@@ -284,6 +284,7 @@ code, pre, .mono {
 }
 .alert.error   { background: rgba(248,113,113,.08); border: 1px solid rgba(248,113,113,.2); color: var(--red); }
 .alert.success { background: rgba(34,211,165,.08);  border: 1px solid rgba(34,211,165,.2); color: var(--green); }
+.alert.info    { background: rgba(99,179,237,.08);  border: 1px solid rgba(99,179,237,.2); color: #93c5fd; }
 .hidden { display: none !important; }
 
 /* ── Code block ────────────────────────────────────────────────────────── */
@@ -338,6 +339,7 @@ code, pre, .mono {
 }
 .dash-tile .val { font-size: 22px; font-weight: 800; color: var(--green); }
 .dash-tile .lbl { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: .5px; margin-top: 4px; }
+.dash-tile .tile-sub { font-size: 11px; color: var(--muted); margin-top: 5px; line-height: 1.4; }
 
 /* ── Footer ────────────────────────────────────────────────────────────── */
 .footer {

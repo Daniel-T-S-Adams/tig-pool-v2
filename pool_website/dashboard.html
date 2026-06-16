@@ -43,27 +43,76 @@
     <!-- Member data (hidden until lookup) -->
     <div id="member-block" class="hidden" style="margin-top:28px;">
 
+      <!-- Status bar -->
+      <div style="display:flex; align-items:center; gap:16px; margin-bottom:20px; flex-wrap:wrap;">
+        <div id="d-status-badge" style="display:flex;align-items:center;gap:8px;padding:6px 14px;border-radius:20px;font-size:13px;font-weight:600;background:rgba(16,185,129,0.15);color:#10b981;border:1px solid rgba(16,185,129,0.3);">
+          <span id="d-status-dot" style="width:8px;height:8px;border-radius:50%;background:#10b981;display:inline-block;"></span>
+          <span id="d-status-text">Active</span>
+        </div>
+        <div style="font-size:12px;color:var(--muted);">
+          Slave: <span class="mono" id="d-slave" style="color:var(--blue);">—</span>
+        </div>
+        <div style="font-size:12px;color:var(--muted);">
+          Member since: <span id="d-registered">—</span>
+        </div>
+        <div style="font-size:12px;color:var(--muted); margin-left:auto;">
+          Last updated: <span id="d-last-refresh">—</span>
+        </div>
+      </div>
+
+      <!-- Primary stats -->
       <div class="dash-stats">
         <div class="dash-tile">
           <div class="val" id="d-nonces">—</div>
           <div class="lbl">Nonces (24h)</div>
+          <div class="tile-sub">Proof-of-work units computed</div>
         </div>
         <div class="dash-tile">
           <div class="val" id="d-batches">—</div>
           <div class="lbl">Batches (24h)</div>
+          <div class="tile-sub">Jobs completed for the pool</div>
         </div>
         <div class="dash-tile">
           <div class="val" id="d-share">—</div>
-          <div class="lbl">Avg Share (24h)</div>
+          <div class="lbl">Pool Share (24h)</div>
+          <div class="tile-sub">Your % of pool's total work</div>
         </div>
         <div class="dash-tile">
-          <div class="val mono" id="d-slave" style="font-size:14px; color:var(--blue);">—</div>
-          <div class="lbl">Slave Name</div>
+          <div class="val" id="d-allocation">—</div>
+          <div class="lbl">Round Allocation</div>
+          <div class="tile-sub">Your cut of this week's TIG</div>
+        </div>
+      </div>
+
+      <!-- Info callout -->
+      <div class="alert info" style="margin-bottom:24px; font-size:13px; line-height:1.6;">
+        <strong>How rewards work:</strong> Your <em>Round Allocation</em> is set on-chain every ~50 blocks via <code>/set-coinbase</code>.
+        At the end of each weekly round the operator claims the TIG earned, and the protocol distributes your share directly to your wallet.
+        Claimed TIG has a <strong>28-day withdrawal lock</strong> before it can be moved.
+      </div>
+
+      <!-- Recent activity + pool context side by side -->
+      <div style="display:grid; grid-template-columns:1fr 1fr; gap:20px; margin-bottom:24px;">
+        <div class="card" style="margin:0;">
+          <h2 style="margin-bottom:12px;">Recent Activity</h2>
+          <div style="display:flex;flex-direction:column;gap:8px;" id="activity-list">
+            <div class="loading">Loading…</div>
+          </div>
+        </div>
+        <div class="card" style="margin:0;">
+          <h2 style="margin-bottom:12px;">Pool Context</h2>
+          <table style="width:100%;font-size:13px;border-collapse:collapse;">
+            <tr><td style="padding:6px 0;color:var(--muted);">Active members</td><td id="ctx-members" style="text-align:right;font-weight:600;">—</td></tr>
+            <tr><td style="padding:6px 0;color:var(--muted);">Pool nonces (24h)</td><td id="ctx-nonces" style="text-align:right;font-weight:600;">—</td></tr>
+            <tr><td style="padding:6px 0;color:var(--muted);">Pool batches (24h)</td><td id="ctx-batches" style="text-align:right;font-weight:600;">—</td></tr>
+            <tr><td style="padding:6px 0;color:var(--muted);">Pool fee</td><td id="ctx-fee" style="text-align:right;font-weight:600;">—</td></tr>
+            <tr><td style="padding:6px 0;color:var(--muted);">Last /set-coinbase</td><td id="ctx-coinbase" style="text-align:right;font-weight:600;">—</td></tr>
+          </table>
         </div>
       </div>
 
       <div class="card">
-        <h2>Contribution History</h2>
+        <h2>Contribution History <span style="font-size:12px;font-weight:400;color:var(--muted);">(most recent first)</span></h2>
         <table class="data-table">
           <thead>
             <tr>
@@ -94,8 +143,15 @@
   <script src="/static/app.js"></script>
   <script>
     const STORAGE_KEY = "innopool_wallet";
-    const REFRESH_MS  = 60000; // auto-refresh every 60 seconds
+    const REFRESH_MS  = 60000;
     let refreshTimer  = null;
+
+    function timeAgo(ms) {
+      const s = Math.floor((Date.now() - ms) / 1000);
+      if (s < 60)  return `${s}s ago`;
+      if (s < 3600) return `${Math.floor(s/60)}m ago`;
+      return `${Math.floor(s/3600)}h ago`;
+    }
 
     async function doLookup(wallet) {
       const errEl = document.getElementById("lookup-error");
@@ -103,23 +159,88 @@
       errEl.classList.add("hidden");
 
       try {
-        const resp = await fetch(`/api/member/${encodeURIComponent(wallet)}`);
-        if (!resp.ok) {
-          const data = await resp.json();
-          errEl.textContent = data.detail || "Member not found";
+        const [mResp, sResp] = await Promise.all([
+          fetch(`/api/member/${encodeURIComponent(wallet)}`),
+          fetch(`/api/stats`),
+        ]);
+
+        if (!mResp.ok) {
+          const d = await mResp.json();
+          errEl.textContent = d.detail || "Member not found";
           errEl.classList.remove("hidden");
           block.classList.add("hidden");
           return;
         }
-        const data = await resp.json();
+
+        const data  = await mResp.json();
+        const stats = sResp.ok ? await sResp.json() : null;
+
+        // Status badge
+        const lastContrib = data.recent_contributions[0];
+        const lastMs = lastContrib ? lastContrib.snapshot_end_ms : null;
+        const isActive = lastMs && (Date.now() - lastMs) < 5 * 60 * 1000;
+        const badge = document.getElementById("d-status-badge");
+        const dot   = document.getElementById("d-status-dot");
+        const txt   = document.getElementById("d-status-text");
+        if (isActive) {
+          badge.style.background = "rgba(16,185,129,0.15)";
+          badge.style.color = "#10b981";
+          badge.style.borderColor = "rgba(16,185,129,0.3)";
+          dot.style.background = "#10b981";
+          txt.textContent = "Active";
+        } else {
+          badge.style.background = "rgba(239,68,68,0.12)";
+          badge.style.color = "#ef4444";
+          badge.style.borderColor = "rgba(239,68,68,0.3)";
+          dot.style.background = "#ef4444";
+          txt.textContent = lastMs ? `Inactive — last seen ${timeAgo(lastMs)}` : "No activity yet";
+        }
 
         document.getElementById("d-slave").textContent = data.slave_name;
+        document.getElementById("d-registered").textContent = new Date(data.registered_at).toLocaleDateString();
+        document.getElementById("d-last-refresh").textContent = new Date().toLocaleTimeString();
+
+        // Primary stats
         if (data.stats_24h) {
           document.getElementById("d-nonces").textContent  = fmtNum(data.stats_24h.nonces);
           document.getElementById("d-batches").textContent = fmtNum(data.stats_24h.batches);
-          document.getElementById("d-share").textContent   = data.stats_24h.avg_share_pct + "%";
+          document.getElementById("d-share").textContent   = data.stats_24h.avg_share_pct.toFixed(1) + "%";
         }
 
+        // Round allocation from latest coinbase distribution
+        let allocationPct = "—";
+        if (stats && stats.last_distribution) {
+          const dist = stats.last_distribution.distribution || {};
+          const myFrac = dist[wallet.toLowerCase()] ?? dist[wallet] ?? null;
+          if (myFrac !== null) allocationPct = (myFrac * 100).toFixed(2) + "%";
+        }
+        document.getElementById("d-allocation").textContent = allocationPct;
+
+        // Pool context
+        if (stats) {
+          document.getElementById("ctx-members").textContent = stats.active_members;
+          document.getElementById("ctx-nonces").textContent  = fmtNum(stats.nonces_last_24h);
+          document.getElementById("ctx-batches").textContent = fmtNum(stats.batches_last_24h);
+          document.getElementById("ctx-fee").textContent     = stats.pool_fee_pct + "%";
+          if (stats.last_distribution) {
+            document.getElementById("ctx-coinbase").textContent = timeAgo(stats.last_distribution.submitted_at);
+          }
+        }
+
+        // Recent activity mini-feed (last 5)
+        const actEl = document.getElementById("activity-list");
+        if (!data.recent_contributions.length) {
+          actEl.innerHTML = '<div class="loading">No activity yet</div>';
+        } else {
+          actEl.innerHTML = data.recent_contributions.slice(0, 5).map(c => `
+            <div style="display:flex;justify-content:space-between;align-items:center;font-size:13px;padding:5px 0;border-bottom:1px solid rgba(255,255,255,0.04);">
+              <span style="color:var(--muted);">${timeAgo(c.snapshot_end_ms)}</span>
+              <span><strong>${fmtNum(c.nonces_computed)}</strong> nonces &nbsp;·&nbsp; ${c.batches_completed} batch${c.batches_completed !== 1 ? 'es' : ''}</span>
+            </div>
+          `).join("");
+        }
+
+        // Contribution history table
         const tbody = document.getElementById("contrib-body");
         tbody.innerHTML = "";
         if (!data.recent_contributions.length) {
@@ -136,9 +257,10 @@
             tbody.appendChild(tr);
           }
         }
+
         block.classList.remove("hidden");
-      } catch (_) {
-        errEl.textContent = "Network error";
+      } catch (err) {
+        errEl.textContent = "Network error — is the pool online?";
         errEl.classList.remove("hidden");
       }
     }
@@ -157,7 +279,6 @@
       startAutoRefresh(wallet);
     });
 
-    // On page load: restore saved wallet (URL param takes priority)
     const params = new URLSearchParams(location.search);
     const saved  = params.get("wallet") || localStorage.getItem(STORAGE_KEY);
     if (saved) {
