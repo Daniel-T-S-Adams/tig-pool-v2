@@ -118,7 +118,7 @@
             <tr>
               <th>Challenge</th>
               <th>Algorithm</th>
-              <th>Batches</th>
+              <th>Batches (done/total)</th>
               <th>Nonces</th>
             </tr>
           </thead>
@@ -264,9 +264,9 @@
         } else {
           algoBody.innerHTML = data.algo_stats.map(a => `
             <tr>
-              <td>${a.challenge}</td>
+              <td>${a.challenge}${a.in_progress ? ' <span style="font-size:11px;background:rgba(251,191,36,0.15);color:#fbbf24;border:1px solid rgba(251,191,36,0.3);border-radius:4px;padding:1px 6px;vertical-align:middle;">computing</span>' : ''}</td>
               <td class="mono" style="font-size:12px;">${a.algorithm}</td>
-              <td>${fmtNum(a.batches)}</td>
+              <td>${fmtNum(a.completed_batches)} / ${fmtNum(a.batches)}</td>
               <td>${fmtNum(a.nonces)}</td>
             </tr>
           `).join("");

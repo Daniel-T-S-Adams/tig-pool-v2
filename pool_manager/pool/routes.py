@@ -160,11 +160,12 @@ def get_member_stats(wallet_address: str):
                 j.challenge,
                 j.algorithm,
                 COUNT(*) AS batches,
-                SUM(LEAST(j.batch_size, j.num_nonces - rb.batch_idx * j.batch_size)) AS nonces
+                SUM(LEAST(j.batch_size, j.num_nonces - rb.batch_idx * j.batch_size)) AS nonces,
+                COUNT(*) FILTER (WHERE rb.ready = true) AS completed_batches
             FROM root_batch rb
             JOIN job j ON rb.benchmark_id = j.benchmark_id
             WHERE rb.slave IN ({placeholders})
-              AND rb.ready = true
+              AND rb.start_time IS NOT NULL
             GROUP BY j.challenge, j.algorithm
             ORDER BY nonces DESC
             """,
@@ -187,7 +188,9 @@ def get_member_stats(wallet_address: str):
                 "challenge": r["challenge"],
                 "algorithm": r["algorithm"],
                 "batches": int(r["batches"] or 0),
+                "completed_batches": int(r["completed_batches"] or 0),
                 "nonces": int(r["nonces"] or 0),
+                "in_progress": int(r["completed_batches"] or 0) < int(r["batches"] or 0),
             }
             for r in algo_stats
         ],
