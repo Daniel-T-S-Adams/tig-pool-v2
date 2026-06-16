@@ -145,6 +145,32 @@ def get_member_stats(wallet_address: str):
         (wallet_address,),
     )
 
+    # Algorithm breakdown — what challenges/algorithms this wallet's slaves have worked on
+    slave_names = db.fetch_all(
+        "SELECT slave_name FROM pool_members WHERE wallet_address = %s",
+        (wallet_address,),
+    )
+    slave_list = [r["slave_name"] for r in slave_names]
+    algo_stats = []
+    if slave_list:
+        placeholders = ",".join(["%s"] * len(slave_list))
+        algo_stats = db.fetch_all(
+            f"""
+            SELECT
+                j.challenge,
+                j.algorithm,
+                COUNT(*) AS batches,
+                SUM(LEAST(j.batch_size, j.num_nonces - rb.batch_idx * j.batch_size)) AS nonces
+            FROM root_batch rb
+            JOIN job j ON rb.benchmark_id = j.benchmark_id
+            WHERE rb.slave IN ({placeholders})
+              AND rb.ready = true
+            GROUP BY j.challenge, j.algorithm
+            ORDER BY nonces DESC
+            """,
+            tuple(slave_list),
+        )
+
     return {
         "wallet_address": member["wallet_address"],
         "slave_name": member["slave_name"],
@@ -156,6 +182,15 @@ def get_member_stats(wallet_address: str):
             "avg_share_pct": round(float(stats_24h["avg_share"] or 0) * 100, 2),
         } if stats_24h else None,
         "recent_contributions": [dict(c) for c in contributions],
+        "algo_stats": [
+            {
+                "challenge": r["challenge"],
+                "algorithm": r["algorithm"],
+                "batches": int(r["batches"] or 0),
+                "nonces": int(r["nonces"] or 0),
+            }
+            for r in algo_stats
+        ],
     }
 
 

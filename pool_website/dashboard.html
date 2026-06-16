@@ -85,10 +85,11 @@
       </div>
 
       <!-- Info callout -->
-      <div class="alert info" style="margin-bottom:24px; font-size:13px; line-height:1.6;">
-        <strong>How rewards work:</strong> Your <em>Round Allocation</em> is set on-chain every ~50 blocks via <code>/set-coinbase</code>.
-        At the end of each weekly round the operator claims the TIG earned, and the protocol distributes your share directly to your wallet.
-        Claimed TIG has a <strong>28-day withdrawal lock</strong> before it can be moved.
+      <div class="alert info" style="margin-bottom:24px; font-size:13px; line-height:1.8;">
+        <strong>How rewards work</strong><br>
+        Your Round Allocation percentage is set on-chain every ~50 blocks. At the end of each weekly round
+        the operator claims the TIG earned, and the protocol sends your share directly to your wallet.
+        All claimed TIG has a <strong>28-day withdrawal lock</strong> before it can be moved.
       </div>
 
       <!-- Recent activity + pool context side by side -->
@@ -109,6 +110,24 @@
             <tr><td style="padding:6px 0;color:var(--muted);">Last /set-coinbase</td><td id="ctx-coinbase" style="text-align:right;font-weight:600;">—</td></tr>
           </table>
         </div>
+      </div>
+
+      <!-- Algorithm breakdown -->
+      <div class="card" style="margin-bottom:20px;">
+        <h2>Algorithms Worked On</h2>
+        <table class="data-table">
+          <thead>
+            <tr>
+              <th>Challenge</th>
+              <th>Algorithm</th>
+              <th>Batches</th>
+              <th>Nonces</th>
+            </tr>
+          </thead>
+          <tbody id="algo-body">
+            <tr><td colspan="4" class="loading">Loading…</td></tr>
+          </tbody>
+        </table>
       </div>
 
       <div class="card">
@@ -237,6 +256,21 @@
               <span style="color:var(--muted);">${timeAgo(c.snapshot_end_ms)}</span>
               <span><strong>${fmtNum(c.nonces_computed)}</strong> nonces &nbsp;·&nbsp; ${c.batches_completed} batch${c.batches_completed !== 1 ? 'es' : ''}</span>
             </div>
+          `).join("");
+        }
+
+        // Algorithm breakdown table
+        const algoBody = document.getElementById("algo-body");
+        if (!data.algo_stats || !data.algo_stats.length) {
+          algoBody.innerHTML = '<tr><td colspan="4" class="loading">No algorithm data yet</td></tr>';
+        } else {
+          algoBody.innerHTML = data.algo_stats.map(a => `
+            <tr>
+              <td>${a.challenge}</td>
+              <td class="mono" style="font-size:12px;">${a.algorithm}</td>
+              <td>${fmtNum(a.batches)}</td>
+              <td>${fmtNum(a.nonces)}</td>
+            </tr>
           `).join("");
         }
 
