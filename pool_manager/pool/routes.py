@@ -28,17 +28,25 @@ def _check_admin(x_admin_secret: str | None):
 
 
 def _wallet_to_slave_name(wallet: str, worker_type: str = "cpu") -> str:
-    """Deterministic slave name from wallet address and worker type.
+    """Generate a unique slave name for this wallet+type combination.
 
-    worker_type must be one of: cpu, gpu
-    Generates names like pool-cpu-a330c544ec5b or pool-gpu-a330c544ec5b
-    which match the master's routing regexes:
-      ^pool-(aws|cpu)-.*$  → CPU challenges
-      ^pool-(c3|gpu)-.*$   → GPU challenges
+    Generates names like pool-cpu-a330c544ec5b or pool-gpu-a330c544ec5b.
+    If that name is already taken, appends -2, -3, etc.
+    Matches the master's routing regexes:
+      ^pool-cpu-.*$  → CPU challenges
+      ^pool-gpu-.*$  → GPU challenges
     """
-    wtype = "gpu" if worker_type.lower() in ("gpu", "c3") else "cpu"
+    wtype = "gpu" if worker_type.lower() == "gpu" else "cpu"
     short = wallet.lower().replace("0x", "")[:12]
-    return f"pool-{wtype}-{short}"
+    base = f"pool-{wtype}-{short}"
+    if not db.fetch_one("SELECT 1 FROM pool_members WHERE slave_name = %s", (base,)):
+        return base
+    i = 2
+    while True:
+        candidate = f"{base}-{i}"
+        if not db.fetch_one("SELECT 1 FROM pool_members WHERE slave_name = %s", (candidate,)):
+            return candidate
+        i += 1
 
 
 # ── public stats ───────────────────────────────────────────────────────────────

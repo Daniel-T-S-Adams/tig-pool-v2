@@ -140,19 +140,18 @@ def main():
             })
     else:
         # Default pool mode — split GPU/CPU by slave name prefix:
-        #   pool-c3-*  or pool-gpu-*  → GPU challenges (c004, c005, c006)
-        #   pool-aws-* or pool-cpu-*  → CPU challenges (c001, c002, c003, c007, c008)
-        # Test slaves pool-c3-test and pool-aws-test match these patterns.
+        #   pool-gpu-*  → GPU challenges (c004, c005, c006)
+        #   pool-cpu-*  → CPU challenges (c001, c002, c003, c007, c008)
         slaves = []
         if gpu_ids:
             slaves.append({
-                "name_regex": "^pool-(c3|gpu)-.*$",
+                "name_regex": "^pool-gpu-.*$",
                 "algorithm_id_regex": _prefix_regex(gpu_ids),
                 "max_concurrent_batches": int(os.environ.get("GPU_MAX_CONCURRENT_BATCHES", "4")),
             })
         if cpu_ids:
             slaves.append({
-                "name_regex": "^pool-(aws|cpu)-.*$",
+                "name_regex": "^pool-cpu-.*$",
                 "algorithm_id_regex": _prefix_regex(cpu_ids),
                 "max_concurrent_batches": int(os.environ.get("CPU_MAX_CONCURRENT_BATCHES", "48")),
             })
