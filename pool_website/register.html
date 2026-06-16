@@ -89,46 +89,61 @@
     <!-- Success block (hidden until registration succeeds) -->
     <div id="success-block" class="hidden">
       <div class="card glow">
-        <div class="success-header">
-          <div class="success-icon">✓</div>
+
+        <!-- Header -->
+        <div style="display:flex; align-items:center; gap:16px; margin-bottom:24px;">
+          <div style="width:48px;height:48px;border-radius:50%;background:rgba(34,211,165,0.15);border:2px solid var(--green);display:flex;align-items:center;justify-content:center;font-size:22px;color:var(--green);flex-shrink:0;">✓</div>
           <div>
-            <div style="font-size:17px; font-weight:700;">Registration Successful</div>
-            <div class="muted small" id="res-summary"></div>
+            <div style="font-size:20px;font-weight:800;color:var(--text);">Registration Successful</div>
+            <div style="font-size:13px;color:var(--muted);margin-top:3px;" id="res-summary"></div>
           </div>
         </div>
 
-        <h3>Step 1 — Clone TIG Monorepo</h3>
-        <div class="code-block">git clone https://github.com/tig-foundation/tig-monorepo.git
+        <!-- Slave name pills -->
+        <div id="slave-pills" style="display:flex;gap:10px;flex-wrap:wrap;margin-bottom:28px;"></div>
+
+        <!-- Step 1 -->
+        <div style="display:flex;align-items:baseline;gap:12px;margin-bottom:10px;">
+          <span style="width:24px;height:24px;border-radius:50%;background:var(--blue);color:#fff;font-size:12px;font-weight:700;display:inline-flex;align-items:center;justify-content:center;flex-shrink:0;">1</span>
+          <span style="font-weight:600;font-size:15px;">Clone the TIG Monorepo</span>
+        </div>
+        <div class="code-block" style="margin-bottom:24px;">git clone https://github.com/tig-foundation/tig-monorepo.git
 cd tig-monorepo/tig-benchmarker</div>
 
         <!-- CPU config block -->
         <div id="cpu-block" class="hidden">
-          <h3>Step 2 — CPU Slave <code>.env</code></h3>
-          <p class="muted small" style="margin-bottom:8px;">Save as <code>tig-benchmarker/.env</code>:</p>
-          <div class="code-block" style="position:relative;">
+          <div style="display:flex;align-items:baseline;gap:12px;margin-bottom:10px;">
+            <span id="cpu-step-num" style="width:24px;height:24px;border-radius:50%;background:var(--blue);color:#fff;font-size:12px;font-weight:700;display:inline-flex;align-items:center;justify-content:center;flex-shrink:0;">2</span>
+            <span style="font-weight:600;font-size:15px;">CPU Slave — save as <code>tig-benchmarker/.env</code></span>
+          </div>
+          <div class="code-block" style="position:relative;margin-bottom:12px;">
             <button class="code-copy" onclick="copyBlock('cpu-config-text', this)">Copy</button>
             <span id="cpu-config-text"></span>
           </div>
-          <h3>Start CPU Slave</h3>
-          <div class="code-block">docker compose -f slave.yml up slave satisfiability vehicle_routing knapsack job_scheduling energy_arbitrage</div>
+          <p style="font-size:13px;color:var(--muted);margin-bottom:6px;">Then start the CPU slave:</p>
+          <div class="code-block" style="margin-bottom:24px;">docker compose -f slave.yml up slave satisfiability vehicle_routing knapsack job_scheduling energy_arbitrage</div>
         </div>
 
         <!-- GPU config block -->
         <div id="gpu-block" class="hidden">
-          <h3 id="gpu-step-label">Step 2 — GPU Slave <code>.env</code></h3>
-          <p class="muted small" style="margin-bottom:8px;">Save as <code>tig-benchmarker/.env</code>:</p>
-          <div class="code-block" style="position:relative;">
+          <div style="display:flex;align-items:baseline;gap:12px;margin-bottom:10px;">
+            <span id="gpu-step-num" style="width:24px;height:24px;border-radius:50%;background:#8b5cf6;color:#fff;font-size:12px;font-weight:700;display:inline-flex;align-items:center;justify-content:center;flex-shrink:0;">2</span>
+            <span style="font-weight:600;font-size:15px;" id="gpu-step-label">GPU Slave — save as <code>tig-benchmarker/.env</code></span>
+          </div>
+          <div class="code-block" style="position:relative;margin-bottom:12px;">
             <button class="code-copy" onclick="copyBlock('gpu-config-text', this)">Copy</button>
             <span id="gpu-config-text"></span>
           </div>
-          <h3>Start GPU Slave</h3>
-          <div class="code-block">docker compose -f slave.yml up slave vector_search hypergraph neuralnet_optimizer</div>
+          <p style="font-size:13px;color:var(--muted);margin-bottom:6px;">Then start the GPU slave:</p>
+          <div class="code-block" style="margin-bottom:24px;">docker compose -f slave.yml up slave vector_search hypergraph neuralnet_optimizer</div>
         </div>
 
-        <div class="alert success" style="margin-top:20px;">
+        <!-- Footer note -->
+        <div style="padding:14px 18px;border-left:3px solid var(--green);background:rgba(34,211,165,0.06);border-radius:0 8px 8px 0;font-size:13px;color:var(--muted2);line-height:1.7;">
           Your slave will appear in the pool within ~60 seconds of its first completed batch.
-          Check <a href="/dashboard.html">My Stats</a> to monitor your contribution.
+          Visit <a href="/dashboard.html" style="color:var(--green);font-weight:600;">My Stats</a> to monitor your contributions and reward allocation.
         </div>
+
       </div>
     </div>
 
@@ -180,9 +195,14 @@ cd tig-monorepo/tig-benchmarker</div>
         const hasCpu = !!slaves.cpu;
         const hasGpu = !!slaves.gpu;
 
+        // Slave name pills
+        const pillsEl = document.getElementById("slave-pills");
+        pillsEl.innerHTML = "";
+        if (hasCpu) pillsEl.innerHTML += `<span style="padding:5px 14px;border-radius:20px;background:rgba(99,179,237,0.12);border:1px solid rgba(99,179,237,0.3);color:#93c5fd;font-size:13px;font-family:monospace;">${slaves.cpu.slave_name}</span>`;
+        if (hasGpu) pillsEl.innerHTML += `<span style="padding:5px 14px;border-radius:20px;background:rgba(139,92,246,0.12);border:1px solid rgba(139,92,246,0.3);color:#c4b5fd;font-size:13px;font-family:monospace;">${slaves.gpu.slave_name}</span>`;
+
         // Summary line
-        const names = Object.values(slaves).map(s => s.slave_name).join(" + ");
-        document.getElementById("res-summary").textContent = "Slave name(s): " + names;
+        document.getElementById("res-summary").textContent = "Wallet registered successfully";
 
         if (hasCpu) {
           document.getElementById("cpu-config-text").textContent = slaves.cpu.slave_config;
@@ -190,8 +210,11 @@ cd tig-monorepo/tig-benchmarker</div>
         }
         if (hasGpu) {
           document.getElementById("gpu-config-text").textContent = slaves.gpu.slave_config;
-          // Re-label step number if both are shown
-          if (hasCpu) document.getElementById("gpu-step-label").textContent = "Step 3 — GPU Slave .env";
+          // Step numbers: if both, GPU becomes step 3
+          if (hasCpu) {
+            document.getElementById("gpu-step-num").textContent = "3";
+            document.getElementById("gpu-step-label").textContent = "GPU Slave — save as tig-benchmarker/.env";
+          }
           document.getElementById("gpu-block").classList.remove("hidden");
         }
 
