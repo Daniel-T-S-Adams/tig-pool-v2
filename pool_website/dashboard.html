@@ -93,13 +93,14 @@
 
   <script src="/static/app.js"></script>
   <script>
-    document.getElementById("lookup-form").addEventListener("submit", async (e) => {
-      e.preventDefault();
-      const wallet  = document.getElementById("lookup-wallet").value.trim();
-      const errEl   = document.getElementById("lookup-error");
-      const block   = document.getElementById("member-block");
+    const STORAGE_KEY = "innopool_wallet";
+    const REFRESH_MS  = 60000; // auto-refresh every 60 seconds
+    let refreshTimer  = null;
+
+    async function doLookup(wallet) {
+      const errEl = document.getElementById("lookup-error");
+      const block  = document.getElementById("member-block");
       errEl.classList.add("hidden");
-      block.classList.add("hidden");
 
       try {
         const resp = await fetch(`/api/member/${encodeURIComponent(wallet)}`);
@@ -107,6 +108,7 @@
           const data = await resp.json();
           errEl.textContent = data.detail || "Member not found";
           errEl.classList.remove("hidden");
+          block.classList.add("hidden");
           return;
         }
         const data = await resp.json();
@@ -139,13 +141,29 @@
         errEl.textContent = "Network error";
         errEl.classList.remove("hidden");
       }
+    }
+
+    function startAutoRefresh(wallet) {
+      clearInterval(refreshTimer);
+      refreshTimer = setInterval(() => doLookup(wallet), REFRESH_MS);
+    }
+
+    document.getElementById("lookup-form").addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const wallet = document.getElementById("lookup-wallet").value.trim();
+      if (!wallet) return;
+      localStorage.setItem(STORAGE_KEY, wallet);
+      await doLookup(wallet);
+      startAutoRefresh(wallet);
     });
 
-    // Auto-lookup from URL param
+    // On page load: restore saved wallet (URL param takes priority)
     const params = new URLSearchParams(location.search);
-    if (params.get("wallet")) {
-      document.getElementById("lookup-wallet").value = params.get("wallet");
-      document.getElementById("lookup-form").dispatchEvent(new Event("submit"));
+    const saved  = params.get("wallet") || localStorage.getItem(STORAGE_KEY);
+    if (saved) {
+      document.getElementById("lookup-wallet").value = saved;
+      doLookup(saved);
+      startAutoRefresh(saved);
     }
   </script>
 </body>
