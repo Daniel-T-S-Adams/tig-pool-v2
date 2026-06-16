@@ -1,0 +1,215 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>InnoPool — Join</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/static/style.css" />
+</head>
+<body>
+
+  <nav class="navbar">
+    <div class="nav-inner">
+      <a class="nav-logo" href="/">
+        <div class="logo-icon">⛏</div>
+        InnoPool
+      </a>
+      <div class="nav-links">
+        <a href="/">Home</a>
+        <a href="/register.html" class="active">Join Pool</a>
+        <a href="/dashboard.html">My Stats</a>
+        <a href="#" onclick="window.open(window.location.protocol+'//'+window.location.hostname+':8888','_blank');return false;" rel="noopener">Operator ↗</a>
+      </div>
+    </div>
+  </nav>
+
+  <div style="padding-top:60px;"></div>
+
+  <section class="section narrow" style="padding-top:48px;">
+
+    <!-- Registration form -->
+    <div id="form-card" class="card glow">
+      <h2>Join the Pool</h2>
+      <p class="muted small" style="margin-bottom:24px;">
+        This pool is currently invite-only. You need a valid invite code to register.
+        Contact the pool operator to request one.
+      </p>
+
+      <form id="register-form" class="form" autocomplete="off">
+        <div class="form-group">
+          <label for="wallet">Wallet Address</label>
+          <input type="text" id="wallet" name="wallet"
+            placeholder="0x000000000000000000000000000000000000" required />
+        </div>
+        <div class="form-group">
+          <label for="invite">Invite Code</label>
+          <input type="text" id="invite" name="invite"
+            placeholder="xxxxxxxxxxxxxxxxxxxx" required autocomplete="off" />
+        </div>
+        <div class="form-group">
+          <label>Hardware Type</label>
+          <div class="hw-selector">
+            <label class="hw-option">
+              <input type="radio" name="worker_type" value="cpu" checked />
+              <span class="hw-card">
+                <span class="hw-icon">🖥</span>
+                <span class="hw-title">CPU only</span>
+                <span class="hw-desc">satisfiability, vehicle routing, knapsack, job scheduling, energy arbitrage</span>
+              </span>
+            </label>
+            <label class="hw-option">
+              <input type="radio" name="worker_type" value="gpu" />
+              <span class="hw-card">
+                <span class="hw-icon">⚡</span>
+                <span class="hw-title">GPU only</span>
+                <span class="hw-desc">vector search, hypergraph, neuralnet optimizer</span>
+              </span>
+            </label>
+            <label class="hw-option">
+              <input type="radio" name="worker_type" value="both" />
+              <span class="hw-card">
+                <span class="hw-icon">🚀</span>
+                <span class="hw-title">CPU + GPU</span>
+                <span class="hw-desc">all challenges — registers two slaves under one invite</span>
+              </span>
+            </label>
+          </div>
+        </div>
+        <button type="submit" class="btn-primary full">
+          Register →
+        </button>
+      </form>
+
+      <div id="register-error" class="alert error hidden"></div>
+    </div>
+
+    <!-- Success block (hidden until registration succeeds) -->
+    <div id="success-block" class="hidden">
+      <div class="card glow">
+        <div class="success-header">
+          <div class="success-icon">✓</div>
+          <div>
+            <div style="font-size:17px; font-weight:700;">Registration Successful</div>
+            <div class="muted small" id="res-summary"></div>
+          </div>
+        </div>
+
+        <h3>Step 1 — Clone TIG Monorepo</h3>
+        <div class="code-block">git clone https://github.com/tig-foundation/tig-monorepo.git
+cd tig-monorepo/tig-benchmarker</div>
+
+        <!-- CPU config block -->
+        <div id="cpu-block" class="hidden">
+          <h3>Step 2 — CPU Slave <code>.env</code></h3>
+          <p class="muted small" style="margin-bottom:8px;">Save as <code>tig-benchmarker/.env</code>:</p>
+          <div class="code-block" style="position:relative;">
+            <button class="code-copy" onclick="copyBlock('cpu-config-text', this)">Copy</button>
+            <span id="cpu-config-text"></span>
+          </div>
+          <h3>Start CPU Slave</h3>
+          <div class="code-block">docker compose -f slave.yml up slave satisfiability vehicle_routing knapsack job_scheduling energy_arbitrage</div>
+        </div>
+
+        <!-- GPU config block -->
+        <div id="gpu-block" class="hidden">
+          <h3 id="gpu-step-label">Step 2 — GPU Slave <code>.env</code></h3>
+          <p class="muted small" style="margin-bottom:8px;">Save as <code>tig-benchmarker/.env</code>:</p>
+          <div class="code-block" style="position:relative;">
+            <button class="code-copy" onclick="copyBlock('gpu-config-text', this)">Copy</button>
+            <span id="gpu-config-text"></span>
+          </div>
+          <h3>Start GPU Slave</h3>
+          <div class="code-block">docker compose -f slave.yml up slave vector_search hypergraph neuralnet_optimizer</div>
+        </div>
+
+        <div class="alert success" style="margin-top:20px;">
+          Your slave will appear in the pool within ~60 seconds of its first completed batch.
+          Check <a href="/dashboard.html">My Stats</a> to monitor your contribution.
+        </div>
+      </div>
+    </div>
+
+  </section>
+
+  <footer class="footer">
+    <div class="footer-inner">
+      <div class="footer-brand">⛏ InnoPool</div>
+      <div class="footer-links">
+        <a href="/">Home</a>
+        <a href="/dashboard.html">Stats</a>
+      </div>
+    </div>
+  </footer>
+
+  <script src="/static/app.js"></script>
+  <script>
+    document.getElementById("register-form").addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const wallet      = document.getElementById("wallet").value.trim();
+      const invite      = document.getElementById("invite").value.trim();
+      const workerType  = document.querySelector('input[name="worker_type"]:checked').value;
+      const errEl       = document.getElementById("register-error");
+      errEl.classList.add("hidden");
+
+      const btn = e.target.querySelector("button[type=submit]");
+      btn.textContent = "Registering…";
+      btn.disabled = true;
+
+      try {
+        const resp = await fetch("/api/register", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ wallet_address: wallet, invite_code: invite, worker_type: workerType }),
+        });
+        if (!resp.ok) {
+          let msg = "Registration failed";
+          try { const e = await resp.json(); msg = e.detail || msg; } catch (_) {}
+          errEl.textContent = msg;
+          errEl.classList.remove("hidden");
+          btn.textContent = "Register →";
+          btn.disabled = false;
+          return;
+        }
+        const data = await resp.json();
+
+        // Populate success block based on worker_type
+        const slaves = data.slaves;
+        const hasCpu = !!slaves.cpu;
+        const hasGpu = !!slaves.gpu;
+
+        // Summary line
+        const names = Object.values(slaves).map(s => s.slave_name).join(" + ");
+        document.getElementById("res-summary").textContent = "Slave name(s): " + names;
+
+        if (hasCpu) {
+          document.getElementById("cpu-config-text").textContent = slaves.cpu.slave_config;
+          document.getElementById("cpu-block").classList.remove("hidden");
+        }
+        if (hasGpu) {
+          document.getElementById("gpu-config-text").textContent = slaves.gpu.slave_config;
+          // Re-label step number if both are shown
+          if (hasCpu) document.getElementById("gpu-step-label").textContent = "Step 3 — GPU Slave .env";
+          document.getElementById("gpu-block").classList.remove("hidden");
+        }
+
+        document.getElementById("form-card").classList.add("hidden");
+        document.getElementById("success-block").classList.remove("hidden");
+      } catch (err) {
+        errEl.textContent = "Network error — is the pool online?";
+        errEl.classList.remove("hidden");
+        btn.textContent = "Register →";
+        btn.disabled = false;
+      }
+    });
+
+    function copyBlock(id, btn) {
+      navigator.clipboard.writeText(document.getElementById(id).textContent);
+      btn.textContent = "Copied!";
+      setTimeout(() => btn.textContent = "Copy", 2000);
+    }
+  </script>
+</body>
+</html>

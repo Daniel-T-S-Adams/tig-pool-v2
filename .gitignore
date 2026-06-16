@@ -1,0 +1,18 @@
+# Runtime data — never commit
+db_data/
+
+# Secrets — use .env.example as the template
+.env
+
+# TIG master saved config contains your API key
+saved_config.json
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+
+# Misc
+*.log
+.DS_Store

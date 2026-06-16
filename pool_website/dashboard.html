@@ -1,0 +1,152 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>InnoPool — My Stats</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/static/style.css" />
+</head>
+<body>
+
+  <nav class="navbar">
+    <div class="nav-inner">
+      <a class="nav-logo" href="/">
+        <div class="logo-icon">⛏</div>
+        InnoPool
+      </a>
+      <div class="nav-links">
+        <a href="/">Home</a>
+        <a href="/register.html">Join Pool</a>
+        <a href="/dashboard.html" class="active">My Stats</a>
+        <a href="#" onclick="window.open(window.location.protocol+'//'+window.location.hostname+':8888','_blank');return false;" rel="noopener">Operator ↗</a>
+      </div>
+    </div>
+  </nav>
+
+  <div style="padding-top:60px;"></div>
+
+  <section class="section" style="padding-top:48px;">
+    <h2 class="section-title">Member Dashboard</h2>
+    <p class="section-sub" style="margin-bottom:24px;">Enter your wallet address to view your contribution stats.</p>
+
+    <form id="lookup-form" class="form inline" style="max-width:600px;" autocomplete="off">
+      <div class="form-group" style="flex:1; gap:0;">
+        <input type="text" id="lookup-wallet" placeholder="0x... your wallet address" autocomplete="off" />
+      </div>
+      <button type="submit" class="btn-primary">Look Up</button>
+    </form>
+    <div id="lookup-error" class="alert error hidden" style="max-width:600px;"></div>
+
+    <!-- Member data (hidden until lookup) -->
+    <div id="member-block" class="hidden" style="margin-top:28px;">
+
+      <div class="dash-stats">
+        <div class="dash-tile">
+          <div class="val" id="d-nonces">—</div>
+          <div class="lbl">Nonces (24h)</div>
+        </div>
+        <div class="dash-tile">
+          <div class="val" id="d-batches">—</div>
+          <div class="lbl">Batches (24h)</div>
+        </div>
+        <div class="dash-tile">
+          <div class="val" id="d-share">—</div>
+          <div class="lbl">Avg Share (24h)</div>
+        </div>
+        <div class="dash-tile">
+          <div class="val mono" id="d-slave" style="font-size:14px; color:var(--blue);">—</div>
+          <div class="lbl">Slave Name</div>
+        </div>
+      </div>
+
+      <div class="card">
+        <h2>Contribution History</h2>
+        <table class="data-table">
+          <thead>
+            <tr>
+              <th>Window End</th>
+              <th>Nonces</th>
+              <th>Batches</th>
+              <th>Share</th>
+            </tr>
+          </thead>
+          <tbody id="contrib-body">
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+  </section>
+
+  <footer class="footer">
+    <div class="footer-inner">
+      <div class="footer-brand">⛏ InnoPool</div>
+      <div class="footer-links">
+        <a href="/">Home</a>
+        <a href="/register.html">Join</a>
+      </div>
+    </div>
+  </footer>
+
+  <script src="/static/app.js"></script>
+  <script>
+    document.getElementById("lookup-form").addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const wallet  = document.getElementById("lookup-wallet").value.trim();
+      const errEl   = document.getElementById("lookup-error");
+      const block   = document.getElementById("member-block");
+      errEl.classList.add("hidden");
+      block.classList.add("hidden");
+
+      try {
+        const resp = await fetch(`/api/member/${encodeURIComponent(wallet)}`);
+        if (!resp.ok) {
+          const data = await resp.json();
+          errEl.textContent = data.detail || "Member not found";
+          errEl.classList.remove("hidden");
+          return;
+        }
+        const data = await resp.json();
+
+        document.getElementById("d-slave").textContent = data.slave_name;
+        if (data.stats_24h) {
+          document.getElementById("d-nonces").textContent  = fmtNum(data.stats_24h.nonces);
+          document.getElementById("d-batches").textContent = fmtNum(data.stats_24h.batches);
+          document.getElementById("d-share").textContent   = data.stats_24h.avg_share_pct + "%";
+        }
+
+        const tbody = document.getElementById("contrib-body");
+        tbody.innerHTML = "";
+        if (!data.recent_contributions.length) {
+          tbody.innerHTML = '<tr><td colspan="4" class="loading">No contributions recorded yet — is your slave running?</td></tr>';
+        } else {
+          for (const c of data.recent_contributions) {
+            const tr = document.createElement("tr");
+            tr.innerHTML = `
+              <td>${new Date(c.snapshot_end_ms).toLocaleString()}</td>
+              <td>${fmtNum(c.nonces_computed)}</td>
+              <td>${c.batches_completed}</td>
+              <td>${(c.share_fraction * 100).toFixed(2)}%</td>
+            `;
+            tbody.appendChild(tr);
+          }
+        }
+        block.classList.remove("hidden");
+      } catch (_) {
+        errEl.textContent = "Network error";
+        errEl.classList.remove("hidden");
+      }
+    });
+
+    // Auto-lookup from URL param
+    const params = new URLSearchParams(location.search);
+    if (params.get("wallet")) {
+      document.getElementById("lookup-wallet").value = params.get("wallet");
+      document.getElementById("lookup-form").dispatchEvent(new Event("submit"));
+    }
+  </script>
+</body>
+</html>

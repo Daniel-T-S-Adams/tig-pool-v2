@@ -1,0 +1,199 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>InnoPool — Decentralised Mining Pool</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/static/style.css" />
+</head>
+<body>
+
+  <nav class="navbar">
+    <div class="nav-inner">
+      <a class="nav-logo" href="/">
+        <div class="logo-icon">⛏</div>
+        InnoPool
+      </a>
+      <div class="nav-links">
+        <a href="/" class="active">Home</a>
+        <a href="/register.html">Join Pool</a>
+        <a href="/dashboard.html">My Stats</a>
+        <a href="#" onclick="window.open(window.location.protocol+'//'+window.location.hostname+':8888','_blank');return false;" rel="noopener">Operator ↗</a>
+      </div>
+    </div>
+  </nav>
+
+  <!-- Hero -->
+  <section class="hero">
+    <div class="hero-bg"></div>
+    <div class="hero-grid"></div>
+    <div class="hero-inner">
+      <div class="hero-label">Now accepting miners</div>
+      <h1>The <span>Innovation Game</span><br>Mining Pool</h1>
+      <p class="hero-sub">
+        Decentralised compute coordination for TIG's Optimisable Proof-of-Work.
+        Contribute your compute, earn rewards — proportional, transparent, on-chain.
+      </p>
+      <div class="hero-actions">
+        <a href="/register.html" class="btn-primary">
+          <span>Join Pool</span>
+          <span>→</span>
+        </a>
+        <a href="/dashboard.html" class="btn-secondary">Check My Stats</a>
+      </div>
+    </div>
+  </section>
+
+  <!-- Live stats strip -->
+  <div class="stats-strip">
+    <div class="stat-tile">
+      <div class="stat-label">Active Members</div>
+      <div class="stat-value green" id="stat-members">—</div>
+      <div class="stat-sub">Registered miners</div>
+    </div>
+    <div class="stat-tile">
+      <div class="stat-label">Nonces (24h)</div>
+      <div class="stat-value" id="stat-nonces">—</div>
+      <div class="stat-sub">Solutions computed</div>
+    </div>
+    <div class="stat-tile">
+      <div class="stat-label">Pool Fee</div>
+      <div class="stat-value green">5%</div>
+      <div class="stat-sub">Operator share</div>
+    </div>
+    <div class="stat-tile">
+      <div class="stat-label">Coinbase Updates</div>
+      <div class="stat-value" id="stat-updates">—</div>
+      <div class="stat-sub">Allocation syncs this round</div>
+    </div>
+  </div>
+
+  <!-- Features -->
+  <section class="section">
+    <p class="section-sub">Why join this pool?</p>
+    <h2 class="section-title">Built for Transparency</h2>
+    <div class="grid-3 mt">
+      <div class="feature-card">
+        <div class="feature-icon green">🔗</div>
+        <h3>On-Chain Allocation</h3>
+        <p>Member shares are set directly on-chain via TIG's <code>/set-coinbase</code> API. Your wallet address receives your allocation when the operator claims at round end — no intermediary holds your tokens.</p>
+      </div>
+      <div class="feature-card">
+        <div class="feature-icon blue">📊</div>
+        <h3>Proportional Rewards</h3>
+        <p>Every member earns exactly proportional to their compute contribution, tracked per-nonce in real time.</p>
+      </div>
+      <div class="feature-card">
+        <div class="feature-icon purple">🛡</div>
+        <h3>Open Source</h3>
+        <p>This pool's source code is fully open. You can verify the reward calculation and distribution logic yourself.</p>
+      </div>
+    </div>
+  </section>
+
+  <hr class="divider" />
+
+  <!-- How it works -->
+  <section class="section">
+    <div class="grid-2" style="align-items:start; gap:48px;">
+      <div>
+        <p class="section-sub">Setup in 4 steps</p>
+        <h2 class="section-title">How It Works</h2>
+        <div class="steps mt">
+          <div class="step">
+            <div class="step-num">1</div>
+            <div class="step-content">
+              <strong>Register</strong>
+              <span>Request an invite code and register your wallet address on the Join page.</span>
+            </div>
+          </div>
+          <div class="step">
+            <div class="step-num">2</div>
+            <div class="step-content">
+              <strong>Configure your slave</strong>
+              <span>You'll receive a ready-to-use <code>.env</code> file pointing your slave at the pool master.</span>
+            </div>
+          </div>
+          <div class="step">
+            <div class="step-num">3</div>
+            <div class="step-content">
+              <strong>Start computing</strong>
+              <span>Run <code>docker-compose -f slave.yml up</code> — your machine joins the pool immediately.</span>
+            </div>
+          </div>
+          <div class="step">
+            <div class="step-num">4</div>
+            <div class="step-content">
+              <strong>Earn round rewards</strong>
+              <span>At the end of each weekly TIG round your proportional share is allocated directly to your wallet. Tokens become claimable after the round and withdrawable after TIG's 28-day lock period.</span>
+            </div>
+          </div>
+        </div>
+      </div>
+      <div class="card glow">
+        <h2>Pool Details</h2>
+        <table class="info-table">
+          <tr><td>Pool Fee</td>           <td class="val green">5%</td></tr>
+          <tr><td>Payout cycle</td>        <td class="val blue">Weekly (TIG rounds)</td></tr>
+          <tr><td>Claim lock</td>         <td class="val">28 days after claiming</td></tr>
+          <tr><td>Allocation method</td>  <td class="val">/set-coinbase (on-chain)</td></tr>
+          <tr><td>Challenges</td>         <td class="val">All 8 (CPU + GPU)</td></tr>
+          <tr><td>Slave port</td>         <td class="val mono">5115</td></tr>
+          <tr><td>Min. contribution</td>  <td class="val">None</td></tr>
+          <tr><td>Access</td>             <td class="val">Invite-only</td></tr>
+        </table>
+        <a href="/register.html" class="btn-primary full" style="margin-top:20px;">Join Pool →</a>
+      </div>
+    </div>
+  </section>
+
+  <hr class="divider" />
+
+  <!-- Leaderboard -->
+  <section class="section">
+    <p class="section-sub">Updated every 60 seconds</p>
+    <h2 class="section-title">Leaderboard — Top Contributors (24h)</h2>
+    <div class="card mt">
+      <table class="data-table">
+        <thead>
+          <tr>
+            <th style="width:48px">#</th>
+            <th>Wallet</th>
+            <th>Nonces (24h)</th>
+            <th>Pool Share</th>
+          </tr>
+        </thead>
+        <tbody id="leaderboard-body">
+          <tr><td colspan="4" class="loading">Loading leaderboard...</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <footer class="footer">
+    <div class="footer-inner">
+      <div class="footer-brand">
+        ⛏ InnoPool
+        <span>Decentralised mining for The Innovation Game</span>
+      </div>
+      <div class="footer-links">
+        <a href="/register.html">Join</a>
+        <a href="/dashboard.html">Stats</a>
+        <a href="https://github.com/tig-foundation/tig-monorepo" target="_blank" rel="noopener">TIG GitHub ↗</a>
+        <a href="https://docs.tig.foundation" target="_blank" rel="noopener">Docs ↗</a>
+      </div>
+    </div>
+  </footer>
+
+  <script src="/static/app.js"></script>
+  <script>
+    loadStats();
+    loadLeaderboard();
+    // Refresh every 60 seconds
+    setInterval(() => { loadStats(); loadLeaderboard(); }, 60000);
+  </script>
+</body>
+</html>
