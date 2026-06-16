@@ -334,7 +334,7 @@ def add_member_direct(req: AddMemberDirectRequest, x_admin_secret: str = Header(
     now_ms = int(time.time() * 1000)
 
     existing = db.fetch_one(
-        "SELECT 1 FROM pool_members WHERE wallet_address = %s", (wallet,)
+        "SELECT 1 FROM pool_members WHERE slave_name = %s", (slave_name,)
     )
     if existing:
         raise HTTPException(status_code=409, detail="Already registered")
