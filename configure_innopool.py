@@ -110,6 +110,19 @@ def main():
     cpu_ids = [s["algorithm_id"] for s in cfg["algo_selection"]
                if s["algorithm_id"].split("_")[0] not in GPU_CHALLENGES]
 
+    # ── batch_size overrides ───────────────────────────────────────────────────
+    # Larger batch_size = fewer batches per benchmark = less backlog buildup.
+    # CPU: 64 nonces/batch (7 batches for a 400-nonce job vs 50 at batch_size=8)
+    # GPU: keep 8 — each GPU nonce takes minutes, so batches stay manageable.
+    CPU_BATCH_SIZE = int(os.environ.get("CPU_BATCH_SIZE", "64"))
+    GPU_BATCH_SIZE = int(os.environ.get("GPU_BATCH_SIZE", "8"))
+    gpu_id_set = set(gpu_ids)
+    for s in cfg["algo_selection"]:
+        if s["algorithm_id"] in gpu_id_set:
+            s["batch_size"] = GPU_BATCH_SIZE
+        else:
+            s["batch_size"] = CPU_BATCH_SIZE
+
     if slave_mode == "hybrid":
         # Your own C3/AWS slaves using their original names
         slaves = []
@@ -135,13 +148,13 @@ def main():
             slaves.append({
                 "name_regex": "^pool-(c3|gpu)-.*$",
                 "algorithm_id_regex": _prefix_regex(gpu_ids),
-                "max_concurrent_batches": int(os.environ.get("GPU_MAX_CONCURRENT_BATCHES", "2")),
+                "max_concurrent_batches": int(os.environ.get("GPU_MAX_CONCURRENT_BATCHES", "4")),
             })
         if cpu_ids:
             slaves.append({
                 "name_regex": "^pool-(aws|cpu)-.*$",
                 "algorithm_id_regex": _prefix_regex(cpu_ids),
-                "max_concurrent_batches": int(os.environ.get("CPU_MAX_CONCURRENT_BATCHES", "4")),
+                "max_concurrent_batches": int(os.environ.get("CPU_MAX_CONCURRENT_BATCHES", "48")),
             })
 
     cfg["slaves"] = slaves
