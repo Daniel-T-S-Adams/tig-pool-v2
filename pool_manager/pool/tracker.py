@@ -67,8 +67,8 @@ def take_snapshot():
         if wallet is None:
             continue
         entry = totals.setdefault(wallet, {"batches": 0, "nonces": 0})
-        entry["batches"] += r["batches_completed"]
-        entry["nonces"] += r["nonces_computed"] or 0
+        entry["batches"] += int(r["batches_completed"] or 0)
+        entry["nonces"] += int(r["nonces_computed"] or 0)
 
     if not totals:
         db.set_setting("last_snapshot_ms", str(now_ms))

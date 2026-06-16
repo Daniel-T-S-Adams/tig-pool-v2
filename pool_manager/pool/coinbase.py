@@ -88,13 +88,13 @@ def _compute_allocation() -> dict[str, float]:
     if not rows:
         return {}
 
-    total = sum(r["total_nonces"] or 0 for r in rows)
+    total = sum(int(r["total_nonces"] or 0) for r in rows)
     if total == 0:
         return {}
 
     member_share = 1.0 - POOL_FEE
     allocation = {
-        r["wallet_address"]: round((r["total_nonces"] / total) * member_share, 6)
+        r["wallet_address"]: round((int(r["total_nonces"]) / total) * member_share, 6)
         for r in rows
         if (r["total_nonces"] or 0) > 0
     }
