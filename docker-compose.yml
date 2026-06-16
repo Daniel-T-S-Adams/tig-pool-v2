@@ -83,11 +83,11 @@ services:
     build:
       context: .         # root context so Dockerfile can access pool_website/
       dockerfile: nginx/Dockerfile
-      args:
-        OPERATOR_USER: ${OPERATOR_USER}
-        OPERATOR_PASSWORD: ${OPERATOR_PASSWORD}
     container_name: innopool_nginx
     restart: unless-stopped
+    environment:
+      - OPERATOR_USER=${OPERATOR_USER}
+      - OPERATOR_PASSWORD=${OPERATOR_PASSWORD}
     ports:
       - "${WEB_PORT}:80"
       - "${OPERATOR_PORT}:8888"

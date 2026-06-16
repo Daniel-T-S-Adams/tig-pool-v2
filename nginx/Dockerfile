@@ -22,12 +22,7 @@ COPY nginx/entrypoint.sh /entrypoint.sh
 # Strip Windows CRLF line endings and make executable
 RUN sed -i 's/\r//' /entrypoint.sh && chmod +x /entrypoint.sh
 
-# Build-time args passed from docker-compose (values come from .env)
-ARG OPERATOR_USER=admin
-ARG OPERATOR_PASSWORD=changeme_operator_password
-
-# Generate /etc/nginx/.htpasswd
-RUN printf "%s:$(openssl passwd -apr1 ${OPERATOR_PASSWORD})\n" "${OPERATOR_USER}" \
-    > /etc/nginx/.htpasswd
+# .htpasswd is generated at runtime from OPERATOR_USER / OPERATOR_PASSWORD
+# env vars so the password is never baked into an image layer.
 
 ENTRYPOINT ["/entrypoint.sh"]
