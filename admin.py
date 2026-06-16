@@ -115,13 +115,26 @@ def cmd_coinbase(_):
         n = len(dist) if isinstance(dist, dict) else "?"
         print(f"  [{ok}] block={r['block_height']}  members={n}  at={ts}")
 
+def cmd_new_round(_):
+    """
+    Run this AFTER you have claimed the round on TIG.
+    Resets the contribution window so the next round starts fresh.
+    Members who only benchmarked in the previous round will not carry
+    their contributions forward into the new round.
+    """
+    result = _post("/admin/new-round", {})
+    print(f"New round started.")
+    print(f"  Round start: {result['new_round_start']}")
+    print(f"  Contributions before this timestamp will no longer affect /set-coinbase.")
+
 # ── main ──────────────────────────────────────────────────────────────────────
 COMMANDS = {
-    "invite":   cmd_invite,
-    "invites":  cmd_invites,
-    "add":      cmd_add,
-    "members":  cmd_members,
-    "coinbase": cmd_coinbase,
+    "invite":    cmd_invite,
+    "invites":   cmd_invites,
+    "add":       cmd_add,
+    "members":   cmd_members,
+    "coinbase":  cmd_coinbase,
+    "new-round": cmd_new_round,
 }
 
 if __name__ == "__main__":

@@ -31,9 +31,6 @@ logger = logging.getLogger(__name__)
 POOL_FEE = float(os.environ.get("POOL_FEE", "0.05"))
 MASTER_URL = os.environ.get("MASTER_INTERNAL_URL", "http://master:3336")
 
-# How many recent snapshots to use when computing weights (rolling window)
-ROLLING_SNAPSHOTS = 10
-
 
 def _get_current_block() -> int | None:
     """Fetch current block height from the master's latest-data endpoint."""
@@ -60,30 +57,37 @@ def _get_tig_credentials() -> tuple[str, str] | tuple[None, None]:
 
 def _compute_allocation() -> dict[str, float]:
     """
-    Compute each member's share of the round earnings based on recent
-    contribution snapshots.
+    Compute each member's share of the round earnings based on ALL contributions
+    since the current round started (set when operator marks a round as claimed).
 
     Returns a dict {wallet_address: fraction} where:
-      - fractions are proportional to nonces computed
+      - fractions are proportional to total nonces computed this round
       - the POOL_FEE fraction is NOT included (it stays with the operator wallet)
       - all returned fractions sum to (1.0 - POOL_FEE)
 
-    This dict is passed directly to /set-coinbase.  TIG will allocate
-    (fraction * total_round_earnings) to each wallet when the operator claims.
+    Members who benchmarked early in the week and then stopped still receive
+    their fair share — contributions accumulate for the full round.
     """
-    rows = db.fetch_all(
-        """
-        SELECT wallet_address, SUM(nonces_computed) AS total_nonces
-        FROM pool_contributions
-        WHERE id IN (
-            SELECT id FROM pool_contributions
-            ORDER BY created_at DESC
-            LIMIT %s
+    round_start = db.get_setting("current_round_start", None)
+    if round_start:
+        rows = db.fetch_all(
+            """
+            SELECT wallet_address, SUM(nonces_computed) AS total_nonces
+            FROM pool_contributions
+            WHERE created_at >= %s
+            GROUP BY wallet_address
+            """,
+            (round_start,),
         )
-        GROUP BY wallet_address
-        """,
-        (ROLLING_SNAPSHOTS * 50,),
-    )
+    else:
+        # No round start recorded yet — sum all contributions ever
+        rows = db.fetch_all(
+            """
+            SELECT wallet_address, SUM(nonces_computed) AS total_nonces
+            FROM pool_contributions
+            GROUP BY wallet_address
+            """
+        )
 
     if not rows:
         return {}

@@ -353,3 +353,17 @@ def list_invites(x_admin_secret: str = Header(None)):
     return db.fetch_all(
         "SELECT code, used_by, used_at, created_at, expires_at FROM pool_invites ORDER BY created_at DESC"
     )
+
+
+@router.post("/admin/new-round")
+def new_round(x_admin_secret: str = Header(None)):
+    """
+    Call this after you have claimed the round on TIG.
+    Resets the round start timestamp so the next round's contributions
+    are tracked fresh — members who only benchmarked in the previous
+    round will no longer affect future allocations.
+    """
+    _check_admin(x_admin_secret)
+    now = __import__("datetime").datetime.utcnow().isoformat()
+    db.set_setting("current_round_start", now)
+    return {"success": True, "new_round_start": now}
