@@ -160,7 +160,7 @@ def maybe_update_coinbase():
     try:
         resp = requests.post(
             f"{api_url}/set-coinbase",
-            json={"distribution": allocation},
+            json={"coinbase": allocation},
             headers={
                 "X-Api-Key": api_key,
                 "Content-Type": "application/json",
