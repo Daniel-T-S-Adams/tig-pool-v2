@@ -145,10 +145,18 @@ def get_member_stats(wallet_address: str):
         SELECT
             SUM(nonces_computed) AS nonces,
             SUM(batches_completed) AS batches,
-            AVG(share_fraction) AS avg_share
+            CASE WHEN pool_total.total_nonces > 0
+                 THEN SUM(nonces_computed)::float / pool_total.total_nonces
+                 ELSE 0 END AS avg_share
         FROM pool_contributions
+        CROSS JOIN (
+            SELECT NULLIF(SUM(nonces_computed), 0) AS total_nonces
+            FROM pool_contributions
+            WHERE snapshot_end_ms > (EXTRACT(EPOCH FROM NOW()) * 1000)::BIGINT - 86400000
+        ) pool_total
         WHERE wallet_address = %s
           AND snapshot_end_ms > (EXTRACT(EPOCH FROM NOW()) * 1000)::BIGINT - 86400000
+        GROUP BY pool_total.total_nonces
         """,
         (wallet_address,),
     )
