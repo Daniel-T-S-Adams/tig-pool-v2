@@ -21,6 +21,9 @@ async function loadStats() {
     if (el("stat-members")) el("stat-members").textContent = fmtNum(d.active_members);
     if (el("stat-nonces"))  el("stat-nonces").textContent  = fmtNum(d.nonces_last_24h);
     if (el("stat-updates")) el("stat-updates").textContent = fmtNum(d.total_coinbase_updates);
+    const feeTxt = d.pool_fee_pct != null ? d.pool_fee_pct + "%" : "—";
+    if (el("stat-fee"))  el("stat-fee").textContent  = feeTxt;
+    if (el("info-fee"))  el("info-fee").textContent  = feeTxt;
   } catch (_) {}
 }
 
