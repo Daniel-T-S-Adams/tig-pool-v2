@@ -39,19 +39,19 @@ class PrecommitManager:
         if  num_pending_benchmarks >= CONFIG["max_concurrent_benchmarks"]:
             logger.debug(f"number of pending benchmarks has reached max of {CONFIG['max_concurrent_benchmarks']}")
             return
-        # Build per-challenge pending counts
+        # Build per-challenge pending counts keyed by challenge_id (e.g. "c004")
         per_challenge_counts = {}
         rows = get_db_conn().fetch_all(
             """
-            SELECT challenge, COUNT(*) as cnt
+            SELECT settings->>'challenge_id' AS challenge_id, COUNT(*) AS cnt
             FROM job
             WHERE merkle_proofs_ready IS NULL
                 AND stopped IS NULL
-            GROUP BY challenge
+            GROUP BY settings->>'challenge_id'
             """
         )
         for row in rows:
-            per_challenge_counts[row["challenge"]] = row["cnt"]
+            per_challenge_counts[row["challenge_id"]] = row["cnt"]
 
         per_challenge_max = CONFIG.get("per_challenge_max_benchmarks", {})
 
@@ -75,20 +75,13 @@ class PrecommitManager:
         challenge_config = self.challenge_configs[c_id]
         # Determine allowed tracks for this challenge (track_allowlist in CONFIG)
         # Maps challenge_id (e.g. "c005") -> challenge name (e.g. "hypergraph")
-        _CHALLENGE_NAMES = {
-            "c001": "satisfiability", "c002": "vehicle_routing", "c003": "knapsack",
-            "c004": "vector_search",  "c005": "hypergraph",      "c006": "neuralnet_optimizer",
-            "c007": "job_scheduling", "c008": "energy_arbitrage",
-        }
-        _allowlist = CONFIG.get("track_allowlist", {})
-        _allowed = _allowlist.get(_CHALLENGE_NAMES.get(c_id, ""), None)
-
+        # Remove tracks no longer active on mainnet
         for t_id in set(selection["track_settings"]) - set(challenge_config["active_tracks"]):
             selection["track_settings"].pop(t_id)
+        # Add all active tracks missing from track_settings with empty defaults
+        # (ALL active tracks must be present in a precommit — TIG API requirement)
         for t_id in set(challenge_config["active_tracks"]) - set(selection["track_settings"]):
-            # Only add back tracks that are in the allowlist (if one is defined)
-            if _allowed is None or t_id in _allowed:
-                selection["track_settings"][t_id] = {}
+            selection["track_settings"][t_id] = {}
         
         for t_id in set(selection["track_settings"]):
             for k in set(selection["track_settings"][t_id]) - {"num_bundles", "hyperparameters", "fuel_budget"}:
