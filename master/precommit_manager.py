@@ -64,7 +64,7 @@ class PrecommitManager:
             if _allowed is None or t_id in _allowed:
                 selection["track_settings"][t_id] = {}
         
-        for t_id in set(challenge_config["active_tracks"]):
+        for t_id in set(selection["track_settings"]):
             for k in set(selection["track_settings"][t_id]) - {"num_bundles", "hyperparameters", "fuel_budget"}:
                 selection["track_settings"][t_id].pop(k)
             if selection["track_settings"][t_id].get("num_bundles", 0) < challenge_config["min_num_bundles"]:
