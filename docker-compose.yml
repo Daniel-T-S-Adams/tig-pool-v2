@@ -19,7 +19,10 @@ services:
       retries: 10
 
   master:
-    image: ghcr.io/tig-foundation/tig-monorepo/benchmarker/master:${TIG_VERSION}
+    build:
+      context: ./master
+      args:
+        TIG_VERSION: ${TIG_VERSION}
     container_name: innopool_master
     restart: unless-stopped
     environment:
