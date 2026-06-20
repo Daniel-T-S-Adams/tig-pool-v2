@@ -122,12 +122,11 @@ def _run():
 
     # GPU per-challenge limits scale with active GPU slave count
     #   hypergraph (c005): 3 benchmarks/slave × 4 bundles = 12 batches → fills 12 C3 workers
-    #   vector_search (c004): 1 benchmark/slave (10-40 bundles, plenty of batches)
-    #   neuralnet (c006): 2 benchmarks/slave × 8 bundles = 16 batches
+    #   GPU challenges: 1 concurrent benchmark each regardless of slave count
     new_per = {
-        "c004": max(1, n_gpu),
-        "c005": max(1, n_gpu * 3),
-        "c006": max(1, n_gpu * 2),
+        "c004": 1,
+        "c005": 1,
+        "c006": 1,
     }
 
     try:
