@@ -39,8 +39,34 @@ class PrecommitManager:
         if  num_pending_benchmarks >= CONFIG["max_concurrent_benchmarks"]:
             logger.debug(f"number of pending benchmarks has reached max of {CONFIG['max_concurrent_benchmarks']}")
             return
-        logger.debug(f"Selecting algorithm from: {[(x['algorithm_id'], x['weight']) for x in algo_selection]}")
-        selection = random.choices(algo_selection, weights=[x["weight"] for x in algo_selection])[0]
+        # Build per-challenge pending counts
+        per_challenge_counts = {}
+        rows = get_db_conn().fetch_all(
+            """
+            SELECT challenge, COUNT(*) as cnt
+            FROM job
+            WHERE merkle_proofs_ready IS NULL
+                AND stopped IS NULL
+            GROUP BY challenge
+            """
+        )
+        for row in rows:
+            per_challenge_counts[row["challenge"]] = row["cnt"]
+
+        per_challenge_max = CONFIG.get("per_challenge_max_benchmarks", {})
+
+        # Filter eligible algorithms (not over their per-challenge limit)
+        eligible = [
+            x for x in algo_selection
+            if per_challenge_max.get(x["algorithm_id"][:4]) is None
+            or per_challenge_counts.get(x["algorithm_id"][:4], 0) < per_challenge_max[x["algorithm_id"][:4]]
+        ]
+        if not eligible:
+            logger.debug("All algorithms are at their per-challenge max concurrent benchmarks")
+            return
+
+        logger.debug(f"Selecting algorithm from: {[(x['algorithm_id'], x['weight']) for x in eligible]}")
+        selection = random.choices(eligible, weights=[x["weight"] for x in eligible])[0]
         a_id = selection["algorithm_id"]
         c_id = a_id[:4]
         if c_id not in self.challenge_configs:
