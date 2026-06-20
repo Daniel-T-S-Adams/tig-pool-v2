@@ -75,13 +75,25 @@ class PrecommitManager:
         challenge_config = self.challenge_configs[c_id]
         # Determine allowed tracks for this challenge (track_allowlist in CONFIG)
         # Maps challenge_id (e.g. "c005") -> challenge name (e.g. "hypergraph")
+        _CHALLENGE_NAMES = {
+            "c001": "satisfiability", "c002": "vehicle_routing", "c003": "knapsack",
+            "c004": "vector_search",  "c005": "hypergraph",      "c006": "neuralnet_optimizer",
+            "c007": "job_scheduling", "c008": "energy_arbitrage",
+        }
+        _allowlist = CONFIG.get("track_allowlist", {})
+        _allowed = _allowlist.get(_CHALLENGE_NAMES.get(c_id, ""), None)
+
         # Remove tracks no longer active on mainnet
         for t_id in set(selection["track_settings"]) - set(challenge_config["active_tracks"]):
             selection["track_settings"].pop(t_id)
-        # Add all active tracks missing from track_settings with empty defaults
-        # (ALL active tracks must be present in a precommit — TIG API requirement)
-        for t_id in set(challenge_config["active_tracks"]) - set(selection["track_settings"]):
-            selection["track_settings"][t_id] = {}
+        # ALL active tracks must be in the precommit (TIG API requirement).
+        # Tracks not in the allowlist get reset to {} (master uses min_num_bundles
+        # — minimal compute). Tracks in the allowlist keep their configured settings.
+        for t_id in challenge_config["active_tracks"]:
+            if t_id not in selection["track_settings"]:
+                selection["track_settings"][t_id] = {}
+            if _allowed is not None and t_id not in _allowed:
+                selection["track_settings"][t_id] = {}  # minimal compute
         
         for t_id in set(selection["track_settings"]):
             for k in set(selection["track_settings"][t_id]) - {"num_bundles", "hyperparameters", "fuel_budget"}:
