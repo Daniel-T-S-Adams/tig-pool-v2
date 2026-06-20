@@ -110,6 +110,19 @@ def main():
     cpu_ids = [s["algorithm_id"] for s in cfg["algo_selection"]
                if s["algorithm_id"].split("_")[0] not in GPU_CHALLENGES]
 
+    # ── max_concurrent_batches — read from saved_config slaves if present ────────
+    saved_slaves = {s["name_regex"]: s for s in cfg.get("slaves", [])}
+    _gpu_slave = next((s for s in saved_slaves.values() if "gpu" in s["name_regex"]), {})
+    _cpu_slave = next((s for s in saved_slaves.values() if "cpu" in s["name_regex"]), {})
+    GPU_MAX_CONCURRENT_BATCHES = int(os.environ.get(
+        "GPU_MAX_CONCURRENT_BATCHES",
+        str(_gpu_slave.get("max_concurrent_batches", 24))
+    ))
+    CPU_MAX_CONCURRENT_BATCHES = int(os.environ.get(
+        "CPU_MAX_CONCURRENT_BATCHES",
+        str(_cpu_slave.get("max_concurrent_batches", 48))
+    ))
+
     # ── batch_size overrides ───────────────────────────────────────────────────
     # Larger batch_size = fewer batches per benchmark = less backlog buildup.
     # CPU: 64 nonces/batch (7 batches for a 400-nonce job vs 50 at batch_size=8)
@@ -130,13 +143,13 @@ def main():
             slaves.append({
                 "name_regex": "^c3-slave-.*$",
                 "algorithm_id_regex": _prefix_regex(gpu_ids),
-                "max_concurrent_batches": int(os.environ.get("GPU_MAX_CONCURRENT_BATCHES", "24")),
+                "max_concurrent_batches": GPU_MAX_CONCURRENT_BATCHES,
             })
         if cpu_ids:
             slaves.append({
                 "name_regex": "^aws-cpu-slave-.*$",
                 "algorithm_id_regex": _prefix_regex(cpu_ids),
-                "max_concurrent_batches": int(os.environ.get("CPU_MAX_CONCURRENT_BATCHES", "48")),
+                "max_concurrent_batches": CPU_MAX_CONCURRENT_BATCHES,
             })
     else:
         # Default pool mode — split GPU/CPU by slave name prefix:
@@ -147,13 +160,13 @@ def main():
             slaves.append({
                 "name_regex": "^pool-gpu-.*$",
                 "algorithm_id_regex": _prefix_regex(gpu_ids),
-                "max_concurrent_batches": int(os.environ.get("GPU_MAX_CONCURRENT_BATCHES", "4")),
+                "max_concurrent_batches": GPU_MAX_CONCURRENT_BATCHES,
             })
         if cpu_ids:
             slaves.append({
                 "name_regex": "^pool-cpu-.*$",
                 "algorithm_id_regex": _prefix_regex(cpu_ids),
-                "max_concurrent_batches": int(os.environ.get("CPU_MAX_CONCURRENT_BATCHES", "48")),
+                "max_concurrent_batches": CPU_MAX_CONCURRENT_BATCHES,
             })
 
     cfg["slaves"] = slaves
