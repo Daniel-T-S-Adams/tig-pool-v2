@@ -123,6 +123,32 @@ def main():
         str(_cpu_slave.get("max_concurrent_batches", 48))
     ))
 
+    # ── apply track_allowlist — remove non-allowlisted tracks from track_settings ─
+    # Maps challenge prefix → challenge name used as key in track_allowlist
+    CHALLENGE_NAMES = {
+        "c001": "satisfiability",
+        "c002": "vehicle_routing",
+        "c003": "knapsack",
+        "c004": "vector_search",
+        "c005": "hypergraph",
+        "c006": "neuralnet_optimizer",
+        "c007": "job_scheduling",
+        "c008": "energy_arbitrage",
+    }
+    allowlist = cfg.get("track_allowlist", {})
+    if allowlist:
+        for sel in cfg["algo_selection"]:
+            cid = sel["algorithm_id"].split("_")[0]
+            cname = CHALLENGE_NAMES.get(cid)
+            allowed_tracks = allowlist.get(cname)
+            if allowed_tracks and "track_settings" in sel:
+                sel["track_settings"] = {
+                    k: v for k, v in sel["track_settings"].items()
+                    if k in allowed_tracks
+                }
+        print(f"  track_allowlist applied: "
+              + ", ".join(f"{c}({len(t)})" for c, t in allowlist.items()))
+
     # ── batch_size overrides ───────────────────────────────────────────────────
     # Larger batch_size = fewer batches per benchmark = less backlog buildup.
     # CPU: 64 nonces/batch (7 batches for a 400-nonce job vs 50 at batch_size=8)
