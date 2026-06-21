@@ -63,13 +63,22 @@ class JobManager:
             if bin.details.download_url is None:
                 logger.error(f"batch {x.benchmark_id}: no download_url found for {bin.algorithm_id}. skipping job")
                 continue
-            batch_size = next(
-                (s["batch_size"] for s in algo_selection if s["algorithm_id"] == x.settings.algorithm_id),
+            algo_sel = next(
+                (s for s in algo_selection if s["algorithm_id"] == x.settings.algorithm_id),
                 None
             )
-            if batch_size is None:
+            if algo_sel is None:
                 logger.error(f"batch {x.benchmark_id}: no batch size found for {x.settings.algorithm_id}. skipping job")
                 continue
+            # Per-track batch_size override: check track_settings[track_id]["batch_size"]
+            # Falls back to algo-level batch_size. batch_size is a master-side config only
+            # (stripped from precommit before submission to mainnet).
+            track_batch_size = None
+            if track_id:
+                track_batch_size = algo_sel.get("track_settings", {}).get(track_id, {}).get("batch_size")
+            batch_size = track_batch_size or algo_sel["batch_size"]
+            if track_batch_size:
+                logger.debug(f"job {benchmark_id}: using per-track batch_size={batch_size} for track '{track_id}'")
             num_batches = math.ceil(x.details.num_nonces / batch_size)
             max_job_batches = CONFIG.get("max_job_batches", 256)
             oversized = bool(max_job_batches) and num_batches > max_job_batches

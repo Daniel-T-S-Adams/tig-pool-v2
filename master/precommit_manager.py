@@ -1,3 +1,4 @@
+import copy
 import os
 import logging
 import random
@@ -66,7 +67,10 @@ class PrecommitManager:
             return
 
         logger.debug(f"Selecting algorithm from: {[(x['algorithm_id'], x['weight']) for x in eligible]}")
-        selection = random.choices(eligible, weights=[x["weight"] for x in eligible])[0]
+        # Deep copy so mutations below (stripping unknown keys, filling defaults)
+        # don't corrupt the live CONFIG["algo_selection"] — especially batch_size
+        # which lives in track_settings but must not be sent to mainnet.
+        selection = copy.deepcopy(random.choices(eligible, weights=[x["weight"] for x in eligible])[0])
         a_id = selection["algorithm_id"]
         c_id = a_id[:4]
         if c_id not in self.challenge_configs:
