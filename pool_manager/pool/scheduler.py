@@ -35,6 +35,7 @@ from pool import database as db
 logger = logging.getLogger("pool.scheduler")
 
 MASTER_URL = os.environ.get("MASTER_INTERNAL_URL", "http://master:3336")
+SCHEDULER_ENABLED = os.environ.get("SCHEDULER_ENABLED", "false").lower() in ("1", "true", "yes", "on")
 
 # Slave is considered active if it dispatched a batch in this window
 ACTIVE_WINDOW_MS = int(os.environ.get("SCHEDULER_ACTIVE_WINDOW_MS", str(5 * 60 * 1000)))

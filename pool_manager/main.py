@@ -58,7 +58,8 @@ def background_loop():
             logger.error(f"Coinbase update error: {e}")
 
         try:
-            scheduler.maybe_update_schedule()
+            if scheduler.SCHEDULER_ENABLED:
+                scheduler.maybe_update_schedule()
         except Exception as e:
             logger.error(f"Scheduler error: {e}")
 
