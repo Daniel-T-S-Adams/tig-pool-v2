@@ -70,6 +70,22 @@ CREATE INDEX idx_root_batch_start_time ON root_batch(start_time);
 CREATE INDEX idx_root_batch_end_time ON root_batch(end_time);
 CREATE INDEX idx_root_batch_ready ON root_batch(ready);
 
+CREATE TABLE IF NOT EXISTS benchmark_slot (
+    slot_id TEXT PRIMARY KEY,
+    slot_type TEXT NOT NULL,
+    benchmark_id TEXT REFERENCES job(benchmark_id),
+    challenge TEXT,
+    algorithm_id TEXT,
+    track_id TEXT,
+    assigned_at BIGINT,
+    last_activity_at BIGINT,
+    state TEXT NOT NULL DEFAULT 'idle'
+);
+
+CREATE INDEX IF NOT EXISTS idx_benchmark_slot_type ON benchmark_slot(slot_type);
+CREATE INDEX IF NOT EXISTS idx_benchmark_slot_benchmark_id ON benchmark_slot(benchmark_id);
+CREATE INDEX IF NOT EXISTS idx_benchmark_slot_state ON benchmark_slot(state);
+
 CREATE TABLE IF NOT EXISTS proofs_batch (
     benchmark_id TEXT REFERENCES job(benchmark_id),
     batch_idx INTEGER,

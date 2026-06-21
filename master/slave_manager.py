@@ -36,6 +36,248 @@ class SlaveManager:
     def __init__(self):
         self.batches = []
         self.lock = Lock()
+        self._slot_table_ready = False
+
+    def _ensure_slot_table(self):
+        if self._slot_table_ready:
+            return
+        get_db_conn().execute(
+            """
+            CREATE TABLE IF NOT EXISTS benchmark_slot (
+                slot_id TEXT PRIMARY KEY,
+                slot_type TEXT NOT NULL,
+                benchmark_id TEXT REFERENCES job(benchmark_id),
+                challenge TEXT,
+                algorithm_id TEXT,
+                track_id TEXT,
+                assigned_at BIGINT,
+                last_activity_at BIGINT,
+                state TEXT NOT NULL DEFAULT 'idle'
+            )
+            """
+        )
+        get_db_conn().execute(
+            "CREATE INDEX IF NOT EXISTS idx_benchmark_slot_type ON benchmark_slot(slot_type)"
+        )
+        get_db_conn().execute(
+            "CREATE INDEX IF NOT EXISTS idx_benchmark_slot_benchmark_id ON benchmark_slot(benchmark_id)"
+        )
+        get_db_conn().execute(
+            "CREATE INDEX IF NOT EXISTS idx_benchmark_slot_state ON benchmark_slot(state)"
+        )
+        self._slot_table_ready = True
+
+    def _resource_slot_counts(self) -> Dict[str, int]:
+        cfg = CONFIG.get("resource_slots", {})
+        if not cfg:
+            return {}
+        if cfg.get("enabled") is False:
+            return {}
+        counts = cfg.get("slots", cfg)
+        return {
+            str(k): int(v)
+            for k, v in counts.items()
+            if k != "enabled" and isinstance(v, int) and v > 0
+        }
+
+    def _slot_types_for_slave(self, slave_name: str) -> List[str]:
+        counts = self._resource_slot_counts()
+        if not counts:
+            return []
+        if slave_name.startswith("pool-cpu-") or slave_name.startswith("aws-cpu-slave-"):
+            return ["cpu"] if "cpu" in counts else []
+        if slave_name.startswith("pool-gpu-") or slave_name.startswith("c3-slave-"):
+            return [t for t in ("vector_search", "hypergraph", "neuralnet_optimizer") if t in counts]
+        return []
+
+    def _sync_slots(self):
+        counts = self._resource_slot_counts()
+        if not counts:
+            return
+        self._ensure_slot_table()
+        queries = []
+        for slot_type, count in counts.items():
+            for i in range(1, count + 1):
+                queries.append((
+                    """
+                    INSERT INTO benchmark_slot (slot_id, slot_type)
+                    VALUES (%s, %s)
+                    ON CONFLICT (slot_id) DO NOTHING
+                    """,
+                    (f"{slot_type}_{i:03d}", slot_type)
+                ))
+        if queries:
+            get_db_conn().execute_many(*queries)
+
+    def _release_slots(self):
+        """Free slots whose benchmark has finished, stopped, expired, or disappeared."""
+        if not self._resource_slot_counts():
+            return
+        self._ensure_slot_table()
+        get_db_conn().execute(
+            """
+            UPDATE benchmark_slot S
+            SET benchmark_id = NULL,
+                challenge = NULL,
+                algorithm_id = NULL,
+                track_id = NULL,
+                assigned_at = NULL,
+                last_activity_at = NULL,
+                state = 'idle'
+            FROM job J
+            WHERE S.benchmark_id = J.benchmark_id
+              AND (
+                J.stopped IS NOT NULL
+                OR J.end_time IS NOT NULL
+                OR J.merkle_proofs_ready IS NOT NULL
+              )
+            """
+        )
+        get_db_conn().execute(
+            """
+            UPDATE benchmark_slot S
+            SET benchmark_id = NULL,
+                challenge = NULL,
+                algorithm_id = NULL,
+                track_id = NULL,
+                assigned_at = NULL,
+                last_activity_at = NULL,
+                state = 'idle'
+            WHERE S.benchmark_id IS NOT NULL
+              AND NOT EXISTS (
+                SELECT 1 FROM job J WHERE J.benchmark_id = S.benchmark_id
+              )
+            """
+        )
+
+    def _challenge_matches_slot(self, slot_type: str) -> str:
+        if slot_type == "cpu":
+            return "J.challenge NOT IN ('vector_search', 'hypergraph', 'neuralnet_optimizer')"
+        return "J.challenge = %s"
+
+    def _assign_idle_slots(self, slot_types: List[str]):
+        if not slot_types:
+            return
+        now_ms = int(time.time() * 1000)
+        for slot_type in slot_types:
+            idle_slots = get_db_conn().fetch_all(
+                """
+                SELECT slot_id
+                FROM benchmark_slot
+                WHERE slot_type = %s
+                  AND benchmark_id IS NULL
+                ORDER BY slot_id
+                """,
+                (slot_type,)
+            )
+            for slot in idle_slots:
+                if slot_type == "cpu":
+                    job = get_db_conn().fetch_one(
+                        """
+                        SELECT J.benchmark_id, J.challenge, J.settings
+                        FROM job J
+                        WHERE J.stopped IS NULL
+                          AND J.end_time IS NULL
+                          AND J.challenge NOT IN ('vector_search', 'hypergraph', 'neuralnet_optimizer')
+                          AND NOT EXISTS (
+                            SELECT 1 FROM benchmark_slot S WHERE S.benchmark_id = J.benchmark_id
+                          )
+                          AND (
+                            EXISTS (
+                              SELECT 1 FROM root_batch R
+                              WHERE R.benchmark_id = J.benchmark_id AND R.ready IS NULL
+                            )
+                            OR EXISTS (
+                              SELECT 1 FROM proofs_batch P
+                              WHERE P.benchmark_id = J.benchmark_id AND P.ready IS NULL
+                            )
+                          )
+                        ORDER BY J.block_started, J.start_time, J.benchmark_id
+                        LIMIT 1
+                        """
+                    )
+                else:
+                    job = get_db_conn().fetch_one(
+                        """
+                        SELECT J.benchmark_id, J.challenge, J.settings
+                        FROM job J
+                        WHERE J.stopped IS NULL
+                          AND J.end_time IS NULL
+                          AND J.challenge = %s
+                          AND NOT EXISTS (
+                            SELECT 1 FROM benchmark_slot S WHERE S.benchmark_id = J.benchmark_id
+                          )
+                          AND (
+                            EXISTS (
+                              SELECT 1 FROM root_batch R
+                              WHERE R.benchmark_id = J.benchmark_id AND R.ready IS NULL
+                            )
+                            OR EXISTS (
+                              SELECT 1 FROM proofs_batch P
+                              WHERE P.benchmark_id = J.benchmark_id AND P.ready IS NULL
+                            )
+                          )
+                        ORDER BY J.block_started, J.start_time, J.benchmark_id
+                        LIMIT 1
+                        """,
+                        (slot_type,)
+                    )
+                if job is None:
+                    break
+                settings = job["settings"] or {}
+                get_db_conn().execute(
+                    """
+                    UPDATE benchmark_slot
+                    SET benchmark_id = %s,
+                        challenge = %s,
+                        algorithm_id = %s,
+                        track_id = %s,
+                        assigned_at = %s,
+                        last_activity_at = %s,
+                        state = 'root'
+                    WHERE slot_id = %s
+                    """,
+                    (
+                        job["benchmark_id"],
+                        job["challenge"],
+                        settings.get("algorithm_id"),
+                        settings.get("track_id"),
+                        now_ms,
+                        now_ms,
+                        slot["slot_id"],
+                    )
+                )
+                logger.info(
+                    f"slot {slot['slot_id']} ({slot_type}) assigned benchmark "
+                    f"{job['benchmark_id']} ({job['challenge']}, {settings.get('track_id')})"
+                )
+
+    def _slot_benchmark_ids(self, slot_types: List[str]) -> Set[str]:
+        if not slot_types:
+            return set()
+        rows = get_db_conn().fetch_all(
+            """
+            SELECT benchmark_id
+            FROM benchmark_slot
+            WHERE slot_type IN %s
+              AND benchmark_id IS NOT NULL
+            """,
+            (tuple(slot_types),)
+        )
+        return {r["benchmark_id"] for r in rows}
+
+    def _mark_slot_activity(self, benchmark_id: str, state: str):
+        if not self._resource_slot_counts():
+            return
+        get_db_conn().execute(
+            """
+            UPDATE benchmark_slot
+            SET last_activity_at = (EXTRACT(EPOCH FROM NOW()) * 1000)::BIGINT,
+                state = %s
+            WHERE benchmark_id = %s
+            """,
+            (state, benchmark_id)
+        )
 
     def run(self):
         with self.lock:
@@ -123,6 +365,14 @@ class SlaveManager:
             concurrent = []
             updates = []
             now = time.time() * 1000
+            slot_types = self._slot_types_for_slave(slave_name)
+            slot_benchmark_ids = set()
+            if slot_types:
+                self._sync_slots()
+                self._release_slots()
+                self._assign_idle_slots(slot_types)
+                slot_benchmark_ids = self._slot_benchmark_ids(slot_types)
+
             with self.lock:
                 max_concurrent = slave["max_concurrent_batches"]
                 # Fair-share: cap how many concurrent batches any single benchmark may hold
@@ -146,6 +396,7 @@ class SlaveManager:
                 def assign_pass(respect_cap):
                     for b in self.batches:
                         batch = b["batch"]
+                        bid = batch["benchmark_id"]
                         if len(concurrent) >= max_concurrent:
                             break
                         if (
@@ -154,13 +405,14 @@ class SlaveManager:
                             b["end_time"] is not None
                         ):
                             continue
+                        if slot_types and bid not in slot_benchmark_ids:
+                            continue
                         if not (
                             b["slave"] is None or
                             b["start_time"] is None or
                             (now - b["start_time"]) > _batch_retry_time(batch["settings"]["algorithm_id"])
                         ):
                             continue
-                        bid = batch["benchmark_id"]
                         if respect_cap and concurrent_by_bench.get(bid, 0) >= per_bench_cap:
                             continue
                         b["slave"] = slave_name
@@ -168,6 +420,7 @@ class SlaveManager:
                         b["num_attempts"] += 1
                         concurrent_by_bench[bid] = concurrent_by_bench.get(bid, 0) + 1
                         table = "root_batch" if batch["sampled_nonces"] is None else "proofs_batch"
+                        slot_state = "root" if batch["sampled_nonces"] is None else "proof"
                         updates.append((
                             f"""
                             UPDATE {table}
@@ -179,6 +432,16 @@ class SlaveManager:
                             """,
                             (slave_name, now, b["num_attempts"], batch["benchmark_id"], batch["batch_idx"])
                         ))
+                        if slot_types:
+                            updates.append((
+                                """
+                                UPDATE benchmark_slot
+                                SET last_activity_at = %s,
+                                    state = %s
+                                WHERE benchmark_id = %s
+                                """,
+                                (now, slot_state, batch["benchmark_id"])
+                            ))
                         concurrent.append(batch)
 
                 # Pass 1: spread across benchmarks (respect per-benchmark cap) so all

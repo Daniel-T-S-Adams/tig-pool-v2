@@ -115,25 +115,42 @@ def _run():
     n_gpu = sum(1 for t in active.values() if t == "gpu")
     n_cpu = sum(1 for t in active.values() if t == "cpu")
 
-    # Benchmark capacity per slave type
-    gpu_cap = n_gpu * (GPU_MAX_CONCURRENT_BATCHES // GPU_MIN_BUNDLES)
-    cpu_cap = n_cpu * (CPU_MAX_CONCURRENT_BATCHES // CPU_MIN_BUNDLES)
-    new_max = max(MIN_BENCHMARKS, min(gpu_cap + cpu_cap, MAX_BENCHMARKS))
-
-    # GPU per-challenge limits scale with active GPU slave count
-    #   hypergraph (c005): 3 benchmarks/slave × 4 bundles = 12 batches → fills 12 C3 workers
-    #   GPU challenges: 1 concurrent benchmark each regardless of slave count
-    new_per = {
-        "c004": 1,
-        "c005": 1,
-        "c006": 1,
-    }
-
     try:
         cfg = _fetch_config()
     except Exception as e:
         logger.warning(f"Scheduler: cannot reach master: {e}")
         return
+
+    resource_slots = cfg.get("resource_slots", {})
+    if resource_slots and resource_slots.get("enabled") is not False:
+        slot_counts = resource_slots.get("slots", resource_slots)
+        cpu_cap = slot_counts.get("cpu", 0) if n_cpu > 0 else 0
+        gpu_cap = 0
+        if n_gpu > 0:
+            gpu_cap = sum(
+                int(slot_counts.get(k, 0))
+                for k in ("vector_search", "hypergraph", "neuralnet_optimizer")
+            )
+        new_max = max(MIN_BENCHMARKS, min(cpu_cap + gpu_cap, MAX_BENCHMARKS))
+        new_per = {
+            "c004": max(1, int(slot_counts.get("vector_search", 1))) if n_gpu > 0 else 1,
+            "c005": max(1, int(slot_counts.get("hypergraph", 1))) if n_gpu > 0 else 1,
+            "c006": max(1, int(slot_counts.get("neuralnet_optimizer", 1))) if n_gpu > 0 else 1,
+        }
+    else:
+        # Benchmark capacity per slave type
+        gpu_cap = n_gpu * (GPU_MAX_CONCURRENT_BATCHES // GPU_MIN_BUNDLES)
+        cpu_cap = n_cpu * (CPU_MAX_CONCURRENT_BATCHES // CPU_MIN_BUNDLES)
+        new_max = max(MIN_BENCHMARKS, min(gpu_cap + cpu_cap, MAX_BENCHMARKS))
+
+        # GPU per-challenge limits scale with active GPU slave count
+        #   hypergraph (c005): 3 benchmarks/slave × 4 bundles = 12 batches → fills 12 C3 workers
+        #   GPU challenges: 1 concurrent benchmark each regardless of slave count
+        new_per = {
+            "c004": 1,
+            "c005": 1,
+            "c006": 1,
+        }
 
     old_max = cfg.get("max_concurrent_benchmarks")
     old_per = cfg.get("per_challenge_max_benchmarks", {})
