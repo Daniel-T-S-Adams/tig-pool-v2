@@ -70,6 +70,9 @@ class JobManager:
             if algo_sel is None:
                 logger.error(f"batch {x.benchmark_id}: no batch size found for {x.settings.algorithm_id}. skipping job")
                 continue
+            # Resolve track_id first — used by both batch_size and allowlist logic.
+            track_id = getattr(x.settings, "track_id", None)
+
             # Per-track batch_size override: check track_settings[track_id]["batch_size"]
             # Falls back to algo-level batch_size. batch_size is a master-side config only
             # (stripped from precommit before submission to mainnet).
@@ -89,7 +92,6 @@ class JobManager:
             # assigned track isn't on it, create the job already-stopped.
             track_allowlist = CONFIG.get("track_allowlist", {})
             allowed_tracks = track_allowlist.get(c_name)
-            track_id = getattr(x.settings, "track_id", None)
             blocked_track = bool(allowed_tracks) and track_id not in allowed_tracks
 
             skip = oversized or blocked_track
