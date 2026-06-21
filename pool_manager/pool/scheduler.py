@@ -50,8 +50,8 @@ GPU_MIN_BUNDLES = 4
 CPU_MIN_BUNDLES = 4
 
 # Hard bounds
-MIN_BENCHMARKS = 3   # always keep some running so master doesn't idle
-MAX_BENCHMARKS = 50  # safety cap
+MIN_BENCHMARKS = int(os.environ.get("SCHEDULER_MIN_BENCHMARKS", "3"))   # always keep some running so master doesn't idle
+MAX_BENCHMARKS = int(os.environ.get("SCHEDULER_MAX_BENCHMARKS", "8"))   # safety cap
 
 _last_run_ts = 0.0
 RUN_INTERVAL_S = 60
