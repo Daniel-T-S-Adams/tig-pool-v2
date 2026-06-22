@@ -226,7 +226,7 @@ def register_member(req: RegisterRequest):
     """Register a pool member using an invite code.
 
     worker_type can be "cpu", "gpu", or "both". Using "both" registers
-    two slave entries (one CPU, one GPU) under a single invite code.
+    two public slave entries (one CPU, one GPU) under a single invite code.
     """
     wallet = req.wallet_address.lower().strip()
     code = req.invite_code.strip()
@@ -236,7 +236,7 @@ def register_member(req: RegisterRequest):
 
     wtype = req.worker_type.lower()
     if wtype not in ("cpu", "gpu", "both", "c3"):
-        raise HTTPException(status_code=400, detail="worker_type must be 'cpu', 'gpu', or 'both'")
+        raise HTTPException(status_code=400, detail="worker_type must be 'cpu', 'gpu', 'both', or 'c3'")
 
     # Check invite code
     invite = db.fetch_one(
