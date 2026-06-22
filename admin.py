@@ -16,7 +16,10 @@ import urllib.request
 import urllib.error
 
 # ── config ────────────────────────────────────────────────────────────────────
-# Reads ADMIN_SECRET from .env if not set in environment
+# Reads ADMIN_SECRET from .env if not set in environment.
+# On the VPS the public HTTP port is normally handled by Caddy, so the CLI should
+# talk to the local nginx/pool API port directly instead of following redirects
+# through the public domain.
 def _load_env():
     env_path = os.path.join(os.path.dirname(__file__), ".env")
     env = {}
@@ -25,13 +28,15 @@ def _load_env():
             line = line.split("#")[0].strip()
             if "=" in line:
                 k, v = line.split("=", 1)
-                env[k.strip()] = v.strip()
+                env[k.strip()] = v.strip().strip('"').strip("'")
     return env
 
 _env = _load_env()
-ADMIN_SECRET = os.environ.get("ADMIN_SECRET") or _env.get("ADMIN_SECRET", "changeme")
-WEB_PORT     = os.environ.get("WEB_PORT")     or _env.get("WEB_PORT", "80")
-BASE_URL     = f"http://localhost:{WEB_PORT}/api"
+ADMIN_SECRET    = os.environ.get("ADMIN_SECRET") or _env.get("ADMIN_SECRET", "changeme")
+WEB_PORT        = os.environ.get("WEB_PORT") or _env.get("WEB_PORT", "8088")
+ADMIN_BASE_URL  = os.environ.get("ADMIN_BASE_URL") or _env.get("ADMIN_BASE_URL")
+PUBLIC_BASE_URL = os.environ.get("PUBLIC_BASE_URL") or _env.get("PUBLIC_BASE_URL", "https://www.innopool.co.uk")
+BASE_URL        = (ADMIN_BASE_URL or f"http://127.0.0.1:{WEB_PORT}/api").rstrip("/")
 
 # ── http helpers ──────────────────────────────────────────────────────────────
 def _req(method, path, body=None):
@@ -50,6 +55,11 @@ def _req(method, path, body=None):
     except urllib.error.HTTPError as e:
         print(f"HTTP {e.code}: {e.read().decode()}")
         sys.exit(1)
+    except urllib.error.URLError as e:
+        print(f"Request failed: {e}")
+        print(f"Tried: {url}")
+        print("If running on the VPS, set ADMIN_BASE_URL=http://127.0.0.1:8088/api or check WEB_PORT in .env.")
+        sys.exit(1)
 
 def _get(path):   return _req("GET", path)
 def _post(path, body=None): return _req("POST", path, body)
@@ -62,7 +72,7 @@ def cmd_invite(args):
     for code in result["codes"]:
         print(f"  {code}")
     print(f"\nShare the registration URL:")
-    print(f"  http://localhost:{WEB_PORT}/register.html")
+    print(f"  {PUBLIC_BASE_URL.rstrip('/')}/register.html")
 
 def cmd_invites(_):
     rows = _get("/admin/invites")
