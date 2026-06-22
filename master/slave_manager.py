@@ -38,6 +38,41 @@ class SlaveManager:
         self.lock = Lock()
         self._slot_table_ready = False
 
+    def _is_authorized_slave(self, slave_name: str) -> bool:
+        """Return True when a slave name is allowed to use the master.
+
+        Regex routing decides what a slave can work on, but it is not an
+        authorization boundary. Pool slave names must be registered and active
+        unless the operator has explicitly trusted the exact name or regex.
+        """
+        if not slave_name.startswith("pool-"):
+            return True
+
+        trusted_names = set(CONFIG.get("trusted_slave_names", []))
+        if slave_name in trusted_names:
+            return True
+
+        for pattern in CONFIG.get("trusted_slave_regexes", []):
+            if re.match(pattern, slave_name):
+                return True
+
+        row = get_db_conn().fetch_one(
+            """
+            SELECT 1
+            FROM pool_members
+            WHERE slave_name = %s
+              AND active = true
+            LIMIT 1
+            """,
+            (slave_name,)
+        )
+        return row is not None
+
+    def _require_authorized_slave(self, slave_name: str):
+        if not self._is_authorized_slave(slave_name):
+            logger.warning(f"slave {slave_name} is not registered or trusted. rejecting request")
+            raise HTTPException(status_code=403, detail="Unregistered slave")
+
     def _ensure_slot_table(self):
         if self._slot_table_ready:
             return
@@ -359,6 +394,7 @@ class SlaveManager:
             if not any(re.match(slave["name_regex"], slave_name) for slave in CONFIG["slaves"]):
                 logger.warning(f"slave {slave_name} does not match any regex. rejecting get-batch request")
                 raise HTTPException(status_code=403, detail="Unregistered slave")
+            self._require_authorized_slave(slave_name)
 
             slave = next((slave for slave in CONFIG["slaves"] if re.match(slave["name_regex"], slave_name)), None)
 
@@ -458,6 +494,7 @@ class SlaveManager:
         def find_batch(batch_id: str, request: Request):
             if (slave_name := request.headers.get('User-Agent', None)) is None:
                 raise HTTPException(status_code=403, detail="User-Agent header is required")
+            self._require_authorized_slave(slave_name)
             
             with self.lock:
                 b = next((
