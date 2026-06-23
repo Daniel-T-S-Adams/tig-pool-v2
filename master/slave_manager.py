@@ -528,7 +528,21 @@ class SlaveManager:
             logger.debug(f"Refreshed pending batches. Got {len(self.batches)}")
 
     def start(self):
-        app = FastAPI()
+        app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
+
+        allowed_exact_paths = {"/get-batches"}
+        allowed_prefixes = (
+            "/submit-batch-root/",
+            "/submit-batch-proofs/",
+            "/submit-batch-error/",
+        )
+
+        @app.middleware("http")
+        async def block_unexpected_paths(request: Request, call_next):
+            path = request.url.path
+            if path not in allowed_exact_paths and not path.startswith(allowed_prefixes):
+                return JSONResponse(status_code=404, content={"detail": "Not Found"})
+            return await call_next(request)
 
         @app.route('/get-batches', methods=['GET'])
         def get_batch(request: Request):
@@ -662,6 +676,10 @@ class SlaveManager:
                 logger.debug(f"no batches available for {slave_name}")
             if len(updates) > 0:
                 get_db_conn().execute_many(*updates)
+            logger.info(
+                f"get-batches slave={slave_name} assigned={len(concurrent)} "
+                f"cap={max_concurrent} route_cap={route_cap} adaptive={max_concurrent != route_cap}"
+            )
             return JSONResponse(content=jsonable_encoder(concurrent))
 
         def find_batch(batch_id: str, request: Request):
@@ -828,7 +846,7 @@ class SlaveManager:
 
             return {"status": "OK"}
             
-        thread = Thread(target=lambda: uvicorn.run(app, host="0.0.0.0", port=5115))
+        thread = Thread(target=lambda: uvicorn.run(app, host="0.0.0.0", port=5115, access_log=False))
         thread.daemon = True
         thread.start()
 
