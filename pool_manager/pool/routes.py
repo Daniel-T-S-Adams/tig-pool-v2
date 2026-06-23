@@ -303,6 +303,9 @@ VERSION={_TIG_VERSION}
 SLAVE_NAME={slave_name}
 MASTER_IP={_POOL_SERVER_IP}
 MASTER_PORT={_MASTER_PORT}
+# Adjust NUM_WORKERS for your machine.
+# CPU: start around your available CPU threads, then reduce if the machine becomes unstable.
+# GPU: normally use 1 worker per GPU.
 NUM_WORKERS=8
 ALGORITHMS_DIR=./algorithms
 RESULTS_DIR=./results
