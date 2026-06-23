@@ -515,13 +515,13 @@ def slave_health(slave_name: str, x_admin_secret: str = Header(None)):
     root = db.fetch_one(
         """
         SELECT
-          COUNT(*) FILTER (WHERE start_time IS NOT NULL) AS assigned_total,
-          COUNT(*) FILTER (WHERE ready = true) AS completed_total,
-          COUNT(*) FILTER (WHERE ready IS NULL AND start_time IS NOT NULL) AS active_unfinished,
-          COUNT(*) FILTER (WHERE start_time > ((EXTRACT(EPOCH FROM NOW()) * 1000) - 300000)) AS assigned_last_5m,
-          COUNT(*) FILTER (WHERE ready = true AND end_time > ((EXTRACT(EPOCH FROM NOW()) * 1000) - 300000)) AS completed_last_5m,
-          COUNT(*) FILTER (WHERE start_time > ((EXTRACT(EPOCH FROM NOW()) * 1000) - 1800000)) AS assigned_last_30m,
-          COUNT(*) FILTER (WHERE ready = true AND end_time > ((EXTRACT(EPOCH FROM NOW()) * 1000) - 1800000)) AS completed_last_30m,
+          COUNT(*) FILTER (WHERE rb.start_time IS NOT NULL) AS assigned_total,
+          COUNT(*) FILTER (WHERE rb.ready = true) AS completed_total,
+          COUNT(*) FILTER (WHERE rb.ready IS NULL AND rb.start_time IS NOT NULL) AS active_unfinished,
+          COUNT(*) FILTER (WHERE rb.start_time > ((EXTRACT(EPOCH FROM NOW()) * 1000) - 300000)) AS assigned_last_5m,
+          COUNT(*) FILTER (WHERE rb.ready = true AND rb.end_time > ((EXTRACT(EPOCH FROM NOW()) * 1000) - 300000)) AS completed_last_5m,
+          COUNT(*) FILTER (WHERE rb.start_time > ((EXTRACT(EPOCH FROM NOW()) * 1000) - 1800000)) AS assigned_last_30m,
+          COUNT(*) FILTER (WHERE rb.ready = true AND rb.end_time > ((EXTRACT(EPOCH FROM NOW()) * 1000) - 1800000)) AS completed_last_30m,
           COALESCE(SUM(LEAST(j.batch_size, j.num_nonces - rb.batch_idx * j.batch_size)) FILTER (
             WHERE rb.ready = true AND rb.end_time > ((EXTRACT(EPOCH FROM NOW()) * 1000) - 1800000)
           ), 0) AS nonces_last_30m,
