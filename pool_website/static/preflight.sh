@@ -40,13 +40,13 @@ if [ "${#services[@]}" -eq 0 ]; then
 fi
 
 docker compose -f slave.yml up -d --force-recreate "${services[@]}"
-docker compose -f slave.yml exec slave sh -lc 'test -d algorithms && test -d results && echo "slave mounts ok"'
+docker compose -f slave.yml exec -T slave sh -lc 'test -d algorithms && test -d results && echo "slave mounts ok"'
 
 for service in "${services[@]}"; do
   if [ "$service" = "slave" ]; then
     continue
   fi
-  docker compose -f slave.yml exec "$service" sh -lc 'test -d algorithms && test -d results && echo "'"$service"' mounts ok"'
+  docker compose -f slave.yml exec -T "$service" sh -lc 'test -d algorithms && test -d results && echo "'"$service"' mounts ok"'
 done
 
 echo "Preflight passed. Watching slave logs."
