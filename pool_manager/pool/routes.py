@@ -9,6 +9,7 @@ import os
 import time
 import secrets
 import logging
+from decimal import Decimal
 from fastapi import APIRouter, HTTPException, Header
 from pydantic import BaseModel
 from . import database as db
@@ -18,6 +19,18 @@ router = APIRouter()
 
 ADMIN_SECRET = os.environ.get("ADMIN_SECRET", "changeme")
 POOL_FEE = float(os.environ.get("POOL_FEE", "0.05"))
+
+
+def _json_safe(row):
+    if row is None:
+        return None
+    out = {}
+    for key, value in dict(row).items():
+        if isinstance(value, Decimal):
+            out[key] = float(value)
+        else:
+            out[key] = value
+    return out
 
 
 # ── helpers ────────────────────────────────────────────────────────────────────
@@ -554,10 +567,10 @@ def slave_health(slave_name: str, x_admin_secret: str = Header(None)):
         (slave_name,),
     )
     return {
-        "member": dict(member) if member else None,
-        "root_batches": dict(root) if root else {},
-        "proof_batches": dict(proofs) if proofs else {},
-        "active_root_batches": [dict(r) for r in recent],
+        "member": _json_safe(member),
+        "root_batches": _json_safe(root) or {},
+        "proof_batches": _json_safe(proofs) or {},
+        "active_root_batches": [_json_safe(r) for r in recent],
     }
 
 
