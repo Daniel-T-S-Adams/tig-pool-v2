@@ -522,6 +522,19 @@ def slave_health(slave_name: str, x_admin_secret: str = Header(None)):
           COUNT(*) FILTER (WHERE rb.ready = true AND rb.end_time > ((EXTRACT(EPOCH FROM NOW()) * 1000) - 300000)) AS completed_last_5m,
           COUNT(*) FILTER (WHERE rb.start_time > ((EXTRACT(EPOCH FROM NOW()) * 1000) - 1800000)) AS assigned_last_30m,
           COUNT(*) FILTER (WHERE rb.ready = true AND rb.end_time > ((EXTRACT(EPOCH FROM NOW()) * 1000) - 1800000)) AS completed_last_30m,
+          COUNT(*) FILTER (
+            WHERE rb.ready IS NULL
+              AND rb.start_time IS NOT NULL
+              AND rb.start_time < ((EXTRACT(EPOCH FROM NOW()) * 1000) - 1800000)
+          ) AS active_over_30m,
+          COUNT(*) FILTER (
+            WHERE rb.ready IS NULL
+              AND rb.start_time IS NOT NULL
+              AND rb.num_attempts >= 3
+          ) AS active_high_attempts,
+          ROUND(MAX((EXTRACT(EPOCH FROM NOW()) * 1000 - rb.start_time)) FILTER (
+            WHERE rb.ready IS NULL AND rb.start_time IS NOT NULL
+          ) / 60000.0, 1) AS oldest_active_min,
           COALESCE(SUM(LEAST(j.batch_size, j.num_nonces - rb.batch_idx * j.batch_size)) FILTER (
             WHERE rb.ready = true AND rb.end_time > ((EXTRACT(EPOCH FROM NOW()) * 1000) - 1800000)
           ), 0) AS nonces_last_30m,

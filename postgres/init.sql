@@ -137,7 +137,7 @@ SELECT '{
     "target_buffer_ms": 600000,
     "warmup_completed_batches": 3,
     "cpu_min_cap": 4,
-    "cpu_max_cap": 10,
+    "cpu_max_cap": 8,
     "gpu_min_cap": 1,
     "gpu_max_cap": 6
   },

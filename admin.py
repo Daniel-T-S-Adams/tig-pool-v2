@@ -161,6 +161,9 @@ def cmd_member_health(args):
         "completed_last_5m",
         "assigned_last_30m",
         "completed_last_30m",
+        "active_over_30m",
+        "active_high_attempts",
+        "oldest_active_min",
         "nonces_last_30m",
         "avg_runtime_sec_30m",
     ):

@@ -450,11 +450,6 @@ class SlaveManager:
         else:
             cap = min_cap
 
-        # If a miner is already holding many unfinished batches, do not assign
-        # more just because historical performance was good.
-        if active > cap:
-            cap = active
-
         cap = max(1, min(max_cap, cap))
         logger.debug(
             f"adaptive cap for {slave_name}: cap={cap}, route_cap={route_cap}, "
@@ -568,15 +563,44 @@ class SlaveManager:
                 if not per_bench_cap or per_bench_cap < 1:
                     per_bench_cap = max(1, max_concurrent // 4)
 
-                concurrent = [
-                    b["batch"] for b in self.batches
-                    if b["slave"] == slave_name
+                assigned = [
+                    b for b in self.batches
+                    if b["slave"] == slave_name and b["end_time"] is None
                 ]
+                kept_assigned = assigned[:max_concurrent]
+                excess_assigned = assigned[max_concurrent:]
+                if excess_assigned:
+                    logger.info(
+                        f"releasing {len(excess_assigned)} excess batches from {slave_name} "
+                        f"(adaptive cap={max_concurrent})"
+                    )
+                    for b in excess_assigned:
+                        batch = b["batch"]
+                        table = "root_batch" if batch["sampled_nonces"] is None else "proofs_batch"
+                        updates.append((
+                            f"""
+                            UPDATE {table}
+                            SET slave = NULL,
+                                start_time = NULL,
+                                end_time = NULL,
+                                num_attempts = GREATEST(num_attempts - 1, 0)
+                            WHERE benchmark_id = %s
+                              AND batch_idx = %s
+                              AND slave = %s
+                              AND ready IS NULL
+                            """,
+                            (batch["benchmark_id"], batch["batch_idx"], slave_name)
+                        ))
+                        b["slave"] = None
+                        b["start_time"] = None
+                        b["end_time"] = None
+                        b["num_attempts"] = max(0, b["num_attempts"] - 1)
+
+                concurrent = [b["batch"] for b in kept_assigned]
                 concurrent_by_bench = {}
-                for b in self.batches:
-                    if b["slave"] == slave_name and b["end_time"] is None:
-                        bid = b["batch"]["benchmark_id"]
-                        concurrent_by_bench[bid] = concurrent_by_bench.get(bid, 0) + 1
+                for b in kept_assigned:
+                    bid = b["batch"]["benchmark_id"]
+                    concurrent_by_bench[bid] = concurrent_by_bench.get(bid, 0) + 1
 
                 def assign_pass(respect_cap):
                     for b in self.batches:
