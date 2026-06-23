@@ -22,6 +22,7 @@ class PrecommitManager:
     def on_new_block(self, block: Block, **kwargs):
         self.last_block_id = block.id
         self.num_precommits_submitted = 0
+        self.per_challenge_precommits_submitted = {}
         self.challenge_configs = block.config["challenges"]
 
     def run(self) -> SubmitPrecommitRequest:
@@ -60,7 +61,10 @@ class PrecommitManager:
         eligible = [
             x for x in algo_selection
             if per_challenge_max.get(x["algorithm_id"][:4]) is None
-            or per_challenge_counts.get(x["algorithm_id"][:4], 0) < per_challenge_max[x["algorithm_id"][:4]]
+            or (
+                per_challenge_counts.get(x["algorithm_id"][:4], 0)
+                + self.per_challenge_precommits_submitted.get(x["algorithm_id"][:4], 0)
+            ) < per_challenge_max[x["algorithm_id"][:4]]
         ]
         if not eligible:
             logger.debug("All algorithms are at their per-challenge max concurrent benchmarks")
@@ -112,6 +116,7 @@ class PrecommitManager:
                 selection["track_settings"][t_id]["hyperparameters"] = None
 
         self.num_precommits_submitted += 1
+        self.per_challenge_precommits_submitted[c_id] = self.per_challenge_precommits_submitted.get(c_id, 0) + 1
         req = SubmitPrecommitRequest(
             settings=BenchmarkSettings(
                 challenge_id=c_id,
