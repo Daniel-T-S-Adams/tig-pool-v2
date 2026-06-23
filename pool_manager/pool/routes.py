@@ -506,9 +506,18 @@ def slave_health(slave_name: str, x_admin_secret: str = Header(None)):
           COUNT(*) FILTER (WHERE ready = true) AS completed_total,
           COUNT(*) FILTER (WHERE ready IS NULL AND start_time IS NOT NULL) AS active_unfinished,
           COUNT(*) FILTER (WHERE start_time > ((EXTRACT(EPOCH FROM NOW()) * 1000) - 300000)) AS assigned_last_5m,
-          COUNT(*) FILTER (WHERE ready = true AND end_time > ((EXTRACT(EPOCH FROM NOW()) * 1000) - 300000)) AS completed_last_5m
-        FROM root_batch
-        WHERE slave = %s
+          COUNT(*) FILTER (WHERE ready = true AND end_time > ((EXTRACT(EPOCH FROM NOW()) * 1000) - 300000)) AS completed_last_5m,
+          COUNT(*) FILTER (WHERE start_time > ((EXTRACT(EPOCH FROM NOW()) * 1000) - 1800000)) AS assigned_last_30m,
+          COUNT(*) FILTER (WHERE ready = true AND end_time > ((EXTRACT(EPOCH FROM NOW()) * 1000) - 1800000)) AS completed_last_30m,
+          COALESCE(SUM(LEAST(j.batch_size, j.num_nonces - rb.batch_idx * j.batch_size)) FILTER (
+            WHERE rb.ready = true AND rb.end_time > ((EXTRACT(EPOCH FROM NOW()) * 1000) - 1800000)
+          ), 0) AS nonces_last_30m,
+          ROUND(AVG(rb.end_time - rb.start_time) FILTER (
+            WHERE rb.ready = true AND rb.end_time > ((EXTRACT(EPOCH FROM NOW()) * 1000) - 1800000)
+          ) / 1000.0, 1) AS avg_runtime_sec_30m
+        FROM root_batch rb
+        JOIN job j ON j.benchmark_id = rb.benchmark_id
+        WHERE rb.slave = %s
         """,
         (slave_name,),
     )

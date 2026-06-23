@@ -153,7 +153,17 @@ def cmd_member_health(args):
     else:
         print("  member : not registered")
     print("\nRoot batches:")
-    for key in ("assigned_total", "completed_total", "active_unfinished", "assigned_last_5m", "completed_last_5m"):
+    for key in (
+        "assigned_total",
+        "completed_total",
+        "active_unfinished",
+        "assigned_last_5m",
+        "completed_last_5m",
+        "assigned_last_30m",
+        "completed_last_30m",
+        "nonces_last_30m",
+        "avg_runtime_sec_30m",
+    ):
         print(f"  {key:<18}: {root.get(key, 0)}")
     print("\nProof batches:")
     for key in ("assigned_total", "completed_total", "active_unfinished"):

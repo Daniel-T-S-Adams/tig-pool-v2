@@ -131,6 +131,16 @@ SELECT '{
   "algo_selection": [],
   "time_before_batch_retry": 60000,
   "max_batch_attempts": 3,
+  "adaptive_slave_caps": {
+    "enabled": true,
+    "window_ms": 1800000,
+    "target_buffer_ms": 600000,
+    "warmup_completed_batches": 3,
+    "cpu_min_cap": 4,
+    "cpu_max_cap": 10,
+    "gpu_min_cap": 1,
+    "gpu_max_cap": 6
+  },
   "slaves": [
     {
       "name_regex": "pool-.*",

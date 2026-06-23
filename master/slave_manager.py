@@ -4,6 +4,7 @@ import logging
 import re
 import time
 import random
+import math
 from threading import Thread, Lock
 from dataclasses import dataclass
 from fastapi import FastAPI, Request, HTTPException
@@ -48,6 +49,12 @@ INFRASTRUCTURE_ERROR_PATTERNS = [
 def _is_infrastructure_error(error: str) -> bool:
     text = (error or "").lower()
     return any(pattern in text for pattern in INFRASTRUCTURE_ERROR_PATTERNS)
+
+
+def _slave_profile(slave_name: str) -> str:
+    if slave_name.startswith("pool-gpu-") or slave_name.startswith("c3-slave-"):
+        return "gpu"
+    return "cpu"
 
 
 class SlaveManager:
@@ -376,6 +383,85 @@ class SlaveManager:
             (state, benchmark_id)
         )
 
+    def _adaptive_max_concurrent(self, slave_name: str, route_cap: int) -> int:
+        """Return a measured per-slave cap, bounded by the route cap.
+
+        New public miners start with a small cap. As they complete batches in
+        the recent window, they earn more in-flight work. Trusted/operator
+        slaves keep the route cap so local AWS/C3 tuning remains explicit.
+        """
+        cfg = CONFIG.get("adaptive_slave_caps", {})
+        if not cfg or cfg.get("enabled") is False:
+            return route_cap
+        if not slave_name.startswith("pool-") or self._is_trusted_slave(slave_name):
+            return route_cap
+
+        profile = _slave_profile(slave_name)
+        default_min = 1 if profile == "gpu" else 4
+        default_max = route_cap
+        min_cap = int(cfg.get(f"{profile}_min_cap", cfg.get("min_cap", default_min)))
+        max_cap = int(cfg.get(f"{profile}_max_cap", cfg.get("max_cap", default_max)))
+        max_cap = min(route_cap, max(min_cap, max_cap))
+
+        window_ms = int(cfg.get("window_ms", 30 * 60 * 1000))
+        target_buffer_ms = int(cfg.get("target_buffer_ms", 10 * 60 * 1000))
+        warmup_completed = int(cfg.get("warmup_completed_batches", 3))
+        now_ms = int(time.time() * 1000)
+        since_ms = now_ms - window_ms
+
+        stats = get_db_conn().fetch_one(
+            """
+            WITH recent_roots AS (
+                SELECT
+                    R.start_time,
+                    R.end_time,
+                    R.ready,
+                    LEAST(J.batch_size, J.num_nonces - R.batch_idx * J.batch_size) AS nonces
+                FROM root_batch R
+                JOIN job J ON J.benchmark_id = R.benchmark_id
+                WHERE R.slave = %s
+                  AND R.start_time IS NOT NULL
+                  AND R.start_time >= %s
+            )
+            SELECT
+                COUNT(*) AS assigned_recent,
+                COUNT(*) FILTER (WHERE ready = true) AS completed_recent,
+                COUNT(*) FILTER (WHERE ready IS NULL) AS active_unfinished,
+                COALESCE(SUM(nonces) FILTER (WHERE ready = true), 0) AS completed_nonces,
+                AVG(end_time - start_time) FILTER (WHERE ready = true AND end_time IS NOT NULL) AS avg_runtime_ms
+            FROM recent_roots
+            """,
+            (slave_name, since_ms)
+        ) or {}
+
+        completed = int(stats.get("completed_recent") or 0)
+        active = int(stats.get("active_unfinished") or 0)
+        avg_runtime_ms = float(stats.get("avg_runtime_ms") or 0)
+
+        if completed < warmup_completed:
+            cap = min_cap
+        elif avg_runtime_ms > 0:
+            # Keep roughly target_buffer_ms worth of work in flight. The
+            # throughput estimate lets multi-worker machines earn more slots,
+            # while runtime keeps very fast single batches from being underfed.
+            throughput_cap = math.ceil(completed * target_buffer_ms / window_ms)
+            runtime_cap = math.ceil(target_buffer_ms / avg_runtime_ms)
+            cap = max(min_cap, throughput_cap, runtime_cap)
+        else:
+            cap = min_cap
+
+        # If a miner is already holding many unfinished batches, do not assign
+        # more just because historical performance was good.
+        if active > cap:
+            cap = active
+
+        cap = max(1, min(max_cap, cap))
+        logger.debug(
+            f"adaptive cap for {slave_name}: cap={cap}, route_cap={route_cap}, "
+            f"completed_recent={completed}, active={active}, avg_runtime_ms={avg_runtime_ms:.0f}"
+        )
+        return cap
+
     def run(self):
         with self.lock:
             self.batches = get_db_conn().fetch_all(
@@ -472,7 +558,8 @@ class SlaveManager:
                 slot_benchmark_ids = self._slot_benchmark_ids(slot_types)
 
             with self.lock:
-                max_concurrent = slave["max_concurrent_batches"]
+                route_cap = int(slave["max_concurrent_batches"])
+                max_concurrent = self._adaptive_max_concurrent(slave_name, route_cap)
                 # Fair-share: cap how many concurrent batches any single benchmark may hold
                 # on this slave, so one benchmark can't drain every slot and starve the other
                 # challenges (the batches are ordered oldest-precommit-first). Default to a
