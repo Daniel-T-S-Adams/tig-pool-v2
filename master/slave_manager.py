@@ -32,11 +32,34 @@ def _batch_retry_time(algorithm_id: str) -> int:
     return overrides.get(challenge_id, CONFIG["time_before_batch_retry"])
 
 
+INFRASTRUCTURE_ERROR_PATTERNS = [
+    "cannot open shared object file",
+    "no such file or directory",
+    "algorithm library",
+    "downloading algorithm",
+    "challenge container",
+    "container not found",
+    "permission denied",
+    "docker",
+    "mount",
+]
+
+
+def _is_infrastructure_error(error: str) -> bool:
+    text = (error or "").lower()
+    return any(pattern in text for pattern in INFRASTRUCTURE_ERROR_PATTERNS)
+
+
 class SlaveManager:
     def __init__(self):
         self.batches = []
         self.lock = Lock()
         self._slot_table_ready = False
+
+    def _is_trusted_slave(self, slave_name: str) -> bool:
+        if slave_name in set(CONFIG.get("trusted_slave_names", [])):
+            return True
+        return any(re.match(pattern, slave_name) for pattern in CONFIG.get("trusted_slave_regexes", []))
 
     def _is_authorized_slave(self, slave_name: str) -> bool:
         """Return True when a slave name is allowed to use the master.
@@ -48,13 +71,8 @@ class SlaveManager:
         if not slave_name.startswith("pool-"):
             return True
 
-        trusted_names = set(CONFIG.get("trusted_slave_names", []))
-        if slave_name in trusted_names:
+        if self._is_trusted_slave(slave_name):
             return True
-
-        for pattern in CONFIG.get("trusted_slave_regexes", []):
-            if re.match(pattern, slave_name):
-                return True
 
         row = get_db_conn().fetch_one(
             """
@@ -72,6 +90,50 @@ class SlaveManager:
         if not self._is_authorized_slave(slave_name):
             logger.warning(f"slave {slave_name} is not registered or trusted. rejecting request")
             raise HTTPException(status_code=403, detail="Unregistered slave")
+
+    def _quarantine_slave(self, slave_name: str, reason: str):
+        """Deactivate a misconfigured public slave and release its unfinished work."""
+        if not slave_name.startswith("pool-") or self._is_trusted_slave(slave_name):
+            return
+
+        note = f"auto-quarantined: {reason[:500]}"
+        logger.warning(f"quarantining slave {slave_name}: {reason}")
+        queries = [
+            (
+                """
+                UPDATE pool_members
+                SET active = false,
+                    notes = CONCAT_WS(E'\n', NULLIF(notes, ''), %s)
+                WHERE slave_name = %s
+                """,
+                (note, slave_name)
+            ),
+            (
+                """
+                UPDATE root_batch
+                SET slave = NULL,
+                    start_time = NULL,
+                    end_time = NULL,
+                    num_attempts = 0
+                WHERE slave = %s
+                  AND ready IS NULL
+                """,
+                (slave_name,)
+            ),
+            (
+                """
+                UPDATE proofs_batch
+                SET slave = NULL,
+                    start_time = NULL,
+                    end_time = NULL,
+                    num_attempts = 0
+                WHERE slave = %s
+                  AND ready IS NULL
+                """,
+                (slave_name,)
+            ),
+        ]
+        get_db_conn().execute_many(*queries)
 
     def _ensure_slot_table(self):
         if self._slot_table_ready:
@@ -521,10 +583,15 @@ class SlaveManager:
         async def submit_batch_error(batch_id: str, request: Request):
             slave_name, b = find_batch(batch_id, request)
             result = await request.json()
-            logger.warning(f"slave {slave_name} reported failure for {batch_id}: {result['error']}")
+            error = result.get("error", "")
+            logger.warning(f"slave {slave_name} reported failure for {batch_id}: {error}")
 
             benchmark_id, batch_idx = batch_id.split("_")
             batch_idx = int(batch_idx)
+            if _is_infrastructure_error(error):
+                self._quarantine_slave(slave_name, error)
+                return {"status": "QUARANTINED"}
+
             if b["num_attempts"] < CONFIG["max_batch_attempts"]:
                 table_name = "root_batch" if b["batch"]["sampled_nonces"] is None else "proofs_batch"
                 queries = [

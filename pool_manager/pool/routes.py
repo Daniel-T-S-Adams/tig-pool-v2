@@ -281,8 +281,7 @@ def register_member(req: RegisterRequest):
         "success": True,
         "wallet_address": wallet,
         "worker_type": wtype,
-        "slaves": {t: {"slave_name": sname, "slave_config": _build_slave_config(sname)}
-                   for t, sname in slave_names.items()},
+        "slaves": {t: _slave_payload(sname, t) for t, sname in slave_names.items()},
         # Convenience aliases for single-type registrations
         "slave_name": slave_names.get("cpu") or slave_names.get("gpu"),
         "slave_config": _build_slave_config(list(slave_names.values())[0]),
@@ -293,11 +292,13 @@ _POOL_SERVER_IP  = os.environ.get("POOL_SERVER_IP", "YOUR_POOL_SERVER_IP")
 _MASTER_PORT     = os.environ.get("MASTER_PORT", "5115")
 _POOL_NAME       = os.environ.get("POOL_NAME", "InnoPool")
 _TIG_VERSION     = os.environ.get("TIG_VERSION", "0.0.6")
+_POOL_PUBLIC_URL = os.environ.get("POOL_PUBLIC_URL", "https://www.innopool.co.uk").rstrip("/")
 
 
-def _build_slave_config(slave_name: str) -> str:
+def _build_slave_config(slave_name: str, num_workers: int = 8) -> str:
     return f"""# {_POOL_NAME} Slave Configuration
-# Save this as your .env file in the tig-benchmarker directory
+# Generated for the tig-benchmarker directory.
+# The setup command on the registration page writes absolute paths for you.
 
 VERSION={_TIG_VERSION}
 SLAVE_NAME={slave_name}
@@ -306,12 +307,61 @@ MASTER_PORT={_MASTER_PORT}
 # Adjust NUM_WORKERS for your machine.
 # CPU: start around your available CPU threads, then reduce if the machine becomes unstable.
 # GPU: normally use 1 worker per GPU.
-NUM_WORKERS=8
+NUM_WORKERS={num_workers}
 ALGORITHMS_DIR=./algorithms
 RESULTS_DIR=./results
 TTL=300
 VERBOSE=
 """
+
+
+def _build_slave_setup_command(slave_name: str, num_workers: int = 8) -> str:
+    """Return a copy-paste setup command to run from tig-benchmarker.
+
+    The official slave uses in-container paths (algorithms/results), while
+    docker compose uses ALGORITHMS_DIR/RESULTS_DIR to mount host directories
+    into /app. Writing absolute host paths avoids bad mounts from a partial
+    or previously-created .env.
+    """
+    return f"""mkdir -p algorithms results
+cat > .env <<EOF
+VERSION={_TIG_VERSION}
+SLAVE_NAME={slave_name}
+MASTER_IP={_POOL_SERVER_IP}
+MASTER_PORT={_MASTER_PORT}
+NUM_WORKERS={num_workers}
+ALGORITHMS_DIR=$(pwd)/algorithms
+RESULTS_DIR=$(pwd)/results
+TTL=300
+VERBOSE=
+EOF
+docker compose -f slave.yml config >/dev/null"""
+
+
+def _build_slave_preflight_command(services: str) -> str:
+    return f"curl -fsSL {_POOL_PUBLIC_URL}/static/preflight.sh | bash -s -- {services}"
+
+
+def _build_slave_start_command(services: str) -> str:
+    return f"docker compose -f slave.yml up -d --force-recreate {services}"
+
+
+def _slave_payload(slave_name: str, worker_type: str) -> dict:
+    is_gpu = worker_type == "gpu"
+    services = (
+        "slave vector_search hypergraph neuralnet_optimizer"
+        if is_gpu
+        else "slave satisfiability vehicle_routing knapsack job_scheduling energy_arbitrage"
+    )
+    num_workers = 1 if is_gpu else 8
+    return {
+        "slave_name": slave_name,
+        "slave_config": _build_slave_config(slave_name, num_workers),
+        "setup_command": _build_slave_setup_command(slave_name, num_workers),
+        "preflight_command": _build_slave_preflight_command(services),
+        "start_command": _build_slave_start_command(services),
+        "services": services,
+    }
 
 
 # ── admin endpoints ────────────────────────────────────────────────────────────
@@ -371,6 +421,7 @@ def add_member_direct(req: AddMemberDirectRequest, x_admin_secret: str = Header(
         "wallet_address": wallet,
         "slave_name": slave_name,
         "slave_config": _build_slave_config(slave_name),
+        "setup_command": _build_slave_setup_command(slave_name),
     }
 
 
@@ -390,6 +441,115 @@ def deactivate_member(wallet_address: str, x_admin_secret: str = Header(None)):
         (wallet_address.lower(),),
     )
     return {"success": True}
+
+
+def _member_where(identifier: str) -> tuple[str, tuple]:
+    ident = identifier.strip()
+    if ident.startswith("pool-"):
+        return "slave_name = %s", (ident,)
+    return "lower(wallet_address) = lower(%s)", (ident,)
+
+
+@router.post("/admin/members/{identifier}/activate")
+def activate_member(identifier: str, x_admin_secret: str = Header(None)):
+    _check_admin(x_admin_secret)
+    where, params = _member_where(identifier)
+    db.execute(f"UPDATE pool_members SET active = true WHERE {where}", params)
+    return {"success": True}
+
+
+@router.post("/admin/members/{identifier}/deactivate")
+def deactivate_member_by_identifier(identifier: str, x_admin_secret: str = Header(None)):
+    _check_admin(x_admin_secret)
+    where, params = _member_where(identifier)
+    db.execute(f"UPDATE pool_members SET active = false WHERE {where}", params)
+    return {"success": True}
+
+
+@router.post("/admin/slaves/{slave_name}/clear")
+def clear_slave_assignments(slave_name: str, x_admin_secret: str = Header(None)):
+    _check_admin(x_admin_secret)
+    db.execute_many(
+        (
+            """
+            UPDATE root_batch
+            SET slave = NULL, start_time = NULL, end_time = NULL
+            WHERE slave = %s
+              AND ready IS NULL
+            """,
+            (slave_name,),
+        ),
+        (
+            """
+            UPDATE proofs_batch
+            SET slave = NULL, start_time = NULL, end_time = NULL
+            WHERE slave = %s
+              AND ready IS NULL
+            """,
+            (slave_name,),
+        ),
+    )
+    return {"success": True}
+
+
+@router.get("/admin/slaves/{slave_name}/health")
+def slave_health(slave_name: str, x_admin_secret: str = Header(None)):
+    _check_admin(x_admin_secret)
+    member = db.fetch_one(
+        "SELECT wallet_address, slave_name, active, notes FROM pool_members WHERE slave_name = %s",
+        (slave_name,),
+    )
+    root = db.fetch_one(
+        """
+        SELECT
+          COUNT(*) FILTER (WHERE start_time IS NOT NULL) AS assigned_total,
+          COUNT(*) FILTER (WHERE ready = true) AS completed_total,
+          COUNT(*) FILTER (WHERE ready IS NULL AND start_time IS NOT NULL) AS active_unfinished,
+          COUNT(*) FILTER (WHERE start_time > ((EXTRACT(EPOCH FROM NOW()) * 1000) - 300000)) AS assigned_last_5m,
+          COUNT(*) FILTER (WHERE ready = true AND end_time > ((EXTRACT(EPOCH FROM NOW()) * 1000) - 300000)) AS completed_last_5m
+        FROM root_batch
+        WHERE slave = %s
+        """,
+        (slave_name,),
+    )
+    proofs = db.fetch_one(
+        """
+        SELECT
+          COUNT(*) FILTER (WHERE start_time IS NOT NULL) AS assigned_total,
+          COUNT(*) FILTER (WHERE ready = true) AS completed_total,
+          COUNT(*) FILTER (WHERE ready IS NULL AND start_time IS NOT NULL) AS active_unfinished
+        FROM proofs_batch
+        WHERE slave = %s
+        """,
+        (slave_name,),
+    )
+    recent = db.fetch_all(
+        """
+        SELECT
+          left(rb.benchmark_id, 10) AS benchmark,
+          j.challenge,
+          j.algorithm,
+          j.settings->>'track_id' AS track,
+          rb.batch_idx,
+          rb.ready,
+          rb.num_attempts,
+          ROUND((EXTRACT(EPOCH FROM NOW()) * 1000 - rb.start_time) / 60000.0, 1) AS assigned_min
+        FROM root_batch rb
+        JOIN job j ON j.benchmark_id = rb.benchmark_id
+        WHERE rb.slave = %s
+          AND rb.ready IS NULL
+          AND rb.start_time IS NOT NULL
+        ORDER BY rb.start_time DESC
+        LIMIT 20
+        """,
+        (slave_name,),
+    )
+    return {
+        "member": dict(member) if member else None,
+        "root_batches": dict(root) if root else {},
+        "proof_batches": dict(proofs) if proofs else {},
+        "active_root_batches": [dict(r) for r in recent],
+    }
 
 
 @router.get("/admin/coinbase-history")

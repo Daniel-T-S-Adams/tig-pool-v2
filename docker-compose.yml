@@ -56,6 +56,7 @@ services:
       - POOL_FEE=${POOL_FEE}
       - POOL_NAME=${POOL_NAME}
       - POOL_SERVER_IP=${POOL_SERVER_IP}
+      - POOL_PUBLIC_URL=${POOL_PUBLIC_URL:-https://www.innopool.co.uk}
       - MASTER_PORT=${MASTER_PORT}
       - ADMIN_SECRET=${ADMIN_SECRET}
       - MASTER_INTERNAL_URL=http://master:3336

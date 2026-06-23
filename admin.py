@@ -7,6 +7,10 @@ Usage:
   python3 admin.py invites                   # list all invite codes
   python3 admin.py add <wallet> [cpu|gpu]    # add member directly (no invite needed)
   python3 admin.py members                   # list all registered members
+  python3 admin.py activate <wallet|slave>   # reactivate a member/slave
+  python3 admin.py deactivate <wallet|slave> # deactivate a member/slave
+  python3 admin.py clear-slave <slave>       # unassign unfinished batches
+  python3 admin.py member-health <slave>     # show slave assignment health
   python3 admin.py coinbase                  # show last 10 coinbase updates
 """
 import json
@@ -111,6 +115,58 @@ def cmd_members(_):
         active = "yes" if r["active"] else "no"
         print(f"{r['wallet_address']:<45} {r['slave_name']:<30} {active}")
 
+def cmd_activate(args):
+    if not args:
+        sys.exit("Usage: python3 admin.py activate <wallet_or_slave_name>")
+    ident = args[0]
+    _post(f"/admin/members/{ident}/activate", {})
+    print(f"Activated: {ident}")
+
+def cmd_deactivate(args):
+    if not args:
+        sys.exit("Usage: python3 admin.py deactivate <wallet_or_slave_name>")
+    ident = args[0]
+    _post(f"/admin/members/{ident}/deactivate", {})
+    print(f"Deactivated: {ident}")
+
+def cmd_clear_slave(args):
+    if not args:
+        sys.exit("Usage: python3 admin.py clear-slave <slave_name>")
+    slave = args[0]
+    _post(f"/admin/slaves/{slave}/clear", {})
+    print(f"Cleared unfinished assignments for: {slave}")
+
+def cmd_member_health(args):
+    if not args:
+        sys.exit("Usage: python3 admin.py member-health <slave_name>")
+    slave = args[0]
+    result = _get(f"/admin/slaves/{slave}/health")
+    member = result.get("member") or {}
+    root = result.get("root_batches") or {}
+    proofs = result.get("proof_batches") or {}
+    print(f"Slave: {slave}")
+    if member:
+        print(f"  wallet : {member.get('wallet_address')}")
+        print(f"  active : {'yes' if member.get('active') else 'no'}")
+        if member.get("notes"):
+            print(f"  notes  : {member.get('notes')}")
+    else:
+        print("  member : not registered")
+    print("\nRoot batches:")
+    for key in ("assigned_total", "completed_total", "active_unfinished", "assigned_last_5m", "completed_last_5m"):
+        print(f"  {key:<18}: {root.get(key, 0)}")
+    print("\nProof batches:")
+    for key in ("assigned_total", "completed_total", "active_unfinished"):
+        print(f"  {key:<18}: {proofs.get(key, 0)}")
+    active = result.get("active_root_batches") or []
+    if active:
+        print("\nActive root batches:")
+        for r in active[:20]:
+            print(
+                f"  {r['benchmark']} {r['challenge']} {r['track']} "
+                f"batch={r['batch_idx']} attempts={r['num_attempts']} age_min={r['assigned_min']}"
+            )
+
 def cmd_coinbase(_):
     rows = _get("/admin/coinbase-history")
     if not rows:
@@ -143,6 +199,10 @@ COMMANDS = {
     "invites":   cmd_invites,
     "add":       cmd_add,
     "members":   cmd_members,
+    "activate":  cmd_activate,
+    "deactivate": cmd_deactivate,
+    "clear-slave": cmd_clear_slave,
+    "member-health": cmd_member_health,
     "coinbase":  cmd_coinbase,
     "new-round": cmd_new_round,
 }
