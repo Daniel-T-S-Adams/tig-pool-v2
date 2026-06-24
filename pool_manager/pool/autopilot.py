@@ -717,19 +717,23 @@ def _plan_config_change(report: dict, cfg: dict, clean_windows: int) -> dict:
         active_jobs = _active_unfinished_jobs()
         stranded_count = len(health["stranded_benchmarks"])
         productive_jobs = max(0, active_jobs - stranded_count)
-        drain_target = productive_jobs + STRANDED_BUFFER_BENCHMARKS
-        step_down_target = current - STRANDED_DOWNSCALE_STEP
-        target = max(MIN_MAX_BENCHMARKS, min(drain_target, step_down_target))
-        target = min(current, target)
-        next_max = _next_value(current, target, STRANDED_DOWNSCALE_STEP)
+        drain_target = _clamp(
+            productive_jobs + STRANDED_BUFFER_BENCHMARKS,
+            MIN_MAX_BENCHMARKS,
+            MAX_MAX_BENCHMARKS,
+        )
+        next_max = current
+        if current > drain_target:
+            next_max = max(drain_target, current - STRANDED_DOWNSCALE_STEP)
         decision["reason"] = "drain_stranded_benchmarks"
         decision["changes"] = {
             "max_concurrent_benchmarks": {
                 "current": current,
-                "target": target,
+                "target": drain_target,
                 "next": next_max,
                 "active_jobs": active_jobs,
                 "productive_jobs": productive_jobs,
+                "buffer": STRANDED_BUFFER_BENCHMARKS,
                 "stranded": health["stranded_benchmarks"],
             }
         }
