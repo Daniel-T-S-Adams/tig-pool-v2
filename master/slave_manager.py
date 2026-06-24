@@ -457,8 +457,48 @@ class SlaveManager:
         )
         return cap
 
+    def _slave_has_root_artifacts(self, slave_name: str, benchmark_id: str, batch_idx: int) -> bool:
+        """Proofs must be built by the slave that produced that exact root batch.
+
+        The slave stores root artifacts locally under its cache/results directory.
+        Assigning proofs to a different slave burns attempts and can stall a
+        benchmark because that slave cannot build Merkle proofs from missing
+        local artifacts.
+        """
+        row = get_db_conn().fetch_one(
+            """
+            SELECT 1
+            FROM root_batch
+            WHERE benchmark_id = %s
+              AND batch_idx = %s
+              AND slave = %s
+              AND ready = true
+            LIMIT 1
+            """,
+            (benchmark_id, batch_idx, slave_name)
+        )
+        return row is not None
+
     def run(self):
         with self.lock:
+            get_db_conn().execute(
+                """
+                UPDATE proofs_batch P
+                SET slave = NULL,
+                    start_time = NULL,
+                    end_time = NULL
+                WHERE P.ready IS NULL
+                  AND P.slave IS NOT NULL
+                  AND NOT EXISTS (
+                    SELECT 1
+                    FROM root_batch R
+                    WHERE R.benchmark_id = P.benchmark_id
+                      AND R.batch_idx = P.batch_idx
+                      AND R.slave = P.slave
+                      AND R.ready = true
+                  )
+                """
+            )
             self.batches = get_db_conn().fetch_all(
                 """
                 SELECT * FROM (
@@ -629,6 +669,11 @@ class SlaveManager:
                         ):
                             continue
                         if slot_types and bid not in slot_benchmark_ids:
+                            continue
+                        if (
+                            batch["sampled_nonces"] is not None
+                            and not self._slave_has_root_artifacts(slave_name, bid, batch["batch_idx"])
+                        ):
                             continue
                         if not (
                             b["slave"] is None or
