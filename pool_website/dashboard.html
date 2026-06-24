@@ -324,13 +324,14 @@
       const slaves = data.slaves && data.slaves.length
         ? data.slaves
         : [{ slave_name: data.slave_name, active: data.active }];
-      const activeCount = slaves.filter(s => s.active).length;
+      const enabledCount = slaves.filter(s => s.active).length;
+      const workingCount = slaves.filter(s => slaveRuntimeStatus(s).key === "working").length;
       const cpuCount = slaves.filter(s => inferSlaveType(s) === "cpu").length;
       const gpuCount = slaves.filter(s => inferSlaveType(s) === "gpu").length;
       const fleetCount = slaves.filter(s => s.fleet_id).length;
 
       document.getElementById("d-slave-count").textContent =
-        `${activeCount}/${slaves.length} active · ${cpuCount} CPU · ${gpuCount} GPU${fleetCount ? ` · ${fleetCount} fleet` : ""}`;
+        `${workingCount} working · ${enabledCount}/${slaves.length} enabled · ${cpuCount} CPU · ${gpuCount} GPU${fleetCount ? ` · ${fleetCount} fleet` : ""}`;
 
       const list = document.getElementById("d-slaves");
       const expanded = list.dataset.expanded === "true";
@@ -363,8 +364,10 @@
         row.appendChild(nameWrap);
 
         const statusEl = document.createElement("div");
-        statusEl.textContent = slave.active ? "active" : "inactive";
-        statusEl.style.cssText = `justify-self:end;border-radius:999px;padding:2px 8px;font-size:11px;font-weight:700;background:${slave.active ? "rgba(34,211,165,.10)" : "rgba(248,113,113,.09)"};color:${slave.active ? "var(--green)" : "var(--red)"};border:1px solid ${slave.active ? "rgba(34,211,165,.20)" : "rgba(248,113,113,.18)"};`;
+        const runtime = slaveRuntimeStatus(slave);
+        statusEl.textContent = runtime.label;
+        statusEl.title = runtime.title;
+        statusEl.style.cssText = `justify-self:end;border-radius:999px;padding:2px 8px;font-size:11px;font-weight:700;background:${runtime.bg};color:${runtime.color};border:1px solid ${runtime.border};`;
         row.appendChild(statusEl);
 
         list.appendChild(row);
@@ -383,6 +386,49 @@
       } else {
         list.dataset.expanded = "false";
       }
+    }
+
+    function slaveRuntimeStatus(slave) {
+      const activeWork = (slave.active_roots || 0) + (slave.active_proofs || 0);
+      if (activeWork > 0) {
+        return {
+          key: "working",
+          label: "working",
+          title: `${activeWork} assigned unfinished batch${activeWork !== 1 ? "es" : ""}`,
+          bg: "rgba(34,211,165,.10)",
+          color: "var(--green)",
+          border: "rgba(34,211,165,.20)",
+        };
+      }
+      const last = Number(slave.last_activity_ms || 0);
+      if (last && Date.now() - last < 10 * 60 * 1000) {
+        return {
+          key: "recent",
+          label: "recent",
+          title: `Last batch activity ${timeAgo(last)}`,
+          bg: "rgba(96,165,250,.09)",
+          color: "var(--blue)",
+          border: "rgba(96,165,250,.20)",
+        };
+      }
+      if (slave.active) {
+        return {
+          key: "enabled",
+          label: "enabled",
+          title: last ? `Registered and enabled, last activity ${timeAgo(last)}` : "Registered and enabled, no batch activity yet",
+          bg: "rgba(148,163,184,.08)",
+          color: "var(--muted2)",
+          border: "rgba(148,163,184,.16)",
+        };
+      }
+      return {
+        key: "disabled",
+        label: "disabled",
+        title: "Disabled in pool registration",
+        bg: "rgba(248,113,113,.09)",
+        color: "var(--red)",
+        border: "rgba(248,113,113,.18)",
+      };
     }
 
     document.getElementById("lookup-form").addEventListener("submit", async (e) => {

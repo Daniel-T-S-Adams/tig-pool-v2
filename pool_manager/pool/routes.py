@@ -371,6 +371,7 @@ def get_member_stats(wallet_address: str):
     # Algorithm breakdown — what challenges/algorithms this wallet's slaves have worked on
     slave_list = [r["slave_name"] for r in members]
     algo_stats = []
+    slave_activity = {}
     if slave_list:
         placeholders = ",".join(["%s"] * len(slave_list))
         algo_stats = db.fetch_all(
@@ -390,6 +391,37 @@ def get_member_stats(wallet_address: str):
             """,
             tuple(slave_list),
         )
+        activity_rows = db.fetch_all(
+            f"""
+            WITH root_activity AS (
+                SELECT
+                    slave,
+                    COUNT(*) FILTER (WHERE ready IS NULL AND start_time IS NOT NULL) AS active_roots,
+                    MAX(GREATEST(COALESCE(start_time, 0), COALESCE(end_time, 0))) AS last_root_ms
+                FROM root_batch
+                WHERE slave IN ({placeholders})
+                GROUP BY slave
+            ),
+            proof_activity AS (
+                SELECT
+                    slave,
+                    COUNT(*) FILTER (WHERE ready IS NULL AND start_time IS NOT NULL) AS active_proofs,
+                    MAX(GREATEST(COALESCE(start_time, 0), COALESCE(end_time, 0))) AS last_proof_ms
+                FROM proofs_batch
+                WHERE slave IN ({placeholders})
+                GROUP BY slave
+            )
+            SELECT
+                COALESCE(r.slave, p.slave) AS slave_name,
+                COALESCE(r.active_roots, 0) AS active_roots,
+                COALESCE(p.active_proofs, 0) AS active_proofs,
+                GREATEST(COALESCE(r.last_root_ms, 0), COALESCE(p.last_proof_ms, 0)) AS last_activity_ms
+            FROM root_activity r
+            FULL OUTER JOIN proof_activity p ON p.slave = r.slave
+            """,
+            tuple(slave_list) + tuple(slave_list),
+        )
+        slave_activity = {r["slave_name"]: r for r in activity_rows}
 
     return {
         "wallet_address": member["wallet_address"],
@@ -402,6 +434,9 @@ def get_member_stats(wallet_address: str):
                 "worker_type": r.get("worker_type"),
                 "fleet_id": r.get("fleet_id"),
                 "machine_index": r.get("machine_index"),
+                "active_roots": int((slave_activity.get(r["slave_name"]) or {}).get("active_roots") or 0),
+                "active_proofs": int((slave_activity.get(r["slave_name"]) or {}).get("active_proofs") or 0),
+                "last_activity_ms": int((slave_activity.get(r["slave_name"]) or {}).get("last_activity_ms") or 0),
             }
             for r in members
         ],
