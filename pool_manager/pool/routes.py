@@ -9,6 +9,8 @@ import os
 import time
 import secrets
 import logging
+import hashlib
+import re
 from decimal import Decimal
 from fastapi import APIRouter, HTTPException, Header
 from pydantic import BaseModel
@@ -61,6 +63,111 @@ def _wallet_to_slave_name(wallet: str, worker_type: str = "cpu") -> str:
         if not db.fetch_one("SELECT 1 FROM pool_members WHERE slave_name = %s", (candidate,)):
             return candidate
         i += 1
+
+
+def _ensure_fleet_schema():
+    db.execute_many(
+        (
+            """
+            CREATE TABLE IF NOT EXISTS pool_fleets (
+                fleet_id TEXT PRIMARY KEY,
+                wallet_address TEXT NOT NULL,
+                label TEXT NOT NULL,
+                fleet_token_hash TEXT NOT NULL UNIQUE,
+                worker_type TEXT NOT NULL DEFAULT 'mixed',
+                declared_cpu_machines INTEGER NOT NULL DEFAULT 0,
+                declared_gpu_machines INTEGER NOT NULL DEFAULT 0,
+                declared_cores_per_machine INTEGER,
+                declared_gpu_model TEXT,
+                active BOOLEAN NOT NULL DEFAULT true,
+                created_at BIGINT NOT NULL DEFAULT (EXTRACT(EPOCH FROM NOW()) * 1000)::BIGINT,
+                notes TEXT
+            )
+            """,
+            None,
+        ),
+        ("ALTER TABLE pool_members ADD COLUMN IF NOT EXISTS fleet_id TEXT", None),
+        ("ALTER TABLE pool_members ADD COLUMN IF NOT EXISTS worker_type TEXT", None),
+        ("ALTER TABLE pool_members ADD COLUMN IF NOT EXISTS machine_index TEXT", None),
+        ("ALTER TABLE pool_members ADD COLUMN IF NOT EXISTS declared_cores INTEGER", None),
+        ("ALTER TABLE pool_members ADD COLUMN IF NOT EXISTS declared_gpu_model TEXT", None),
+        ("CREATE INDEX IF NOT EXISTS idx_pool_fleets_wallet ON pool_fleets(wallet_address)", None),
+        ("CREATE INDEX IF NOT EXISTS idx_pool_members_fleet_id ON pool_members(fleet_id)", None),
+    )
+
+
+def _hash_token(token: str) -> str:
+    return hashlib.sha256(token.encode()).hexdigest()
+
+
+def _slug(value: str, fallback: str = "fleet") -> str:
+    slug = re.sub(r"[^a-z0-9-]+", "-", (value or "").lower()).strip("-")
+    return slug[:32] or fallback
+
+
+def _wallet_prefix(wallet: str) -> str:
+    return wallet.lower().replace("0x", "")[:12]
+
+
+def _normalise_machine_index(value: str) -> str:
+    raw = (value or "").strip().lower()
+    raw = re.sub(r"[^a-z0-9-]+", "-", raw).strip("-")
+    if not raw:
+        raise HTTPException(status_code=400, detail="machine_index is required")
+    return raw[:48]
+
+
+def _fleet_slave_name(wallet: str, worker_type: str, label: str, machine_index: str) -> str:
+    wtype = "gpu" if worker_type == "gpu" else "cpu"
+    return f"pool-{wtype}-{_wallet_prefix(wallet)}-{_slug(label)}-{_normalise_machine_index(machine_index)}"
+
+
+def _create_fleet(wallet: str, label: str, worker_type: str, cpu_count: int = 0, gpu_count: int = 0,
+                  cores_per_machine: int | None = None, gpu_model: str | None = None,
+                  notes: str = "") -> dict:
+    _ensure_fleet_schema()
+    token = secrets.token_urlsafe(24)
+    fleet_id = f"fleet-{_wallet_prefix(wallet)}-{_slug(label)}-{secrets.token_hex(3)}"
+    now_ms = int(time.time() * 1000)
+    db.execute(
+        """
+        INSERT INTO pool_fleets (
+            fleet_id, wallet_address, label, fleet_token_hash, worker_type,
+            declared_cpu_machines, declared_gpu_machines, declared_cores_per_machine,
+            declared_gpu_model, created_at, notes
+        )
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+        """,
+        (
+            fleet_id,
+            wallet,
+            label,
+            _hash_token(token),
+            worker_type,
+            max(0, int(cpu_count or 0)),
+            max(0, int(gpu_count or 0)),
+            cores_per_machine,
+            gpu_model,
+            now_ms,
+            notes,
+        ),
+    )
+    return {
+        "fleet_id": fleet_id,
+        "wallet_address": wallet,
+        "label": label,
+        "worker_type": worker_type,
+        "fleet_token": token,
+        "cpu_count": max(0, int(cpu_count or 0)),
+        "gpu_count": max(0, int(gpu_count or 0)),
+    }
+
+
+def _fleet_install_command(token: str, worker_type: str, machine_index: str = "001") -> str:
+    return (
+        f"curl -fsSL {_POOL_PUBLIC_URL}/static/fleet-install.sh | bash -s -- "
+        f"--fleet-token {token} --worker-type {worker_type} --machine-index {machine_index}"
+    )
 
 
 # ── public stats ───────────────────────────────────────────────────────────────
@@ -238,6 +345,12 @@ class RegisterRequest(BaseModel):
     wallet_address: str
     invite_code: str
     worker_type: str = "cpu"  # "cpu", "gpu", or "both"
+    setup_type: str = "single"  # "single", "single_both", "fleet", or "cloud"
+    fleet_label: str = "fleet"
+    cpu_machines: int = 0
+    gpu_machines: int = 0
+    cores_per_machine: int | None = None
+    gpu_model: str | None = None
 
 
 @router.post("/register")
@@ -256,6 +369,9 @@ def register_member(req: RegisterRequest):
     wtype = req.worker_type.lower()
     if wtype not in ("cpu", "gpu", "both", "c3"):
         raise HTTPException(status_code=400, detail="worker_type must be 'cpu', 'gpu', 'both', or 'c3'")
+    setup_type = req.setup_type.lower()
+    if setup_type not in ("single", "single_both", "fleet", "cloud"):
+        raise HTTPException(status_code=400, detail="Invalid setup_type")
 
     # Check invite code
     invite = db.fetch_one(
@@ -269,6 +385,55 @@ def register_member(req: RegisterRequest):
     )
     if not invite:
         raise HTTPException(status_code=400, detail="Invalid or expired invite code")
+
+    if setup_type in ("fleet", "cloud") or req.cpu_machines > 1 or req.gpu_machines > 1:
+        cpu_count = max(0, int(req.cpu_machines or 0))
+        gpu_count = max(0, int(req.gpu_machines or 0))
+        if cpu_count == 0 and gpu_count == 0:
+            if wtype == "gpu":
+                gpu_count = 1
+            elif wtype == "both":
+                cpu_count = 1
+                gpu_count = 1
+            else:
+                cpu_count = 1
+        fleet_type = "mixed" if cpu_count and gpu_count else ("gpu" if gpu_count else "cpu")
+        now_ms = int(time.time() * 1000)
+        fleet = _create_fleet(
+            wallet,
+            req.fleet_label or ("cloud" if setup_type == "cloud" else "fleet"),
+            fleet_type,
+            cpu_count,
+            gpu_count,
+            req.cores_per_machine,
+            req.gpu_model,
+            notes=f"self-registered via {setup_type}",
+        )
+        db.execute(
+            "UPDATE pool_invites SET used_by = %s, used_at = %s WHERE code = %s",
+            (wallet, now_ms, code),
+        )
+        install = {}
+        if cpu_count:
+            install["cpu"] = _fleet_install_command(fleet["fleet_token"], "cpu", "001")
+        if gpu_count:
+            install["gpu"] = _fleet_install_command(fleet["fleet_token"], "gpu", "001")
+        return {
+            "success": True,
+            "wallet_address": wallet,
+            "setup_type": setup_type,
+            "worker_type": fleet_type,
+            "fleet": {
+                "fleet_id": fleet["fleet_id"],
+                "label": fleet["label"],
+                "fleet_token": fleet["fleet_token"],
+                "cpu_count": cpu_count,
+                "gpu_count": gpu_count,
+                "install_commands": install,
+                "config_url_example": f"{_POOL_PUBLIC_URL}/api/fleet/config?token={fleet['fleet_token']}&worker_type=cpu&machine_index=001",
+            },
+            "slaves": {},
+        }
 
     # Determine which slave names to create
     types_to_register = ["cpu", "gpu"] if wtype == "both" else [wtype]
@@ -385,6 +550,66 @@ def _slave_payload(slave_name: str, worker_type: str) -> dict:
     }
 
 
+@router.get("/fleet/config")
+def fleet_config(token: str, worker_type: str = "cpu", machine_index: str = "001"):
+    """Return/create the correct slave config for one machine in a fleet."""
+    _ensure_fleet_schema()
+    wtype = worker_type.lower().strip()
+    if wtype not in ("cpu", "gpu"):
+        raise HTTPException(status_code=400, detail="worker_type must be cpu or gpu")
+    index = _normalise_machine_index(machine_index)
+    fleet = db.fetch_one(
+        """
+        SELECT *
+        FROM pool_fleets
+        WHERE fleet_token_hash = %s
+          AND active = true
+        """,
+        (_hash_token(token),),
+    )
+    if not fleet:
+        raise HTTPException(status_code=404, detail="Invalid or inactive fleet token")
+
+    slave_name = _fleet_slave_name(fleet["wallet_address"], wtype, fleet["label"], index)
+    now_ms = int(time.time() * 1000)
+    db.execute(
+        """
+        INSERT INTO pool_members (
+            wallet_address, slave_name, registered_at, notes,
+            fleet_id, worker_type, machine_index, declared_cores, declared_gpu_model
+        )
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+        ON CONFLICT (slave_name) DO UPDATE
+        SET active = true,
+            fleet_id = EXCLUDED.fleet_id,
+            worker_type = EXCLUDED.worker_type,
+            machine_index = EXCLUDED.machine_index,
+            declared_cores = EXCLUDED.declared_cores,
+            declared_gpu_model = EXCLUDED.declared_gpu_model
+        """,
+        (
+            fleet["wallet_address"],
+            slave_name,
+            now_ms,
+            f"fleet {fleet['label']} machine {index}",
+            fleet["fleet_id"],
+            wtype,
+            index,
+            fleet.get("declared_cores_per_machine") if wtype == "cpu" else None,
+            fleet.get("declared_gpu_model") if wtype == "gpu" else None,
+        ),
+    )
+    payload = _slave_payload(slave_name, wtype)
+    return {
+        "success": True,
+        "fleet_id": fleet["fleet_id"],
+        "wallet_address": fleet["wallet_address"],
+        "worker_type": wtype,
+        "machine_index": index,
+        **payload,
+    }
+
+
 # ── admin endpoints ────────────────────────────────────────────────────────────
 
 class CreateInviteRequest(BaseModel):
@@ -444,6 +669,69 @@ def add_member_direct(req: AddMemberDirectRequest, x_admin_secret: str = Header(
         "slave_config": _build_slave_config(slave_name),
         "setup_command": _build_slave_setup_command(slave_name),
     }
+
+
+class CreateFleetRequest(BaseModel):
+    wallet_address: str
+    label: str = "fleet"
+    worker_type: str = "mixed"
+    cpu_count: int = 0
+    gpu_count: int = 0
+    cores_per_machine: int | None = None
+    gpu_model: str | None = None
+    notes: str = ""
+
+
+@router.post("/admin/fleets")
+def create_fleet(req: CreateFleetRequest, x_admin_secret: str = Header(None)):
+    _check_admin(x_admin_secret)
+    wallet = req.wallet_address.lower().strip()
+    if not wallet.startswith("0x") or len(wallet) < 10:
+        raise HTTPException(status_code=400, detail="Invalid wallet address")
+    worker_type = req.worker_type.lower().strip()
+    if worker_type not in ("cpu", "gpu", "mixed"):
+        raise HTTPException(status_code=400, detail="worker_type must be cpu, gpu, or mixed")
+    fleet = _create_fleet(
+        wallet,
+        req.label,
+        worker_type,
+        req.cpu_count,
+        req.gpu_count,
+        req.cores_per_machine,
+        req.gpu_model,
+        req.notes,
+    )
+    install = {}
+    if req.cpu_count:
+        install["cpu"] = _fleet_install_command(fleet["fleet_token"], "cpu", "001")
+    if req.gpu_count:
+        install["gpu"] = _fleet_install_command(fleet["fleet_token"], "gpu", "001")
+    return {**fleet, "install_commands": install}
+
+
+@router.get("/admin/fleets")
+def list_fleets(x_admin_secret: str = Header(None)):
+    _check_admin(x_admin_secret)
+    _ensure_fleet_schema()
+    rows = db.fetch_all(
+        """
+        SELECT
+            f.fleet_id,
+            f.wallet_address,
+            f.label,
+            f.worker_type,
+            f.declared_cpu_machines,
+            f.declared_gpu_machines,
+            f.active,
+            f.created_at,
+            COUNT(pm.slave_name) AS registered_slaves
+        FROM pool_fleets f
+        LEFT JOIN pool_members pm ON pm.fleet_id = f.fleet_id
+        GROUP BY f.fleet_id
+        ORDER BY f.created_at DESC
+        """
+    )
+    return [_json_safe(r) for r in rows]
 
 
 @router.get("/admin/members")

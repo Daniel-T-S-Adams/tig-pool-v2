@@ -6,6 +6,8 @@ Usage:
   python3 admin.py invite 5                  # create 5 invite codes
   python3 admin.py invites                   # list all invite codes
   python3 admin.py add <wallet> [cpu|gpu]    # add member directly (no invite needed)
+  python3 admin.py create-fleet <wallet> <label> [cpu|gpu|mixed] [--cpu N] [--gpu N]
+  python3 admin.py fleets                    # list registered fleets
   python3 admin.py members                   # list all registered members
   python3 admin.py activate <wallet|slave>   # reactivate a member/slave
   python3 admin.py deactivate <wallet|slave> # deactivate a member/slave
@@ -115,6 +117,67 @@ def cmd_members(_):
     for r in rows:
         active = "yes" if r["active"] else "no"
         print(f"{r['wallet_address']:<45} {r['slave_name']:<30} {active}")
+
+def cmd_create_fleet(args):
+    if len(args) < 2:
+        sys.exit("Usage: python3 admin.py create-fleet <wallet> <label> [cpu|gpu|mixed] [--cpu N] [--gpu N] [--cores N] [--gpu-model MODEL]")
+    wallet = args[0]
+    label = args[1]
+    worker_type = args[2] if len(args) > 2 and not args[2].startswith("--") else "mixed"
+    opts = args[3:] if len(args) > 2 and not args[2].startswith("--") else args[2:]
+
+    def opt_int(name, default=0):
+        if name in opts:
+            i = opts.index(name)
+            if i + 1 < len(opts):
+                return int(opts[i + 1])
+        return default
+
+    def opt_str(name, default=None):
+        if name in opts:
+            i = opts.index(name)
+            if i + 1 < len(opts):
+                return opts[i + 1]
+        return default
+
+    body = {
+        "wallet_address": wallet,
+        "label": label,
+        "worker_type": worker_type,
+        "cpu_count": opt_int("--cpu", 0),
+        "gpu_count": opt_int("--gpu", 0),
+        "cores_per_machine": opt_int("--cores", 0) or None,
+        "gpu_model": opt_str("--gpu-model"),
+    }
+    result = _post("/admin/fleets", body)
+    print("Fleet created:")
+    print(f"  fleet_id : {result['fleet_id']}")
+    print(f"  wallet   : {result['wallet_address']}")
+    print(f"  label    : {result['label']}")
+    print(f"  token    : {result['fleet_token']}")
+    installs = result.get("install_commands") or {}
+    if installs:
+        print("\nInstall command templates:")
+        for kind, cmd in installs.items():
+            print(f"\n[{kind}]")
+            print(cmd)
+    else:
+        print("\nUse token with /api/fleet/config to generate machine configs.")
+
+def cmd_fleets(_):
+    rows = _get("/admin/fleets")
+    if not rows:
+        print("No fleets registered yet.")
+        return
+    print(f"{'FLEET':<34} {'WALLET':<45} {'LABEL':<18} {'TYPE':<6} {'CPU':>4} {'GPU':>4} {'SLAVES':>6} {'ACTIVE'}")
+    print("-" * 130)
+    for r in rows:
+        active = "yes" if r.get("active") else "no"
+        print(
+            f"{r['fleet_id']:<34} {r['wallet_address']:<45} {r['label']:<18} "
+            f"{r['worker_type']:<6} {int(r.get('declared_cpu_machines') or 0):>4} "
+            f"{int(r.get('declared_gpu_machines') or 0):>4} {int(r.get('registered_slaves') or 0):>6} {active}"
+        )
 
 def cmd_activate(args):
     if not args:
@@ -271,6 +334,8 @@ COMMANDS = {
     "invite":    cmd_invite,
     "invites":   cmd_invites,
     "add":       cmd_add,
+    "create-fleet": cmd_create_fleet,
+    "fleets":    cmd_fleets,
     "members":   cmd_members,
     "activate":  cmd_activate,
     "deactivate": cmd_deactivate,

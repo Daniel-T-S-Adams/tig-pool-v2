@@ -79,6 +79,47 @@
             </label>
           </div>
         </div>
+        <div class="form-group">
+          <label>Setup Size</label>
+          <div class="hw-selector">
+            <label class="hw-option">
+              <input type="radio" name="setup_type" value="single" checked />
+              <span class="hw-card">
+                <span class="hw-icon">1</span>
+                <span class="hw-title">Single computer</span>
+                <span class="hw-desc">one machine, or CPU + GPU on one machine using separate folders</span>
+              </span>
+            </label>
+            <label class="hw-option">
+              <input type="radio" name="setup_type" value="fleet" />
+              <span class="hw-card">
+                <span class="hw-icon">#</span>
+                <span class="hw-title">Multiple machines / fleet</span>
+                <span class="hw-desc">many physical machines, VPS instances, AWS, or mixed CPU/GPU workers</span>
+              </span>
+            </label>
+          </div>
+        </div>
+        <div id="fleet-options" class="hidden" style="padding:14px 18px;border-left:3px solid var(--blue);background:rgba(99,179,237,0.06);border-radius:0 8px 8px 0;margin-bottom:20px;">
+          <div class="form-group">
+            <label for="fleet-label">Fleet Label</label>
+            <input type="text" id="fleet-label" placeholder="e.g. epyc-fleet, aws-cpu, gpu-rig" value="fleet" />
+          </div>
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px;">
+            <div class="form-group">
+              <label for="cpu-machines">CPU Machines</label>
+              <input type="number" id="cpu-machines" min="0" value="1" />
+            </div>
+            <div class="form-group">
+              <label for="gpu-machines">GPU Machines</label>
+              <input type="number" id="gpu-machines" min="0" value="0" />
+            </div>
+          </div>
+          <p class="muted small" style="margin-top:4px;">
+            Exact cores/GPU model are optional. InnoPool will measure real throughput after machines connect.
+            Each machine gets a unique slave name from the fleet token and machine index.
+          </p>
+        </div>
         <button type="submit" class="btn-primary full">
           Register →
         </button>
@@ -102,6 +143,15 @@
 
         <!-- Slave name pills -->
         <div id="slave-pills" style="display:flex;gap:10px;flex-wrap:wrap;margin-bottom:28px;"></div>
+
+        <div id="fleet-block" class="hidden" style="margin-bottom:28px;">
+          <div style="padding:14px 18px;border-left:3px solid var(--green);background:rgba(34,211,165,0.06);border-radius:0 8px 8px 0;font-size:13px;color:var(--muted2);line-height:1.7;margin-bottom:16px;">
+            <strong style="color:var(--text);">Fleet registration created.</strong>
+            Run the install command on each machine. Change <code>--machine-index</code> for every machine
+            (for example <code>001</code>, <code>002</code>, or use hostnames).
+          </div>
+          <div id="fleet-install-blocks"></div>
+        </div>
 
         <div id="dual-worker-note" class="hidden" style="padding:14px 18px;border-left:3px solid var(--orange);background:rgba(251,146,60,0.07);border-radius:0 8px 8px 0;font-size:13px;color:var(--muted2);line-height:1.7;margin-bottom:24px;">
           <strong style="color:var(--text);">CPU + GPU means two separate slaves.</strong>
@@ -197,6 +247,10 @@ git switch main</div>
       const wallet      = document.getElementById("wallet").value.trim();
       const invite      = document.getElementById("invite").value.trim();
       const workerType  = document.querySelector('input[name="worker_type"]:checked').value;
+      const setupType   = document.querySelector('input[name="setup_type"]:checked').value;
+      const fleetLabel  = document.getElementById("fleet-label").value.trim() || "fleet";
+      const cpuMachines = parseInt(document.getElementById("cpu-machines").value || "0", 10);
+      const gpuMachines = parseInt(document.getElementById("gpu-machines").value || "0", 10);
       const errEl       = document.getElementById("register-error");
       errEl.classList.add("hidden");
 
@@ -208,7 +262,15 @@ git switch main</div>
         const resp = await fetch("/api/register", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ wallet_address: wallet, invite_code: invite, worker_type: workerType }),
+          body: JSON.stringify({
+            wallet_address: wallet,
+            invite_code: invite,
+            worker_type: workerType,
+            setup_type: setupType,
+            fleet_label: fleetLabel,
+            cpu_machines: cpuMachines,
+            gpu_machines: gpuMachines
+          }),
         });
         if (!resp.ok) {
           let msg = "Registration failed";
@@ -221,8 +283,31 @@ git switch main</div>
         }
         const data = await resp.json();
 
+        if (data.fleet) {
+          const fleet = data.fleet;
+          document.getElementById("res-summary").textContent =
+            `Fleet ${fleet.label} registered. Token generated for CPU/GPU machine installs.`;
+          const pillsEl = document.getElementById("slave-pills");
+          pillsEl.innerHTML = `<span style="padding:5px 14px;border-radius:20px;background:rgba(34,211,165,0.12);border:1px solid rgba(34,211,165,0.3);color:#86efac;font-size:13px;font-family:monospace;">${fleet.fleet_id}</span>`;
+          const blocks = document.getElementById("fleet-install-blocks");
+          blocks.innerHTML = "";
+          for (const [kind, cmd] of Object.entries(fleet.install_commands || {})) {
+            const id = `fleet-${kind}-install-text`;
+            blocks.innerHTML += `
+              <div style="font-weight:600;font-size:15px;margin:14px 0 8px;">${kind.toUpperCase()} fleet install command</div>
+              <div class="code-block" style="position:relative;margin-bottom:12px;">
+                <button class="code-copy" onclick="copyBlock('${id}', this)">Copy</button>
+                <span id="${id}">${cmd}</span>
+              </div>`;
+          }
+          document.getElementById("fleet-block").classList.remove("hidden");
+          document.getElementById("form-card").classList.add("hidden");
+          document.getElementById("success-block").classList.remove("hidden");
+          return;
+        }
+
         // Populate success block based on worker_type
-        const slaves = data.slaves;
+        const slaves = data.slaves || {};
         const hasCpu = !!slaves.cpu;
         const hasGpu = !!slaves.gpu;
 
@@ -268,6 +353,13 @@ git switch main</div>
         btn.textContent = "Register →";
         btn.disabled = false;
       }
+    });
+
+    document.querySelectorAll('input[name="setup_type"]').forEach((el) => {
+      el.addEventListener("change", () => {
+        const isFleet = document.querySelector('input[name="setup_type"]:checked').value === "fleet";
+        document.getElementById("fleet-options").classList.toggle("hidden", !isFleet);
+      });
     });
 
     function copyBlock(id, btn) {

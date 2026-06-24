@@ -164,11 +164,34 @@ CREATE TABLE IF NOT EXISTS pool_members (
     invite_code TEXT,
     registered_at BIGINT NOT NULL DEFAULT (EXTRACT(EPOCH FROM NOW()) * 1000)::BIGINT,
     active BOOLEAN NOT NULL DEFAULT true,
-    notes TEXT
+    notes TEXT,
+    fleet_id TEXT,
+    worker_type TEXT,
+    machine_index TEXT,
+    declared_cores INTEGER,
+    declared_gpu_model TEXT
 );
 
 CREATE INDEX idx_pool_members_slave_name ON pool_members(slave_name);
 CREATE INDEX idx_pool_members_active ON pool_members(active);
+CREATE INDEX IF NOT EXISTS idx_pool_members_fleet_id ON pool_members(fleet_id);
+
+CREATE TABLE IF NOT EXISTS pool_fleets (
+    fleet_id TEXT PRIMARY KEY,
+    wallet_address TEXT NOT NULL,
+    label TEXT NOT NULL,
+    fleet_token_hash TEXT NOT NULL UNIQUE,
+    worker_type TEXT NOT NULL DEFAULT 'mixed',
+    declared_cpu_machines INTEGER NOT NULL DEFAULT 0,
+    declared_gpu_machines INTEGER NOT NULL DEFAULT 0,
+    declared_cores_per_machine INTEGER,
+    declared_gpu_model TEXT,
+    active BOOLEAN NOT NULL DEFAULT true,
+    created_at BIGINT NOT NULL DEFAULT (EXTRACT(EPOCH FROM NOW()) * 1000)::BIGINT,
+    notes TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_pool_fleets_wallet ON pool_fleets(wallet_address);
 
 -- Contribution snapshots: how many nonces each member computed per snapshot window
 CREATE TABLE IF NOT EXISTS pool_contributions (
