@@ -34,6 +34,14 @@ MAX_BENCHMARK_STEP = int(os.environ.get("AUTOPILOT_MAX_BENCHMARK_STEP", "2"))
 SLOT_STEP = int(os.environ.get("AUTOPILOT_SLOT_STEP", "1"))
 MAX_CPU_SLOTS = int(os.environ.get("AUTOPILOT_MAX_CPU_SLOTS", "64"))
 MAX_GPU_SLOTS_PER_TYPE = int(os.environ.get("AUTOPILOT_MAX_GPU_SLOTS_PER_TYPE", "6"))
+STALE_CLEANUP_ENABLED = os.environ.get("AUTOPILOT_STALE_CLEANUP_ENABLED", "false").lower() in (
+    "1",
+    "true",
+    "yes",
+    "on",
+)
+STALE_CLEANUP_MIN_AGE_MS = int(os.environ.get("AUTOPILOT_STALE_CLEANUP_MIN_AGE_MS", str(60 * 60 * 1000)))
+STALE_CLEANUP_MAX_ROWS = int(os.environ.get("AUTOPILOT_STALE_CLEANUP_MAX_ROWS", "50"))
 
 GPU_CHALLENGES = {"vector_search", "hypergraph", "neuralnet_optimizer"}
 GPU_SLOT_TYPES = ("vector_search", "hypergraph", "neuralnet_optimizer")
@@ -156,6 +164,138 @@ def _save_decision(report: dict, decision: dict):
             json.dumps(report),
         ),
     )
+
+
+def _retry_timeout_ms(cfg: dict, challenge: str) -> int:
+    overrides = cfg.get("per_challenge_time_before_batch_retry", {}) or {}
+    global_timeout = int(cfg.get("time_before_batch_retry") or STALE_CLEANUP_MIN_AGE_MS)
+    challenge_id = str(challenge or "").split("_")[0]
+    return int(overrides.get(challenge_id, global_timeout) or global_timeout)
+
+
+def _cleanup_stale_assignments(cfg: dict, now_ms: int) -> dict:
+    """Release stale assignments so eligible work can be retried.
+
+    Cleanup uses the master's per-challenge retry timeout when available and a
+    separate minimum age floor. This avoids cancelling slow-but-valid work too
+    early on weaker CPUs.
+    """
+    result = {
+        "enabled": STALE_CLEANUP_ENABLED,
+        "released_roots": [],
+        "released_proofs": [],
+        "skipped": "",
+    }
+    if not STALE_CLEANUP_ENABLED:
+        result["skipped"] = "disabled"
+        return result
+    if not cfg:
+        result["skipped"] = "missing_config"
+        return result
+
+    root_candidates = _fetch_all(
+        """
+        SELECT
+            rb.benchmark_id,
+            rb.batch_idx,
+            rb.slave,
+            rb.start_time,
+            rb.num_attempts,
+            j.challenge,
+            j.settings->>'track_id' AS track
+        FROM root_batch rb
+        JOIN job j ON j.benchmark_id = rb.benchmark_id
+        WHERE rb.ready IS NULL
+          AND rb.slave IS NOT NULL
+          AND rb.start_time IS NOT NULL
+          AND rb.start_time < %s
+        ORDER BY rb.start_time
+        LIMIT %s
+        """,
+        (now_ms - STALE_CLEANUP_MIN_AGE_MS, STALE_CLEANUP_MAX_ROWS),
+    )
+    roots_to_release = []
+    for row in root_candidates:
+        age_ms = now_ms - int(row.get("start_time") or now_ms)
+        timeout_ms = max(STALE_CLEANUP_MIN_AGE_MS, _retry_timeout_ms(cfg, row.get("challenge")))
+        if age_ms >= timeout_ms:
+            roots_to_release.append(row)
+
+    proof_candidates = _fetch_all(
+        """
+        SELECT
+            pb.benchmark_id,
+            pb.batch_idx,
+            pb.slave,
+            pb.start_time,
+            pb.num_attempts,
+            j.challenge,
+            j.settings->>'track_id' AS track
+        FROM proofs_batch pb
+        JOIN job j ON j.benchmark_id = pb.benchmark_id
+        WHERE pb.ready IS NULL
+          AND pb.start_time IS NOT NULL
+          AND pb.start_time < %s
+        ORDER BY pb.start_time
+        LIMIT %s
+        """,
+        (now_ms - STALE_CLEANUP_MIN_AGE_MS, STALE_CLEANUP_MAX_ROWS),
+    )
+    proofs_to_release = []
+    for row in proof_candidates:
+        age_ms = now_ms - int(row.get("start_time") or now_ms)
+        timeout_ms = max(STALE_CLEANUP_MIN_AGE_MS, _retry_timeout_ms(cfg, row.get("challenge")))
+        if age_ms >= timeout_ms:
+            proofs_to_release.append(row)
+
+    queries = []
+    for row in roots_to_release:
+        queries.append((
+            """
+            UPDATE root_batch
+            SET slave = NULL,
+                start_time = NULL,
+                end_time = NULL
+            WHERE benchmark_id = %s
+              AND batch_idx = %s
+              AND ready IS NULL
+            """,
+            (row["benchmark_id"], row["batch_idx"]),
+        ))
+        result["released_roots"].append({
+            "benchmark": str(row["benchmark_id"])[:10],
+            "batch_idx": row["batch_idx"],
+            "slave": row["slave"],
+            "challenge": row["challenge"],
+            "track": row["track"],
+            "age_min": round((now_ms - int(row["start_time"])) / 60000.0, 1),
+        })
+
+    for row in proofs_to_release:
+        queries.append((
+            """
+            UPDATE proofs_batch
+            SET slave = NULL,
+                start_time = NULL,
+                end_time = NULL
+            WHERE benchmark_id = %s
+              AND batch_idx = %s
+              AND ready IS NULL
+            """,
+            (row["benchmark_id"], row["batch_idx"]),
+        ))
+        result["released_proofs"].append({
+            "benchmark": str(row["benchmark_id"])[:10],
+            "batch_idx": row["batch_idx"],
+            "slave": row["slave"],
+            "challenge": row["challenge"],
+            "track": row["track"],
+            "age_min": round((now_ms - int(row["start_time"])) / 60000.0, 1),
+        })
+
+    if queries:
+        db.execute_many(*queries)
+    return result
 
 
 def _current_config_summary(cfg: dict) -> dict:
@@ -562,7 +702,9 @@ def maybe_run():
         return None
     _last_run_ts = now
 
+    now_ms = int(time.time() * 1000)
     cfg, cfg_error = _fetch_master_config()
+    cleanup = _cleanup_stale_assignments(cfg, now_ms)
     report = build_report()
     if cfg_error and not report.get("master_config_error"):
         report["master_config_error"] = cfg_error
@@ -573,6 +715,12 @@ def maybe_run():
     db.set_setting("autopilot_clean_windows", str(clean_windows))
 
     decision = _plan_config_change(report, cfg, clean_windows)
+    decision["cleanup"] = cleanup
+    if cleanup.get("released_roots") or cleanup.get("released_proofs"):
+        decision.setdefault("changes", {})["stale_cleanup"] = {
+            "released_roots": cleanup.get("released_roots", []),
+            "released_proofs": cleanup.get("released_proofs", []),
+        }
     if decision.get("reason") == "ready_to_apply" and decision.get("config"):
         _push_config(decision["config"])
         decision["applied"] = True
