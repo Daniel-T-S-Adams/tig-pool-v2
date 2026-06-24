@@ -213,6 +213,67 @@ $SUDO docker compose -f slave.yml up -d --force-recreate {services}
 
 def _fleet_aws_user_data_script(token: str, worker_type: str) -> str:
     services = _fleet_services(worker_type)
+    if worker_type == "gpu":
+        return f"""#!/bin/bash
+set -euxo pipefail
+exec > >(tee -a /var/log/innopool-gpu-userdata.log) 2>&1
+
+FLEET_TOKEN="{token}"
+
+apt-get update
+apt-get install -y curl git ca-certificates gnupg python3 ubuntu-drivers-common docker.io docker-compose-v2
+
+systemctl enable --now docker
+
+ubuntu-drivers devices || true
+ubuntu-drivers install
+
+modprobe nvidia || true
+nvidia-smi
+
+curl -fsSL https://nvidia.github.io/libnvidia-container/gpgkey \\
+  | gpg --dearmor -o /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg
+
+curl -fsSL https://nvidia.github.io/libnvidia-container/stable/deb/nvidia-container-toolkit.list \\
+  | sed 's#deb https://#deb [signed-by=/usr/share/keyrings/nvidia-container-toolkit-keyring.gpg] https://#g' \\
+  > /etc/apt/sources.list.d/nvidia-container-toolkit.list
+
+apt-get update
+apt-get install -y nvidia-container-toolkit
+
+nvidia-ctk runtime configure --runtime=docker
+systemctl restart docker
+
+nvidia-smi
+docker run --rm --gpus all nvidia/cuda:12.4.1-base-ubuntu22.04 nvidia-smi
+
+if [ ! -d /opt/tig-monorepo ]; then
+  git clone https://github.com/tig-foundation/tig-monorepo.git /opt/tig-monorepo
+fi
+
+cd /opt/tig-monorepo
+git pull || true
+
+cd /opt/tig-monorepo/tig-benchmarker
+
+IMDS_TOKEN="$(curl -s -X PUT http://169.254.169.254/latest/api/token \\
+  -H 'X-aws-ec2-metadata-token-ttl-seconds: 21600' || true)"
+
+INSTANCE_ID="$(curl -s -H "X-aws-ec2-metadata-token: $IMDS_TOKEN" \\
+  http://169.254.169.254/latest/meta-data/instance-id || hostname)"
+
+curl -fsSL "{_POOL_PUBLIC_URL}/static/fleet-install.sh?cachebust=$(date +%s)" | bash -s -- \\
+  --fleet-token "$FLEET_TOKEN" \\
+  --worker-type gpu \\
+  --machine-index "$INSTANCE_ID"
+
+docker compose -f slave.yml up -d --force-recreate {services}
+
+docker compose -f slave.yml ps
+docker compose -f slave.yml logs --tail=80 slave
+
+echo "INNOPOOL_STANDARD_UBUNTU_GPU_SETUP_DONE"
+"""
     return f"""#!/bin/bash
 set -euxo pipefail
 exec > >(tee -a /var/log/innopool-userdata.log) 2>&1
