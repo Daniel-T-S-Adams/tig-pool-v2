@@ -34,6 +34,9 @@ MAX_BENCHMARK_STEP = int(os.environ.get("AUTOPILOT_MAX_BENCHMARK_STEP", "2"))
 SLOT_STEP = int(os.environ.get("AUTOPILOT_SLOT_STEP", "1"))
 MAX_CPU_SLOTS = int(os.environ.get("AUTOPILOT_MAX_CPU_SLOTS", "64"))
 MAX_GPU_SLOTS_PER_TYPE = int(os.environ.get("AUTOPILOT_MAX_GPU_SLOTS_PER_TYPE", "6"))
+STRANDED_BENCHMARK_MS = int(os.environ.get("AUTOPILOT_STRANDED_BENCHMARK_MS", str(30 * 60 * 1000)))
+STRANDED_DOWNSCALE_STEP = int(os.environ.get("AUTOPILOT_STRANDED_DOWNSCALE_STEP", "2"))
+STRANDED_BUFFER_BENCHMARKS = int(os.environ.get("AUTOPILOT_STRANDED_BUFFER_BENCHMARKS", "2"))
 STALE_CLEANUP_ENABLED = os.environ.get("AUTOPILOT_STALE_CLEANUP_ENABLED", "false").lower() in (
     "1",
     "true",
@@ -118,6 +121,19 @@ def _push_config(cfg: dict):
 
 def _clamp(value: int, lo: int, hi: int) -> int:
     return max(lo, min(hi, value))
+
+
+def _active_unfinished_jobs() -> int:
+    row = _fetch_one(
+        """
+        SELECT COUNT(*) AS count
+        FROM job
+        WHERE stopped IS NULL
+          AND end_time IS NULL
+          AND merkle_proofs_ready IS NULL
+        """
+    )
+    return int(row.get("count") or 0)
 
 
 def _ensure_decision_table():
@@ -474,6 +490,53 @@ def _slot_metrics(now_ms: int) -> dict:
     return {"summary": summary, "detail": detail}
 
 
+def _stranded_benchmarks(now_ms: int) -> list[dict]:
+    """Find old active benchmarks with pending roots but no assigned root work."""
+    return _fetch_all(
+        """
+        SELECT
+            left(j.benchmark_id, 10) AS benchmark,
+            j.benchmark_id,
+            j.challenge,
+            j.algorithm,
+            j.settings->>'algorithm_id' AS algorithm_id,
+            j.settings->>'track_id' AS track,
+            ROUND((%s - j.start_time) / 60000.0, 1) AS age_min,
+            COUNT(rb.*) FILTER (WHERE rb.ready IS NULL) AS pending_roots,
+            COUNT(rb.*) FILTER (
+                WHERE rb.ready IS NULL
+                  AND rb.slave IS NOT NULL
+                  AND rb.start_time IS NOT NULL
+            ) AS assigned_roots,
+            COUNT(pb.*) FILTER (WHERE pb.ready IS NULL) AS pending_proofs,
+            bs.slot_id,
+            bs.slot_type,
+            bs.state AS slot_state
+        FROM job j
+        JOIN root_batch rb ON rb.benchmark_id = j.benchmark_id
+        LEFT JOIN proofs_batch pb
+          ON pb.benchmark_id = j.benchmark_id
+         AND pb.batch_idx = rb.batch_idx
+        LEFT JOIN benchmark_slot bs ON bs.benchmark_id = j.benchmark_id
+        WHERE j.stopped IS NULL
+          AND j.end_time IS NULL
+          AND j.merkle_root_ready IS NULL
+          AND j.start_time IS NOT NULL
+          AND j.start_time < %s
+        GROUP BY j.benchmark_id, j.challenge, j.algorithm, j.settings, bs.slot_id, bs.slot_type, bs.state
+        HAVING COUNT(rb.*) FILTER (WHERE rb.ready IS NULL) > 0
+           AND COUNT(rb.*) FILTER (
+                WHERE rb.ready IS NULL
+                  AND rb.slave IS NOT NULL
+                  AND rb.start_time IS NOT NULL
+           ) = 0
+        ORDER BY j.start_time
+        LIMIT 25
+        """,
+        (now_ms, now_ms - STRANDED_BENCHMARK_MS),
+    )
+
+
 def _recommendations(cfg: dict, slaves: list[dict], challenges: list[dict], slots: dict) -> list[dict]:
     active_cpu = [s for s in slaves if s["profile"] == "cpu" and _counts_for_capacity(s)]
     active_gpu = [s for s in slaves if s["profile"] == "gpu" and _counts_for_capacity(s)]
@@ -608,11 +671,13 @@ def _health_summary(report: dict) -> dict:
         and _is_public_member_slave(str(s.get("slave_name") or ""))
         and not s.get("registered")
     ]
+    stranded = report.get("stranded_benchmarks") or []
     return {
         "stale_roots": stale_roots,
         "stale_proofs": stale_proofs,
         "active_unregistered": active_unregistered,
-        "healthy": stale_roots == 0 and stale_proofs == 0 and not active_unregistered,
+        "stranded_benchmarks": stranded,
+        "healthy": stale_roots == 0 and stale_proofs == 0 and not active_unregistered and not stranded,
     }
 
 
@@ -640,6 +705,34 @@ def _plan_config_change(report: dict, cfg: dict, clean_windows: int) -> dict:
         return decision
     if report.get("master_config_error"):
         decision["reason"] = f"master_config_unavailable: {report['master_config_error']}"
+        return decision
+    if health.get("stranded_benchmarks"):
+        current = int(cfg.get("max_concurrent_benchmarks") or 0)
+        active_jobs = _active_unfinished_jobs()
+        stranded_count = len(health["stranded_benchmarks"])
+        productive_jobs = max(0, active_jobs - stranded_count)
+        drain_target = productive_jobs + STRANDED_BUFFER_BENCHMARKS
+        step_down_target = current - STRANDED_DOWNSCALE_STEP
+        target = max(MIN_MAX_BENCHMARKS, min(drain_target, step_down_target))
+        target = min(current, target)
+        next_max = _next_value(current, target, STRANDED_DOWNSCALE_STEP)
+        decision["reason"] = "drain_stranded_benchmarks"
+        decision["changes"] = {
+            "max_concurrent_benchmarks": {
+                "current": current,
+                "target": target,
+                "next": next_max,
+                "active_jobs": active_jobs,
+                "productive_jobs": productive_jobs,
+                "stranded": health["stranded_benchmarks"],
+            }
+        }
+        if next_max != current:
+            new_cfg = json.loads(json.dumps(cfg))
+            new_cfg["max_concurrent_benchmarks"] = next_max
+            decision["config"] = new_cfg
+        else:
+            decision["reason"] = "stranded_benchmarks_at_drain_target"
         return decision
     if not health["healthy"]:
         decision["reason"] = "blocked_by_stale_or_unregistered_work"
@@ -721,10 +814,13 @@ def maybe_run():
             "released_roots": cleanup.get("released_roots", []),
             "released_proofs": cleanup.get("released_proofs", []),
         }
-    if decision.get("reason") == "ready_to_apply" and decision.get("config"):
+    if decision.get("config"):
         _push_config(decision["config"])
         decision["applied"] = True
-        decision["reason"] = "applied"
+        if decision.get("reason") == "ready_to_apply":
+            decision["reason"] = "applied"
+        elif decision.get("reason") == "drain_stranded_benchmarks":
+            decision["reason"] = "applied_drain_stranded_benchmarks"
 
     _save_decision(report, decision)
     logger.info(
@@ -745,6 +841,7 @@ def build_report() -> dict:
     slaves = _slave_metrics(now_ms)
     challenges = _challenge_metrics(now_ms)
     slots = _slot_metrics(now_ms)
+    stranded = _stranded_benchmarks(now_ms)
     recommendations = _recommendations(cfg, slaves, challenges, slots) if cfg else []
 
     active_counts = {
@@ -767,5 +864,6 @@ def build_report() -> dict:
         "slaves": slaves,
         "slots": slots,
         "challenges": challenges,
+        "stranded_benchmarks": stranded,
         "recommendations": recommendations,
     }
