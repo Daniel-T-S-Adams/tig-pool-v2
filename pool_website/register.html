@@ -103,6 +103,14 @@
         <!-- Slave name pills -->
         <div id="slave-pills" style="display:flex;gap:10px;flex-wrap:wrap;margin-bottom:28px;"></div>
 
+        <div id="dual-worker-note" class="hidden" style="padding:14px 18px;border-left:3px solid var(--orange);background:rgba(251,146,60,0.07);border-radius:0 8px 8px 0;font-size:13px;color:var(--muted2);line-height:1.7;margin-bottom:24px;">
+          <strong style="color:var(--text);">CPU + GPU means two separate slaves.</strong>
+          If you run both on the same machine, use two separate <code>tig-benchmarker</code> folders:
+          one folder for the CPU setup and one folder for the GPU setup. Each folder has its own
+          <code>.env</code>, <code>SLAVE_NAME</code>, <code>algorithms</code>, and <code>results</code>.
+          Do not paste both setup commands into the same folder.
+        </div>
+
         <!-- Step 1 -->
         <div style="display:flex;align-items:baseline;gap:12px;margin-bottom:10px;">
           <span style="width:24px;height:24px;border-radius:50%;background:var(--blue);color:#fff;font-size:12px;font-weight:700;display:inline-flex;align-items:center;justify-content:center;flex-shrink:0;">1</span>
@@ -111,12 +119,17 @@
         <div class="code-block" style="margin-bottom:24px;">git clone https://github.com/tig-foundation/tig-monorepo.git
 cd tig-monorepo/tig-benchmarker
 git switch main</div>
+        <div id="second-folder-note" class="hidden" style="font-size:13px;color:var(--muted);line-height:1.7;margin-top:-12px;margin-bottom:24px;">
+          Running CPU and GPU on the same machine? Clone a second folder for the second slave, for example
+          <code>tig-monorepo-cpu</code> and <code>tig-monorepo-gpu</code>. Run the CPU setup command in one
+          folder and the GPU setup command in the other.
+        </div>
 
         <!-- CPU setup block -->
         <div id="cpu-block" class="hidden">
           <div style="display:flex;align-items:baseline;gap:12px;margin-bottom:10px;">
             <span id="cpu-step-num" style="width:24px;height:24px;border-radius:50%;background:var(--blue);color:#fff;font-size:12px;font-weight:700;display:inline-flex;align-items:center;justify-content:center;flex-shrink:0;">2</span>
-            <span style="font-weight:600;font-size:15px;">CPU Slave — setup from inside <code>tig-benchmarker</code></span>
+            <span style="font-weight:600;font-size:15px;" id="cpu-step-label">CPU Slave — setup from inside <code>tig-benchmarker</code></span>
           </div>
           <div class="code-block" style="position:relative;margin-bottom:12px;">
             <button class="code-copy" onclick="copyBlock('cpu-setup-text', this)">Copy</button>
@@ -221,10 +234,15 @@ git switch main</div>
 
         // Summary line
         document.getElementById("res-summary").textContent = hasCpu && hasGpu
-          ? "Wallet registered successfully. CPU and GPU are separate slave names; run one setup per machine."
+          ? "Wallet registered successfully. CPU and GPU are separate slave names; run each setup in its own folder."
           : "Wallet registered successfully";
+        document.getElementById("dual-worker-note").classList.toggle("hidden", !(hasCpu && hasGpu));
+        document.getElementById("second-folder-note").classList.toggle("hidden", !(hasCpu && hasGpu));
 
         if (hasCpu) {
+          if (hasGpu) {
+            document.getElementById("cpu-step-label").innerHTML = 'CPU Slave — setup from inside the CPU <code>tig-benchmarker</code> folder';
+          }
           document.getElementById("cpu-setup-text").textContent = slaves.cpu.setup_command || slaves.cpu.slave_config;
           document.getElementById("cpu-preflight-text").textContent = slaves.cpu.preflight_command || slaves.cpu.start_command;
           document.getElementById("cpu-start-text").textContent = slaves.cpu.start_command;
@@ -237,7 +255,7 @@ git switch main</div>
           // Step numbers: if both, GPU becomes step 3
           if (hasCpu) {
             document.getElementById("gpu-step-num").textContent = "3";
-            document.getElementById("gpu-step-label").textContent = "GPU Slave — setup from inside a separate tig-benchmarker checkout";
+            document.getElementById("gpu-step-label").textContent = "GPU Slave — setup from inside a separate GPU tig-benchmarker folder";
           }
           document.getElementById("gpu-block").classList.remove("hidden");
         }
