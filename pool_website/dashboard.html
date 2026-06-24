@@ -57,12 +57,12 @@
           Last updated: <span id="d-last-refresh">—</span>
         </div>
       </div>
-      <div class="slave-summary" style="margin-bottom:20px;">
-        <div class="slave-summary-head">
+      <div class="slave-summary" style="margin-bottom:20px;background:rgba(17,24,39,.55);border:1px solid var(--border);border-radius:10px;padding:12px 14px;">
+        <div class="slave-summary-head" style="display:flex;justify-content:space-between;gap:12px;color:var(--muted);font-size:11px;font-weight:600;letter-spacing:.5px;margin-bottom:8px;text-transform:uppercase;">
           <span>Registered Slaves</span>
           <span id="d-slave-count">—</span>
         </div>
-        <div id="d-slaves" class="slave-chip-list"></div>
+        <div id="d-slaves"></div>
       </div>
 
       <!-- Primary stats -->
@@ -313,10 +313,10 @@
       return (slave.slave_name || "").startsWith("pool-gpu-") ? "gpu" : "cpu";
     }
 
-    function shortSlaveName(name) {
-      return (name || "")
-        .replace(/^pool-(cpu|gpu)-/, "")
-        .replace(/-fleet-/, " / ");
+    function shortSlaveName(slave) {
+      const name = slave.slave_name || "";
+      if (slave.machine_index) return slave.machine_index;
+      return name.replace(/^pool-(cpu|gpu)-/, "");
     }
 
     function renderSlaves(data) {
@@ -335,37 +335,36 @@
       list.innerHTML = "";
       slaves.forEach((slave) => {
         const type = inferSlaveType(slave);
-        const chip = document.createElement("div");
-        chip.className = `slave-chip ${type} ${slave.active ? "active" : "inactive"}`;
+        const row = document.createElement("div");
+        row.style.cssText = "display:grid;grid-template-columns:74px minmax(0,1fr) 78px;gap:10px;align-items:center;padding:7px 0;border-top:1px solid rgba(255,255,255,0.05);font-size:12px;";
 
-        const dot = document.createElement("span");
-        dot.className = "slave-dot";
-        chip.appendChild(dot);
-
-        const typeEl = document.createElement("span");
-        typeEl.className = "slave-type";
+        const typeEl = document.createElement("div");
         typeEl.textContent = type.toUpperCase();
-        chip.appendChild(typeEl);
+        typeEl.style.cssText = `font-weight:800;letter-spacing:.6px;color:${type === "gpu" ? "var(--purple)" : "var(--blue)"};`;
+        row.appendChild(typeEl);
 
-        const nameEl = document.createElement("span");
-        nameEl.className = "slave-name mono";
+        const nameWrap = document.createElement("div");
+        nameWrap.style.cssText = "min-width:0;";
+        const nameEl = document.createElement("div");
+        nameEl.className = "mono";
         nameEl.title = slave.slave_name || "";
-        nameEl.textContent = shortSlaveName(slave.slave_name);
-        chip.appendChild(nameEl);
-
-        if (slave.machine_index) {
-          const machineEl = document.createElement("span");
-          machineEl.className = "slave-machine";
-          machineEl.textContent = slave.machine_index;
-          chip.appendChild(machineEl);
-        }
+        nameEl.textContent = shortSlaveName(slave);
+        nameEl.style.cssText = "color:var(--text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;";
+        nameWrap.appendChild(nameEl);
         if (slave.fleet_id) {
-          const fleetEl = document.createElement("span");
-          fleetEl.className = "slave-tag";
-          fleetEl.textContent = "fleet";
-          chip.appendChild(fleetEl);
+          const subEl = document.createElement("div");
+          subEl.textContent = "Fleet machine";
+          subEl.style.cssText = "color:var(--muted);font-size:11px;margin-top:1px;";
+          nameWrap.appendChild(subEl);
         }
-        list.appendChild(chip);
+        row.appendChild(nameWrap);
+
+        const statusEl = document.createElement("div");
+        statusEl.textContent = slave.active ? "active" : "inactive";
+        statusEl.style.cssText = `justify-self:end;border-radius:999px;padding:2px 8px;font-size:11px;font-weight:700;background:${slave.active ? "rgba(34,211,165,.10)" : "rgba(248,113,113,.09)"};color:${slave.active ? "var(--green)" : "var(--red)"};border:1px solid ${slave.active ? "rgba(34,211,165,.20)" : "rgba(248,113,113,.18)"};`;
+        row.appendChild(statusEl);
+
+        list.appendChild(row);
       });
     }
 
