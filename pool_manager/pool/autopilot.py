@@ -1,9 +1,9 @@
 """
-Read-only pool autopilot report.
+Pool autopilot report and guarded controller.
 
-This module deliberately does not mutate master config. It collects the signals
-needed to tune the pool safely, then returns "would change" recommendations for
-the operator to review.
+The report path is always read-only. The background controller can optionally
+apply small config changes when AUTOPILOT_MODE=apply and the pool has been clean
+for enough consecutive windows.
 """
 from __future__ import annotations
 
@@ -21,16 +21,25 @@ from pool import database as db
 logger = logging.getLogger("pool.autopilot")
 
 MASTER_URL = os.environ.get("MASTER_INTERNAL_URL", "http://master:3336")
+AUTOPILOT_MODE = os.environ.get("AUTOPILOT_MODE", "off").lower()
+RUN_INTERVAL_S = int(os.environ.get("AUTOPILOT_INTERVAL_S", "300"))
 ACTIVE_WINDOW_MS = int(os.environ.get("AUTOPILOT_ACTIVE_WINDOW_MS", str(10 * 60 * 1000)))
 METRIC_WINDOW_MS = int(os.environ.get("AUTOPILOT_METRIC_WINDOW_MS", str(30 * 60 * 1000)))
 STALE_ROOT_MS = int(os.environ.get("AUTOPILOT_STALE_ROOT_MS", str(45 * 60 * 1000)))
 STALE_PROOF_MS = int(os.environ.get("AUTOPILOT_STALE_PROOF_MS", str(20 * 60 * 1000)))
 MIN_MAX_BENCHMARKS = int(os.environ.get("AUTOPILOT_MIN_MAX_BENCHMARKS", "3"))
 MAX_MAX_BENCHMARKS = int(os.environ.get("AUTOPILOT_MAX_MAX_BENCHMARKS", "32"))
+APPLY_MIN_CLEAN_WINDOWS = int(os.environ.get("AUTOPILOT_APPLY_MIN_CLEAN_WINDOWS", "2"))
+MAX_BENCHMARK_STEP = int(os.environ.get("AUTOPILOT_MAX_BENCHMARK_STEP", "2"))
+SLOT_STEP = int(os.environ.get("AUTOPILOT_SLOT_STEP", "1"))
+MAX_CPU_SLOTS = int(os.environ.get("AUTOPILOT_MAX_CPU_SLOTS", "64"))
+MAX_GPU_SLOTS_PER_TYPE = int(os.environ.get("AUTOPILOT_MAX_GPU_SLOTS_PER_TYPE", "6"))
 
 GPU_CHALLENGES = {"vector_search", "hypergraph", "neuralnet_optimizer"}
 GPU_SLOT_TYPES = ("vector_search", "hypergraph", "neuralnet_optimizer")
 CPU_SLOT_TYPE = "cpu"
+_last_run_ts = 0.0
+_decision_table_ready = False
 
 
 def _json_safe(value: Any) -> Any:
@@ -65,6 +74,21 @@ def _slave_profile(slave_name: str) -> str:
     return "cpu"
 
 
+def _is_public_member_slave(slave_name: str) -> bool:
+    return slave_name.startswith(("pool-cpu-", "pool-gpu-"))
+
+
+def _counts_for_capacity(slave: dict) -> bool:
+    name = slave.get("slave_name") or ""
+    return bool(
+        slave.get("active_now")
+        and (
+            slave.get("registered_active")
+            or not _is_public_member_slave(name)
+        )
+    )
+
+
 def _fetch_master_config() -> tuple[dict, str | None]:
     try:
         with urllib.request.urlopen(f"{MASTER_URL}/get-config", timeout=5) as resp:
@@ -73,8 +97,65 @@ def _fetch_master_config() -> tuple[dict, str | None]:
         return {}, str(exc)
 
 
+def _push_config(cfg: dict):
+    data = json.dumps(cfg).encode()
+    req = urllib.request.Request(
+        f"{MASTER_URL}/update-config",
+        data=data,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    urllib.request.urlopen(req, timeout=5)
+
+
 def _clamp(value: int, lo: int, hi: int) -> int:
     return max(lo, min(hi, value))
+
+
+def _ensure_decision_table():
+    global _decision_table_ready
+    if _decision_table_ready:
+        return
+    db.execute(
+        """
+        CREATE TABLE IF NOT EXISTS autopilot_decisions (
+            id BIGSERIAL PRIMARY KEY,
+            mode TEXT NOT NULL,
+            generated_at_ms BIGINT NOT NULL,
+            clean_windows INTEGER NOT NULL,
+            healthy BOOLEAN NOT NULL,
+            applied BOOLEAN NOT NULL,
+            reason TEXT,
+            changes JSONB NOT NULL DEFAULT '{}'::JSONB,
+            report JSONB NOT NULL,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        )
+        """
+    )
+    _decision_table_ready = True
+
+
+def _save_decision(report: dict, decision: dict):
+    _ensure_decision_table()
+    db.execute(
+        """
+        INSERT INTO autopilot_decisions (
+            mode, generated_at_ms, clean_windows, healthy, applied,
+            reason, changes, report
+        )
+        VALUES (%s, %s, %s, %s, %s, %s, %s::JSONB, %s::JSONB)
+        """,
+        (
+            decision.get("mode", AUTOPILOT_MODE),
+            report.get("generated_at_ms"),
+            int(decision.get("clean_windows") or 0),
+            bool(decision.get("healthy")),
+            bool(decision.get("applied")),
+            decision.get("reason"),
+            json.dumps(decision.get("changes") or {}),
+            json.dumps(report),
+        ),
+    )
 
 
 def _current_config_summary(cfg: dict) -> dict:
@@ -139,7 +220,8 @@ def _slave_metrics(now_ms: int) -> list[dict]:
         SELECT
             COALESCE(r.slave_name, rs.slave_name, ps.slave_name) AS slave_name,
             r.wallet_address,
-            COALESCE(r.active, true) AS registered_active,
+            r.slave_name IS NOT NULL AS registered,
+            COALESCE(r.active, false) AS registered_active,
             COALESCE(rs.assigned_recent, 0) AS assigned_recent,
             COALESCE(rs.completed_recent, 0) AS completed_recent,
             COALESCE(rs.active_unfinished, 0) AS active_unfinished,
@@ -253,10 +335,15 @@ def _slot_metrics(now_ms: int) -> dict:
 
 
 def _recommendations(cfg: dict, slaves: list[dict], challenges: list[dict], slots: dict) -> list[dict]:
-    active_cpu = [s for s in slaves if s["profile"] == "cpu" and s["active_now"] and s.get("registered_active")]
-    active_gpu = [s for s in slaves if s["profile"] == "gpu" and s["active_now"] and s.get("registered_active")]
-    stale_roots = sum(int(s.get("stale_roots") or 0) for s in slaves)
-    stale_proofs = sum(int(s.get("stale_proofs") or 0) for s in slaves)
+    active_cpu = [s for s in slaves if s["profile"] == "cpu" and _counts_for_capacity(s)]
+    active_gpu = [s for s in slaves if s["profile"] == "gpu" and _counts_for_capacity(s)]
+    stale_roots = sum(int(s.get("stale_roots") or 0) for s in slaves) + sum(
+        int(c.get("stale_roots") or 0) for c in challenges
+    )
+    stale_proofs = sum(int(s.get("stale_proofs") or 0) for s in slaves) + sum(
+        int(c.get("stale_proofs") or 0) for c in challenges
+    )
+    stale_total = stale_roots + stale_proofs
 
     current_slots = (cfg.get("resource_slots") or {}).get("slots", {})
     slot_counts: dict[str, int] = {}
@@ -275,10 +362,10 @@ def _recommendations(cfg: dict, slaves: list[dict], challenges: list[dict], slot
 
     recommended_cpu_slots = int(current_slots.get(CPU_SLOT_TYPE, slot_counts.get(CPU_SLOT_TYPE, 0)) or 0)
     if active_cpu:
-        if stale_roots:
+        if stale_total:
             recommended_cpu_slots = max(2, recommended_cpu_slots - 1)
         elif slot_idle.get(CPU_SLOT_TYPE, 0) == 0 and cpu_pressure >= max(1, recommended_cpu_slots):
-            recommended_cpu_slots = min(recommended_cpu_slots + 2, 24)
+            recommended_cpu_slots = min(recommended_cpu_slots + 2, MAX_CPU_SLOTS)
         else:
             recommended_cpu_slots = max(recommended_cpu_slots, min(12, max(2, len(active_cpu) * 2)))
     else:
@@ -290,8 +377,8 @@ def _recommendations(cfg: dict, slaves: list[dict], challenges: list[dict], slot
         proposed_slots[CPU_SLOT_TYPE] = recommended_cpu_slots
         for slot_type in GPU_SLOT_TYPES:
             current = int(current_slots.get(slot_type, slot_counts.get(slot_type, 0)) or 0)
-            if active_gpu and stale_roots == 0 and slot_idle.get(slot_type, 0) == 0 and gpu_pressure:
-                proposed_slots[slot_type] = min(current + 1, 6)
+            if active_gpu and stale_total == 0 and slot_idle.get(slot_type, 0) == 0 and gpu_pressure:
+                proposed_slots[slot_type] = min(current + 1, MAX_GPU_SLOTS_PER_TYPE)
             elif not active_gpu:
                 proposed_slots[slot_type] = 0
             else:
@@ -321,8 +408,11 @@ def _recommendations(cfg: dict, slaves: list[dict], challenges: list[dict], slot
     current_per = cfg.get("per_challenge_max_benchmarks", {}) or {}
     proposed_per = dict(current_per)
     if active_gpu:
+        # c004/vector-search is very fast, so keep extra benchmark buffer instead
+        # of mapping it strictly one-for-one to vector slots.
+        current_c004 = int(current_per.get("c004", 1) or 1)
         proposed_per.update({
-            "c004": max(1, int(current_slots.get("vector_search", 1) or 1)),
+            "c004": max(current_c004, int(current_slots.get("vector_search", 1) or 1)),
             "c005": max(1, int(current_slots.get("hypergraph", 1) or 1)),
             "c006": max(1, int(current_slots.get("neuralnet_optimizer", 1) or 1)),
         })
@@ -362,6 +452,145 @@ def _recommendations(cfg: dict, slaves: list[dict], challenges: list[dict], slot
     return recommendations
 
 
+def _health_summary(report: dict) -> dict:
+    slaves = report.get("slaves") or []
+    challenges = report.get("challenges") or []
+    stale_roots = sum(int(s.get("stale_roots") or 0) for s in slaves) + sum(
+        int(c.get("stale_roots") or 0) for c in challenges
+    )
+    stale_proofs = sum(int(s.get("stale_proofs") or 0) for s in slaves) + sum(
+        int(c.get("stale_proofs") or 0) for c in challenges
+    )
+    active_unregistered = [
+        s["slave_name"]
+        for s in slaves
+        if s.get("active_now")
+        and _is_public_member_slave(str(s.get("slave_name") or ""))
+        and not s.get("registered")
+    ]
+    return {
+        "stale_roots": stale_roots,
+        "stale_proofs": stale_proofs,
+        "active_unregistered": active_unregistered,
+        "healthy": stale_roots == 0 and stale_proofs == 0 and not active_unregistered,
+    }
+
+
+def _next_value(current: int, target: int, step: int) -> int:
+    if target > current:
+        return min(target, current + step)
+    if target < current:
+        return max(target, current - step)
+    return current
+
+
+def _plan_config_change(report: dict, cfg: dict, clean_windows: int) -> dict:
+    health = _health_summary(report)
+    decision = {
+        "mode": AUTOPILOT_MODE,
+        "healthy": health["healthy"],
+        "clean_windows": clean_windows,
+        "applied": False,
+        "reason": "report_only",
+        "changes": {},
+        "health": health,
+    }
+
+    if AUTOPILOT_MODE != "apply":
+        return decision
+    if report.get("master_config_error"):
+        decision["reason"] = f"master_config_unavailable: {report['master_config_error']}"
+        return decision
+    if not health["healthy"]:
+        decision["reason"] = "blocked_by_stale_or_unregistered_work"
+        return decision
+    if clean_windows < APPLY_MIN_CLEAN_WINDOWS:
+        decision["reason"] = "waiting_for_clean_windows"
+        return decision
+
+    new_cfg = json.loads(json.dumps(cfg))
+    changes: dict[str, dict] = {}
+    recommendations = {r.get("key"): r for r in report.get("recommendations") or []}
+
+    slots_rec = recommendations.get("resource_slots.slots")
+    current_slots = ((new_cfg.get("resource_slots") or {}).get("slots") or {})
+    if slots_rec and current_slots:
+        proposed_slots = slots_rec.get("proposed") or {}
+        next_slots = dict(current_slots)
+        for key, target in proposed_slots.items():
+            current = int(current_slots.get(key, 0) or 0)
+            target = int(target or 0)
+            next_slots[key] = _next_value(current, target, SLOT_STEP)
+        if next_slots != current_slots:
+            new_cfg.setdefault("resource_slots", {})["slots"] = next_slots
+            changes["resource_slots.slots"] = {
+                "current": current_slots,
+                "target": proposed_slots,
+                "next": next_slots,
+            }
+
+    max_rec = recommendations.get("max_concurrent_benchmarks")
+    if max_rec and new_cfg.get("max_concurrent_benchmarks") is not None:
+        current = int(new_cfg.get("max_concurrent_benchmarks") or 0)
+        target = int(max_rec.get("proposed") or current)
+        next_max = _next_value(current, target, MAX_BENCHMARK_STEP)
+        if next_max != current:
+            new_cfg["max_concurrent_benchmarks"] = next_max
+            changes["max_concurrent_benchmarks"] = {
+                "current": current,
+                "target": target,
+                "next": next_max,
+            }
+
+    if not changes:
+        decision["reason"] = "no_safe_changes"
+        return decision
+
+    decision["reason"] = "ready_to_apply"
+    decision["changes"] = changes
+    decision["config"] = new_cfg
+    return decision
+
+
+def maybe_run():
+    """Run the autopilot background loop when AUTOPILOT_MODE is report/apply."""
+    global _last_run_ts
+    if AUTOPILOT_MODE not in {"report", "apply"}:
+        return None
+    now = time.time()
+    if now - _last_run_ts < RUN_INTERVAL_S:
+        return None
+    _last_run_ts = now
+
+    cfg, cfg_error = _fetch_master_config()
+    report = build_report()
+    if cfg_error and not report.get("master_config_error"):
+        report["master_config_error"] = cfg_error
+
+    health = _health_summary(report)
+    clean_windows = int(db.get_setting("autopilot_clean_windows", "0") or 0)
+    clean_windows = clean_windows + 1 if health["healthy"] else 0
+    db.set_setting("autopilot_clean_windows", str(clean_windows))
+
+    decision = _plan_config_change(report, cfg, clean_windows)
+    if decision.get("reason") == "ready_to_apply" and decision.get("config"):
+        _push_config(decision["config"])
+        decision["applied"] = True
+        decision["reason"] = "applied"
+
+    _save_decision(report, decision)
+    logger.info(
+        "autopilot mode=%s healthy=%s clean_windows=%s applied=%s reason=%s changes=%s",
+        AUTOPILOT_MODE,
+        decision.get("healthy"),
+        clean_windows,
+        decision.get("applied"),
+        decision.get("reason"),
+        list((decision.get("changes") or {}).keys()),
+    )
+    return decision
+
+
 def build_report() -> dict:
     now_ms = int(time.time() * 1000)
     cfg, cfg_error = _fetch_master_config()
@@ -371,8 +600,8 @@ def build_report() -> dict:
     recommendations = _recommendations(cfg, slaves, challenges, slots) if cfg else []
 
     active_counts = {
-        "cpu": sum(1 for s in slaves if s["profile"] == "cpu" and s["active_now"] and s.get("registered_active")),
-        "gpu": sum(1 for s in slaves if s["profile"] == "gpu" and s["active_now"] and s.get("registered_active")),
+        "cpu": sum(1 for s in slaves if s["profile"] == "cpu" and _counts_for_capacity(s)),
+        "gpu": sum(1 for s in slaves if s["profile"] == "gpu" and _counts_for_capacity(s)),
     }
 
     return {

@@ -13,7 +13,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from pool.routes import router
-from pool import tracker, coinbase, scheduler
+from pool import tracker, coinbase, scheduler, autopilot
 
 logging.basicConfig(
     level=logging.INFO,
@@ -62,6 +62,11 @@ def background_loop():
                 scheduler.maybe_update_schedule()
         except Exception as e:
             logger.error(f"Scheduler error: {e}")
+
+        try:
+            autopilot.maybe_run()
+        except Exception as e:
+            logger.error(f"Autopilot error: {e}")
 
         time.sleep(30)
 
