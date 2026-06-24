@@ -399,6 +399,9 @@ def get_member_stats(wallet_address: str):
                 "slave_name": r["slave_name"],
                 "active": r["active"],
                 "registered_at": r["registered_at"],
+                "worker_type": r.get("worker_type"),
+                "fleet_id": r.get("fleet_id"),
+                "machine_index": r.get("machine_index"),
             }
             for r in members
         ],

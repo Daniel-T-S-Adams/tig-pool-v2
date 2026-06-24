@@ -341,6 +341,85 @@ code, pre, .mono {
 .dash-tile .lbl { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: .5px; margin-top: 4px; }
 .dash-tile .tile-sub { font-size: 11px; color: var(--muted); margin-top: 5px; line-height: 1.4; }
 
+.slave-summary {
+  background: rgba(17,24,39,.55);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 12px 14px;
+}
+.slave-summary-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: .5px;
+  margin-bottom: 10px;
+  text-transform: uppercase;
+}
+.slave-chip-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.slave-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  max-width: 100%;
+  padding: 6px 9px;
+  border: 1px solid var(--border2);
+  border-radius: 999px;
+  background: rgba(255,255,255,.025);
+  color: var(--muted2);
+  font-size: 12px;
+}
+.slave-chip.cpu { border-color: rgba(96,165,250,.22); }
+.slave-chip.gpu { border-color: rgba(167,139,250,.24); }
+.slave-chip.inactive { opacity: .55; }
+.slave-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--red);
+  flex-shrink: 0;
+}
+.slave-chip.active .slave-dot { background: var(--green); }
+.slave-type {
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: .5px;
+}
+.slave-chip.cpu .slave-type { color: var(--blue); }
+.slave-chip.gpu .slave-type { color: var(--purple); }
+.slave-name {
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.slave-machine,
+.slave-tag {
+  border-radius: 999px;
+  font-size: 10px;
+  font-weight: 700;
+  padding: 1px 6px;
+}
+.slave-machine {
+  background: rgba(96,165,250,.08);
+  color: var(--blue);
+}
+.slave-tag {
+  background: rgba(34,211,165,.08);
+  color: var(--green);
+}
+@media (max-width: 700px) {
+  .slave-summary-head { flex-direction: column; gap: 4px; }
+  .slave-chip { width: 100%; }
+}
+
 /* ── Footer ────────────────────────────────────────────────────────────── */
 .footer {
   border-top: 1px solid var(--border);

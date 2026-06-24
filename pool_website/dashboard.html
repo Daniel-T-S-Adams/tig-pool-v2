@@ -45,13 +45,10 @@
     <div id="member-block" class="hidden" style="margin-top:28px;">
 
       <!-- Status bar -->
-      <div style="display:flex; align-items:center; gap:16px; margin-bottom:20px; flex-wrap:wrap;">
+      <div style="display:flex; align-items:center; gap:16px; margin-bottom:12px; flex-wrap:wrap;">
         <div id="d-status-badge" style="display:flex;align-items:center;gap:8px;padding:6px 14px;border-radius:20px;font-size:13px;font-weight:600;background:rgba(16,185,129,0.15);color:#10b981;border:1px solid rgba(16,185,129,0.3);">
           <span id="d-status-dot" style="width:8px;height:8px;border-radius:50%;background:#10b981;display:inline-block;"></span>
           <span id="d-status-text">Active</span>
-        </div>
-        <div style="font-size:12px;color:var(--muted);">
-          Slaves: <span class="mono" id="d-slave" style="color:var(--blue);">—</span>
         </div>
         <div style="font-size:12px;color:var(--muted);">
           Member since: <span id="d-registered">—</span>
@@ -59,6 +56,13 @@
         <div style="font-size:12px;color:var(--muted); margin-left:auto;">
           Last updated: <span id="d-last-refresh">—</span>
         </div>
+      </div>
+      <div class="slave-summary" style="margin-bottom:20px;">
+        <div class="slave-summary-head">
+          <span>Registered Slaves</span>
+          <span id="d-slave-count">—</span>
+        </div>
+        <div id="d-slaves" class="slave-chip-list"></div>
       </div>
 
       <!-- Primary stats -->
@@ -214,10 +218,7 @@
           txt.textContent = lastMs ? `Inactive — last seen ${timeAgo(lastMs)}` : "No activity yet";
         }
 
-        const slaves = data.slaves && data.slaves.length
-          ? data.slaves.map(s => s.slave_name)
-          : [data.slave_name];
-        document.getElementById("d-slave").textContent = slaves.join(", ");
+        renderSlaves(data);
         document.getElementById("d-registered").textContent = new Date(data.registered_at).toLocaleDateString();
         document.getElementById("d-last-refresh").textContent = new Date().toLocaleTimeString();
 
@@ -304,6 +305,68 @@
     function startAutoRefresh(wallet) {
       clearInterval(refreshTimer);
       refreshTimer = setInterval(() => doLookup(wallet), REFRESH_MS);
+    }
+
+    function inferSlaveType(slave) {
+      const explicit = (slave.worker_type || "").toLowerCase();
+      if (explicit === "cpu" || explicit === "gpu") return explicit;
+      return (slave.slave_name || "").startsWith("pool-gpu-") ? "gpu" : "cpu";
+    }
+
+    function shortSlaveName(name) {
+      return (name || "")
+        .replace(/^pool-(cpu|gpu)-/, "")
+        .replace(/-fleet-/, " / ");
+    }
+
+    function renderSlaves(data) {
+      const slaves = data.slaves && data.slaves.length
+        ? data.slaves
+        : [{ slave_name: data.slave_name, active: data.active }];
+      const activeCount = slaves.filter(s => s.active).length;
+      const cpuCount = slaves.filter(s => inferSlaveType(s) === "cpu").length;
+      const gpuCount = slaves.filter(s => inferSlaveType(s) === "gpu").length;
+      const fleetCount = slaves.filter(s => s.fleet_id).length;
+
+      document.getElementById("d-slave-count").textContent =
+        `${activeCount}/${slaves.length} active · ${cpuCount} CPU · ${gpuCount} GPU${fleetCount ? ` · ${fleetCount} fleet` : ""}`;
+
+      const list = document.getElementById("d-slaves");
+      list.innerHTML = "";
+      slaves.forEach((slave) => {
+        const type = inferSlaveType(slave);
+        const chip = document.createElement("div");
+        chip.className = `slave-chip ${type} ${slave.active ? "active" : "inactive"}`;
+
+        const dot = document.createElement("span");
+        dot.className = "slave-dot";
+        chip.appendChild(dot);
+
+        const typeEl = document.createElement("span");
+        typeEl.className = "slave-type";
+        typeEl.textContent = type.toUpperCase();
+        chip.appendChild(typeEl);
+
+        const nameEl = document.createElement("span");
+        nameEl.className = "slave-name mono";
+        nameEl.title = slave.slave_name || "";
+        nameEl.textContent = shortSlaveName(slave.slave_name);
+        chip.appendChild(nameEl);
+
+        if (slave.machine_index) {
+          const machineEl = document.createElement("span");
+          machineEl.className = "slave-machine";
+          machineEl.textContent = slave.machine_index;
+          chip.appendChild(machineEl);
+        }
+        if (slave.fleet_id) {
+          const fleetEl = document.createElement("span");
+          fleetEl.className = "slave-tag";
+          fleetEl.textContent = "fleet";
+          chip.appendChild(fleetEl);
+        }
+        list.appendChild(chip);
+      });
     }
 
     document.getElementById("lookup-form").addEventListener("submit", async (e) => {
