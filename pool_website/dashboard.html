@@ -51,7 +51,7 @@
           <span id="d-status-text">Active</span>
         </div>
         <div style="font-size:12px;color:var(--muted);">
-          Slave: <span class="mono" id="d-slave" style="color:var(--blue);">—</span>
+          Slaves: <span class="mono" id="d-slave" style="color:var(--blue);">—</span>
         </div>
         <div style="font-size:12px;color:var(--muted);">
           Member since: <span id="d-registered">—</span>
@@ -214,7 +214,10 @@
           txt.textContent = lastMs ? `Inactive — last seen ${timeAgo(lastMs)}` : "No activity yet";
         }
 
-        document.getElementById("d-slave").textContent = data.slave_name;
+        const slaves = data.slaves && data.slaves.length
+          ? data.slaves.map(s => s.slave_name)
+          : [data.slave_name];
+        document.getElementById("d-slave").textContent = slaves.join(", ");
         document.getElementById("d-registered").textContent = new Date(data.registered_at).toLocaleDateString();
         document.getElementById("d-last-refresh").textContent = new Date().toLocaleTimeString();
 

@@ -133,12 +133,13 @@ def get_leaderboard():
 def get_member_stats(wallet_address: str):
     """Stats for a specific pool member."""
     wallet_address = wallet_address.lower()
-    member = db.fetch_one(
-        "SELECT * FROM pool_members WHERE wallet_address = %s",
+    members = db.fetch_all(
+        "SELECT * FROM pool_members WHERE wallet_address = %s ORDER BY slave_name",
         (wallet_address,),
     )
-    if not member:
+    if not members:
         raise HTTPException(status_code=404, detail="Member not found")
+    member = members[0]
 
     contributions = db.fetch_all(
         """
@@ -175,11 +176,7 @@ def get_member_stats(wallet_address: str):
     )
 
     # Algorithm breakdown — what challenges/algorithms this wallet's slaves have worked on
-    slave_names = db.fetch_all(
-        "SELECT slave_name FROM pool_members WHERE wallet_address = %s",
-        (wallet_address,),
-    )
-    slave_list = [r["slave_name"] for r in slave_names]
+    slave_list = [r["slave_name"] for r in members]
     algo_stats = []
     if slave_list:
         placeholders = ",".join(["%s"] * len(slave_list))
@@ -204,8 +201,16 @@ def get_member_stats(wallet_address: str):
     return {
         "wallet_address": member["wallet_address"],
         "slave_name": member["slave_name"],
+        "slaves": [
+            {
+                "slave_name": r["slave_name"],
+                "active": r["active"],
+                "registered_at": r["registered_at"],
+            }
+            for r in members
+        ],
         "registered_at": member["registered_at"],
-        "active": member["active"],
+        "active": any(r["active"] for r in members),
         "stats_24h": {
             "nonces": int(stats_24h["nonces"] or 0),
             "batches": int(stats_24h["batches"] or 0),
