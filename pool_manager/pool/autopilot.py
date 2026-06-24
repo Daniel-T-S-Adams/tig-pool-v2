@@ -772,14 +772,34 @@ def _plan_config_change(report: dict, cfg: dict, clean_windows: int) -> dict:
     if max_rec and new_cfg.get("max_concurrent_benchmarks") is not None:
         current = int(new_cfg.get("max_concurrent_benchmarks") or 0)
         target = int(max_rec.get("proposed") or current)
-        next_max = _next_value(current, target, MAX_BENCHMARK_STEP)
-        if next_max != current:
-            new_cfg["max_concurrent_benchmarks"] = next_max
-            changes["max_concurrent_benchmarks"] = {
+        active_jobs = _active_unfinished_jobs()
+        if target < current:
+            # Healthy slot-capacity changes can fluctuate when slaves appear or
+            # go quiet briefly. Only stranded-benchmark drain mode is allowed to
+            # lower max_concurrent_benchmarks automatically.
+            decision.setdefault("guardrails", {})["max_concurrent_benchmarks"] = {
+                "skipped": "downscale_requires_stranded_benchmarks",
                 "current": current,
                 "target": target,
-                "next": next_max,
+                "active_jobs": active_jobs,
             }
+        elif target > current and active_jobs < max(1, current - 1):
+            decision.setdefault("guardrails", {})["max_concurrent_benchmarks"] = {
+                "skipped": "upscale_requires_saturated_precommit_capacity",
+                "current": current,
+                "target": target,
+                "active_jobs": active_jobs,
+            }
+        else:
+            next_max = _next_value(current, target, MAX_BENCHMARK_STEP)
+            if next_max != current:
+                new_cfg["max_concurrent_benchmarks"] = next_max
+                changes["max_concurrent_benchmarks"] = {
+                    "current": current,
+                    "target": target,
+                    "next": next_max,
+                    "active_jobs": active_jobs,
+                }
 
     if not changes:
         decision["reason"] = "no_safe_changes"

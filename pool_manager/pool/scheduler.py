@@ -36,6 +36,7 @@ logger = logging.getLogger("pool.scheduler")
 
 MASTER_URL = os.environ.get("MASTER_INTERNAL_URL", "http://master:3336")
 SCHEDULER_ENABLED = os.environ.get("SCHEDULER_ENABLED", "false").lower() in ("1", "true", "yes", "on")
+AUTOPILOT_MODE = os.environ.get("AUTOPILOT_MODE", "off").lower()
 
 # Slave is considered active if it dispatched a batch in this window
 ACTIVE_WINDOW_MS = int(os.environ.get("SCHEDULER_ACTIVE_WINDOW_MS", str(5 * 60 * 1000)))
@@ -55,6 +56,7 @@ MIN_BENCHMARKS = int(os.environ.get("SCHEDULER_MIN_BENCHMARKS", "3"))   # always
 MAX_BENCHMARKS = int(os.environ.get("SCHEDULER_MAX_BENCHMARKS", "8"))   # safety cap
 
 _last_run_ts = 0.0
+_last_skip_log_ts = 0.0
 RUN_INTERVAL_S = 60
 
 
@@ -99,7 +101,14 @@ def _push_config(cfg: dict):
 
 def maybe_update_schedule():
     """Called from background loop. Throttled to once every RUN_INTERVAL_S seconds."""
-    global _last_run_ts
+    global _last_run_ts, _last_skip_log_ts
+    if AUTOPILOT_MODE == "apply":
+        now = time.time()
+        if now - _last_skip_log_ts > 300:
+            logger.info("Scheduler skipped because AUTOPILOT_MODE=apply owns master config changes")
+            _last_skip_log_ts = now
+        return
+
     now = time.time()
     if now - _last_run_ts < RUN_INTERVAL_S:
         return
