@@ -44,6 +44,12 @@ STALE_CLEANUP_ENABLED = os.environ.get("AUTOPILOT_STALE_CLEANUP_ENABLED", "false
     "on",
 )
 STALE_CLEANUP_MIN_AGE_MS = int(os.environ.get("AUTOPILOT_STALE_CLEANUP_MIN_AGE_MS", str(60 * 60 * 1000)))
+STALE_ROOT_CLEANUP_MIN_AGE_MS = int(
+    os.environ.get("AUTOPILOT_STALE_ROOT_CLEANUP_MIN_AGE_MS", str(STALE_CLEANUP_MIN_AGE_MS))
+)
+STALE_PROOF_CLEANUP_MIN_AGE_MS = int(
+    os.environ.get("AUTOPILOT_STALE_PROOF_CLEANUP_MIN_AGE_MS", str(20 * 60 * 1000))
+)
 STALE_CLEANUP_MAX_ROWS = int(os.environ.get("AUTOPILOT_STALE_CLEANUP_MAX_ROWS", "50"))
 
 GPU_CHALLENGES = {"vector_search", "hypergraph", "neuralnet_optimizer"}
@@ -228,12 +234,12 @@ def _cleanup_stale_assignments(cfg: dict, now_ms: int) -> dict:
         ORDER BY rb.start_time
         LIMIT %s
         """,
-        (now_ms - STALE_CLEANUP_MIN_AGE_MS, STALE_CLEANUP_MAX_ROWS),
+        (now_ms - STALE_ROOT_CLEANUP_MIN_AGE_MS, STALE_CLEANUP_MAX_ROWS),
     )
     roots_to_release = []
     for row in root_candidates:
         age_ms = now_ms - int(row.get("start_time") or now_ms)
-        timeout_ms = max(STALE_CLEANUP_MIN_AGE_MS, _retry_timeout_ms(cfg, row.get("challenge")))
+        timeout_ms = max(STALE_ROOT_CLEANUP_MIN_AGE_MS, _retry_timeout_ms(cfg, row.get("challenge")))
         if age_ms >= timeout_ms:
             roots_to_release.append(row)
 
@@ -255,12 +261,12 @@ def _cleanup_stale_assignments(cfg: dict, now_ms: int) -> dict:
         ORDER BY pb.start_time
         LIMIT %s
         """,
-        (now_ms - STALE_CLEANUP_MIN_AGE_MS, STALE_CLEANUP_MAX_ROWS),
+        (now_ms - STALE_PROOF_CLEANUP_MIN_AGE_MS, STALE_CLEANUP_MAX_ROWS),
     )
     proofs_to_release = []
     for row in proof_candidates:
         age_ms = now_ms - int(row.get("start_time") or now_ms)
-        timeout_ms = max(STALE_CLEANUP_MIN_AGE_MS, _retry_timeout_ms(cfg, row.get("challenge")))
+        timeout_ms = STALE_PROOF_CLEANUP_MIN_AGE_MS
         if age_ms >= timeout_ms:
             proofs_to_release.append(row)
 
