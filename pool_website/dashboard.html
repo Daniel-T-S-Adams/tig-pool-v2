@@ -166,6 +166,7 @@
   <script>
     const STORAGE_KEY = "innopool_wallet";
     const REFRESH_MS  = 60000;
+    const SLAVE_PREVIEW_LIMIT = 10;
     let refreshTimer  = null;
 
     function timeAgo(ms) {
@@ -332,8 +333,10 @@
         `${activeCount}/${slaves.length} active · ${cpuCount} CPU · ${gpuCount} GPU${fleetCount ? ` · ${fleetCount} fleet` : ""}`;
 
       const list = document.getElementById("d-slaves");
+      const expanded = list.dataset.expanded === "true";
+      const visibleSlaves = expanded ? slaves : slaves.slice(0, SLAVE_PREVIEW_LIMIT);
       list.innerHTML = "";
-      slaves.forEach((slave) => {
+      visibleSlaves.forEach((slave) => {
         const type = inferSlaveType(slave);
         const row = document.createElement("div");
         row.style.cssText = "display:grid;grid-template-columns:74px minmax(0,1fr) 78px;gap:10px;align-items:center;padding:7px 0;border-top:1px solid rgba(255,255,255,0.05);font-size:12px;";
@@ -366,6 +369,20 @@
 
         list.appendChild(row);
       });
+      if (slaves.length > SLAVE_PREVIEW_LIMIT) {
+        const hiddenCount = slaves.length - SLAVE_PREVIEW_LIMIT;
+        const btn = document.createElement("button");
+        btn.type = "button";
+        btn.textContent = expanded ? "Show fewer slaves" : `Show all ${slaves.length} slaves (${hiddenCount} more)`;
+        btn.style.cssText = "margin-top:10px;background:rgba(96,165,250,.08);border:1px solid rgba(96,165,250,.20);color:var(--blue);border-radius:8px;padding:7px 10px;font-size:12px;font-weight:700;cursor:pointer;";
+        btn.addEventListener("click", () => {
+          list.dataset.expanded = expanded ? "false" : "true";
+          renderSlaves(data);
+        });
+        list.appendChild(btn);
+      } else {
+        list.dataset.expanded = "false";
+      }
     }
 
     document.getElementById("lookup-form").addEventListener("submit", async (e) => {
