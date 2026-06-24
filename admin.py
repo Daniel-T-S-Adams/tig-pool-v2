@@ -11,6 +11,7 @@ Usage:
   python3 admin.py deactivate <wallet|slave> # deactivate a member/slave
   python3 admin.py clear-slave <slave>       # unassign unfinished batches
   python3 admin.py member-health <slave>     # show slave assignment health
+  python3 admin.py autopilot [--json]        # read-only scheduler report
   python3 admin.py coinbase                  # show last 10 coinbase updates
 """
 import json
@@ -194,6 +195,65 @@ def cmd_coinbase(_):
         n = len(dist) if isinstance(dist, dict) else "?"
         print(f"  [{ok}] block={r['block_height']}  members={n}  at={ts}")
 
+def cmd_autopilot(args):
+    report = _get("/admin/autopilot/report")
+    if "--json" in args:
+        print(json.dumps(report, indent=2, sort_keys=True))
+        return
+
+    windows = report.get("windows", {})
+    active = report.get("active_slave_counts", {})
+    current = report.get("current_config", {})
+    recommendations = report.get("recommendations") or []
+
+    print("Autopilot report (read-only)")
+    print(f"  active slaves : CPU={active.get('cpu', 0)} GPU={active.get('gpu', 0)}")
+    print(f"  metric window : {int(windows.get('metric_window_ms', 0) / 60000)} min")
+    if report.get("master_config_error"):
+        print(f"  master config : ERROR {report['master_config_error']}")
+    else:
+        print(f"  max benchmarks: {current.get('max_concurrent_benchmarks')}")
+        print(f"  resource slots: {current.get('resource_slots', {}).get('slots', {})}")
+
+    print("\nTop slaves:")
+    print(f"{'SLAVE':<32} {'TYPE':<4} {'ACTIVE':<6} {'DONE':>5} {'LIVE':>5} {'STALE':>5} {'AVG S':>7} {'IDLE M':>7}")
+    print("-" * 82)
+    for slave in (report.get("slaves") or [])[:20]:
+        stale = int(slave.get("stale_roots") or 0) + int(slave.get("stale_proofs") or 0)
+        avg = slave.get("avg_runtime_sec")
+        idle = slave.get("idle_for_min")
+        print(
+            f"{slave.get('slave_name', ''):<32} "
+            f"{slave.get('profile', ''):<4} "
+            f"{'yes' if slave.get('active_now') else 'no':<6} "
+            f"{int(slave.get('completed_recent') or 0):>5} "
+            f"{int(slave.get('active_unfinished') or 0):>5} "
+            f"{stale:>5} "
+            f"{str(avg if avg is not None else '-'):>7} "
+            f"{str(idle if idle is not None else '-'):>7}"
+        )
+
+    print("\nChallenge pressure:")
+    print(f"{'CHALLENGE':<22} {'TRACK':<30} {'BENCH':>5} {'ROOT PEND':>9} {'ROOT LIVE':>9} {'STALE':>5}")
+    print("-" * 88)
+    for row in report.get("challenges") or []:
+        stale = int(row.get("stale_roots") or 0) + int(row.get("stale_proofs") or 0)
+        print(
+            f"{row.get('challenge', ''):<22} "
+            f"{str(row.get('track') or ''):<30} "
+            f"{int(row.get('active_benchmarks') or 0):>5} "
+            f"{int(row.get('roots_pending') or 0):>9} "
+            f"{int(row.get('roots_inflight') or 0):>9} "
+            f"{stale:>5}"
+        )
+
+    print("\nWould-change recommendations:")
+    if not recommendations:
+        print("  No changes suggested from the current window.")
+    for rec in recommendations:
+        print(f"  - {rec.get('key')}: {rec.get('current')} -> {rec.get('proposed')}")
+        print(f"    {rec.get('reason')}")
+
 def cmd_new_round(_):
     """
     Run this AFTER you have claimed the round on TIG.
@@ -216,6 +276,7 @@ COMMANDS = {
     "deactivate": cmd_deactivate,
     "clear-slave": cmd_clear_slave,
     "member-health": cmd_member_health,
+    "autopilot": cmd_autopilot,
     "coinbase":  cmd_coinbase,
     "new-round": cmd_new_round,
 }

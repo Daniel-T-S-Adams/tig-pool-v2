@@ -13,6 +13,7 @@ from decimal import Decimal
 from fastapi import APIRouter, HTTPException, Header
 from pydantic import BaseModel
 from . import database as db
+from . import autopilot
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -614,6 +615,13 @@ def list_invites(x_admin_secret: str = Header(None)):
     return db.fetch_all(
         "SELECT code, used_by, used_at, created_at, expires_at FROM pool_invites ORDER BY created_at DESC"
     )
+
+
+@router.get("/admin/autopilot/report")
+def autopilot_report(x_admin_secret: str = Header(None)):
+    """Read-only scheduler report showing current pressure and would-change recommendations."""
+    _check_admin(x_admin_secret)
+    return autopilot.build_report()
 
 
 @router.post("/admin/new-round")
