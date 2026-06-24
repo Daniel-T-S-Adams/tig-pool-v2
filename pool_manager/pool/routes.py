@@ -165,9 +165,94 @@ def _create_fleet(wallet: str, label: str, worker_type: str, cpu_count: int = 0,
 
 def _fleet_install_command(token: str, worker_type: str, machine_index: str = "001") -> str:
     return (
-        f"curl -fsSL {_POOL_PUBLIC_URL}/static/fleet-install.sh | bash -s -- "
+        f"curl -fsSL \"{_POOL_PUBLIC_URL}/static/fleet-install.sh?cachebust=$(date +%s)\" | bash -s -- "
         f"--fleet-token {token} --worker-type {worker_type} --machine-index {machine_index}"
     )
+
+
+def _fleet_services(worker_type: str) -> str:
+    return (
+        "slave vector_search hypergraph neuralnet_optimizer"
+        if worker_type == "gpu"
+        else "slave satisfiability vehicle_routing knapsack job_scheduling energy_arbitrage"
+    )
+
+
+def _fleet_linux_install_script(token: str, worker_type: str) -> str:
+    services = _fleet_services(worker_type)
+    return f"""#!/usr/bin/env bash
+set -euxo pipefail
+
+if [ "$(id -u)" -eq 0 ]; then
+  SUDO=""
+else
+  SUDO="sudo"
+fi
+
+$SUDO apt-get update
+$SUDO apt-get install -y curl git ca-certificates python3 docker.io docker-compose-v2
+$SUDO systemctl enable --now docker
+
+if [ ! -d "$HOME/tig-monorepo" ]; then
+  git clone https://github.com/tig-foundation/tig-monorepo.git "$HOME/tig-monorepo"
+fi
+
+cd "$HOME/tig-monorepo"
+git pull || true
+
+cd "$HOME/tig-monorepo/tig-benchmarker"
+
+curl -fsSL "{_POOL_PUBLIC_URL}/static/fleet-install.sh?cachebust=$(date +%s)" | bash -s -- \\
+  --fleet-token "{token}" \\
+  --worker-type {worker_type} \\
+  --machine-index "$(hostname)"
+
+$SUDO docker compose -f slave.yml up -d --force-recreate {services}
+"""
+
+
+def _fleet_aws_user_data_script(token: str, worker_type: str) -> str:
+    services = _fleet_services(worker_type)
+    return f"""#!/bin/bash
+set -euxo pipefail
+exec > >(tee -a /var/log/innopool-userdata.log) 2>&1
+
+apt-get update
+apt-get install -y curl git ca-certificates python3 docker.io docker-compose-v2
+
+systemctl enable --now docker
+
+if [ ! -d /opt/tig-monorepo ]; then
+  git clone https://github.com/tig-foundation/tig-monorepo.git /opt/tig-monorepo
+fi
+
+cd /opt/tig-monorepo
+git pull || true
+
+cd /opt/tig-monorepo/tig-benchmarker
+
+IMDS_TOKEN="$(curl -s -X PUT http://169.254.169.254/latest/api/token \\
+  -H 'X-aws-ec2-metadata-token-ttl-seconds: 21600' || true)"
+
+INSTANCE_ID="$(curl -s -H "X-aws-ec2-metadata-token: $IMDS_TOKEN" \\
+  http://169.254.169.254/latest/meta-data/instance-id || hostname)"
+
+curl -fsSL "{_POOL_PUBLIC_URL}/static/fleet-install.sh?cachebust=$(date +%s)" | bash -s -- \\
+  --fleet-token "{token}" \\
+  --worker-type {worker_type} \\
+  --machine-index "$INSTANCE_ID"
+
+docker compose -f slave.yml up -d --force-recreate {services}
+"""
+
+
+def _fleet_onboarding_payload(token: str, worker_type: str) -> dict:
+    return {
+        "quick_install_command": _fleet_install_command(token, worker_type, "$(hostname)"),
+        "linux_install_script": _fleet_linux_install_script(token, worker_type),
+        "aws_user_data": _fleet_aws_user_data_script(token, worker_type),
+        "services": _fleet_services(worker_type),
+    }
 
 
 # ── public stats ───────────────────────────────────────────────────────────────
@@ -414,10 +499,13 @@ def register_member(req: RegisterRequest):
             (wallet, now_ms, code),
         )
         install = {}
+        onboarding = {}
         if cpu_count:
             install["cpu"] = _fleet_install_command(fleet["fleet_token"], "cpu", "001")
+            onboarding["cpu"] = _fleet_onboarding_payload(fleet["fleet_token"], "cpu")
         if gpu_count:
             install["gpu"] = _fleet_install_command(fleet["fleet_token"], "gpu", "001")
+            onboarding["gpu"] = _fleet_onboarding_payload(fleet["fleet_token"], "gpu")
         return {
             "success": True,
             "wallet_address": wallet,
@@ -430,6 +518,7 @@ def register_member(req: RegisterRequest):
                 "cpu_count": cpu_count,
                 "gpu_count": gpu_count,
                 "install_commands": install,
+                "onboarding": onboarding,
                 "config_url_example": f"{_POOL_PUBLIC_URL}/api/fleet/config?token={fleet['fleet_token']}&worker_type=cpu&machine_index=001",
             },
             "slaves": {},
@@ -702,11 +791,14 @@ def create_fleet(req: CreateFleetRequest, x_admin_secret: str = Header(None)):
         req.notes,
     )
     install = {}
+    onboarding = {}
     if req.cpu_count:
         install["cpu"] = _fleet_install_command(fleet["fleet_token"], "cpu", "001")
+        onboarding["cpu"] = _fleet_onboarding_payload(fleet["fleet_token"], "cpu")
     if req.gpu_count:
         install["gpu"] = _fleet_install_command(fleet["fleet_token"], "gpu", "001")
-    return {**fleet, "install_commands": install}
+        onboarding["gpu"] = _fleet_onboarding_payload(fleet["fleet_token"], "gpu")
+    return {**fleet, "install_commands": install, "onboarding": onboarding}
 
 
 @router.get("/admin/fleets")

@@ -147,8 +147,9 @@
         <div id="fleet-block" class="hidden" style="margin-bottom:28px;">
           <div style="padding:14px 18px;border-left:3px solid var(--green);background:rgba(34,211,165,0.06);border-radius:0 8px 8px 0;font-size:13px;color:var(--muted2);line-height:1.7;margin-bottom:16px;">
             <strong style="color:var(--text);">Fleet registration created.</strong>
-            Run the install command on each machine. Change <code>--machine-index</code> for every machine
-            (for example <code>001</code>, <code>002</code>, or use hostnames).
+            Use the AWS User Data script for EC2 launch templates, or the Linux/home script on physical
+            machines and normal VPS hosts. Each machine gets its own slave name while rewards stay under
+            the same wallet.
           </div>
           <div id="fleet-install-blocks"></div>
         </div>
@@ -291,14 +292,52 @@ git switch main</div>
           pillsEl.innerHTML = `<span style="padding:5px 14px;border-radius:20px;background:rgba(34,211,165,0.12);border:1px solid rgba(34,211,165,0.3);color:#86efac;font-size:13px;font-family:monospace;">${fleet.fleet_id}</span>`;
           const blocks = document.getElementById("fleet-install-blocks");
           blocks.innerHTML = "";
-          for (const [kind, cmd] of Object.entries(fleet.install_commands || {})) {
-            const id = `fleet-${kind}-install-text`;
-            blocks.innerHTML += `
-              <div style="font-weight:600;font-size:15px;margin:14px 0 8px;">${kind.toUpperCase()} fleet install command</div>
-              <div class="code-block" style="position:relative;margin-bottom:12px;">
-                <button class="code-copy" onclick="copyBlock('${id}', this)">Copy</button>
-                <span id="${id}">${cmd}</span>
-              </div>`;
+
+          function appendFleetCodeBlock(title, id, text, note = "") {
+            const titleEl = document.createElement("div");
+            titleEl.style.cssText = "font-weight:600;font-size:15px;margin:16px 0 8px;";
+            titleEl.textContent = title;
+            blocks.appendChild(titleEl);
+            if (note) {
+              const noteEl = document.createElement("p");
+              noteEl.style.cssText = "font-size:13px;color:var(--muted);margin:0 0 8px;line-height:1.6;";
+              noteEl.textContent = note;
+              blocks.appendChild(noteEl);
+            }
+            const codeEl = document.createElement("div");
+            codeEl.className = "code-block";
+            codeEl.style.cssText = "position:relative;margin-bottom:12px;white-space:pre-wrap;";
+            codeEl.innerHTML = `<button class="code-copy" onclick="copyBlock('${id}', this)">Copy</button><span id="${id}"></span>`;
+            blocks.appendChild(codeEl);
+            document.getElementById(id).textContent = text;
+          }
+
+          for (const [kind, payload] of Object.entries(fleet.onboarding || {})) {
+            const label = kind.toUpperCase();
+            appendFleetCodeBlock(
+              `${label} AWS EC2 User Data`,
+              `fleet-${kind}-aws-user-data`,
+              payload.aws_user_data,
+              "Paste this into Advanced details -> User data when launching an Ubuntu 24.04 EC2 instance."
+            );
+            appendFleetCodeBlock(
+              `${label} Linux / home PC / VPS install`,
+              `fleet-${kind}-linux-install`,
+              payload.linux_install_script,
+              "Run this once on each Ubuntu/Debian machine. It uses the hostname as the machine index."
+            );
+            appendFleetCodeBlock(
+              `${label} quick command for an existing tig-benchmarker folder`,
+              `fleet-${kind}-quick-install`,
+              payload.quick_install_command,
+              "Use this only if Docker and tig-monorepo are already installed and you are inside tig-benchmarker."
+            );
+          }
+
+          if (!Object.keys(fleet.onboarding || {}).length) {
+            for (const [kind, cmd] of Object.entries(fleet.install_commands || {})) {
+              appendFleetCodeBlock(`${kind.toUpperCase()} fleet install command`, `fleet-${kind}-install-text`, cmd);
+            }
           }
           document.getElementById("fleet-block").classList.remove("hidden");
           document.getElementById("form-card").classList.add("hidden");
