@@ -303,6 +303,8 @@ def register_member(req: RegisterRequest):
 
 _POOL_SERVER_IP  = os.environ.get("POOL_SERVER_IP", "YOUR_POOL_SERVER_IP")
 _MASTER_PORT     = os.environ.get("MASTER_PORT", "5115")
+_PUBLIC_MASTER_HOST = os.environ.get("PUBLIC_MASTER_HOST") or _POOL_SERVER_IP
+_PUBLIC_MASTER_PORT = os.environ.get("PUBLIC_MASTER_PORT") or _MASTER_PORT
 _POOL_NAME       = os.environ.get("POOL_NAME", "InnoPool")
 _TIG_VERSION     = os.environ.get("TIG_VERSION", "0.0.6")
 _POOL_PUBLIC_URL = os.environ.get("POOL_PUBLIC_URL", "https://www.innopool.co.uk").rstrip("/")
@@ -315,8 +317,8 @@ def _build_slave_config(slave_name: str, num_workers: int = 8) -> str:
 
 VERSION={_TIG_VERSION}
 SLAVE_NAME={slave_name}
-MASTER_IP={_POOL_SERVER_IP}
-MASTER_PORT={_MASTER_PORT}
+MASTER_IP={_PUBLIC_MASTER_HOST}
+MASTER_PORT={_PUBLIC_MASTER_PORT}
 # Adjust NUM_WORKERS for your machine.
 # CPU: start around your available CPU threads, then reduce if the machine becomes unstable.
 # GPU: normally use 1 worker per GPU.
@@ -340,8 +342,8 @@ def _build_slave_setup_command(slave_name: str, num_workers: int = 8) -> str:
 cat > .env <<EOF
 VERSION={_TIG_VERSION}
 SLAVE_NAME={slave_name}
-MASTER_IP={_POOL_SERVER_IP}
-MASTER_PORT={_MASTER_PORT}
+MASTER_IP={_PUBLIC_MASTER_HOST}
+MASTER_PORT={_PUBLIC_MASTER_PORT}
 NUM_WORKERS={num_workers}
 ALGORITHMS_DIR=$(pwd)/algorithms
 RESULTS_DIR=$(pwd)/results

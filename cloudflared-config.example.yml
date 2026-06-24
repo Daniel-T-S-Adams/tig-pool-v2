@@ -1,0 +1,26 @@
+# Example /etc/cloudflared/config.yml for a hidden InnoPool origin.
+#
+# Create the tunnel in Cloudflare first, then replace the tunnel id and
+# credentials path. Run cloudflared on the VPS host, not inside Docker, so it
+# can reach the localhost-only ports bound by docker-compose.
+
+tunnel: innopool-origin
+credentials-file: /etc/cloudflared/innopool-origin.json
+
+ingress:
+  # Public pool website and pool manager API.
+  - hostname: innopool.co.uk
+    service: http://127.0.0.1:80
+  - hostname: www.innopool.co.uk
+    service: http://127.0.0.1:80
+
+  # Stock TIG slaves use plain HTTP from MASTER_IP/MASTER_PORT. Point generated
+  # miner configs at master.innopool.co.uk:80.
+  - hostname: master.innopool.co.uk
+    service: http://127.0.0.1:8081
+
+  # Protect this hostname with Cloudflare Access.
+  - hostname: operator.innopool.co.uk
+    service: http://127.0.0.1:8888
+
+  - service: http_status:404

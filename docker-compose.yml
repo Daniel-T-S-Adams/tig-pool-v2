@@ -35,10 +35,10 @@ services:
       - innopool
     ports:
       # Slave API — pool members (and test slaves) point MASTER_IP:MASTER_PORT here
-      - "${MASTER_PORT}:5115"
+      - "${BIND_ADDR:-0.0.0.0}:${MASTER_PORT}:5115"
       # ClientManager API — exposes /get-config, /update-config etc to localhost
       # so configure_innopool.py can reach it without going through nginx auth
-      - "3336:3336"
+      - "${BIND_ADDR:-0.0.0.0}:3336:3336"
     depends_on:
       db:
         condition: service_healthy
@@ -56,6 +56,8 @@ services:
       - POOL_FEE=${POOL_FEE}
       - POOL_NAME=${POOL_NAME}
       - POOL_SERVER_IP=${POOL_SERVER_IP}
+      - PUBLIC_MASTER_HOST=${PUBLIC_MASTER_HOST:-}
+      - PUBLIC_MASTER_PORT=${PUBLIC_MASTER_PORT:-}
       - POOL_PUBLIC_URL=${POOL_PUBLIC_URL:-https://www.innopool.co.uk}
       - MASTER_PORT=${MASTER_PORT}
       - ADMIN_SECRET=${ADMIN_SECRET}
@@ -82,7 +84,7 @@ services:
     networks:
       - innopool
     ports:
-      - "7777:80"
+      - "${BIND_ADDR:-0.0.0.0}:7777:80"
     expose:
       - 80
     depends_on:
@@ -98,8 +100,10 @@ services:
       - OPERATOR_USER=${OPERATOR_USER}
       - OPERATOR_PASSWORD=${OPERATOR_PASSWORD}
     ports:
-      - "${WEB_PORT}:80"
-      - "${OPERATOR_PORT}:8888"
+      - "${BIND_ADDR:-0.0.0.0}:${WEB_PORT}:80"
+      - "${BIND_ADDR:-0.0.0.0}:${OPERATOR_PORT}:8888"
+      # Master slave API through nginx, for Cloudflare Tunnel hostname routing.
+      - "${BIND_ADDR:-0.0.0.0}:${MASTER_TUNNEL_PORT:-8081}:5115"
     networks:
       - innopool
     depends_on:
