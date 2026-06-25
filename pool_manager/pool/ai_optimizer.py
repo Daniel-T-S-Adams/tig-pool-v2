@@ -422,11 +422,14 @@ def _ensure_evidence_metric(recommendation: dict, metric: str, value: int, inter
 
 
 def _enforce_recommendation_consistency(recommendation: dict, prompt_context: dict):
-    """Correct AI text that contradicts deterministic stale root/proof totals."""
+    """Correct AI text that contradicts deterministic derived facts."""
     derived = prompt_context.get("derived_pool_facts") or {}
     stale_totals = derived.get("stale_totals") or {}
+    stranded = derived.get("stranded_classification") or {}
     stale_roots = int(stale_totals.get("roots") or 0)
     stale_proofs = int(stale_totals.get("proofs") or 0)
+    unserved_count = len(stranded.get("unserved") or [])
+    capacity_waiting_count = len(stranded.get("capacity_waiting") or [])
     warnings = []
 
     _ensure_evidence_metric(
@@ -441,6 +444,18 @@ def _enforce_recommendation_consistency(recommendation: dict, prompt_context: di
         stale_proofs,
         f"Deterministic derived stale proof total is {stale_proofs}.",
     )
+    _ensure_evidence_metric(
+        recommendation,
+        "deterministic_unserved_stranded",
+        unserved_count,
+        f"Deterministic unserved stranded benchmark count is {unserved_count}.",
+    )
+    _ensure_evidence_metric(
+        recommendation,
+        "deterministic_capacity_waiting",
+        capacity_waiting_count,
+        f"Deterministic capacity-waiting benchmark count is {capacity_waiting_count}.",
+    )
 
     summary = str(recommendation.get("summary") or "")
     if stale_proofs > 0 and "no stale proofs" in summary.lower():
@@ -453,6 +468,41 @@ def _enforce_recommendation_consistency(recommendation: dict, prompt_context: di
             "reason": "model_claimed_no_stale_proofs_but_derived_total_is_positive",
             "derived_stale_proofs": stale_proofs,
         })
+    if unserved_count == 0 and capacity_waiting_count > 0 and "blocked by stranded" in summary.lower():
+        recommendation["summary"] = (
+            summary
+            .replace(
+                "Autopilot is blocked by stranded benchmarks at drain target.",
+                f"Deterministic classification shows 0 unserved stranded benchmarks and {capacity_waiting_count} benchmarks waiting behind saturated capacity.",
+            )
+            .replace(
+                "autopilot is blocked by stranded benchmarks at drain target.",
+                f"deterministic classification shows 0 unserved stranded benchmarks and {capacity_waiting_count} benchmarks waiting behind saturated capacity.",
+            )
+        )
+        warnings.append({
+            "field": "summary",
+            "reason": "model_called_capacity_waiting_stranded_blocked",
+            "unserved": unserved_count,
+            "capacity_waiting": capacity_waiting_count,
+        })
+
+    for action in recommendation.get("blocked_actions") or []:
+        if not isinstance(action, dict):
+            continue
+        reason = str(action.get("reason") or "")
+        if unserved_count == 0 and capacity_waiting_count > 0 and "stranded benchmarks" in reason.lower():
+            action["reason"] = (
+                f"Not recommended from current evidence: deterministic classification shows "
+                f"0 unserved stranded benchmarks and {capacity_waiting_count} benchmarks "
+                "waiting behind saturated capacity."
+            )
+            warnings.append({
+                "field": f"blocked_actions.{action.get('key')}",
+                "reason": "model_called_capacity_waiting_stranded_blocked",
+                "unserved": unserved_count,
+                "capacity_waiting": capacity_waiting_count,
+            })
 
     for item in recommendation.get("evidence") or []:
         if not isinstance(item, dict):
@@ -474,6 +524,21 @@ def _enforce_recommendation_consistency(recommendation: dict, prompt_context: di
             item["value"] = stale_roots
         if metric == "stale_proofs":
             item["value"] = stale_proofs
+        if metric in {"autopilot_blocked", "stranded_benchmarks"} and unserved_count == 0 and capacity_waiting_count > 0:
+            item["value"] = {
+                "unserved": unserved_count,
+                "capacity_waiting": capacity_waiting_count,
+            }
+            item["interpretation"] = (
+                f"Deterministic classification shows no unserved stranded benchmarks; "
+                f"{capacity_waiting_count} benchmarks are waiting behind saturated capacity."
+            )
+            warnings.append({
+                "field": f"evidence.{metric}",
+                "reason": "model_called_capacity_waiting_stranded_blocked",
+                "unserved": unserved_count,
+                "capacity_waiting": capacity_waiting_count,
+            })
 
     if warnings:
         recommendation["deterministic_consistency_warnings"] = warnings
