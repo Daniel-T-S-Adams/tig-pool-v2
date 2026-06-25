@@ -36,6 +36,9 @@ MAX_CPU_SLOTS = int(os.environ.get("AUTOPILOT_MAX_CPU_SLOTS", "64"))
 MAX_GPU_SLOTS_PER_TYPE = int(os.environ.get("AUTOPILOT_MAX_GPU_SLOTS_PER_TYPE", "6"))
 PRODUCTIVE_IDLE_CPU_SCALE_MIN = int(os.environ.get("AUTOPILOT_PRODUCTIVE_IDLE_CPU_SCALE_MIN", "5"))
 PRODUCTIVE_IDLE_CPU_PER_SLOT = int(os.environ.get("AUTOPILOT_PRODUCTIVE_IDLE_CPU_PER_SLOT", "4"))
+PRODUCTIVE_IDLE_STALE_ROOT_TOLERANCE = int(
+    os.environ.get("AUTOPILOT_PRODUCTIVE_IDLE_STALE_ROOT_TOLERANCE", "5")
+)
 STRANDED_BENCHMARK_MS = int(os.environ.get("AUTOPILOT_STRANDED_BENCHMARK_MS", str(30 * 60 * 1000)))
 STRANDED_DOWNSCALE_STEP = int(os.environ.get("AUTOPILOT_STRANDED_DOWNSCALE_STEP", "2"))
 STRANDED_BUFFER_BENCHMARKS = int(os.environ.get("AUTOPILOT_STRANDED_BUFFER_BENCHMARKS", "2"))
@@ -660,6 +663,11 @@ def _recommendations(cfg: dict, slaves: list[dict], challenges: list[dict], slot
                     "Slot pressure is inferred from active slaves, idle slots, stale unfinished work, "
                     f"and {len(productive_idle_cpu)} productive idle CPU slaves."
                 ),
+                "signals": {
+                    "productive_idle_cpu": len(productive_idle_cpu),
+                    "stale_roots": stale_roots,
+                    "stale_proofs": stale_proofs,
+                },
                 "apply_now": False,
             })
 
@@ -849,6 +857,19 @@ def _plan_config_change(report: dict, cfg: dict, clean_windows: int) -> dict:
     if report.get("master_config_error"):
         decision["reason"] = f"master_config_unavailable: {report['master_config_error']}"
         return decision
+    recommendations = {r.get("key"): r for r in report.get("recommendations") or []}
+    slots_rec = recommendations.get("resource_slots.slots") or {}
+    slot_signals = slots_rec.get("signals") or {}
+    productive_idle_cpu = int(slot_signals.get("productive_idle_cpu") or 0)
+    stale_roots = int(slot_signals.get("stale_roots") or health.get("stale_roots") or 0)
+    stale_proofs = int(slot_signals.get("stale_proofs") or health.get("stale_proofs") or 0)
+    productive_idle_cpu_scale = (
+        productive_idle_cpu >= PRODUCTIVE_IDLE_CPU_SCALE_MIN
+        and stale_roots <= PRODUCTIVE_IDLE_STALE_ROOT_TOLERANCE
+        and stale_proofs == 0
+        and not health.get("active_unregistered")
+        and not health.get("unserved_stranded_benchmarks")
+    )
     if health.get("unserved_stranded_benchmarks"):
         current = int(cfg.get("max_concurrent_benchmarks") or 0)
         active_jobs = _active_unfinished_jobs()
@@ -885,7 +906,7 @@ def _plan_config_change(report: dict, cfg: dict, clean_windows: int) -> dict:
         else:
             decision["reason"] = "stranded_benchmarks_at_drain_target"
         return decision
-    if not health["healthy"]:
+    if not health["healthy"] and not productive_idle_cpu_scale:
         decision["reason"] = "blocked_by_stale_or_unregistered_work"
         return decision
     if clean_windows < APPLY_MIN_CLEAN_WINDOWS:
@@ -894,9 +915,7 @@ def _plan_config_change(report: dict, cfg: dict, clean_windows: int) -> dict:
 
     new_cfg = json.loads(json.dumps(cfg))
     changes: dict[str, dict] = {}
-    recommendations = {r.get("key"): r for r in report.get("recommendations") or []}
 
-    slots_rec = recommendations.get("resource_slots.slots")
     current_slots = ((new_cfg.get("resource_slots") or {}).get("slots") or {})
     if slots_rec and current_slots:
         proposed_slots = slots_rec.get("proposed") or {}
