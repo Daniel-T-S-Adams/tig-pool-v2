@@ -15,7 +15,7 @@ from decimal import Decimal
 from fastapi import APIRouter, HTTPException, Header
 from pydantic import BaseModel
 from . import database as db
-from . import autopilot
+from . import autopilot, ai_optimizer
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -1101,6 +1101,20 @@ def autopilot_report(x_admin_secret: str = Header(None)):
     """Read-only scheduler report showing current pressure and would-change recommendations."""
     _check_admin(x_admin_secret)
     return autopilot.build_report()
+
+
+@router.post("/admin/ai-optimizer/run")
+def ai_optimizer_run(x_admin_secret: str = Header(None)):
+    """Run one read-only AI optimizer recommendation cycle."""
+    _check_admin(x_admin_secret)
+    return ai_optimizer.run_once(force=True)
+
+
+@router.get("/admin/ai-optimizer/decisions")
+def ai_optimizer_decisions(limit: int = 10, x_admin_secret: str = Header(None)):
+    """List recent AI optimizer recommendations."""
+    _check_admin(x_admin_secret)
+    return ai_optimizer.latest(limit=limit)
 
 
 @router.post("/admin/new-round")

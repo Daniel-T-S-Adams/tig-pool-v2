@@ -14,6 +14,8 @@ Usage:
   python3 admin.py clear-slave <slave>       # unassign unfinished batches
   python3 admin.py member-health <slave>     # show slave assignment health
   python3 admin.py autopilot [--json]        # read-only scheduler report
+  python3 admin.py ai-optimizer [--json]     # run read-only DeepSeek analyst
+  python3 admin.py ai-decisions [N]          # show recent AI recommendations
   python3 admin.py coinbase                  # show last 10 coinbase updates
 """
 import json
@@ -317,6 +319,53 @@ def cmd_autopilot(args):
         print(f"  - {rec.get('key')}: {rec.get('current')} -> {rec.get('proposed')}")
         print(f"    {rec.get('reason')}")
 
+def cmd_ai_optimizer(args):
+    result = _post("/admin/ai-optimizer/run", {})
+    if "--json" in args:
+        print(json.dumps(result, indent=2, sort_keys=True))
+        return
+    if result.get("status") != "ok":
+        print(f"AI optimizer failed/skipped: {result.get('error') or result.get('reason')}")
+        return
+    rec = result.get("recommendation") or {}
+    print("AI optimizer recommendation (read-only)")
+    print(f"  category  : {rec.get('decision_category')}")
+    print(f"  confidence: {rec.get('confidence')}")
+    print(f"  approval  : {'yes' if rec.get('requires_human_approval') else 'no'}")
+    print(f"  summary   : {rec.get('summary')}")
+    actions = rec.get("recommended_actions") or []
+    print("\nRecommended actions:")
+    if not actions:
+        print("  No actions recommended.")
+    for action in actions:
+        print(
+            f"  - {action.get('action_type')} {action.get('key', '')}: "
+            f"{action.get('current')} -> {action.get('proposed')}"
+        )
+        if action.get("reason"):
+            print(f"    {action.get('reason')}")
+        if action.get("rollback_condition"):
+            print(f"    rollback: {action.get('rollback_condition')}")
+
+def cmd_ai_decisions(args):
+    limit = int(args[0]) if args and args[0].isdigit() else 10
+    rows = _get(f"/admin/ai-optimizer/decisions?limit={limit}")
+    if not rows:
+        print("No AI optimizer decisions yet.")
+        return
+    print(f"{'ID':>4} {'STATUS':<8} {'CATEGORY':<24} {'CONF':>5} SUMMARY")
+    print("-" * 100)
+    for row in rows:
+        conf = row.get("confidence")
+        conf_s = f"{float(conf):.2f}" if conf is not None else "-"
+        print(
+            f"{int(row.get('id') or 0):>4} "
+            f"{str(row.get('status') or ''):<8} "
+            f"{str(row.get('decision_category') or ''):<24} "
+            f"{conf_s:>5} "
+            f"{row.get('summary') or row.get('error') or ''}"
+        )
+
 def cmd_new_round(_):
     """
     Run this AFTER you have claimed the round on TIG.
@@ -342,6 +391,8 @@ COMMANDS = {
     "clear-slave": cmd_clear_slave,
     "member-health": cmd_member_health,
     "autopilot": cmd_autopilot,
+    "ai-optimizer": cmd_ai_optimizer,
+    "ai-decisions": cmd_ai_decisions,
     "coinbase":  cmd_coinbase,
     "new-round": cmd_new_round,
 }

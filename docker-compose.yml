@@ -82,6 +82,14 @@ services:
       - AUTOPILOT_STALE_ROOT_CLEANUP_MIN_AGE_MS=${AUTOPILOT_STALE_ROOT_CLEANUP_MIN_AGE_MS:-3600000}
       - AUTOPILOT_STALE_PROOF_CLEANUP_MIN_AGE_MS=${AUTOPILOT_STALE_PROOF_CLEANUP_MIN_AGE_MS:-1200000}
       - AUTOPILOT_STALE_CLEANUP_MAX_ROWS=${AUTOPILOT_STALE_CLEANUP_MAX_ROWS:-50}
+      - AI_OPTIMIZER_MODE=${AI_OPTIMIZER_MODE:-off}
+      - AI_OPTIMIZER_INTERVAL_S=${AI_OPTIMIZER_INTERVAL_S:-600}
+      - AI_CONTEXT_PATH=${AI_CONTEXT_PATH:-/app/docs/ai_pool_operator_context.md}
+      - DEEPSEEK_API_KEY=${DEEPSEEK_API_KEY:-}
+      - DEEPSEEK_MODEL=${DEEPSEEK_MODEL:-deepseek-chat}
+      - DEEPSEEK_API_URL=${DEEPSEEK_API_URL:-https://api.deepseek.com/chat/completions}
+    volumes:
+      - ./docs:/app/docs:ro
     networks:
       - innopool
     expose:
