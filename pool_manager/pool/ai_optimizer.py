@@ -259,6 +259,7 @@ def _recommendation_signals(report: dict) -> list[dict]:
             "current": current,
             "proposed": rec.get("proposed"),
             "reason": rec.get("reason"),
+            "signals": rec.get("signals") or {},
         }
         if key == "proof_queue" and isinstance(current, dict):
             signal["stale_proofs"] = int(current.get("stale_proofs") or 0)
@@ -308,6 +309,39 @@ def _derived_pool_facts(report: dict) -> dict:
         sum(int(signal.get("stale_proofs") or 0) for signal in recommendation_signals),
     )
 
+    safe_capacity_upscale = []
+    for signal in recommendation_signals:
+        key = signal.get("key")
+        current = signal.get("current")
+        proposed = signal.get("proposed")
+        if key == "max_concurrent_benchmarks":
+            try:
+                if int(proposed) > int(current):
+                    safe_capacity_upscale.append({
+                        "key": key,
+                        "current": current,
+                        "proposed": proposed,
+                    })
+            except (TypeError, ValueError):
+                pass
+        elif key == "adaptive_slave_caps" and isinstance(current, dict) and isinstance(proposed, dict):
+            cap_changes = {
+                cap_key: {"current": current.get(cap_key), "proposed": proposed.get(cap_key)}
+                for cap_key in ("cpu_max_cap", "gpu_max_cap")
+                if int(proposed.get(cap_key) or 0) > int(current.get(cap_key) or 0)
+            }
+            if cap_changes:
+                safe_capacity_upscale.append({
+                    "key": key,
+                    "changes": cap_changes,
+                })
+
+    stale_roots_tolerated_for_capacity = (
+        stale_roots <= autopilot.PRODUCTIVE_IDLE_STALE_ROOT_TOLERANCE
+        and stale_proofs == 0
+        and not (report.get("stranded_classification") or {}).get("unserved")
+    )
+
     return {
         "slot_state_counts": _slot_state_counts(report),
         "active_gpu_slaves": gpu_slaves,
@@ -319,6 +353,9 @@ def _derived_pool_facts(report: dict) -> dict:
             "combined": stale_roots + stale_proofs,
         },
         "autopilot_recommendation_signals": recommendation_signals,
+        "safe_capacity_upscale": safe_capacity_upscale,
+        "stale_roots_tolerated_for_capacity_upscale": stale_roots_tolerated_for_capacity,
+        "productive_idle_stale_root_tolerance": autopilot.PRODUCTIVE_IDLE_STALE_ROOT_TOLERANCE,
         "interpretation_hints": [
             "Do not describe a GPU slave with completed_recent >= 10 and stale_total == 0 as low throughput.",
             "A C3 GPU dispatcher with live_roots > 0 and completed_recent >= 10 is healthy unless stale work exists.",
@@ -326,6 +363,7 @@ def _derived_pool_facts(report: dict) -> dict:
             "If stale_totals.proofs is greater than zero, never say there are no stale proofs.",
             "If autopilot_recommendation_signals includes proof_queue, mention it as a proof queue signal.",
             "If stranded_classification.capacity_waiting is non-empty and unserved is empty, describe it as queued behind saturated capacity, not broken.",
+            "If safe_capacity_upscale is non-empty and stale_roots_tolerated_for_capacity_upscale is true, do not say autopilot is blocked by stale work.",
             "Use exact values from derived_pool_facts when summarizing throughput.",
         ],
     }
@@ -430,6 +468,8 @@ def _enforce_recommendation_consistency(recommendation: dict, prompt_context: di
     stale_proofs = int(stale_totals.get("proofs") or 0)
     unserved_count = len(stranded.get("unserved") or [])
     capacity_waiting_count = len(stranded.get("capacity_waiting") or [])
+    safe_capacity_upscale = derived.get("safe_capacity_upscale") or []
+    stale_tolerated_for_capacity = bool(derived.get("stale_roots_tolerated_for_capacity_upscale"))
     warnings = []
 
     _ensure_evidence_metric(
@@ -456,6 +496,16 @@ def _enforce_recommendation_consistency(recommendation: dict, prompt_context: di
         capacity_waiting_count,
         f"Deterministic capacity-waiting benchmark count is {capacity_waiting_count}.",
     )
+    if safe_capacity_upscale:
+        _ensure_evidence_metric(
+            recommendation,
+            "deterministic_safe_capacity_upscale",
+            len(safe_capacity_upscale),
+            (
+                "Deterministic autopilot has safe capacity-upscale recommendations. "
+                f"Stale roots tolerated for capacity upscale: {stale_tolerated_for_capacity}."
+            ),
+        )
 
     summary = str(recommendation.get("summary") or "")
     if stale_proofs > 0 and "no stale proofs" in summary.lower():
@@ -486,6 +536,25 @@ def _enforce_recommendation_consistency(recommendation: dict, prompt_context: di
             "unserved": unserved_count,
             "capacity_waiting": capacity_waiting_count,
         })
+    if safe_capacity_upscale and stale_tolerated_for_capacity and "blocked by stale work" in summary.lower():
+        recommendation["summary"] = (
+            summary
+            .replace(
+                "Autopilot is blocked by stale work.",
+                "Deterministic autopilot is not blocked: stale roots are within the productive-capacity tolerance and there are no stale proofs or unserved stranded benchmarks.",
+            )
+            .replace(
+                "autopilot is blocked by stale work.",
+                "deterministic autopilot is not blocked: stale roots are within the productive-capacity tolerance and there are no stale proofs or unserved stranded benchmarks.",
+            )
+        )
+        warnings.append({
+            "field": "summary",
+            "reason": "model_called_tolerated_stale_roots_blocking",
+            "safe_capacity_upscale": safe_capacity_upscale,
+            "stale_roots": stale_roots,
+            "stale_proofs": stale_proofs,
+        })
 
     for action in recommendation.get("blocked_actions") or []:
         if not isinstance(action, dict):
@@ -502,6 +571,18 @@ def _enforce_recommendation_consistency(recommendation: dict, prompt_context: di
                 "reason": "model_called_capacity_waiting_stranded_blocked",
                 "unserved": unserved_count,
                 "capacity_waiting": capacity_waiting_count,
+            })
+        if safe_capacity_upscale and stale_tolerated_for_capacity and "stale work" in reason.lower():
+            action["reason"] = (
+                "Deterministic autopilot does not treat the current stale roots as blocking: "
+                "stale roots are within productive-capacity tolerance, stale proofs are zero, "
+                "and unserved stranded benchmarks are zero."
+            )
+            warnings.append({
+                "field": f"blocked_actions.{action.get('key')}",
+                "reason": "model_blocked_safe_upscale_due_to_tolerated_stale_roots",
+                "safe_capacity_upscale": safe_capacity_upscale,
+                "stale_roots": stale_roots,
             })
 
     for item in recommendation.get("evidence") or []:

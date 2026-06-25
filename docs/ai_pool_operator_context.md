@@ -305,9 +305,14 @@ Autopilot is expected to scale proportionally with fleet size:
   interpreted as desired downscale targets if the current live config is already
   higher.
 - If deterministic autopilot recommends increasing `max_concurrent_benchmarks`,
-  `resource_slots`, or challenge caps and there is no stale work or unserved
-  stranded benchmark, the AI should treat that as the primary safe action unless
-  it has direct contrary evidence.
+  `resource_slots`, `adaptive_slave_caps`, or challenge caps and there are no
+  stale proofs or unserved stranded benchmarks, the AI should treat that as the
+  primary safe action unless stale roots exceed the configured productive-capacity
+  tolerance.
+- A small stale root count is not automatically a block. If
+  `derived_pool_facts.stale_roots_tolerated_for_capacity_upscale` is true and
+  `derived_pool_facts.safe_capacity_upscale` is non-empty, do not say autopilot
+  is blocked by stale work.
 - `track_economics` should be used when evaluating whether a track is too coarse,
   too fragmented, too slow, or under-bundled. Do not recommend bundle changes
   from stale counts alone.
