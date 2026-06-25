@@ -547,31 +547,68 @@ def _enforce_recommendation_consistency(recommendation: dict, prompt_context: di
             "Deterministic autopilot reported stale active tracks that need investigation or drain handling.",
         )
 
+        deduped_stale_tracks = []
+        seen_stale_track_keys = set()
+        for signal in stale_track_signals:
+            key = signal.get("key")
+            if key in seen_stale_track_keys:
+                continue
+            seen_stale_track_keys.add(key)
+            deduped_stale_tracks.append(signal)
+
         actions = recommendation.setdefault("recommended_actions", [])
-        has_stale_action = any(
-            isinstance(action, dict)
-            and action.get("action_type") in {"investigate", "stale_track_attention"}
-            for action in actions
-        )
-        if not has_stale_action:
-            actions.append({
-                "action_type": "stale_track_attention",
-                "key": "challenge_health",
-                "current": stale_track_signals[:10],
-                "proposed": "investigate_or_wait_for_stale_cleanup",
-                "reason": "Active tracks have stale unfinished root work; broad capacity increases should wait, but stale-free challenge caps may still be raised selectively.",
-                "risk": "Ignoring stale roots can keep weak or stuck slaves holding work and distort capacity estimates.",
-                "rollback_condition": "If stale roots return to zero and workers remain idle, resume normal capacity scaling.",
-            })
-            if recommendation.get("decision_category") == "observe_only":
-                recommendation["decision_category"] = "investigate"
-            warnings.append({
-                "field": "recommended_actions",
-                "reason": "added_missing_stale_track_action",
-                "stale_track_count": len(stale_track_signals),
-            })
+        recommendation["recommended_actions"] = [
+            action for action in actions
+            if not (
+                isinstance(action, dict)
+                and action.get("key") == "challenge_health"
+                and action.get("action_type") in {"no_op", "investigate", "stale_track_attention"}
+            )
+        ]
+        recommendation["recommended_actions"].append({
+            "action_type": "stale_track_attention",
+            "key": "challenge_health",
+            "current": deduped_stale_tracks[:10],
+            "proposed": "investigate_or_wait_for_stale_cleanup",
+            "reason": "Active tracks have stale unfinished root work; broad capacity increases should wait, but stale-free challenge caps may still be raised selectively.",
+            "risk": "Ignoring stale roots can keep weak or stuck slaves holding work and distort capacity estimates.",
+            "rollback_condition": "If stale roots return to zero and workers remain idle, resume normal capacity scaling.",
+        })
+        if recommendation.get("decision_category") == "observe_only":
+            recommendation["decision_category"] = "investigate"
+        warnings.append({
+            "field": "recommended_actions",
+            "reason": "normalized_stale_track_action",
+            "stale_track_count": len(deduped_stale_tracks),
+        })
 
     summary = str(recommendation.get("summary") or "")
+    if stale_track_signals and summary:
+        summary = (
+            summary
+            .replace(
+                "Pool is stable",
+                "Pool has active capacity, but stale root pressure needs investigation",
+            )
+            .replace(
+                "pool is stable",
+                "pool has active capacity, but stale root pressure needs investigation",
+            )
+            .replace(
+                "No safe config change is recommended now.",
+                "No broad capacity change is recommended until stale tracks clear; stale-track investigation or cleanup is recommended.",
+            )
+            .replace(
+                "no safe config change is recommended now.",
+                "no broad capacity change is recommended until stale tracks clear; stale-track investigation or cleanup is recommended.",
+            )
+        )
+        recommendation["summary"] = summary
+        warnings.append({
+            "field": "summary",
+            "reason": "corrected_stale_track_observe_only_wording",
+            "stale_track_count": len(stale_track_signals),
+        })
     if stale_proofs > 0 and "no stale proofs" in summary.lower():
         recommendation["summary"] = (
             summary.rstrip(".")
