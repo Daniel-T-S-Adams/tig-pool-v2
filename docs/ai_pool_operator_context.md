@@ -180,7 +180,9 @@ Important config keys:
 - `max_concurrent_benchmarks`: global active benchmark/precommit budget. If this
   is too low, one class of work can starve another.
 - `per_challenge_max_benchmarks`: per-challenge benchmark caps, keyed by challenge
-  ID such as `c004`, `c005`, `c006`.
+  ID such as `c001`, `c002`, `c004`, `c008`. If these caps are too low, the
+  precommit manager can log `All algorithms are at their per-challenge max
+  concurrent benchmarks` even while slaves and resource slots are idle.
 - `resource_slots`: active slot limits for CPU and GPU challenge families.
   Example slot types are `cpu`, `hypergraph`, `vector_search`, and
   `neuralnet_optimizer`.
@@ -293,6 +295,9 @@ Autopilot is expected to scale proportionally with fleet size:
   consume the whole global benchmark cap.
 - `c004`, `c005`, and `c006` caps should rise with GPU slot capacity when GPU
   workers are active.
+- CPU challenge caps such as `c001`, `c002`, `c003`, `c007`, and `c008` should
+  also rise with CPU slot capacity. Otherwise `max_concurrent_benchmarks` can be
+  high enough while precommit creation remains blocked by per-challenge caps.
 - Minor stale roots may be tolerated for CPU scale-up when there are no stale
   proofs, no unregistered active public slaves, and no truly unserved stranded
   benchmarks.

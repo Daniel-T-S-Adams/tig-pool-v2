@@ -39,6 +39,8 @@ SLOT_UP_STEP = int(os.environ.get("AUTOPILOT_SLOT_UP_STEP", str(SLOT_STEP)))
 SLOT_DOWN_STEP = int(os.environ.get("AUTOPILOT_SLOT_DOWN_STEP", str(SLOT_STEP)))
 MAX_CPU_SLOTS = int(os.environ.get("AUTOPILOT_MAX_CPU_SLOTS", "64"))
 MAX_GPU_SLOTS_PER_TYPE = int(os.environ.get("AUTOPILOT_MAX_GPU_SLOTS_PER_TYPE", "6"))
+MAX_CPU_CHALLENGE_BENCHMARKS = int(os.environ.get("AUTOPILOT_MAX_CPU_CHALLENGE_BENCHMARKS", "16"))
+MAX_GPU_CHALLENGE_BENCHMARKS = int(os.environ.get("AUTOPILOT_MAX_GPU_CHALLENGE_BENCHMARKS", "12"))
 MAX_CPU_SLAVE_CAP = int(os.environ.get("AUTOPILOT_MAX_CPU_SLAVE_CAP", "256"))
 MAX_GPU_SLAVE_CAP = int(os.environ.get("AUTOPILOT_MAX_GPU_SLAVE_CAP", "24"))
 MIN_CPU_SLAVE_CAP = int(os.environ.get("AUTOPILOT_MIN_CPU_SLAVE_CAP", "4"))
@@ -876,15 +878,49 @@ def _target_max_concurrent_benchmarks(capacity: dict, proposed_slots: dict) -> i
     return _clamp(cpu_slot_total + gpu_slot_total + buffer, MIN_MAX_BENCHMARKS, MAX_MAX_BENCHMARKS)
 
 
-def _target_gpu_challenge_caps(cfg: dict, capacity: dict, proposed_slots: dict) -> dict:
+def _challenge_ids_by_profile(cfg: dict) -> tuple[list[str], list[str]]:
+    cpu_ids = []
+    gpu_ids = []
+    for algo in cfg.get("algo_selection") or []:
+        challenge_id = str(algo.get("algorithm_id") or "").split("_")[0]
+        if not challenge_id:
+            continue
+        if challenge_id in {"c004", "c005", "c006"}:
+            if challenge_id not in gpu_ids:
+                gpu_ids.append(challenge_id)
+        elif challenge_id not in cpu_ids:
+            cpu_ids.append(challenge_id)
+    return cpu_ids, gpu_ids
+
+
+def _target_per_challenge_caps(cfg: dict, capacity: dict, proposed_slots: dict) -> dict:
     current_per = cfg.get("per_challenge_max_benchmarks", {}) or {}
     proposed = dict(current_per)
+    cpu_ids, _gpu_ids = _challenge_ids_by_profile(cfg)
+    if capacity["active_cpu"] and cpu_ids:
+        cpu_slots = int(proposed_slots.get(CPU_SLOT_TYPE, 0) or 0)
+        per_cpu_target = max(1, math.ceil(cpu_slots / max(1, len(cpu_ids))))
+        for challenge_id in cpu_ids:
+            current = int(current_per.get(challenge_id, 1) or 1)
+            proposed[challenge_id] = min(
+                max(current, per_cpu_target),
+                MAX_CPU_CHALLENGE_BENCHMARKS,
+            )
     if capacity["active_gpu"]:
         current_c004 = int(current_per.get("c004", 1) or 1)
         proposed.update({
-            "c004": max(current_c004, int(proposed_slots.get("vector_search", 1) or 1)),
-            "c005": max(1, int(proposed_slots.get("hypergraph", 1) or 1)),
-            "c006": max(1, int(proposed_slots.get("neuralnet_optimizer", 1) or 1)),
+            "c004": min(
+                max(current_c004, int(proposed_slots.get("vector_search", 1) or 1)),
+                MAX_GPU_CHALLENGE_BENCHMARKS,
+            ),
+            "c005": min(
+                max(1, int(proposed_slots.get("hypergraph", 1) or 1)),
+                MAX_GPU_CHALLENGE_BENCHMARKS,
+            ),
+            "c006": min(
+                max(1, int(proposed_slots.get("neuralnet_optimizer", 1) or 1)),
+                MAX_GPU_CHALLENGE_BENCHMARKS,
+            ),
         })
     else:
         proposed.update({"c004": 1, "c005": 1, "c006": 1})
@@ -982,13 +1018,13 @@ def _recommendations(
         })
 
     current_per = cfg.get("per_challenge_max_benchmarks", {}) or {}
-    proposed_per = _target_gpu_challenge_caps(cfg, capacity, proposed_slots)
+    proposed_per = _target_per_challenge_caps(cfg, capacity, proposed_slots)
     if proposed_per != current_per:
         recommendations.append({
             "key": "per_challenge_max_benchmarks",
             "current": current_per,
             "proposed": proposed_per,
-            "reason": "GPU challenge benchmark caps should match currently available GPU slot capacity.",
+            "reason": "Per-challenge benchmark caps should scale with CPU/GPU slot capacity so precommit creation does not starve active workers.",
             "signals": capacity,
             "apply_now": False,
         })
@@ -1298,9 +1334,9 @@ def _plan_config_change(report: dict, cfg: dict, clean_windows: int) -> dict:
         proposed_per = per_rec.get("proposed") or {}
         next_per = dict(current_per)
         per_changes = {}
-        for key in ("c004", "c005", "c006"):
+        for key, proposed_value in proposed_per.items():
             current = int(current_per.get(key, 0) or 0)
-            target = int(proposed_per.get(key, current) or current)
+            target = int(proposed_value or current)
             if target > current:
                 next_value = target
                 next_per[key] = next_value
@@ -1452,7 +1488,7 @@ def build_report() -> dict:
                 else None
             ),
             "per_challenge_max_benchmarks": (
-                _target_gpu_challenge_caps(cfg, capacity, target_slots)
+                _target_per_challenge_caps(cfg, capacity, target_slots)
                 if capacity
                 else {}
             ),
