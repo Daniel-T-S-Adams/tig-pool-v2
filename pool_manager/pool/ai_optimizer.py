@@ -249,6 +249,26 @@ def _slave_health_note(slave: dict) -> str:
     return "idle_or_recently_quiet"
 
 
+def _recommendation_signals(report: dict) -> list[dict]:
+    signals = []
+    for rec in report.get("recommendations") or []:
+        key = rec.get("key")
+        current = rec.get("current")
+        signal = {
+            "key": key,
+            "current": current,
+            "proposed": rec.get("proposed"),
+            "reason": rec.get("reason"),
+        }
+        if key == "proof_queue" and isinstance(current, dict):
+            signal["stale_proofs"] = int(current.get("stale_proofs") or 0)
+        if str(key or "").startswith("challenge_health.") and isinstance(current, dict):
+            signal["stale_roots"] = int(current.get("stale_roots") or 0)
+            signal["stale_proofs"] = int(current.get("stale_proofs") or 0)
+        signals.append(signal)
+    return signals
+
+
 def _derived_pool_facts(report: dict) -> dict:
     gpu_slaves = []
     cpu_slaves = []
@@ -278,6 +298,16 @@ def _derived_pool_facts(report: dict) -> dict:
         stale_roots += int(challenge.get("stale_roots") or 0)
         stale_proofs += int(challenge.get("stale_proofs") or 0)
 
+    recommendation_signals = _recommendation_signals(report)
+    stale_roots = max(
+        stale_roots,
+        sum(int(signal.get("stale_roots") or 0) for signal in recommendation_signals),
+    )
+    stale_proofs = max(
+        stale_proofs,
+        sum(int(signal.get("stale_proofs") or 0) for signal in recommendation_signals),
+    )
+
     return {
         "slot_state_counts": _slot_state_counts(report),
         "active_gpu_slaves": gpu_slaves,
@@ -287,10 +317,13 @@ def _derived_pool_facts(report: dict) -> dict:
             "proofs": stale_proofs,
             "combined": stale_roots + stale_proofs,
         },
+        "autopilot_recommendation_signals": recommendation_signals,
         "interpretation_hints": [
             "Do not describe a GPU slave with completed_recent >= 10 and stale_total == 0 as low throughput.",
             "A C3 GPU dispatcher with live_roots > 0 and completed_recent >= 10 is healthy unless stale work exists.",
             "Occupied GPU slots plus active GPU slaves usually means observe unless stale work or idle live assignments grow.",
+            "If stale_totals.proofs is greater than zero, never say there are no stale proofs.",
+            "If autopilot_recommendation_signals includes proof_queue, mention it as a proof queue signal.",
             "Use exact values from derived_pool_facts when summarizing throughput.",
         ],
     }
@@ -370,6 +403,78 @@ def _parse_model_json(text: str) -> dict:
     parsed.setdefault("requires_human_approval", False)
     _sanitize_followup_queries(parsed)
     return parsed
+
+
+def _ensure_evidence_metric(recommendation: dict, metric: str, value: int, interpretation: str):
+    evidence = recommendation.setdefault("evidence", [])
+    for item in evidence:
+        if isinstance(item, dict) and item.get("metric") == metric:
+            item["value"] = value
+            item["interpretation"] = interpretation
+            return
+    evidence.append({
+        "metric": metric,
+        "value": value,
+        "interpretation": interpretation,
+    })
+
+
+def _enforce_recommendation_consistency(recommendation: dict, prompt_context: dict):
+    """Correct AI text that contradicts deterministic stale root/proof totals."""
+    derived = prompt_context.get("derived_pool_facts") or {}
+    stale_totals = derived.get("stale_totals") or {}
+    stale_roots = int(stale_totals.get("roots") or 0)
+    stale_proofs = int(stale_totals.get("proofs") or 0)
+    warnings = []
+
+    _ensure_evidence_metric(
+        recommendation,
+        "deterministic_stale_roots",
+        stale_roots,
+        f"Deterministic derived stale root total is {stale_roots}.",
+    )
+    _ensure_evidence_metric(
+        recommendation,
+        "deterministic_stale_proofs",
+        stale_proofs,
+        f"Deterministic derived stale proof total is {stale_proofs}.",
+    )
+
+    summary = str(recommendation.get("summary") or "")
+    if stale_proofs > 0 and "no stale proofs" in summary.lower():
+        recommendation["summary"] = (
+            summary.rstrip(".")
+            + f". Deterministic check: stale_proofs={stale_proofs}, so proof queue should be monitored."
+        )
+        warnings.append({
+            "field": "summary",
+            "reason": "model_claimed_no_stale_proofs_but_derived_total_is_positive",
+            "derived_stale_proofs": stale_proofs,
+        })
+
+    for item in recommendation.get("evidence") or []:
+        if not isinstance(item, dict):
+            continue
+        metric = str(item.get("metric") or "")
+        text = f"{item.get('value', '')} {item.get('interpretation', '')}".lower()
+        if metric in {"stale_proofs", "proof_queue"} and stale_proofs > 0 and "no stale proofs" in text:
+            item["value"] = stale_proofs
+            item["interpretation"] = (
+                f"Deterministic derived stale proof total is {stale_proofs}; "
+                "proof_queue should be monitored."
+            )
+            warnings.append({
+                "field": f"evidence.{metric}",
+                "reason": "model_claimed_no_stale_proofs_but_derived_total_is_positive",
+                "derived_stale_proofs": stale_proofs,
+            })
+        if metric == "stale_roots":
+            item["value"] = stale_roots
+        if metric == "stale_proofs":
+            item["value"] = stale_proofs
+
+    if warnings:
+        recommendation["deterministic_consistency_warnings"] = warnings
 
 
 def _validate_sql_query(sql: str) -> list[str]:
@@ -524,6 +629,7 @@ def run_once(force: bool = False) -> dict:
         report = autopilot.build_report()
         prompt_context = _build_prompt_payload(report)
         recommendation, raw = _call_deepseek(context_doc, prompt_context)
+        _enforce_recommendation_consistency(recommendation, prompt_context)
         _save_decision(
             status="ok",
             recommendation=recommendation,

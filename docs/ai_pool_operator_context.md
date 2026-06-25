@@ -384,6 +384,8 @@ The executor must enforce these rules:
 - Every recommendation and applied diff must be recorded.
 - Every applied change should include a rollback condition.
 - If live telemetry is missing or stale, output `observe_only`.
+- If deterministic stale totals show `proofs > 0`, do not write "no stale proofs";
+  say exactly how many stale proofs were reported and whether action is required.
 
 ## 13. Evidence The AI Should Use
 
@@ -406,6 +408,10 @@ Each live request to the AI should include:
 - `derived_pool_facts`, which contains precomputed slot counts, active GPU slave
   health notes, stale totals, and interpretation hints. Prefer these derived facts
   over vague impressions when describing current health.
+- `derived_pool_facts.stale_totals` is authoritative for stale root/proof totals.
+  Do not contradict it in summaries or evidence.
+- `derived_pool_facts.autopilot_recommendation_signals` is authoritative for
+  proof queue and challenge health warning signals.
 - `known_database_schema`, which lists the only database tables and columns that
   may be referenced.
 - `allowed_followup_checks`, which lists preferred check IDs and commands for
