@@ -737,6 +737,32 @@ def _health_summary(report: dict) -> dict:
     }
 
 
+def _gpu_slot_counts(report: dict) -> tuple[int, int]:
+    total = 0
+    idle = 0
+    for row in (report.get("slots") or {}).get("summary", []):
+        if row.get("slot_type") not in GPU_SLOT_TYPES:
+            continue
+        count = int(row.get("count") or 0)
+        total += count
+        if row.get("state") == "idle":
+            idle += count
+    return total, idle
+
+
+def _active_gpu_slave_count(report: dict) -> int:
+    return sum(
+        1
+        for slave in report.get("slaves") or []
+        if slave.get("profile") == "gpu" and _counts_for_capacity(slave)
+    )
+
+
+def _gpu_capacity_needs_benchmark_room(report: dict) -> bool:
+    gpu_slots, idle_gpu_slots = _gpu_slot_counts(report)
+    return _active_gpu_slave_count(report) > 0 and gpu_slots > 0 and idle_gpu_slots > 0
+
+
 def _next_value(current: int, target: int, step: int) -> int:
     if target > current:
         return min(target, current + step)
@@ -767,8 +793,10 @@ def _plan_config_change(report: dict, cfg: dict, clean_windows: int) -> dict:
         active_jobs = _active_unfinished_jobs()
         stranded_count = len(health["stranded_benchmarks"])
         productive_jobs = max(0, active_jobs - stranded_count)
+        gpu_slot_total, _ = _gpu_slot_counts(report)
+        gpu_reserve = gpu_slot_total if _active_gpu_slave_count(report) else 0
         drain_target = _clamp(
-            productive_jobs + STRANDED_BUFFER_BENCHMARKS,
+            productive_jobs + STRANDED_BUFFER_BENCHMARKS + gpu_reserve,
             MIN_MAX_BENCHMARKS,
             MAX_MAX_BENCHMARKS,
         )
@@ -784,6 +812,7 @@ def _plan_config_change(report: dict, cfg: dict, clean_windows: int) -> dict:
                 "active_jobs": active_jobs,
                 "productive_jobs": productive_jobs,
                 "buffer": STRANDED_BUFFER_BENCHMARKS,
+                "gpu_reserve": gpu_reserve,
                 "stranded": health["stranded_benchmarks"],
             }
         }
@@ -827,6 +856,7 @@ def _plan_config_change(report: dict, cfg: dict, clean_windows: int) -> dict:
         current = int(new_cfg.get("max_concurrent_benchmarks") or 0)
         target = int(max_rec.get("proposed") or current)
         active_jobs = _active_unfinished_jobs()
+        gpu_needs_room = _gpu_capacity_needs_benchmark_room(report)
         if target < current:
             # Healthy slot-capacity changes can fluctuate when slaves appear or
             # go quiet briefly. Only stranded-benchmark drain mode is allowed to
@@ -837,7 +867,7 @@ def _plan_config_change(report: dict, cfg: dict, clean_windows: int) -> dict:
                 "target": target,
                 "active_jobs": active_jobs,
             }
-        elif target > current and active_jobs < max(1, current - 1):
+        elif target > current and active_jobs < max(1, current - 1) and not gpu_needs_room:
             decision.setdefault("guardrails", {})["max_concurrent_benchmarks"] = {
                 "skipped": "upscale_requires_saturated_precommit_capacity",
                 "current": current,
@@ -853,7 +883,29 @@ def _plan_config_change(report: dict, cfg: dict, clean_windows: int) -> dict:
                     "target": target,
                     "next": next_max,
                     "active_jobs": active_jobs,
+                    "gpu_capacity_needs_room": gpu_needs_room,
                 }
+
+    per_rec = recommendations.get("per_challenge_max_benchmarks")
+    current_per = new_cfg.get("per_challenge_max_benchmarks") or {}
+    if per_rec and current_per:
+        proposed_per = per_rec.get("proposed") or {}
+        next_per = dict(current_per)
+        per_changes = {}
+        for key in ("c004", "c005", "c006"):
+            current = int(current_per.get(key, 0) or 0)
+            target = int(proposed_per.get(key, current) or current)
+            if target > current:
+                next_value = target
+                next_per[key] = next_value
+                per_changes[key] = {
+                    "current": current,
+                    "target": target,
+                    "next": next_value,
+                }
+        if per_changes:
+            new_cfg["per_challenge_max_benchmarks"] = next_per
+            changes["per_challenge_max_benchmarks"] = per_changes
 
     if not changes:
         decision["reason"] = "no_safe_changes"
