@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import os
 import time
 import urllib.error
@@ -51,6 +52,9 @@ PRODUCTIVE_IDLE_STALE_ROOT_TOLERANCE = int(
 PRODUCTIVE_IDLE_GPU_SCALE_MIN = int(os.environ.get("AUTOPILOT_PRODUCTIVE_IDLE_GPU_SCALE_MIN", "1"))
 PRODUCTIVE_IDLE_GPU_PER_SLOT = int(os.environ.get("AUTOPILOT_PRODUCTIVE_IDLE_GPU_PER_SLOT", "1"))
 CAP_SCALE_COMPLETIONS_PER_STEP = int(os.environ.get("AUTOPILOT_CAP_SCALE_COMPLETIONS_PER_STEP", "20"))
+BUNDLE_TARGET_MIN_ROOT_BATCHES = int(os.environ.get("AUTOPILOT_BUNDLE_TARGET_MIN_ROOT_BATCHES", "8"))
+BUNDLE_TARGET_MAX_ROOT_BATCHES = int(os.environ.get("AUTOPILOT_BUNDLE_TARGET_MAX_ROOT_BATCHES", "192"))
+BUNDLE_TARGET_ROOT_RUNTIME_SEC = int(os.environ.get("AUTOPILOT_BUNDLE_TARGET_ROOT_RUNTIME_SEC", "900"))
 STRANDED_BENCHMARK_MS = int(os.environ.get("AUTOPILOT_STRANDED_BENCHMARK_MS", str(30 * 60 * 1000)))
 STRANDED_DOWNSCALE_STEP = int(os.environ.get("AUTOPILOT_STRANDED_DOWNSCALE_STEP", "2"))
 STRANDED_BUFFER_BENCHMARKS = int(os.environ.get("AUTOPILOT_STRANDED_BUFFER_BENCHMARKS", "2"))
@@ -536,6 +540,127 @@ def _challenge_metrics(now_ms: int) -> list[dict]:
     )
 
 
+def _track_workload_metrics(now_ms: int) -> list[dict]:
+    cutoff_metrics = now_ms - METRIC_WINDOW_MS
+    return _fetch_all(
+        """
+        SELECT
+            j.challenge,
+            j.settings->>'algorithm_id' AS algorithm_id,
+            j.settings->>'track_id' AS track,
+            COUNT(DISTINCT j.benchmark_id) AS benchmarks_seen,
+            COUNT(DISTINCT j.benchmark_id) FILTER (
+                WHERE j.stopped IS NULL AND j.end_time IS NULL
+            ) AS active_benchmarks,
+            ROUND(AVG(j.num_nonces)::numeric, 1) AS avg_num_nonces,
+            ROUND(AVG(j.num_batches)::numeric, 1) AS avg_num_batches,
+            ROUND(AVG(j.batch_size)::numeric, 1) AS avg_batch_size,
+            COUNT(rb.*) AS root_batches_seen,
+            COUNT(rb.*) FILTER (WHERE rb.ready = true) AS roots_ready,
+            COUNT(rb.*) FILTER (WHERE rb.ready IS NULL) AS roots_pending,
+            COUNT(rb.*) FILTER (
+                WHERE rb.ready IS NULL
+                  AND rb.start_time IS NOT NULL
+                  AND rb.start_time < %s
+            ) AS stale_roots,
+            COUNT(pb.*) AS proof_batches_seen,
+            COUNT(pb.*) FILTER (WHERE pb.ready = true) AS proofs_ready,
+            COUNT(pb.*) FILTER (WHERE pb.ready IS NULL) AS proofs_pending,
+            ROUND(AVG(rb.end_time - rb.start_time) FILTER (
+                WHERE rb.ready = true
+                  AND rb.end_time >= %s
+                  AND rb.end_time IS NOT NULL
+            ) / 1000.0, 1) AS avg_root_runtime_sec,
+            ROUND(AVG(j.end_time - j.start_time) FILTER (
+                WHERE j.end_time >= %s
+                  AND j.end_time IS NOT NULL
+                  AND j.start_time IS NOT NULL
+            ) / 1000.0, 1) AS avg_benchmark_wall_sec
+        FROM job j
+        LEFT JOIN root_batch rb ON rb.benchmark_id = j.benchmark_id
+        LEFT JOIN proofs_batch pb
+          ON pb.benchmark_id = j.benchmark_id
+         AND pb.batch_idx = rb.batch_idx
+        WHERE j.start_time >= %s
+           OR j.end_time IS NULL
+        GROUP BY j.challenge, j.settings->>'algorithm_id', j.settings->>'track_id'
+        ORDER BY j.challenge, algorithm_id, track
+        """,
+        (now_ms - STALE_ROOT_MS, cutoff_metrics, cutoff_metrics, cutoff_metrics),
+    )
+
+
+def _track_config_economics(cfg: dict, workload: list[dict]) -> list[dict]:
+    metrics = {
+        (row.get("algorithm_id"), row.get("track")): row
+        for row in workload
+    }
+    out = []
+    for algo in cfg.get("algo_selection") or []:
+        algorithm_id = algo.get("algorithm_id")
+        challenge_id = str(algorithm_id or "").split("_")[0]
+        algo_batch_size = int(algo.get("batch_size") or 1)
+        for track, settings in (algo.get("track_settings") or {}).items():
+            settings = settings or {}
+            configured_batch_size = int(settings.get("batch_size") or algo_batch_size or 1)
+            configured_bundles = int(settings.get("num_bundles") or 0)
+            row = dict(metrics.get((algorithm_id, track), {}))
+            avg_num_nonces = row.get("avg_num_nonces")
+            avg_num_batches = row.get("avg_num_batches")
+            avg_root_runtime = row.get("avg_root_runtime_sec")
+            nonces_per_bundle = None
+            estimated_root_batches = None
+            estimated_benchmark_root_runtime_sec = None
+            if configured_bundles > 0 and avg_num_nonces is not None:
+                nonces_per_bundle = round(float(avg_num_nonces) / configured_bundles, 1)
+            if nonces_per_bundle is not None and configured_batch_size > 0:
+                estimated_root_batches = int(math.ceil((nonces_per_bundle * configured_bundles) / configured_batch_size))
+            elif avg_num_batches is not None:
+                estimated_root_batches = int(math.ceil(float(avg_num_batches)))
+            if estimated_root_batches is not None and avg_root_runtime is not None:
+                estimated_benchmark_root_runtime_sec = round(estimated_root_batches * float(avg_root_runtime), 1)
+
+            notes = []
+            if estimated_root_batches is not None:
+                if estimated_root_batches > BUNDLE_TARGET_MAX_ROOT_BATCHES:
+                    notes.append("too_many_root_batches_for_single_benchmark")
+                elif estimated_root_batches < BUNDLE_TARGET_MIN_ROOT_BATCHES and configured_bundles > 1:
+                    notes.append("few_root_batches_consider_more_parallelism_or_bundles")
+            if avg_root_runtime is not None:
+                if float(avg_root_runtime) > BUNDLE_TARGET_ROOT_RUNTIME_SEC:
+                    notes.append("root_batch_runtime_ties_worker_too_long")
+                elif float(avg_root_runtime) < max(30, BUNDLE_TARGET_ROOT_RUNTIME_SEC // 6):
+                    notes.append("root_batch_runtime_short_enough_for_larger_batches")
+
+            out.append({
+                "challenge_id": challenge_id,
+                "algorithm_id": algorithm_id,
+                "track": track,
+                "configured": {
+                    "weight": algo.get("weight"),
+                    "algo_batch_size": algo_batch_size,
+                    "track_batch_size": settings.get("batch_size"),
+                    "effective_batch_size": configured_batch_size,
+                    "num_bundles": configured_bundles,
+                    "fuel_budget": settings.get("fuel_budget"),
+                    "hyperparameters": settings.get("hyperparameters"),
+                },
+                "observed": row,
+                "derived": {
+                    "estimated_nonces_per_bundle": nonces_per_bundle,
+                    "estimated_root_batches": estimated_root_batches,
+                    "estimated_benchmark_root_runtime_sec": estimated_benchmark_root_runtime_sec,
+                    "root_batches_per_bundle": (
+                        round(estimated_root_batches / configured_bundles, 2)
+                        if estimated_root_batches is not None and configured_bundles > 0
+                        else None
+                    ),
+                },
+                "efficiency_notes": notes,
+            })
+    return out
+
+
 def _slot_metrics(now_ms: int) -> dict:
     summary = _fetch_all(
         """
@@ -786,7 +911,43 @@ def _target_adaptive_slave_caps(capacity: dict) -> dict:
     return proposed
 
 
-def _recommendations(cfg: dict, slaves: list[dict], challenges: list[dict], slots: dict) -> list[dict]:
+def _track_economics_recommendations(track_economics: list[dict]) -> list[dict]:
+    recs = []
+    flagged = [
+        row for row in track_economics
+        if row.get("efficiency_notes")
+    ]
+    if flagged:
+        recs.append({
+            "key": "track_settings.bundle_runtime_economics",
+            "current": [
+                {
+                    "algorithm_id": row.get("algorithm_id"),
+                    "track": row.get("track"),
+                    "configured": row.get("configured"),
+                    "derived": row.get("derived"),
+                    "notes": row.get("efficiency_notes"),
+                }
+                for row in flagged[:25]
+            ],
+            "proposed": "review_num_bundles_batch_size_and_hyperparameters",
+            "reason": (
+                "num_bundles controls total nonces and reward-ticket count, while batch_size controls "
+                "root-batch granularity. Tracks with very high root-batch counts or very long root "
+                "runtimes need balancing before automatic algo_selection changes are safe."
+            ),
+            "apply_now": False,
+        })
+    return recs
+
+
+def _recommendations(
+    cfg: dict,
+    slaves: list[dict],
+    challenges: list[dict],
+    slots: dict,
+    track_economics: list[dict] | None = None,
+) -> list[dict]:
     capacity = _fleet_capacity(cfg, slaves, challenges, slots)
     current_slots = capacity["current_slots"]
     proposed_slots = _target_resource_slots(capacity)
@@ -863,6 +1024,7 @@ def _recommendations(cfg: dict, slaves: list[dict], challenges: list[dict], slot
             "apply_now": False,
         })
 
+    recommendations.extend(_track_economics_recommendations(track_economics or []))
     return recommendations
 
 
@@ -1244,9 +1406,11 @@ def build_report() -> dict:
     challenges = _challenge_metrics(now_ms)
     slots = _slot_metrics(now_ms)
     stranded = _stranded_benchmarks(now_ms)
+    workload = _track_workload_metrics(now_ms)
+    track_economics = _track_config_economics(cfg, workload) if cfg else []
     capacity = _fleet_capacity(cfg, slaves, challenges, slots) if cfg else {}
     target_slots = _target_resource_slots(capacity) if capacity else {}
-    recommendations = _recommendations(cfg, slaves, challenges, slots) if cfg else []
+    recommendations = _recommendations(cfg, slaves, challenges, slots, track_economics) if cfg else []
 
     active_counts = {
         "cpu": sum(1 for s in slaves if s["profile"] == "cpu" and _counts_for_capacity(s)),
@@ -1274,6 +1438,8 @@ def build_report() -> dict:
         "slaves": slaves,
         "slots": slots,
         "challenges": challenges,
+        "track_workload": workload,
+        "track_economics": track_economics,
         "capacity_model": capacity,
         "capacity_targets": {
             "resource_slots": target_slots,

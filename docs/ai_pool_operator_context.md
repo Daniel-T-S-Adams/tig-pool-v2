@@ -157,6 +157,26 @@ Important config keys:
 
 - `algo_selection`: algorithm entries. From TIG 0.0.7 each entry must include
   `compute_type`, an AWS verification instance type from the protocol whitelist.
+- `algo_selection[].weight`: relative chance that the master picks this algorithm
+  for the next precommit among currently eligible algorithms. It does not change
+  slave assignment directly.
+- `algo_selection[].batch_size`: default master-side root batch size. It is used
+  only after the chain confirms which track was assigned. Larger values create
+  fewer, longer root batches; smaller values create more, shorter root batches.
+- `algo_selection[].track_settings[track].batch_size`: per-track override for
+  root batch size. This is stripped before precommit submission and is not an
+  on-chain setting.
+- `algo_selection[].track_settings[track].num_bundles`: on-chain work size. The
+  protocol turns this into `num_nonces = num_bundles * num_nonces_per_bundle`.
+  More bundles means more nonces, more root batches for a fixed batch size, more
+  runtime, higher fee exposure, and more bundle-level chances to clear the active
+  quality threshold.
+- `algo_selection[].track_settings[track].fuel_budget`: on-chain fuel cap passed
+  to the slave. It affects how much algorithm work can be spent per nonce/batch,
+  but not the number of batches.
+- `algo_selection[].track_settings[track].hyperparameters`: algorithm-specific
+  behavior passed to slaves. It can strongly affect runtime and quality, but it
+  does not change batch topology by itself.
 - `max_concurrent_benchmarks`: global active benchmark/precommit budget. If this
   is too low, one class of work can starve another.
 - `per_challenge_max_benchmarks`: per-challenge benchmark caps, keyed by challenge
@@ -174,6 +194,34 @@ Important config keys:
 - `track_allowlist`: optional per-challenge allowed track list.
 - `max_job_batches`: maximum allowed root batches for a job before it is created
   as stopped.
+
+Bundle and batch-size mechanics:
+
+```text
+track_settings.num_bundles
+  -> chain num_nonces
+  -> master num_batches = ceil(num_nonces / effective_batch_size)
+  -> root_batch rows assigned to slaves
+  -> benchmark quality by bundle
+  -> sampled proof nonces if active bundles exist
+```
+
+The delicate balance is:
+
+- Too few bundles: lower compute cost and faster completion, but fewer
+  independent bundle-quality chances and less total nonce coverage.
+- Too many bundles: more reward chances and more total nonces, but workers can
+  stay tied up too long, proof work grows, stale risk rises, and precommit spend
+  increases.
+- Too small `batch_size`: workers receive shorter jobs and recover faster from
+  weak machines, but the master creates many root batches and scheduling/proof
+  overhead rises.
+- Too large `batch_size`: fewer scheduling rows and less overhead, but a single
+  assignment can tie up a worker for too long and stale retry timing becomes
+  harder to set safely.
+- `num_bundles` and `batch_size` must be evaluated together. The useful signal is
+  not either field alone; it is root batches per benchmark, observed root runtime,
+  benchmark wall time, stale roots/proofs, and resulting solution quality.
 
 Important adaptive cap fields:
 
@@ -220,6 +268,9 @@ Current autopilot responsibilities:
   roots/proofs, and current adaptive cap ceilings.
 - Build `capacity_targets` for `resource_slots`, `max_concurrent_benchmarks`,
   GPU per-challenge benchmark caps, and `adaptive_slave_caps`.
+- Build `track_economics` from configured `num_bundles`, effective batch size,
+  observed nonces, observed root batch counts, root runtime, benchmark wall time,
+  and stale/proof pressure.
 - Summarize stale roots/proofs.
 - Summarize challenge pressure.
 - Manage resource slot recommendations.
@@ -250,6 +301,20 @@ Autopilot is expected to scale proportionally with fleet size:
 - Adaptive cap ceilings (`cpu_max_cap`, `gpu_max_cap`) may rise when recent
   completions or productive idle workers show the slaves can safely carry more
   concurrent batches.
+- `track_economics` should be used when evaluating whether a track is too coarse,
+  too fragmented, too slow, or under-bundled. Do not recommend bundle changes
+  from stale counts alone.
+
+When recommending `num_bundles`, `batch_size`, `fuel_budget`, or
+`hyperparameters`, the AI must explain:
+
+- The current configured values and observed track runtime.
+- Whether the issue is total benchmark size (`num_bundles`), root granularity
+  (`batch_size`), algorithm effort (`hyperparameters` / `fuel_budget`), or
+  insufficient worker capacity.
+- The expected tradeoff between more nonces/reward chances and longer runtime.
+- Why the change will not cause jobs to exceed `max_job_batches` or retry
+  windows.
 
 ## 9. What Healthy Looks Like
 
