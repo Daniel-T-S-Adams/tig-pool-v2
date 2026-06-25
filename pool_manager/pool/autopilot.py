@@ -986,6 +986,13 @@ def _next_power_of_two(value: int) -> int:
     return 1 << value.bit_length()
 
 
+def _decrease_bundles(current: int) -> int:
+    current = int(current or 0)
+    if current <= WORKLOAD_MIN_BUNDLES:
+        return current
+    return max(WORKLOAD_MIN_BUNDLES, current - WORKLOAD_MAX_BUNDLE_STEP)
+
+
 def _workload_controller_targets(
     cfg: dict,
     track_economics: list[dict],
@@ -1060,20 +1067,20 @@ def _workload_controller_targets(
             if stopped_without_roots:
                 action = "reduce_or_fix_unrunnable_track"
                 reasons.append("recent jobs stopped before root work; check max_job_batches/allowlist/TIG debt")
-                target_bundles = max(WORKLOAD_MIN_BUNDLES, current_bundles - WORKLOAD_MAX_BUNDLE_STEP)
+                target_bundles = _decrease_bundles(current_bundles)
             elif proof_unhealthy:
                 action = "reduce_workload_until_proofs_convert"
                 reasons.append("proof conversion is below target")
-                target_bundles = max(WORKLOAD_MIN_BUNDLES, current_bundles - WORKLOAD_MAX_BUNDLE_STEP)
+                target_bundles = _decrease_bundles(current_bundles)
                 target_weight = max(1, current_weight - 1) if current_weight > 1 else current_weight
             elif stopped_unhealthy:
                 action = "reduce_workload_until_stopped_rate_recovers"
                 reasons.append("stopped/expired benchmark rate is above target")
-                target_bundles = max(WORKLOAD_MIN_BUNDLES, current_bundles - WORKLOAD_MAX_BUNDLE_STEP)
+                target_bundles = _decrease_bundles(current_bundles)
             elif slow_to_proof:
                 action = "reduce_tail_time"
                 reasons.append("time-to-proof-submission is above target")
-                target_bundles = max(WORKLOAD_MIN_BUNDLES, current_bundles - WORKLOAD_MAX_BUNDLE_STEP)
+                target_bundles = _decrease_bundles(current_bundles)
                 if p95_root_runtime is not None and float(p95_root_runtime) > BUNDLE_TARGET_ROOT_RUNTIME_SEC:
                     target_batch_size = max(1, _previous_power_of_two(current_batch_size // 2))
                     reasons.append("p95 root batch runtime is too high; smaller batches may reduce tail latency")
