@@ -205,6 +205,7 @@ def _cleanup_stale_assignments(cfg: dict, now_ms: int) -> dict:
     result = {
         "enabled": STALE_CLEANUP_ENABLED,
         "released_roots": [],
+        "released_orphan_roots": [],
         "released_proofs": [],
         "skipped": "",
     }
@@ -242,6 +243,33 @@ def _cleanup_stale_assignments(cfg: dict, now_ms: int) -> dict:
         timeout_ms = max(STALE_ROOT_CLEANUP_MIN_AGE_MS, _retry_timeout_ms(cfg, row.get("challenge")))
         if age_ms >= timeout_ms:
             roots_to_release.append(row)
+
+    orphan_root_candidates = _fetch_all(
+        """
+        SELECT
+            rb.benchmark_id,
+            rb.batch_idx,
+            rb.start_time,
+            rb.num_attempts,
+            j.challenge,
+            j.settings->>'track_id' AS track
+        FROM root_batch rb
+        JOIN job j ON j.benchmark_id = rb.benchmark_id
+        WHERE rb.ready IS NULL
+          AND rb.slave IS NULL
+          AND rb.start_time IS NOT NULL
+          AND rb.start_time < %s
+        ORDER BY rb.start_time
+        LIMIT %s
+        """,
+        (now_ms - STALE_ROOT_CLEANUP_MIN_AGE_MS, STALE_CLEANUP_MAX_ROWS),
+    )
+    orphan_roots_to_release = []
+    for row in orphan_root_candidates:
+        age_ms = now_ms - int(row.get("start_time") or now_ms)
+        timeout_ms = max(STALE_ROOT_CLEANUP_MIN_AGE_MS, _retry_timeout_ms(cfg, row.get("challenge")))
+        if age_ms >= timeout_ms:
+            orphan_roots_to_release.append(row)
 
     proof_candidates = _fetch_all(
         """
@@ -288,6 +316,28 @@ def _cleanup_stale_assignments(cfg: dict, now_ms: int) -> dict:
             "benchmark": str(row["benchmark_id"])[:10],
             "batch_idx": row["batch_idx"],
             "slave": row["slave"],
+            "challenge": row["challenge"],
+            "track": row["track"],
+            "age_min": round((now_ms - int(row["start_time"])) / 60000.0, 1),
+        })
+
+    for row in orphan_roots_to_release:
+        queries.append((
+            """
+            UPDATE root_batch
+            SET start_time = NULL,
+                end_time = NULL
+            WHERE benchmark_id = %s
+              AND batch_idx = %s
+              AND ready IS NULL
+              AND slave IS NULL
+            """,
+            (row["benchmark_id"], row["batch_idx"]),
+        ))
+        result["released_orphan_roots"].append({
+            "benchmark": str(row["benchmark_id"])[:10],
+            "batch_idx": row["batch_idx"],
+            "slave": None,
             "challenge": row["challenge"],
             "track": row["track"],
             "age_min": round((now_ms - int(row["start_time"])) / 60000.0, 1),
@@ -839,9 +889,14 @@ def maybe_run():
 
     decision = _plan_config_change(report, cfg, clean_windows)
     decision["cleanup"] = cleanup
-    if cleanup.get("released_roots") or cleanup.get("released_proofs"):
+    if (
+        cleanup.get("released_roots")
+        or cleanup.get("released_orphan_roots")
+        or cleanup.get("released_proofs")
+    ):
         decision.setdefault("changes", {})["stale_cleanup"] = {
             "released_roots": cleanup.get("released_roots", []),
+            "released_orphan_roots": cleanup.get("released_orphan_roots", []),
             "released_proofs": cleanup.get("released_proofs", []),
         }
     if decision.get("config"):
