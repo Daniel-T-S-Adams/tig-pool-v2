@@ -622,6 +622,8 @@ def _safe_div(numerator: int | float | None, denominator: int | float | None) ->
 
 def _reward_funnel_summary(now_ms: int) -> dict:
     cutoff_metrics = now_ms - METRIC_WINDOW_MS
+    cfg, _cfg_error = _fetch_master_config()
+    track_allowlist = cfg.get("track_allowlist", {}) if cfg else {}
     total = _fetch_one(
         """
         WITH job_base AS (
@@ -804,6 +806,12 @@ def _reward_funnel_summary(now_ms: int) -> dict:
         proof_required = int(row.get("proof_required_benchmarks") or 0)
         proof_submitted = int(row.get("proof_submitted_confirmed") or 0)
         stopped = int(row.get("stopped_benchmarks") or 0)
+        stopped_without_roots = int(row.get("stopped_without_roots") or 0)
+        allowed_tracks = track_allowlist.get(row.get("challenge"))
+        allowlist_blocked = bool(allowed_tracks) and row.get("track") not in allowed_tracks
+        row["allowlist_blocked"] = allowlist_blocked
+        row["intentional_stopped_without_roots"] = stopped_without_roots if allowlist_blocked else 0
+        row["unexpected_stopped_without_roots"] = 0 if allowlist_blocked else stopped_without_roots
         row["root_ready_rate"] = _safe_div(root_ready, seen)
         row["proof_conversion_rate"] = _safe_div(proof_submitted, proof_required)
         row["stopped_rate"] = _safe_div(stopped, seen)
@@ -815,11 +823,18 @@ def _reward_funnel_summary(now_ms: int) -> dict:
     proof_attempted = int(total.get("proof_submit_attempted") or 0)
     stopped = int(total.get("stopped_benchmarks") or 0)
     stopped_without_roots = int(total.get("stopped_without_roots") or 0)
+    intentional_stopped_without_roots = sum(
+        int(row.get("intentional_stopped_without_roots") or 0)
+        for row in by_track
+    )
+    unexpected_stopped_without_roots = max(0, stopped_without_roots - intentional_stopped_without_roots)
+    unexpected_stopped = max(0, stopped - intentional_stopped_without_roots)
     roots_pending = int(float(total.get("roots_pending") or 0))
     avg_time_to_proof = total.get("avg_time_to_proof_submit_sec")
     proof_conversion = _safe_div(proof_submitted, proof_required)
     proof_attempt_rate = _safe_div(proof_attempted, proof_required)
     stopped_rate = _safe_div(stopped, seen)
+    unexpected_stopped_rate = _safe_div(unexpected_stopped, seen)
     issues = []
     if seen >= 5 and proof_required == 0:
         issues.append("warming_up_no_proof_samples")
@@ -827,9 +842,9 @@ def _reward_funnel_summary(now_ms: int) -> dict:
         issues.append("root_phase_not_complete")
     if proof_required and (proof_conversion or 0.0) < FUNNEL_MIN_PROOF_CONVERSION_RATE:
         issues.append("low_proof_conversion")
-    if stopped_rate is not None and stopped_rate > FUNNEL_MAX_STOPPED_OR_EXPIRED_RATE:
+    if unexpected_stopped_rate is not None and unexpected_stopped_rate > FUNNEL_MAX_STOPPED_OR_EXPIRED_RATE:
         issues.append("high_stopped_or_expired_rate")
-    if stopped_without_roots:
+    if unexpected_stopped_without_roots:
         issues.append("stopped_without_root_work")
     if avg_time_to_proof is not None and float(avg_time_to_proof) > FUNNEL_TARGET_PROOF_SUBMIT_SEC:
         issues.append("slow_time_to_proof_submission")
@@ -846,6 +861,9 @@ def _reward_funnel_summary(now_ms: int) -> dict:
             "proof_conversion_rate": proof_conversion,
             "proof_submit_attempt_rate": proof_attempt_rate,
             "stopped_rate": stopped_rate,
+            "unexpected_stopped_rate": unexpected_stopped_rate,
+            "intentional_stopped_without_roots": intentional_stopped_without_roots,
+            "unexpected_stopped_without_roots": unexpected_stopped_without_roots,
             "safe_to_scale_workload": not issues,
             "issues": issues,
         },
@@ -1033,6 +1051,9 @@ def _workload_controller_targets(
         proof_conversion = funnel.get("proof_conversion_rate")
         stopped_rate = funnel.get("stopped_rate")
         stopped_without_roots = int(funnel.get("stopped_without_roots") or 0)
+        intentional_stopped_without_roots = int(funnel.get("intentional_stopped_without_roots") or 0)
+        unexpected_stopped_without_roots = int(funnel.get("unexpected_stopped_without_roots") or 0)
+        allowlist_blocked = bool(funnel.get("allowlist_blocked"))
         avg_time_to_proof = funnel.get("avg_time_to_proof_submit_sec")
         p95_root_runtime = funnel.get("p95_root_batch_runtime_sec")
         estimated_root_batches = derived.get("estimated_root_batches")
@@ -1064,7 +1085,10 @@ def _workload_controller_targets(
                 and float(avg_time_to_proof) <= FUNNEL_TARGET_PROOF_SUBMIT_SEC * WORKLOAD_FAST_PROOF_FACTOR
             )
 
-            if stopped_without_roots:
+            if allowlist_blocked:
+                action = "intentional_allowlist_stop"
+                reasons.append("track is outside track_allowlist and was intentionally not benchmarked")
+            elif unexpected_stopped_without_roots:
                 action = "reduce_or_fix_unrunnable_track"
                 reasons.append("recent jobs stopped before root work; check max_job_batches/allowlist/TIG debt")
                 target_bundles = _decrease_bundles(current_bundles)
@@ -1135,6 +1159,9 @@ def _workload_controller_targets(
                 "proof_conversion_rate": proof_conversion,
                 "stopped_rate": stopped_rate,
                 "stopped_without_roots": stopped_without_roots,
+                "intentional_stopped_without_roots": intentional_stopped_without_roots,
+                "unexpected_stopped_without_roots": unexpected_stopped_without_roots,
+                "allowlist_blocked": allowlist_blocked,
                 "avg_time_to_proof_submit_sec": avg_time_to_proof,
                 "p95_root_batch_runtime_sec": p95_root_runtime,
                 "avg_num_batches": observed.get("avg_num_batches"),
