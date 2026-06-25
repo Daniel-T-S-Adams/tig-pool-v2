@@ -423,6 +423,11 @@ def _allowed_followup_checks() -> list[dict]:
             "purpose": "Check whether usable active GPU roots exist.",
         },
         {
+            "check_id": "unserved_gpu_stranded",
+            "command": "docker compose exec -T db psql -U postgres -d innopool -c \"select left(j.benchmark_id, 10) as benchmark, j.challenge, j.settings->>'track_id' as track, j.settings->>'algorithm_id' as algorithm_id, count(rb.*) filter (where rb.ready is null) as pending_roots, count(rb.*) filter (where rb.ready is null and rb.slave is not null and rb.start_time is not null) as assigned_roots, bs.slot_id, bs.slot_type, bs.state from job j join root_batch rb on rb.benchmark_id = j.benchmark_id left join benchmark_slot bs on bs.benchmark_id = j.benchmark_id where j.stopped is null and j.end_time is null and j.merkle_root_ready is null and j.challenge in ('hypergraph','vector_search','neuralnet_optimizer') group by j.benchmark_id, j.challenge, j.settings, bs.slot_id, bs.slot_type, bs.state having count(rb.*) filter (where rb.ready is null) > 0 and count(rb.*) filter (where rb.ready is null and rb.slave is not null and rb.start_time is not null) = 0 order by j.challenge, track;\"",
+            "purpose": "Inspect active GPU benchmarks that have pending roots but no assigned roots.",
+        },
+        {
             "check_id": "c3_master_logs",
             "command": "docker compose logs --tail=160 master | grep -Ei \"pool-gpu-a330c544ec5b-c3-001|get-batches|submitted root|adaptive cap\"",
             "purpose": "Verify C3 assignment, adaptive cap, and root submission activity.",
@@ -503,6 +508,10 @@ def _enforce_recommendation_consistency(recommendation: dict, prompt_context: di
     stale_track_signals = derived.get("stale_track_signals") or []
     stale_tolerated_for_capacity = bool(derived.get("stale_roots_tolerated_for_capacity_upscale"))
     selective_challenge_upscale_allowed = bool(derived.get("selective_challenge_upscale_allowed"))
+    unserved_gpu_stranded = [
+        item for item in stranded.get("unserved") or []
+        if item.get("capacity_profile") == "gpu"
+    ]
     warnings = []
 
     _ensure_evidence_metric(
@@ -580,6 +589,32 @@ def _enforce_recommendation_consistency(recommendation: dict, prompt_context: di
             "field": "recommended_actions",
             "reason": "normalized_stale_track_action",
             "stale_track_count": len(deduped_stale_tracks),
+        })
+    if unserved_gpu_stranded:
+        actions = recommendation.setdefault("recommended_actions", [])
+        actions = [
+            action for action in actions
+            if not (
+                isinstance(action, dict)
+                and action.get("key") == "stranded_classification.unserved_gpu"
+            )
+        ]
+        actions.append({
+            "action_type": "gpu_unserved_stranded_attention",
+            "key": "stranded_classification.unserved_gpu",
+            "current": unserved_gpu_stranded[:10],
+            "proposed": "inspect_gpu_slot_assignment_and_route_caps",
+            "reason": "Active GPU benchmarks have pending roots but no assigned roots even though matching GPU slot capacity appears available.",
+            "risk": "GPU work can starve while C3/local GPU capacity polls for batches and receives none.",
+            "rollback_condition": "If unserved GPU stranded count returns to zero, resume normal GPU capacity scaling.",
+        })
+        recommendation["recommended_actions"] = actions
+        if recommendation.get("decision_category") == "observe_only":
+            recommendation["decision_category"] = "investigate"
+        warnings.append({
+            "field": "recommended_actions",
+            "reason": "added_unserved_gpu_stranded_action",
+            "unserved_gpu_count": len(unserved_gpu_stranded),
         })
 
     summary = str(recommendation.get("summary") or "")

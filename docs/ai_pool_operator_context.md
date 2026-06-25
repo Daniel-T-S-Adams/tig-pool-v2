@@ -442,6 +442,9 @@ Autopilot classifies stranded benchmarks:
 - `capacity_waiting`: matching CPU/GPU workers are already carrying at least the
   configured slot capacity. This is queued behind saturated capacity and should
   not be described as broken by itself.
+- If `unserved` contains GPU benchmarks, recommend inspecting GPU slot assignment,
+  route regexes, route caps, and C3/local GPU polling. This is not the same as
+  normal saturated capacity.
 
 ### Weak Slaves Overfed
 
