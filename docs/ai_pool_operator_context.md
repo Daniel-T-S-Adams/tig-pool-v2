@@ -446,9 +446,9 @@ Autopilot classifies stranded benchmarks:
   route regexes, route caps, and C3/local GPU polling. This is not the same as
   normal saturated capacity.
 - GPU slot capacity is not always identical to effective route/adaptive cap
-  capacity. If live GPU roots are within roughly the number of active GPU slaves
-  of GPU slot capacity, treat the state as near-saturated waiting unless other
-  evidence proves assignment is broken.
+  capacity. If live GPU roots are at least roughly 60% of GPU slot capacity,
+  treat the state as near-saturated waiting unless other evidence proves
+  assignment is broken.
 
 ### Weak Slaves Overfed
 

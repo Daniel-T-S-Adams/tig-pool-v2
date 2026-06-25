@@ -1221,7 +1221,7 @@ def _health_summary(report: dict) -> dict:
                 1,
                 min(
                     capacity - _active_gpu_slave_count(report),
-                    math.floor(capacity * 0.70),
+                    math.floor(capacity * 0.60),
                 ),
             )
         else:

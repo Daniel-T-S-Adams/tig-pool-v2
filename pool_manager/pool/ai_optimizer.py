@@ -286,7 +286,7 @@ def _normalize_gpu_stranded(stranded: dict) -> dict:
             continue
         live = int(item.get("matching_live_roots") or 0)
         capacity = int(item.get("matching_slot_capacity") or 0)
-        if capacity > 0 and live >= max(1, math.floor(capacity * 0.70)):
+        if capacity > 0 and live >= max(1, math.floor(capacity * 0.60)):
             moved = dict(item)
             moved["classification"] = "capacity_waiting"
             moved["reclassified_by_ai_optimizer"] = "gpu_near_capacity"
