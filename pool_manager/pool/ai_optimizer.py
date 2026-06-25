@@ -740,8 +740,46 @@ def _enforce_recommendation_consistency(recommendation: dict, prompt_context: di
             "reason": "added_unserved_gpu_stranded_action",
             "unserved_gpu_count": len(unserved_gpu_stranded),
         })
+    else:
+        actions = recommendation.get("recommended_actions") or []
+        filtered_actions = [
+            action for action in actions
+            if not (
+                isinstance(action, dict)
+                and action.get("key") == "stranded_classification.unserved_gpu"
+            )
+        ]
+        if len(filtered_actions) != len(actions):
+            recommendation["recommended_actions"] = filtered_actions
+            warnings.append({
+                "field": "recommended_actions",
+                "reason": "removed_false_unserved_gpu_action_after_normalization",
+            })
+        queries = recommendation.get("queries_to_run_next") or []
+        recommendation["queries_to_run_next"] = [
+            query for query in queries
+            if not (
+                isinstance(query, dict)
+                and query.get("check_id") == "unserved_gpu_stranded"
+            )
+        ]
 
     summary = str(recommendation.get("summary") or "")
+    if not unserved_gpu_stranded and summary:
+        summary = (
+            summary
+            .replace("but 9 unserved GPU stranded benchmarks exist with pending roots and no assigned roots, despite matching slot capacity being available. ", "")
+            .replace("but 10 unserved GPU stranded benchmarks exist with pending roots and no assigned roots, despite matching slot capacity being available. ", "")
+            .replace("but 11 unserved GPU stranded benchmarks exist with pending roots and no assigned roots, despite matching slot capacity being available. ", "")
+            .replace("Autopilot is blocked by unserved stranded benchmarks and stale work.", "Autopilot is blocked by stale work; GPU stranded benchmarks are waiting behind near-saturated capacity.")
+            .replace("autopilot is blocked by unserved stranded benchmarks and stale work.", "autopilot is blocked by stale work; GPU stranded benchmarks are waiting behind near-saturated capacity.")
+            .replace("investigate GPU assignment and stale tracks", "investigate stale tracks")
+        )
+        recommendation["summary"] = summary
+        warnings.append({
+            "field": "summary",
+            "reason": "removed_false_unserved_gpu_summary_after_normalization",
+        })
     if stale_track_signals and summary:
         summary = (
             summary
