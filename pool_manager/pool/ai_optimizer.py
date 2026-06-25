@@ -695,7 +695,12 @@ def _enforce_recommendation_consistency(recommendation: dict, prompt_context: di
             if not (
                 isinstance(action, dict)
                 and action.get("key") == "challenge_health"
-                and action.get("action_type") in {"no_op", "investigate", "stale_track_attention"}
+                and action.get("action_type") in {
+                    "no_op",
+                    "investigate",
+                    "request_more_data",
+                    "stale_track_attention",
+                }
             )
         ]
         recommendation["recommended_actions"].append({
@@ -746,7 +751,10 @@ def _enforce_recommendation_consistency(recommendation: dict, prompt_context: di
             action for action in actions
             if not (
                 isinstance(action, dict)
-                and action.get("key") == "stranded_classification.unserved_gpu"
+                and action.get("key") in {
+                    "stranded_classification.unserved_gpu",
+                    "gpu_unserved_stranded",
+                }
             )
         ]
         if len(filtered_actions) != len(actions):
@@ -760,7 +768,11 @@ def _enforce_recommendation_consistency(recommendation: dict, prompt_context: di
             query for query in queries
             if not (
                 isinstance(query, dict)
-                and query.get("check_id") == "unserved_gpu_stranded"
+                and query.get("check_id") in {
+                    "unserved_gpu_stranded",
+                    "c3_master_logs",
+                    "active_gpu_roots",
+                }
             )
         ]
 
@@ -773,6 +785,8 @@ def _enforce_recommendation_consistency(recommendation: dict, prompt_context: di
             .replace("but 11 unserved GPU stranded benchmarks exist with pending roots and no assigned roots, despite matching slot capacity being available. ", "")
             .replace("Autopilot is blocked by unserved stranded benchmarks and stale work.", "Autopilot is blocked by stale work; GPU stranded benchmarks are waiting behind near-saturated capacity.")
             .replace("autopilot is blocked by unserved stranded benchmarks and stale work.", "autopilot is blocked by stale work; GPU stranded benchmarks are waiting behind near-saturated capacity.")
+            .replace("Autopilot is blocked by stale work and unserved stranded benchmarks.", "Autopilot is blocked by stale work; GPU stranded benchmarks are waiting behind near-saturated capacity.")
+            .replace("autopilot is blocked by stale work and unserved stranded benchmarks.", "autopilot is blocked by stale work; GPU stranded benchmarks are waiting behind near-saturated capacity.")
             .replace("investigate GPU assignment and stale tracks", "investigate stale tracks")
         )
         recommendation["summary"] = summary
@@ -878,9 +892,10 @@ def _enforce_recommendation_consistency(recommendation: dict, prompt_context: di
         reason = str(action.get("reason") or "")
         if unserved_count == 0 and capacity_waiting_count > 0 and "stranded benchmarks" in reason.lower():
             action["reason"] = (
-                f"Not recommended from current evidence: deterministic classification shows "
-                f"0 unserved stranded benchmarks and {capacity_waiting_count} benchmarks "
-                "waiting behind saturated capacity."
+                f"Deterministic classification shows 0 unserved stranded benchmarks and "
+                f"{capacity_waiting_count} benchmarks waiting behind saturated capacity; "
+                "this is not the blocking reason. Broad capacity changes should be judged "
+                "against stale roots/proofs and explicit autopilot guardrails."
             )
             warnings.append({
                 "field": f"blocked_actions.{action.get('key')}",
