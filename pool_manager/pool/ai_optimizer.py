@@ -788,6 +788,8 @@ def _enforce_recommendation_consistency(recommendation: dict, prompt_context: di
             .replace("Autopilot is blocked by stale work and unserved stranded benchmarks.", "Autopilot is blocked by stale work; GPU stranded benchmarks are waiting behind near-saturated capacity.")
             .replace("autopilot is blocked by stale work and unserved stranded benchmarks.", "autopilot is blocked by stale work; GPU stranded benchmarks are waiting behind near-saturated capacity.")
             .replace("investigate GPU assignment and stale tracks", "investigate stale tracks")
+            .replace("investigate stale tracks and GPU assignment", "investigate stale tracks; GPU work is capacity-waiting")
+            .replace("investigate GPU assignment", "treat GPU work as capacity-waiting")
         )
         recommendation["summary"] = summary
         warnings.append({
