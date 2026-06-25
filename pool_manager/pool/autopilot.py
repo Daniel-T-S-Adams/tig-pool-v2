@@ -631,6 +631,9 @@ def _reward_funnel_summary(now_ms: int) -> dict:
                 j.settings->>'track_id' AS track
             FROM job j
             WHERE j.start_time >= %s
+               OR j.benchmark_submit_time >= %s
+               OR j.proof_submit_time >= %s
+               OR j.end_time >= %s
                OR j.end_time IS NULL
         ),
         root_agg AS (
@@ -701,7 +704,14 @@ def _reward_funnel_summary(now_ms: int) -> dict:
         LEFT JOIN root_agg ra ON ra.benchmark_id = jb.benchmark_id
         LEFT JOIN proof_agg pa ON pa.benchmark_id = jb.benchmark_id
         """,
-        (cutoff_metrics, cutoff_metrics, cutoff_metrics),
+        (
+            cutoff_metrics,
+            cutoff_metrics,
+            cutoff_metrics,
+            cutoff_metrics,
+            cutoff_metrics,
+            cutoff_metrics,
+        ),
     )
     by_track = _fetch_all(
         """
@@ -712,6 +722,9 @@ def _reward_funnel_summary(now_ms: int) -> dict:
                 j.settings->>'track_id' AS track
             FROM job j
             WHERE j.start_time >= %s
+               OR j.benchmark_submit_time >= %s
+               OR j.proof_submit_time >= %s
+               OR j.end_time >= %s
                OR j.end_time IS NULL
         ),
         root_agg AS (
@@ -777,7 +790,13 @@ def _reward_funnel_summary(now_ms: int) -> dict:
         GROUP BY jb.challenge, jb.algorithm_id, jb.track
         ORDER BY jb.challenge, jb.algorithm_id, jb.track
         """,
-        (cutoff_metrics, cutoff_metrics),
+        (
+            cutoff_metrics,
+            cutoff_metrics,
+            cutoff_metrics,
+            cutoff_metrics,
+            cutoff_metrics,
+        ),
     )
     for row in by_track:
         seen = int(row.get("benchmarks_seen") or 0)
@@ -793,11 +812,13 @@ def _reward_funnel_summary(now_ms: int) -> dict:
     root_ready = int(total.get("root_ready_benchmarks") or 0)
     proof_required = int(total.get("proof_required_benchmarks") or 0)
     proof_submitted = int(total.get("proof_submitted_confirmed") or 0)
+    proof_attempted = int(total.get("proof_submit_attempted") or 0)
     stopped = int(total.get("stopped_benchmarks") or 0)
     stopped_without_roots = int(total.get("stopped_without_roots") or 0)
     roots_pending = int(float(total.get("roots_pending") or 0))
     avg_time_to_proof = total.get("avg_time_to_proof_submit_sec")
     proof_conversion = _safe_div(proof_submitted, proof_required)
+    proof_attempt_rate = _safe_div(proof_attempted, proof_required)
     stopped_rate = _safe_div(stopped, seen)
     issues = []
     if seen >= 5 and proof_required == 0:
@@ -823,6 +844,7 @@ def _reward_funnel_summary(now_ms: int) -> dict:
             **total,
             "root_ready_rate": _safe_div(root_ready, seen),
             "proof_conversion_rate": proof_conversion,
+            "proof_submit_attempt_rate": proof_attempt_rate,
             "stopped_rate": stopped_rate,
             "safe_to_scale_workload": not issues,
             "issues": issues,
