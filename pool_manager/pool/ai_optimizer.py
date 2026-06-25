@@ -32,7 +32,7 @@ DEEPSEEK_API_URL = os.environ.get(
 AI_CONTEXT_PATH = os.environ.get("AI_CONTEXT_PATH", "/app/docs/ai_pool_operator_context.md")
 AI_OPTIMIZER_TIMEOUT_S = int(os.environ.get("AI_OPTIMIZER_TIMEOUT_S", "90"))
 AI_OPTIMIZER_HISTORY_LIMIT = int(os.environ.get("AI_OPTIMIZER_HISTORY_LIMIT", "8"))
-AI_OPTIMIZER_MAX_TOKENS = int(os.environ.get("AI_OPTIMIZER_MAX_TOKENS", "2500"))
+AI_OPTIMIZER_MAX_TOKENS = int(os.environ.get("AI_OPTIMIZER_MAX_TOKENS", "1800"))
 
 _last_run_ts = 0.0
 _decision_table_ready = False
@@ -468,7 +468,24 @@ def _strip_json_fences(text: str) -> str:
 
 
 def _parse_model_json(text: str) -> dict:
-    parsed = json.loads(_strip_json_fences(text))
+    try:
+        parsed = json.loads(_strip_json_fences(text))
+    except json.JSONDecodeError as exc:
+        parsed = {
+            "schema_version": 1,
+            "decision_category": "investigate",
+            "summary": "AI model returned malformed JSON; deterministic autopilot facts were used for fallback actions.",
+            "confidence": 0.0,
+            "evidence": [],
+            "recommended_actions": [],
+            "blocked_actions": [],
+            "queries_to_run_next": [{"check_id": "admin_autopilot", "purpose": "Refresh deterministic autopilot report."}],
+            "requires_human_approval": False,
+            "parse_warning": {
+                "error": str(exc),
+                "raw_prefix": text[:500],
+            },
+        }
     if not isinstance(parsed, dict):
         raise ValueError("model response JSON must be an object")
     parsed.setdefault("schema_version", 1)
