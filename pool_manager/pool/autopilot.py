@@ -1212,7 +1212,12 @@ def _health_summary(report: dict) -> dict:
         enriched["capacity_profile"] = profile
         enriched["matching_live_roots"] = live
         enriched["matching_slot_capacity"] = capacity
-        if capacity > 0 and live >= capacity:
+        # Slot capacity is a benchmark budget, not always the exact effective
+        # slave assignment capacity. Treat near-full GPU capacity as normal
+        # waiting so a few idle slot-equivalents do not become a hard blocker
+        # while C3/local GPU route caps are already busy.
+        near_capacity_buffer = _active_gpu_slave_count(report) if profile == "gpu" else 0
+        if capacity > 0 and live >= max(1, capacity - near_capacity_buffer):
             enriched["classification"] = "capacity_waiting"
             capacity_waiting.append(enriched)
         else:
