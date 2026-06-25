@@ -386,8 +386,72 @@ Each live request to the AI should include:
 - Recent master logs filtered for `get-batches`, adaptive cap, submitted roots,
   submitted proofs, and errors.
 - Recent Cloudflare/tunnel errors if available.
+- `derived_pool_facts`, which contains precomputed slot counts, active GPU slave
+  health notes, stale totals, and interpretation hints. Prefer these derived facts
+  over vague impressions when describing current health.
+- `known_database_schema`, which lists the only database tables and columns that
+  may be referenced.
+- `allowed_followup_checks`, which lists preferred check IDs and commands for
+  follow-up investigation.
 
-## 14. Decision Categories
+## 14. Known Database Schema
+
+Do not invent table names or column names. If a needed table or column is not
+listed here or in the live `known_database_schema` payload, do not write SQL for
+it. Use an allowed follow-up check or ask for more data instead.
+
+Known tables:
+
+- `job`: `benchmark_id`, `settings`, `hyperparameters`, `num_nonces`,
+  `num_batches`, `rand_hash`, `fuel_budget`, `batch_size`, `challenge`,
+  `algorithm`, `download_url`, `block_started`, `start_time`, `sampled_nonces`,
+  `merkle_root_ready`, `merkle_proofs_ready`, `stopped`, `end_time`.
+- `root_batch`: `benchmark_id`, `batch_idx`, `slave`, `start_time`, `end_time`,
+  `ready`, `num_attempts`.
+- `proofs_batch`: `benchmark_id`, `batch_idx`, `sampled_nonces`, `slave`,
+  `start_time`, `end_time`, `ready`, `num_attempts`.
+- `benchmark_slot`: `slot_id`, `slot_type`, `benchmark_id`, `challenge`,
+  `algorithm_id`, `track_id`, `assigned_at`, `last_activity_at`, `state`.
+- `pool_members`: `slave_name`, `wallet_address`, `invite_code`,
+  `registered_at`, `active`, `notes`, `fleet_id`, `worker_type`,
+  `machine_index`, `declared_cores`, `declared_gpu_model`.
+- `autopilot_decisions`: `id`, `mode`, `generated_at_ms`, `clean_windows`,
+  `healthy`, `applied`, `reason`, `changes`, `report`, `created_at`.
+- `ai_optimizer_decisions`: `id`, `mode`, `generated_at_ms`, `model`, `status`,
+  `decision_category`, `confidence`, `summary`, `recommendation`,
+  `raw_response`, `prompt_context`, `error`, `created_at`.
+
+Known non-existent tables/columns:
+
+- There is no `slave_status` table.
+- `root_batch` does not have `created_at`.
+- `root_batch` does not have `benchmark`; use `benchmark_id`.
+- `proofs_batch` does not have `created_at`.
+
+SQL policy:
+
+- Prefer `allowed_followup_checks` and include the `check_id` instead of writing
+  raw SQL.
+- If raw SQL is included, it must use only known tables and columns.
+- If unsure, use `request_more_data` instead of inventing a query.
+
+## 15. Throughput Interpretation Rules
+
+Use exact values when describing throughput.
+
+- Do not call a GPU slave "low throughput" if `completed_recent >= 10` and
+  `stale_total == 0`.
+- A C3 GPU dispatcher with `completed_recent >= 10`, live assignments, and no
+  stale work is healthy unless other evidence proves otherwise.
+- Idle minutes alone are not proof of a problem if the slave also has live work
+  and recent completions.
+- Occupied GPU slots plus active GPU slaves is usually a normal `observe_only`
+  state unless stale work, growing proof backlog, or missing completions are
+  present.
+- Stale roots/proofs and active job filters matter more than historical leftover
+  rows.
+
+## 16. Decision Categories
 
 The AI should classify every recommendation into one category:
 
@@ -398,7 +462,7 @@ The AI should classify every recommendation into one category:
 - `emergency_drain`: reduce or stop creating work to clear stale/stuck work.
 - `rollback`: undo or step back a previous change.
 
-## 15. Required AI Output Schema
+## 17. Required AI Output Schema
 
 The AI must return strict JSON only. No markdown, no prose outside JSON.
 
@@ -434,8 +498,8 @@ The AI must return strict JSON only. No markdown, no prose outside JSON.
   ],
   "queries_to_run_next": [
     {
-      "purpose": "Confirm active GPU roots are actually available.",
-      "sql": "SELECT ..."
+      "purpose": "Inspect GPU slot occupancy and slot age.",
+      "check_id": "gpu_slot_detail"
     }
   ],
   "requires_human_approval": false
@@ -468,7 +532,7 @@ If no action is safe, use:
 }
 ```
 
-## 16. Examples Of Good Recommendations
+## 18. Examples Of Good Recommendations
 
 ### GPU Starvation
 
@@ -525,7 +589,7 @@ Bad recommendation:
 
 - Increase all GPU slave caps globally without distinguishing C3 from local GPUs.
 
-## 17. Operator Style
+## 19. Operator Style
 
 The AI operator should be precise, conservative, and evidence-driven.
 
@@ -546,7 +610,7 @@ It should avoid:
 - making large unexplained jumps
 - optimizing one hardware class while starving another
 
-## 18. Stable Facts To Remember
+## 20. Stable Facts To Remember
 
 - Proofs must normally be built by the same slave that produced the root.
 - C3 dispatchers can represent many GPUs behind one slave name.

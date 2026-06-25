@@ -37,6 +37,99 @@ AI_OPTIMIZER_MAX_TOKENS = int(os.environ.get("AI_OPTIMIZER_MAX_TOKENS", "2500"))
 _last_run_ts = 0.0
 _decision_table_ready = False
 
+KNOWN_SCHEMA = {
+    "job": {
+        "benchmark_id",
+        "settings",
+        "hyperparameters",
+        "num_nonces",
+        "num_batches",
+        "rand_hash",
+        "fuel_budget",
+        "batch_size",
+        "challenge",
+        "algorithm",
+        "download_url",
+        "block_started",
+        "start_time",
+        "sampled_nonces",
+        "merkle_root_ready",
+        "merkle_proofs_ready",
+        "stopped",
+        "end_time",
+    },
+    "root_batch": {
+        "benchmark_id",
+        "batch_idx",
+        "slave",
+        "start_time",
+        "end_time",
+        "ready",
+        "num_attempts",
+    },
+    "proofs_batch": {
+        "benchmark_id",
+        "batch_idx",
+        "sampled_nonces",
+        "slave",
+        "start_time",
+        "end_time",
+        "ready",
+        "num_attempts",
+    },
+    "benchmark_slot": {
+        "slot_id",
+        "slot_type",
+        "benchmark_id",
+        "challenge",
+        "algorithm_id",
+        "track_id",
+        "assigned_at",
+        "last_activity_at",
+        "state",
+    },
+    "pool_members": {
+        "slave_name",
+        "wallet_address",
+        "invite_code",
+        "registered_at",
+        "active",
+        "notes",
+        "fleet_id",
+        "worker_type",
+        "machine_index",
+        "declared_cores",
+        "declared_gpu_model",
+    },
+    "autopilot_decisions": {
+        "id",
+        "mode",
+        "generated_at_ms",
+        "clean_windows",
+        "healthy",
+        "applied",
+        "reason",
+        "changes",
+        "report",
+        "created_at",
+    },
+    "ai_optimizer_decisions": {
+        "id",
+        "mode",
+        "generated_at_ms",
+        "model",
+        "status",
+        "decision_category",
+        "confidence",
+        "summary",
+        "recommendation",
+        "raw_response",
+        "prompt_context",
+        "error",
+        "created_at",
+    },
+}
+
 
 def _ensure_decision_table():
     global _decision_table_ready
@@ -131,17 +224,124 @@ def _recent_autopilot_decisions() -> list[dict]:
         return []
 
 
+def _slot_state_counts(report: dict) -> dict:
+    counts: dict[str, dict[str, int]] = {}
+    for row in (report.get("slots") or {}).get("summary", []):
+        slot_type = str(row.get("slot_type") or "unknown")
+        state = str(row.get("state") or "unknown")
+        counts.setdefault(slot_type, {})
+        counts[slot_type][state] = counts[slot_type].get(state, 0) + int(row.get("count") or 0)
+    return counts
+
+
+def _slave_health_note(slave: dict) -> str:
+    completed = int(slave.get("completed_recent") or 0)
+    stale = int(slave.get("stale_roots") or 0) + int(slave.get("stale_proofs") or 0)
+    live = int(slave.get("active_unfinished") or 0) + int(slave.get("active_proofs") or 0)
+    if stale:
+        return "attention: stale work exists"
+    if completed >= 10 and live:
+        return "healthy: completing work and still has live assignments"
+    if completed >= 5:
+        return "acceptable: recent completions present"
+    if live:
+        return "warming_or_slow: live assignments but low recent completions"
+    return "idle_or_recently_quiet"
+
+
+def _derived_pool_facts(report: dict) -> dict:
+    gpu_slaves = []
+    cpu_slaves = []
+    stale_roots = 0
+    stale_proofs = 0
+    for slave in report.get("slaves") or []:
+        stale_roots += int(slave.get("stale_roots") or 0)
+        stale_proofs += int(slave.get("stale_proofs") or 0)
+        if not slave.get("active_now"):
+            continue
+        item = {
+            "slave_name": slave.get("slave_name"),
+            "completed_recent": int(slave.get("completed_recent") or 0),
+            "live_roots": int(slave.get("active_unfinished") or 0),
+            "live_proofs": int(slave.get("active_proofs") or 0),
+            "stale_total": int(slave.get("stale_roots") or 0) + int(slave.get("stale_proofs") or 0),
+            "avg_runtime_sec": slave.get("avg_runtime_sec"),
+            "idle_for_min": slave.get("idle_for_min"),
+            "health_note": _slave_health_note(slave),
+        }
+        if slave.get("profile") == "gpu":
+            gpu_slaves.append(item)
+        elif slave.get("profile") == "cpu":
+            cpu_slaves.append(item)
+
+    for challenge in report.get("challenges") or []:
+        stale_roots += int(challenge.get("stale_roots") or 0)
+        stale_proofs += int(challenge.get("stale_proofs") or 0)
+
+    return {
+        "slot_state_counts": _slot_state_counts(report),
+        "active_gpu_slaves": gpu_slaves,
+        "active_cpu_slave_count": len(cpu_slaves),
+        "stale_totals": {
+            "roots": stale_roots,
+            "proofs": stale_proofs,
+            "combined": stale_roots + stale_proofs,
+        },
+        "interpretation_hints": [
+            "Do not describe a GPU slave with completed_recent >= 10 and stale_total == 0 as low throughput.",
+            "A C3 GPU dispatcher with live_roots > 0 and completed_recent >= 10 is healthy unless stale work exists.",
+            "Occupied GPU slots plus active GPU slaves usually means observe unless stale work or idle live assignments grow.",
+            "Use exact values from derived_pool_facts when summarizing throughput.",
+        ],
+    }
+
+
+def _allowed_followup_checks() -> list[dict]:
+    return [
+        {
+            "check_id": "admin_autopilot",
+            "command": "python3 admin.py autopilot",
+            "purpose": "Refresh the deterministic pool health report.",
+        },
+        {
+            "check_id": "ai_optimizer_json",
+            "command": "python3 admin.py ai-optimizer --json",
+            "purpose": "Show the full AI recommendation and evidence.",
+        },
+        {
+            "check_id": "gpu_slot_detail",
+            "command": "docker compose exec -T db psql -U postgres -d innopool -c \"select slot_type, slot_id, left(benchmark_id, 10) as benchmark, challenge, track_id, algorithm_id, state, round((extract(epoch from now())*1000 - coalesce(last_activity_at, assigned_at))/60000.0::numeric, 1) as idle_min from benchmark_slot where slot_type in ('hypergraph','vector_search','neuralnet_optimizer') order by slot_type, slot_id;\"",
+            "purpose": "Inspect GPU slot occupancy and slot age.",
+        },
+        {
+            "check_id": "active_gpu_roots",
+            "command": "docker compose exec -T db psql -U postgres -d innopool -c \"select j.challenge, j.settings->>'track_id' as track, j.settings->>'algorithm_id' as algorithm_id, count(*) as active_unassigned_roots from root_batch rb join job j on j.benchmark_id = rb.benchmark_id where rb.ready is null and rb.slave is null and j.stopped is null and j.end_time is null and j.challenge in ('hypergraph','vector_search','neuralnet_optimizer') group by j.challenge, j.settings->>'track_id', j.settings->>'algorithm_id' order by active_unassigned_roots desc;\"",
+            "purpose": "Check whether usable active GPU roots exist.",
+        },
+        {
+            "check_id": "c3_master_logs",
+            "command": "docker compose logs --tail=160 master | grep -Ei \"pool-gpu-a330c544ec5b-c3-001|get-batches|submitted root|adaptive cap\"",
+            "purpose": "Verify C3 assignment, adaptive cap, and root submission activity.",
+        },
+    ]
+
+
 def _build_prompt_payload(report: dict) -> dict:
     return {
         "generated_at_ms": int(time.time() * 1000),
         "mode": AI_OPTIMIZER_MODE,
         "autopilot_report": report,
+        "derived_pool_facts": _derived_pool_facts(report),
+        "known_database_schema": {table: sorted(cols) for table, cols in KNOWN_SCHEMA.items()},
+        "allowed_followup_checks": _allowed_followup_checks(),
         "recent_autopilot_decisions": _recent_autopilot_decisions(),
         "recent_ai_optimizer_decisions": _recent_ai_decisions(),
         "instructions": {
             "output": "Return strict JSON only. Follow the schema in the context document.",
             "apply_policy": "Read-only analysis. Do not claim any change has been applied.",
             "if_uncertain": "Use request_more_data or observe_only.",
+            "sql_policy": "Do not invent SQL. Prefer allowed_followup_checks check_id values. If SQL is included, it must use only known_database_schema tables and columns.",
+            "accuracy_policy": "Use derived_pool_facts for throughput statements; do not call healthy GPU completion counts low throughput.",
         },
     }
 
@@ -168,7 +368,64 @@ def _parse_model_json(text: str) -> dict:
     parsed.setdefault("confidence", 0.0)
     parsed.setdefault("recommended_actions", [])
     parsed.setdefault("requires_human_approval", False)
+    _sanitize_followup_queries(parsed)
     return parsed
+
+
+def _validate_sql_query(sql: str) -> list[str]:
+    import re
+
+    errors = []
+    alias_to_table = {}
+    for table, alias in re.findall(r"\b(?:from|join)\s+([a-zA-Z_][a-zA-Z0-9_]*)\s+([a-zA-Z_][a-zA-Z0-9_]*)", sql, flags=re.I):
+        if table not in KNOWN_SCHEMA:
+            errors.append(f"unknown table '{table}'")
+            continue
+        alias_to_table[alias] = table
+    for table in re.findall(r"\b(?:from|join)\s+([a-zA-Z_][a-zA-Z0-9_]*)\b", sql, flags=re.I):
+        if table not in KNOWN_SCHEMA and table not in alias_to_table:
+            errors.append(f"unknown table '{table}'")
+    for alias, column in re.findall(r"\b([a-zA-Z_][a-zA-Z0-9_]*)\.([a-zA-Z_][a-zA-Z0-9_]*)\b", sql):
+        table = alias_to_table.get(alias)
+        if not table:
+            continue
+        if column not in KNOWN_SCHEMA[table]:
+            errors.append(f"unknown column '{alias}.{column}' for table '{table}'")
+    return sorted(set(errors))
+
+
+def _sanitize_followup_queries(recommendation: dict):
+    queries = recommendation.get("queries_to_run_next")
+    if not isinstance(queries, list):
+        recommendation["queries_to_run_next"] = []
+        return
+    warnings = []
+    sanitized = []
+    for query in queries:
+        if not isinstance(query, dict):
+            continue
+        sql = query.get("sql")
+        if not sql:
+            sanitized.append(query)
+            continue
+        errors = _validate_sql_query(str(sql))
+        if errors:
+            warnings.append({
+                "purpose": query.get("purpose"),
+                "rejected_sql": sql,
+                "errors": errors,
+            })
+            sanitized.append({
+                "purpose": query.get("purpose"),
+                "status": "rejected_invalid_sql",
+                "reason": "; ".join(errors),
+                "suggestion": "Use allowed_followup_checks instead of invented SQL.",
+            })
+        else:
+            sanitized.append(query)
+    recommendation["queries_to_run_next"] = sanitized
+    if warnings:
+        recommendation["query_validation_warnings"] = warnings
 
 
 def _call_deepseek(context_doc: str, payload: dict) -> tuple[dict, str]:
