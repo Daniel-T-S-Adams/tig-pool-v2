@@ -28,12 +28,14 @@ METRIC_WINDOW_MS = int(os.environ.get("AUTOPILOT_METRIC_WINDOW_MS", str(30 * 60 
 STALE_ROOT_MS = int(os.environ.get("AUTOPILOT_STALE_ROOT_MS", str(45 * 60 * 1000)))
 STALE_PROOF_MS = int(os.environ.get("AUTOPILOT_STALE_PROOF_MS", str(20 * 60 * 1000)))
 MIN_MAX_BENCHMARKS = int(os.environ.get("AUTOPILOT_MIN_MAX_BENCHMARKS", "3"))
-MAX_MAX_BENCHMARKS = int(os.environ.get("AUTOPILOT_MAX_MAX_BENCHMARKS", "32"))
+MAX_MAX_BENCHMARKS = int(os.environ.get("AUTOPILOT_MAX_MAX_BENCHMARKS", "96"))
 APPLY_MIN_CLEAN_WINDOWS = int(os.environ.get("AUTOPILOT_APPLY_MIN_CLEAN_WINDOWS", "2"))
 MAX_BENCHMARK_STEP = int(os.environ.get("AUTOPILOT_MAX_BENCHMARK_STEP", "2"))
 SLOT_STEP = int(os.environ.get("AUTOPILOT_SLOT_STEP", "1"))
 MAX_CPU_SLOTS = int(os.environ.get("AUTOPILOT_MAX_CPU_SLOTS", "64"))
 MAX_GPU_SLOTS_PER_TYPE = int(os.environ.get("AUTOPILOT_MAX_GPU_SLOTS_PER_TYPE", "6"))
+PRODUCTIVE_IDLE_CPU_SCALE_MIN = int(os.environ.get("AUTOPILOT_PRODUCTIVE_IDLE_CPU_SCALE_MIN", "5"))
+PRODUCTIVE_IDLE_CPU_PER_SLOT = int(os.environ.get("AUTOPILOT_PRODUCTIVE_IDLE_CPU_PER_SLOT", "4"))
 STRANDED_BENCHMARK_MS = int(os.environ.get("AUTOPILOT_STRANDED_BENCHMARK_MS", str(30 * 60 * 1000)))
 STRANDED_DOWNSCALE_STEP = int(os.environ.get("AUTOPILOT_STRANDED_DOWNSCALE_STEP", "2"))
 STRANDED_BUFFER_BENCHMARKS = int(os.environ.get("AUTOPILOT_STRANDED_BUFFER_BENCHMARKS", "2"))
@@ -613,6 +615,10 @@ def _recommendations(cfg: dict, slaves: list[dict], challenges: list[dict], slot
 
     cpu_pressure = sum(int(s.get("active_unfinished") or 0) for s in active_cpu)
     gpu_pressure = sum(int(s.get("active_unfinished") or 0) for s in active_gpu)
+    productive_idle_cpu = [
+        s for s in active_cpu
+        if int(s.get("completed_recent") or 0) > 0 and int(s.get("active_unfinished") or 0) == 0
+    ]
     slot_idle = {
         row.get("slot_type"): int(row.get("count") or 0)
         for row in slots.get("summary", [])
@@ -621,7 +627,10 @@ def _recommendations(cfg: dict, slaves: list[dict], challenges: list[dict], slot
 
     recommended_cpu_slots = int(current_slots.get(CPU_SLOT_TYPE, slot_counts.get(CPU_SLOT_TYPE, 0)) or 0)
     if active_cpu:
-        if stale_total:
+        if len(productive_idle_cpu) >= PRODUCTIVE_IDLE_CPU_SCALE_MIN:
+            extra_slots = max(1, len(productive_idle_cpu) // max(1, PRODUCTIVE_IDLE_CPU_PER_SLOT))
+            recommended_cpu_slots = min(recommended_cpu_slots + extra_slots, MAX_CPU_SLOTS)
+        elif stale_total:
             recommended_cpu_slots = max(2, recommended_cpu_slots - 1)
         elif slot_idle.get(CPU_SLOT_TYPE, 0) == 0 and cpu_pressure >= max(1, recommended_cpu_slots):
             recommended_cpu_slots = min(recommended_cpu_slots + 2, MAX_CPU_SLOTS)
@@ -647,7 +656,10 @@ def _recommendations(cfg: dict, slaves: list[dict], challenges: list[dict], slot
                 "key": "resource_slots.slots",
                 "current": current_slots,
                 "proposed": proposed_slots,
-                "reason": "Slot pressure is inferred from active slaves, idle slots, and stale unfinished work.",
+                "reason": (
+                    "Slot pressure is inferred from active slaves, idle slots, stale unfinished work, "
+                    f"and {len(productive_idle_cpu)} productive idle CPU slaves."
+                ),
                 "apply_now": False,
             })
 
