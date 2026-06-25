@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import os
 import time
 from pathlib import Path
@@ -270,6 +271,33 @@ def _recommendation_signals(report: dict) -> list[dict]:
     return signals
 
 
+def _normalize_gpu_stranded(stranded: dict) -> dict:
+    normalized = {
+        "unserved": list(stranded.get("unserved") or []),
+        "capacity_waiting": list(stranded.get("capacity_waiting") or []),
+        "live_by_profile": stranded.get("live_by_profile") or {},
+        "slot_capacity": stranded.get("slot_capacity") or {},
+    }
+    kept_unserved = []
+    moved_to_waiting = []
+    for item in normalized["unserved"]:
+        if item.get("capacity_profile") != "gpu":
+            kept_unserved.append(item)
+            continue
+        live = int(item.get("matching_live_roots") or 0)
+        capacity = int(item.get("matching_slot_capacity") or 0)
+        if capacity > 0 and live >= max(1, math.floor(capacity * 0.70)):
+            moved = dict(item)
+            moved["classification"] = "capacity_waiting"
+            moved["reclassified_by_ai_optimizer"] = "gpu_near_capacity"
+            moved_to_waiting.append(moved)
+        else:
+            kept_unserved.append(item)
+    normalized["unserved"] = kept_unserved
+    normalized["capacity_waiting"].extend(moved_to_waiting)
+    return normalized
+
+
 def _derived_pool_facts(report: dict) -> dict:
     gpu_slaves = []
     cpu_slaves = []
@@ -359,14 +387,15 @@ def _derived_pool_facts(report: dict) -> dict:
                     "changes": cap_changes,
                 })
 
+    stranded_classification = _normalize_gpu_stranded(report.get("stranded_classification") or {})
     stale_roots_tolerated_for_capacity = (
         stale_roots <= autopilot.PRODUCTIVE_IDLE_STALE_ROOT_TOLERANCE
         and stale_proofs == 0
-        and not (report.get("stranded_classification") or {}).get("unserved")
+        and not stranded_classification.get("unserved")
     )
     selective_challenge_upscale_allowed = (
         stale_proofs == 0
-        and not (report.get("stranded_classification") or {}).get("unserved")
+        and not stranded_classification.get("unserved")
         and any(item.get("key") == "per_challenge_max_benchmarks" for item in safe_capacity_upscale)
     )
 
@@ -374,7 +403,7 @@ def _derived_pool_facts(report: dict) -> dict:
         "slot_state_counts": _slot_state_counts(report),
         "active_gpu_slaves": gpu_slaves,
         "active_cpu_slave_count": len(cpu_slaves),
-        "stranded_classification": report.get("stranded_classification", {}),
+        "stranded_classification": stranded_classification,
         "stale_totals": {
             "roots": stale_roots,
             "proofs": stale_proofs,
@@ -588,7 +617,7 @@ def _enforce_recommendation_consistency(recommendation: dict, prompt_context: di
     """Correct AI text that contradicts deterministic derived facts."""
     derived = prompt_context.get("derived_pool_facts") or {}
     stale_totals = derived.get("stale_totals") or {}
-    stranded = derived.get("stranded_classification") or {}
+    stranded = _normalize_gpu_stranded(derived.get("stranded_classification") or {})
     stale_roots = int(stale_totals.get("roots") or 0)
     stale_proofs = int(stale_totals.get("proofs") or 0)
     unserved_count = len(stranded.get("unserved") or [])
