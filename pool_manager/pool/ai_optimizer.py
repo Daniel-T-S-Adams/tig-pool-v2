@@ -32,7 +32,7 @@ DEEPSEEK_API_URL = os.environ.get(
 AI_CONTEXT_PATH = os.environ.get("AI_CONTEXT_PATH", "/app/docs/ai_pool_operator_context.md")
 AI_OPTIMIZER_TIMEOUT_S = int(os.environ.get("AI_OPTIMIZER_TIMEOUT_S", "90"))
 AI_OPTIMIZER_HISTORY_LIMIT = int(os.environ.get("AI_OPTIMIZER_HISTORY_LIMIT", "8"))
-AI_OPTIMIZER_MAX_TOKENS = int(os.environ.get("AI_OPTIMIZER_MAX_TOKENS", "1800"))
+AI_OPTIMIZER_MAX_TOKENS = int(os.environ.get("AI_OPTIMIZER_MAX_TOKENS", "4000"))
 
 _last_run_ts = 0.0
 _decision_table_ready = False
