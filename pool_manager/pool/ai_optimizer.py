@@ -435,12 +435,60 @@ def _allowed_followup_checks() -> list[dict]:
     ]
 
 
+def _compact_autopilot_report(report: dict, derived: dict) -> dict:
+    recommendations = []
+    for rec in report.get("recommendations") or []:
+        key = rec.get("key")
+        item = {
+            "key": key,
+            "current": rec.get("current"),
+            "proposed": rec.get("proposed"),
+            "reason": rec.get("reason"),
+        }
+        if str(key or "").startswith("challenge_health."):
+            recommendations.append(item)
+        elif key in {
+            "max_concurrent_benchmarks",
+            "per_challenge_max_benchmarks",
+            "resource_slots.slots",
+            "adaptive_slave_caps",
+            "proof_queue",
+        }:
+            recommendations.append(item)
+        elif key == "track_settings.bundle_runtime_economics":
+            current = rec.get("current") or []
+            item["current"] = current[:8] if isinstance(current, list) else current
+            recommendations.append(item)
+
+    stranded = report.get("stranded_classification") or {}
+    return {
+        "generated_at_ms": report.get("generated_at_ms"),
+        "current_config": report.get("current_config"),
+        "active_slave_counts": report.get("active_slave_counts"),
+        "stale_totals": report.get("stale_totals"),
+        "slot_state_counts": derived.get("slot_state_counts"),
+        "capacity_targets": report.get("capacity_targets"),
+        "stranded_classification": {
+            "unserved_count": len(stranded.get("unserved") or []),
+            "capacity_waiting_count": len(stranded.get("capacity_waiting") or []),
+            "unserved_examples": (stranded.get("unserved") or [])[:8],
+            "capacity_waiting_examples": (stranded.get("capacity_waiting") or [])[:8],
+        },
+        "active_gpu_slaves": derived.get("active_gpu_slaves"),
+        "active_cpu_slave_count": derived.get("active_cpu_slave_count"),
+        "stale_track_signals": (derived.get("stale_track_signals") or [])[:10],
+        "safe_capacity_upscale": derived.get("safe_capacity_upscale"),
+        "recommendations": recommendations[:30],
+    }
+
+
 def _build_prompt_payload(report: dict) -> dict:
+    derived = _derived_pool_facts(report)
     return {
         "generated_at_ms": int(time.time() * 1000),
         "mode": AI_OPTIMIZER_MODE,
-        "autopilot_report": report,
-        "derived_pool_facts": _derived_pool_facts(report),
+        "autopilot_report": _compact_autopilot_report(report, derived),
+        "derived_pool_facts": derived,
         "known_database_schema": {table: sorted(cols) for table, cols in KNOWN_SCHEMA.items()},
         "allowed_followup_checks": _allowed_followup_checks(),
         "recent_autopilot_decisions": _recent_autopilot_decisions(),
@@ -483,7 +531,7 @@ def _parse_model_json(text: str) -> dict:
             "requires_human_approval": False,
             "parse_warning": {
                 "error": str(exc),
-                "raw_prefix": text[:500],
+                "raw_prefix": text[:180],
             },
         }
     if not isinstance(parsed, dict):
