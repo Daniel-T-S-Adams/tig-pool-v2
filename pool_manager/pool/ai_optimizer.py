@@ -560,6 +560,30 @@ def _ensure_evidence_metric(recommendation: dict, metric: str, value: int, inter
     })
 
 
+def _deterministic_summary(derived: dict) -> str:
+    stale_totals = derived.get("stale_totals") or {}
+    stranded = derived.get("stranded_classification") or {}
+    stale_roots = int(stale_totals.get("roots") or 0)
+    stale_proofs = int(stale_totals.get("proofs") or 0)
+    unserved_count = len(stranded.get("unserved") or [])
+    capacity_waiting_count = len(stranded.get("capacity_waiting") or [])
+    cpu_count = int(derived.get("active_cpu_slave_count") or 0)
+    gpu_count = len(derived.get("active_gpu_slaves") or [])
+    stale_track_count = len(derived.get("stale_track_signals") or [])
+    parts = [f"Pool has {cpu_count} active CPU slaves and {gpu_count} active GPU slaves."]
+    parts.append(f"Deterministic stale totals: roots={stale_roots}, proofs={stale_proofs}.")
+    parts.append(
+        f"Stranded classification: unserved={unserved_count}, capacity_waiting={capacity_waiting_count}."
+    )
+    if stale_track_count:
+        parts.append(f"{stale_track_count} active track(s) need stale-work investigation.")
+    if unserved_count:
+        parts.append("Investigate unserved stranded benchmarks before broad capacity increases.")
+    elif capacity_waiting_count:
+        parts.append("Capacity-waiting benchmarks indicate queued work behind active capacity, not broken assignment.")
+    return " ".join(parts)
+
+
 def _enforce_recommendation_consistency(recommendation: dict, prompt_context: dict):
     """Correct AI text that contradicts deterministic derived facts."""
     derived = prompt_context.get("derived_pool_facts") or {}
@@ -578,6 +602,12 @@ def _enforce_recommendation_consistency(recommendation: dict, prompt_context: di
         if item.get("capacity_profile") == "gpu"
     ]
     warnings = []
+    if recommendation.get("parse_warning"):
+        recommendation["summary"] = _deterministic_summary(derived)
+        warnings.append({
+            "field": "summary",
+            "reason": "replaced_parse_fallback_summary_with_deterministic_summary",
+        })
 
     _ensure_evidence_metric(
         recommendation,

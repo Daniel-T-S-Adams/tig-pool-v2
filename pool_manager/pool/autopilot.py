@@ -1216,8 +1216,17 @@ def _health_summary(report: dict) -> dict:
         # slave assignment capacity. Treat near-full GPU capacity as normal
         # waiting so a few idle slot-equivalents do not become a hard blocker
         # while C3/local GPU route caps are already busy.
-        near_capacity_buffer = _active_gpu_slave_count(report) if profile == "gpu" else 0
-        if capacity > 0 and live >= max(1, capacity - near_capacity_buffer):
+        if profile == "gpu":
+            near_capacity_threshold = max(
+                1,
+                min(
+                    capacity - _active_gpu_slave_count(report),
+                    math.floor(capacity * 0.70),
+                ),
+            )
+        else:
+            near_capacity_threshold = capacity
+        if capacity > 0 and live >= near_capacity_threshold:
             enriched["classification"] = "capacity_waiting"
             capacity_waiting.append(enriched)
         else:
