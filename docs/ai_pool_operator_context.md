@@ -306,6 +306,23 @@ Check:
 Do not treat these as available work. They remain in the database as historical
 rows but the master correctly ignores them.
 
+### Slot-Held Benchmarks With No Assigned Roots
+
+An active benchmark can hold a resource slot and still show `pending_roots > 0`
+with `assigned_roots = 0` for a while. This means the slot is reserved, but no
+matching slave currently has a free assignment lane for that benchmark.
+
+The master contains a deterministic slot-starvation prioritizer:
+
+- It detects slotted active benchmarks with pending roots, zero assigned roots,
+  and old slot activity.
+- It prioritizes their root batches in `/get-batches` for matching slaves.
+- It does not release or churn the slot by default.
+
+The AI should treat this as an assignment-priority signal, not automatically as a
+reason to increase global capacity. If stale work is low and slaves are busy,
+`observe_only` may still be correct.
+
 ### Weak Slaves Overfed
 
 Adaptive caps should reduce work for machines that complete few batches or have
@@ -618,6 +635,8 @@ It should avoid:
 - `per_challenge_max_benchmarks` must allow active GPU challenges to exist.
 - GPU slot types are `vector_search`, `hypergraph`, and `neuralnet_optimizer`.
 - Stopped or ended jobs with unassigned roots are historical leftovers.
+- Slot-held active benchmarks with pending roots and zero assigned roots should
+  be prioritized for assignment before slot churn or capacity increases.
 - Cloudflare 502s indicate origin/tunnel trouble, not bad challenge logic.
 - Autopilot is the executor; the AI is the strategist.
 - Every action must be validated, bounded, logged, and reversible.

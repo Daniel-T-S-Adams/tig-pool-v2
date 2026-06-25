@@ -370,6 +370,57 @@ class SlaveManager:
         )
         return {r["benchmark_id"] for r in rows}
 
+    def _starved_slot_benchmarks(self, slot_types: List[str], now_ms: int) -> Dict[str, float]:
+        """Return slotted benchmarks that should be prioritized for root assignment.
+
+        A slot can be occupied by an active benchmark but make no progress if all
+        matching slaves stay full on other work. Once the slot has pending roots,
+        no assigned roots, and has been idle for long enough, move its root
+        batches to the front of the candidate order instead of churning the slot.
+        """
+        if not slot_types:
+            return {}
+        threshold_ms = int(CONFIG.get("slot_starvation_priority_ms", 20 * 60 * 1000))
+        if threshold_ms <= 0:
+            return {}
+        rows = get_db_conn().fetch_all(
+            """
+            SELECT
+                S.benchmark_id,
+                COALESCE(S.last_activity_at, S.assigned_at, J.start_time, 0) AS last_activity_at,
+                COUNT(R.*) FILTER (WHERE R.ready IS NULL) AS pending_roots,
+                COUNT(R.*) FILTER (
+                    WHERE R.ready IS NULL
+                      AND R.slave IS NOT NULL
+                      AND R.start_time IS NOT NULL
+                ) AS assigned_roots
+            FROM benchmark_slot S
+            JOIN job J ON J.benchmark_id = S.benchmark_id
+            JOIN root_batch R ON R.benchmark_id = S.benchmark_id
+            WHERE S.slot_type IN %s
+              AND S.benchmark_id IS NOT NULL
+              AND S.state = 'root'
+              AND J.stopped IS NULL
+              AND J.end_time IS NULL
+              AND J.merkle_root_ready IS NULL
+            GROUP BY S.benchmark_id, S.last_activity_at, S.assigned_at, J.start_time
+            HAVING COUNT(R.*) FILTER (WHERE R.ready IS NULL) > 0
+               AND COUNT(R.*) FILTER (
+                    WHERE R.ready IS NULL
+                      AND R.slave IS NOT NULL
+                      AND R.start_time IS NOT NULL
+               ) = 0
+            """,
+            (tuple(slot_types),)
+        )
+        out = {}
+        for row in rows:
+            last_activity_at = int(row.get("last_activity_at") or 0)
+            idle_ms = now_ms - last_activity_at
+            if idle_ms >= threshold_ms:
+                out[row["benchmark_id"]] = idle_ms
+        return out
+
     def _mark_slot_activity(self, benchmark_id: str, state: str):
         if not self._resource_slot_counts():
             return
@@ -600,11 +651,13 @@ class SlaveManager:
             now = time.time() * 1000
             slot_types = self._slot_types_for_slave(slave_name)
             slot_benchmark_ids = set()
+            starved_slot_benchmarks = {}
             if slot_types:
                 self._sync_slots()
                 self._release_slots()
                 self._assign_idle_slots(slot_types)
                 slot_benchmark_ids = self._slot_benchmark_ids(slot_types)
+                starved_slot_benchmarks = self._starved_slot_benchmarks(slot_types, int(now))
 
             with self.lock:
                 route_cap = int(slave["max_concurrent_batches"])
@@ -656,8 +709,24 @@ class SlaveManager:
                     bid = b["batch"]["benchmark_id"]
                     concurrent_by_bench[bid] = concurrent_by_bench.get(bid, 0) + 1
 
+                ordered_batches = self.batches
+                if starved_slot_benchmarks:
+                    ordered_batches = [
+                        b for _, b in sorted(
+                            enumerate(self.batches),
+                            key=lambda item: (
+                                0 if (
+                                    item[1]["batch"]["sampled_nonces"] is None
+                                    and item[1]["batch"]["benchmark_id"] in starved_slot_benchmarks
+                                ) else 1,
+                                -starved_slot_benchmarks.get(item[1]["batch"]["benchmark_id"], 0),
+                                item[0],
+                            ),
+                        )
+                    ]
+
                 def assign_pass(respect_cap):
-                    for b in self.batches:
+                    for b in ordered_batches:
                         batch = b["batch"]
                         bid = batch["benchmark_id"]
                         if len(concurrent) >= max_concurrent:
@@ -717,6 +786,17 @@ class SlaveManager:
                 # benchmarks are active, fill them ignoring the cap (use full capacity).
                 assign_pass(respect_cap=True)
                 assign_pass(respect_cap=False)
+                assigned_starved = [
+                    batch["id"]
+                    for batch in concurrent
+                    if batch["sampled_nonces"] is None
+                    and batch["benchmark_id"] in starved_slot_benchmarks
+                ]
+                if assigned_starved:
+                    logger.info(
+                        f"prioritized {len(assigned_starved)} starved slot batches for "
+                        f"{slave_name}: {assigned_starved[:8]}"
+                    )
             if len(concurrent) == 0:
                 logger.debug(f"no batches available for {slave_name}")
             if len(updates) > 0:
