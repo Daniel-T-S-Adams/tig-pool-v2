@@ -16,6 +16,7 @@ Usage:
   python3 admin.py autopilot [--json]        # read-only scheduler report
   python3 admin.py ai-optimizer [--json]     # run read-only DeepSeek analyst
   python3 admin.py ai-decisions [N]          # show recent AI recommendations
+  python3 admin.py compute-types [--apply]   # validate/add TIG 0.0.7 compute_type
   python3 admin.py coinbase                  # show last 10 coinbase updates
 """
 import json
@@ -46,6 +47,14 @@ WEB_PORT        = os.environ.get("WEB_PORT") or _env.get("WEB_PORT", "8088")
 ADMIN_BASE_URL  = os.environ.get("ADMIN_BASE_URL") or _env.get("ADMIN_BASE_URL")
 PUBLIC_BASE_URL = os.environ.get("PUBLIC_BASE_URL") or _env.get("PUBLIC_BASE_URL", "https://www.innopool.co.uk")
 BASE_URL        = (ADMIN_BASE_URL or f"http://127.0.0.1:{WEB_PORT}/api").rstrip("/")
+MASTER_CONFIG_URL = os.environ.get("MASTER_CONFIG_URL") or _env.get("MASTER_CONFIG_URL", "http://127.0.0.1:3336")
+GPU_CHALLENGES = {"c004", "c005", "c006"}
+COMPUTE_TYPE_WHITELIST = {
+    "aws_t3", "aws_t3a", "aws_t4g",
+    "aws_c7i", "aws_c7a", "aws_c7g",
+    "aws_m7i", "aws_m7a", "aws_m7g",
+    "aws_g4dn",
+}
 
 # ── http helpers ──────────────────────────────────────────────────────────────
 def _req(method, path, body=None):
@@ -72,6 +81,47 @@ def _req(method, path, body=None):
 
 def _get(path):   return _req("GET", path)
 def _post(path, body=None): return _req("POST", path, body)
+
+def _master_get_config():
+    with urllib.request.urlopen(f"{MASTER_CONFIG_URL.rstrip('/')}/get-config", timeout=10) as r:
+        return json.loads(r.read())
+
+def _master_update_config(cfg):
+    data = json.dumps(cfg).encode()
+    req = urllib.request.Request(
+        f"{MASTER_CONFIG_URL.rstrip('/')}/update-config",
+        data=data,
+        method="POST",
+        headers={"Content-Type": "application/json"},
+    )
+    with urllib.request.urlopen(req, timeout=10) as r:
+        return r.read().decode()
+
+def _compute_type_overrides():
+    raw = os.environ.get("COMPUTE_TYPE_OVERRIDES") or _env.get("COMPUTE_TYPE_OVERRIDES", "")
+    raw = raw.strip()
+    if not raw:
+        return {}
+    try:
+        overrides = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        sys.exit(f"Invalid COMPUTE_TYPE_OVERRIDES JSON: {exc}")
+    if not isinstance(overrides, dict):
+        sys.exit("COMPUTE_TYPE_OVERRIDES must be a JSON object")
+    return overrides
+
+def _compute_type_for_algorithm(algorithm_id, overrides):
+    challenge_id = algorithm_id.split("_", 1)[0]
+    if algorithm_id in overrides:
+        return overrides[algorithm_id]
+    if challenge_id in overrides:
+        return overrides[challenge_id]
+    env_key = f"COMPUTE_TYPE_{challenge_id.upper()}"
+    if os.environ.get(env_key) or _env.get(env_key):
+        return (os.environ.get(env_key) or _env.get(env_key)).strip()
+    cpu_default = os.environ.get("CPU_COMPUTE_TYPE") or _env.get("CPU_COMPUTE_TYPE", "aws_c7a")
+    gpu_default = os.environ.get("GPU_COMPUTE_TYPE") or _env.get("GPU_COMPUTE_TYPE", "aws_g4dn")
+    return gpu_default.strip() if challenge_id in GPU_CHALLENGES else cpu_default.strip()
 
 # ── commands ──────────────────────────────────────────────────────────────────
 def cmd_invite(args):
@@ -366,6 +416,62 @@ def cmd_ai_decisions(args):
             f"{row.get('summary') or row.get('error') or ''}"
         )
 
+def cmd_compute_types(args):
+    apply = "--apply" in args
+    preserve = "--force" not in args
+    cfg = _master_get_config()
+    overrides = _compute_type_overrides()
+    changed = []
+    counts = {}
+    invalid = []
+    for sel in cfg.get("algo_selection", []):
+        algorithm_id = sel.get("algorithm_id", "")
+        before = sel.get("compute_type")
+        after = before if preserve and before else _compute_type_for_algorithm(algorithm_id, overrides)
+        if after not in COMPUTE_TYPE_WHITELIST:
+            invalid.append((algorithm_id, after))
+            continue
+        if before != after:
+            sel["compute_type"] = after
+            changed.append((algorithm_id, before, after))
+        counts[after] = counts.get(after, 0) + 1
+
+    if invalid:
+        print("Invalid compute_type values:")
+        for algorithm_id, value in invalid:
+            print(f"  {algorithm_id}: {value}")
+        print("Allowed:", ", ".join(sorted(COMPUTE_TYPE_WHITELIST)))
+        sys.exit(1)
+
+    missing = [
+        sel.get("algorithm_id", "")
+        for sel in cfg.get("algo_selection", [])
+        if not sel.get("compute_type")
+    ]
+    if missing:
+        print("Missing compute_type after normalization:")
+        for algorithm_id in missing:
+            print(f"  {algorithm_id}")
+        sys.exit(1)
+
+    print("compute_type summary:")
+    for key, value in sorted(counts.items()):
+        print(f"  {key}: {value} algorithm(s)")
+    if changed:
+        print("\nChanges:")
+        for algorithm_id, before, after in changed:
+            print(f"  {algorithm_id}: {before or '<missing>'} -> {after}")
+    else:
+        print("\nNo changes needed.")
+
+    if not apply:
+        print("\nDry run only. Re-run with:")
+        print("  python3 admin.py compute-types --apply")
+        return
+
+    resp = _master_update_config(cfg)
+    print(f"\nupdate-config: {resp}")
+
 def cmd_new_round(_):
     """
     Run this AFTER you have claimed the round on TIG.
@@ -393,6 +499,7 @@ COMMANDS = {
     "autopilot": cmd_autopilot,
     "ai-optimizer": cmd_ai_optimizer,
     "ai-decisions": cmd_ai_decisions,
+    "compute-types": cmd_compute_types,
     "coinbase":  cmd_coinbase,
     "new-round": cmd_new_round,
 }

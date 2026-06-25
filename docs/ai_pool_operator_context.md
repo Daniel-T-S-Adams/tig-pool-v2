@@ -155,6 +155,8 @@ file.
 
 Important config keys:
 
+- `algo_selection`: algorithm entries. From TIG 0.0.7 each entry must include
+  `compute_type`, an AWS verification instance type from the protocol whitelist.
 - `max_concurrent_benchmarks`: global active benchmark/precommit budget. If this
   is too low, one class of work can starve another.
 - `per_challenge_max_benchmarks`: per-challenge benchmark caps, keyed by challenge
@@ -646,3 +648,5 @@ It should avoid:
 - Cloudflare 502s indicate origin/tunnel trouble, not bad challenge logic.
 - Autopilot is the executor; the AI is the strategist.
 - Every action must be validated, bounded, logged, and reversible.
+- TIG 0.0.7 requires `compute_type` on every `algo_selection` entry. Missing or
+  invalid compute types should be treated as a configuration health issue.

@@ -38,6 +38,20 @@ SAVED_CONFIG_PATH = os.path.expanduser(
     os.environ.get("SAVED_CONFIG", "~/tig-master/saved_config.json")
 )
 
+GPU_CHALLENGES = {"c004", "c005", "c006"}
+COMPUTE_TYPE_WHITELIST = {
+    "aws_t3",
+    "aws_t3a",
+    "aws_t4g",
+    "aws_c7i",
+    "aws_c7a",
+    "aws_c7g",
+    "aws_m7i",
+    "aws_m7a",
+    "aws_m7g",
+    "aws_g4dn",
+}
+
 
 def _load_base_config() -> dict:
     if not os.path.exists(SAVED_CONFIG_PATH):
@@ -64,6 +78,71 @@ def _prefix_regex(algo_ids: list) -> str:
     if not prefixes:
         return r"^$a"
     return r"^(" + "|".join(re.escape(p) for p in prefixes) + r")_"
+
+
+def _load_compute_type_overrides() -> dict:
+    raw = os.environ.get("COMPUTE_TYPE_OVERRIDES", "").strip()
+    if not raw:
+        return {}
+    try:
+        overrides = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        sys.exit(f"Invalid COMPUTE_TYPE_OVERRIDES JSON: {exc}")
+    if not isinstance(overrides, dict):
+        sys.exit("COMPUTE_TYPE_OVERRIDES must be a JSON object")
+    for key, value in overrides.items():
+        if value not in COMPUTE_TYPE_WHITELIST:
+            sys.exit(
+                f"Invalid compute_type override for {key}: {value}\n"
+                f"Allowed: {', '.join(sorted(COMPUTE_TYPE_WHITELIST))}"
+            )
+    return overrides
+
+
+def _compute_type_for_algorithm(algorithm_id: str, overrides: dict) -> str:
+    challenge_id = algorithm_id.split("_", 1)[0]
+    if algorithm_id in overrides:
+        return overrides[algorithm_id]
+    if challenge_id in overrides:
+        return overrides[challenge_id]
+
+    env_key = f"COMPUTE_TYPE_{challenge_id.upper()}"
+    if os.environ.get(env_key):
+        return os.environ[env_key].strip()
+
+    default_cpu = os.environ.get("CPU_COMPUTE_TYPE", "aws_c7a").strip()
+    default_gpu = os.environ.get("GPU_COMPUTE_TYPE", "aws_g4dn").strip()
+    return default_gpu if challenge_id in GPU_CHALLENGES else default_cpu
+
+
+def _ensure_compute_types(cfg: dict):
+    overrides = _load_compute_type_overrides()
+    preserve_existing = os.environ.get("PRESERVE_COMPUTE_TYPE", "true").lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+    summary = {}
+    for sel in cfg.get("algo_selection", []):
+        algorithm_id = sel.get("algorithm_id", "")
+        existing = sel.get("compute_type")
+        compute_type = existing if preserve_existing and existing else _compute_type_for_algorithm(algorithm_id, overrides)
+        if compute_type not in COMPUTE_TYPE_WHITELIST:
+            sys.exit(
+                f"Invalid compute_type for {algorithm_id}: {compute_type}\n"
+                f"Allowed: {', '.join(sorted(COMPUTE_TYPE_WHITELIST))}\n"
+                "Set CPU_COMPUTE_TYPE, GPU_COMPUTE_TYPE, COMPUTE_TYPE_C00X, "
+                "or COMPUTE_TYPE_OVERRIDES."
+            )
+        sel["compute_type"] = compute_type
+        summary.setdefault(compute_type, 0)
+        summary[compute_type] += 1
+    if cfg.get("algo_selection"):
+        print(
+            "  compute_type applied: "
+            + ", ".join(f"{k}({v})" for k, v in sorted(summary.items()))
+        )
 
 
 def main():
@@ -100,11 +179,13 @@ def main():
     # ── slave routing ─────────────────────────────────────────────────────────
     slave_mode = os.environ.get("SLAVE_MODE", "pool").lower()
 
+    # Ensure TIG 0.0.7 verification compute_type is present before pushing config.
+    _ensure_compute_types(cfg)
+
     # Determine which algo IDs are GPU vs CPU based on challenge prefix
     # c004=vector_search, c005=hypergraph, c006=neuralnet_optimizer → GPU
     # c001=satisfiability, c002=vehicle_routing, c003=knapsack,
     # c007=job_scheduling, c008=energy_arbitrage → CPU
-    GPU_CHALLENGES = {"c004", "c005", "c006"}
     gpu_ids = [s["algorithm_id"] for s in cfg["algo_selection"]
                if s["algorithm_id"].split("_")[0] in GPU_CHALLENGES]
     cpu_ids = [s["algorithm_id"] for s in cfg["algo_selection"]

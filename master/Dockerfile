@@ -1,4 +1,4 @@
-ARG TIG_VERSION=0.0.6
+ARG TIG_VERSION=0.0.7
 FROM ghcr.io/tig-foundation/tig-monorepo/benchmarker/master:${TIG_VERSION}
 
 # Patch slave_manager.py to support per_challenge_time_before_batch_retry.
