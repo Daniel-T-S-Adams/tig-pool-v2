@@ -307,14 +307,19 @@ def _derived_pool_facts(report: dict) -> dict:
         stale_proofs = max(stale_proofs, challenge_stale_proofs)
 
     recommendation_signals = _recommendation_signals(report)
-    stale_roots = max(
-        stale_roots,
-        sum(int(signal.get("stale_roots") or 0) for signal in recommendation_signals),
-    )
-    stale_proofs = max(
-        stale_proofs,
-        sum(int(signal.get("stale_proofs") or 0) for signal in recommendation_signals),
-    )
+    stale_track_signals = [
+        signal for signal in recommendation_signals
+        if str(signal.get("key") or "").startswith("challenge_health.")
+    ]
+    if not exact_stale_totals:
+        stale_roots = max(
+            stale_roots,
+            sum(int(signal.get("stale_roots") or 0) for signal in recommendation_signals),
+        )
+        stale_proofs = max(
+            stale_proofs,
+            sum(int(signal.get("stale_proofs") or 0) for signal in recommendation_signals),
+        )
 
     safe_capacity_upscale = []
     for signal in recommendation_signals:
@@ -375,6 +380,7 @@ def _derived_pool_facts(report: dict) -> dict:
             "proofs": stale_proofs,
             "combined": stale_roots + stale_proofs,
         },
+        "stale_track_signals": stale_track_signals,
         "autopilot_recommendation_signals": recommendation_signals,
         "safe_capacity_upscale": safe_capacity_upscale,
         "stale_roots_tolerated_for_capacity_upscale": stale_roots_tolerated_for_capacity,
@@ -494,6 +500,7 @@ def _enforce_recommendation_consistency(recommendation: dict, prompt_context: di
     unserved_count = len(stranded.get("unserved") or [])
     capacity_waiting_count = len(stranded.get("capacity_waiting") or [])
     safe_capacity_upscale = derived.get("safe_capacity_upscale") or []
+    stale_track_signals = derived.get("stale_track_signals") or []
     stale_tolerated_for_capacity = bool(derived.get("stale_roots_tolerated_for_capacity_upscale"))
     selective_challenge_upscale_allowed = bool(derived.get("selective_challenge_upscale_allowed"))
     warnings = []
@@ -532,6 +539,37 @@ def _enforce_recommendation_consistency(recommendation: dict, prompt_context: di
                 f"Stale roots tolerated for capacity upscale: {stale_tolerated_for_capacity}."
             ),
         )
+    if stale_track_signals:
+        _ensure_evidence_metric(
+            recommendation,
+            "deterministic_stale_track_signals",
+            len(stale_track_signals),
+            "Deterministic autopilot reported stale active tracks that need investigation or drain handling.",
+        )
+
+        actions = recommendation.setdefault("recommended_actions", [])
+        has_stale_action = any(
+            isinstance(action, dict)
+            and action.get("action_type") in {"investigate", "stale_track_attention"}
+            for action in actions
+        )
+        if not has_stale_action:
+            actions.append({
+                "action_type": "stale_track_attention",
+                "key": "challenge_health",
+                "current": stale_track_signals[:10],
+                "proposed": "investigate_or_wait_for_stale_cleanup",
+                "reason": "Active tracks have stale unfinished root work; broad capacity increases should wait, but stale-free challenge caps may still be raised selectively.",
+                "risk": "Ignoring stale roots can keep weak or stuck slaves holding work and distort capacity estimates.",
+                "rollback_condition": "If stale roots return to zero and workers remain idle, resume normal capacity scaling.",
+            })
+            if recommendation.get("decision_category") == "observe_only":
+                recommendation["decision_category"] = "investigate"
+            warnings.append({
+                "field": "recommended_actions",
+                "reason": "added_missing_stale_track_action",
+                "stale_track_count": len(stale_track_signals),
+            })
 
     summary = str(recommendation.get("summary") or "")
     if stale_proofs > 0 and "no stale proofs" in summary.lower():

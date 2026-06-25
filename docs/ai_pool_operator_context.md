@@ -532,6 +532,9 @@ Each live request to the AI should include:
   Do not contradict it in summaries or evidence.
 - `derived_pool_facts.autopilot_recommendation_signals` is authoritative for
   proof queue and challenge health warning signals.
+- If `derived_pool_facts.stale_track_signals` is non-empty, the AI should include
+  a concrete `recommended_actions` item to investigate or wait for stale cleanup
+  on those tracks. Do not return empty actions with only `observe_only`.
 - `known_database_schema`, which lists the only database tables and columns that
   may be referenced.
 - `allowed_followup_checks`, which lists preferred check IDs and commands for
