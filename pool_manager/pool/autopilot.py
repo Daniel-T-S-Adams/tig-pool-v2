@@ -640,7 +640,11 @@ def _reward_funnel_summary(now_ms: int) -> dict:
                 COUNT(*) FILTER (WHERE ready = true) AS roots_ready,
                 COUNT(*) FILTER (WHERE ready IS NULL) AS roots_pending,
                 COUNT(*) FILTER (WHERE ready = false) AS roots_failed,
-                MAX(end_time) FILTER (WHERE ready = true) AS all_roots_ready_at,
+                CASE
+                    WHEN COUNT(*) > 0 AND COUNT(*) = COUNT(*) FILTER (WHERE ready = true)
+                    THEN MAX(end_time) FILTER (WHERE ready = true)
+                    ELSE NULL
+                END AS all_roots_ready_at,
                 PERCENTILE_CONT(0.95) WITHIN GROUP (ORDER BY end_time - start_time)
                     FILTER (WHERE ready = true AND end_time >= %s AND end_time IS NOT NULL) AS root_runtime_p95_ms
             FROM root_batch
@@ -716,7 +720,11 @@ def _reward_funnel_summary(now_ms: int) -> dict:
                 COUNT(*) AS root_batches,
                 COUNT(*) FILTER (WHERE ready = true) AS roots_ready,
                 COUNT(*) FILTER (WHERE ready IS NULL) AS roots_pending,
-                MAX(end_time) FILTER (WHERE ready = true) AS all_roots_ready_at,
+                CASE
+                    WHEN COUNT(*) > 0 AND COUNT(*) = COUNT(*) FILTER (WHERE ready = true)
+                    THEN MAX(end_time) FILTER (WHERE ready = true)
+                    ELSE NULL
+                END AS all_roots_ready_at,
                 PERCENTILE_CONT(0.95) WITHIN GROUP (ORDER BY end_time - start_time)
                     FILTER (WHERE ready = true AND end_time >= %s AND end_time IS NOT NULL) AS root_runtime_p95_ms
             FROM root_batch
@@ -787,10 +795,15 @@ def _reward_funnel_summary(now_ms: int) -> dict:
     proof_submitted = int(total.get("proof_submitted_confirmed") or 0)
     stopped = int(total.get("stopped_benchmarks") or 0)
     stopped_without_roots = int(total.get("stopped_without_roots") or 0)
+    roots_pending = int(float(total.get("roots_pending") or 0))
     avg_time_to_proof = total.get("avg_time_to_proof_submit_sec")
     proof_conversion = _safe_div(proof_submitted, proof_required)
     stopped_rate = _safe_div(stopped, seen)
     issues = []
+    if seen >= 5 and proof_required == 0:
+        issues.append("warming_up_no_proof_samples")
+    if seen >= 5 and root_ready == 0 and roots_pending > 0:
+        issues.append("root_phase_not_complete")
     if proof_required and (proof_conversion or 0.0) < FUNNEL_MIN_PROOF_CONVERSION_RATE:
         issues.append("low_proof_conversion")
     if stopped_rate is not None and stopped_rate > FUNNEL_MAX_STOPPED_OR_EXPIRED_RATE:
