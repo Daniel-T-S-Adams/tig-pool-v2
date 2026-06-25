@@ -359,6 +359,11 @@ def _derived_pool_facts(report: dict) -> dict:
         and stale_proofs == 0
         and not (report.get("stranded_classification") or {}).get("unserved")
     )
+    selective_challenge_upscale_allowed = (
+        stale_proofs == 0
+        and not (report.get("stranded_classification") or {}).get("unserved")
+        and any(item.get("key") == "per_challenge_max_benchmarks" for item in safe_capacity_upscale)
+    )
 
     return {
         "slot_state_counts": _slot_state_counts(report),
@@ -373,6 +378,7 @@ def _derived_pool_facts(report: dict) -> dict:
         "autopilot_recommendation_signals": recommendation_signals,
         "safe_capacity_upscale": safe_capacity_upscale,
         "stale_roots_tolerated_for_capacity_upscale": stale_roots_tolerated_for_capacity,
+        "selective_challenge_upscale_allowed": selective_challenge_upscale_allowed,
         "productive_idle_stale_root_tolerance": autopilot.PRODUCTIVE_IDLE_STALE_ROOT_TOLERANCE,
         "interpretation_hints": [
             "Do not describe a GPU slave with completed_recent >= 10 and stale_total == 0 as low throughput.",
@@ -382,6 +388,7 @@ def _derived_pool_facts(report: dict) -> dict:
             "If autopilot_recommendation_signals includes proof_queue, mention it as a proof queue signal.",
             "If stranded_classification.capacity_waiting is non-empty and unserved is empty, describe it as queued behind saturated capacity, not broken.",
             "If safe_capacity_upscale is non-empty and stale_roots_tolerated_for_capacity_upscale is true, do not say autopilot is blocked by stale work.",
+            "If selective_challenge_upscale_allowed is true, say autopilot can selectively raise non-stale challenge caps even while stale tracks are investigated.",
             "Use exact values from derived_pool_facts when summarizing throughput.",
         ],
     }
@@ -488,6 +495,7 @@ def _enforce_recommendation_consistency(recommendation: dict, prompt_context: di
     capacity_waiting_count = len(stranded.get("capacity_waiting") or [])
     safe_capacity_upscale = derived.get("safe_capacity_upscale") or []
     stale_tolerated_for_capacity = bool(derived.get("stale_roots_tolerated_for_capacity_upscale"))
+    selective_challenge_upscale_allowed = bool(derived.get("selective_challenge_upscale_allowed"))
     warnings = []
 
     _ensure_evidence_metric(
@@ -573,6 +581,24 @@ def _enforce_recommendation_consistency(recommendation: dict, prompt_context: di
             "stale_roots": stale_roots,
             "stale_proofs": stale_proofs,
         })
+    elif selective_challenge_upscale_allowed and "blocked by stale work" in summary.lower():
+        recommendation["summary"] = (
+            summary
+            .replace(
+                "Autopilot is blocked by stale work.",
+                "Autopilot should hold broad capacity increases, but can selectively raise non-stale CPU challenge caps while stale tracks are investigated.",
+            )
+            .replace(
+                "autopilot is blocked by stale work.",
+                "autopilot should hold broad capacity increases, but can selectively raise non-stale CPU challenge caps while stale tracks are investigated.",
+            )
+        )
+        warnings.append({
+            "field": "summary",
+            "reason": "model_called_selective_challenge_upscale_globally_blocked",
+            "safe_capacity_upscale": safe_capacity_upscale,
+            "stale_roots": stale_roots,
+        })
 
     for action in recommendation.get("blocked_actions") or []:
         if not isinstance(action, dict):
@@ -599,6 +625,18 @@ def _enforce_recommendation_consistency(recommendation: dict, prompt_context: di
             warnings.append({
                 "field": f"blocked_actions.{action.get('key')}",
                 "reason": "model_blocked_safe_upscale_due_to_tolerated_stale_roots",
+                "safe_capacity_upscale": safe_capacity_upscale,
+                "stale_roots": stale_roots,
+            })
+        elif selective_challenge_upscale_allowed and "stale work" in reason.lower():
+            action["reason"] = (
+                "Broad capacity increases should wait, but deterministic autopilot can selectively "
+                "raise non-stale CPU challenge caps because stale proofs and unserved stranded "
+                "benchmarks are zero."
+            )
+            warnings.append({
+                "field": f"blocked_actions.{action.get('key')}",
+                "reason": "model_blocked_selective_challenge_upscale_due_to_stale_roots",
                 "safe_capacity_upscale": safe_capacity_upscale,
                 "stale_roots": stale_roots,
             })

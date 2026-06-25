@@ -318,6 +318,10 @@ Autopilot is expected to scale proportionally with fleet size:
   `derived_pool_facts.stale_roots_tolerated_for_capacity_upscale` is true and
   `derived_pool_facts.safe_capacity_upscale` is non-empty, do not say autopilot
   is blocked by stale work.
+- Stale roots on one CPU challenge should not freeze every CPU challenge. If
+  `derived_pool_facts.selective_challenge_upscale_allowed` is true, broad
+  capacity increases may wait, but non-stale CPU challenge caps can still rise so
+  healthy workers are not starved.
 - `track_economics` should be used when evaluating whether a track is too coarse,
   too fragmented, too slow, or under-bundled. Do not recommend bundle changes
   from stale counts alone.
