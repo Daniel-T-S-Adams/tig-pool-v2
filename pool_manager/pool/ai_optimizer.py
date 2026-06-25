@@ -312,6 +312,7 @@ def _derived_pool_facts(report: dict) -> dict:
         "slot_state_counts": _slot_state_counts(report),
         "active_gpu_slaves": gpu_slaves,
         "active_cpu_slave_count": len(cpu_slaves),
+        "stranded_classification": report.get("stranded_classification", {}),
         "stale_totals": {
             "roots": stale_roots,
             "proofs": stale_proofs,
@@ -324,6 +325,7 @@ def _derived_pool_facts(report: dict) -> dict:
             "Occupied GPU slots plus active GPU slaves usually means observe unless stale work or idle live assignments grow.",
             "If stale_totals.proofs is greater than zero, never say there are no stale proofs.",
             "If autopilot_recommendation_signals includes proof_queue, mention it as a proof queue signal.",
+            "If stranded_classification.capacity_waiting is non-empty and unserved is empty, describe it as queued behind saturated capacity, not broken.",
             "Use exact values from derived_pool_facts when summarizing throughput.",
         ],
     }

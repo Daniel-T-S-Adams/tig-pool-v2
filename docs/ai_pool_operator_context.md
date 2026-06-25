@@ -325,6 +325,14 @@ The AI should treat this as an assignment-priority signal, not automatically as 
 reason to increase global capacity. If stale work is low and slaves are busy,
 `observe_only` may still be correct.
 
+Autopilot classifies stranded benchmarks:
+
+- `unserved`: matching slot capacity appears available, but the benchmark has no
+  assigned roots. This is a health blocker.
+- `capacity_waiting`: matching CPU/GPU workers are already carrying at least the
+  configured slot capacity. This is queued behind saturated capacity and should
+  not be described as broken by itself.
+
 ### Weak Slaves Overfed
 
 Adaptive caps should reduce work for machines that complete few batches or have
@@ -473,6 +481,9 @@ Use exact values when describing throughput.
 - Occupied GPU slots plus active GPU slaves is usually a normal `observe_only`
   state unless stale work, growing proof backlog, or missing completions are
   present.
+- If `stranded_classification.capacity_waiting` is non-empty and
+  `stranded_classification.unserved` is empty, describe the pool as saturated or
+  waiting for capacity, not blocked by broken stranded work.
 - Stale roots/proofs and active job filters matter more than historical leftover
   rows.
 

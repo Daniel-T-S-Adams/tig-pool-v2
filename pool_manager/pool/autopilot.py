@@ -714,6 +714,7 @@ def _recommendations(cfg: dict, slaves: list[dict], challenges: list[dict], slot
 def _health_summary(report: dict) -> dict:
     slaves = report.get("slaves") or []
     challenges = report.get("challenges") or []
+    slots = report.get("slots") or {}
     stale_roots = sum(int(s.get("stale_roots") or 0) for s in slaves) + sum(
         int(c.get("stale_roots") or 0) for c in challenges
     )
@@ -728,12 +729,60 @@ def _health_summary(report: dict) -> dict:
         and not s.get("registered")
     ]
     stranded = report.get("stranded_benchmarks") or []
+    slot_capacity: dict[str, int] = {}
+    for row in slots.get("summary", []):
+        slot_type = row.get("slot_type")
+        slot_capacity[slot_type] = slot_capacity.get(slot_type, 0) + int(row.get("count") or 0)
+
+    live_by_profile = {
+        "cpu": sum(
+            int(s.get("active_unfinished") or 0)
+            for s in slaves
+            if s.get("profile") == "cpu" and _counts_for_capacity(s)
+        ),
+        "gpu": sum(
+            int(s.get("active_unfinished") or 0)
+            for s in slaves
+            if s.get("profile") == "gpu" and _counts_for_capacity(s)
+        ),
+    }
+    live_by_slot_type = {
+        CPU_SLOT_TYPE: live_by_profile["cpu"],
+        "gpu": live_by_profile["gpu"],
+    }
+    gpu_slot_capacity = sum(int(slot_capacity.get(k, 0) or 0) for k in GPU_SLOT_TYPES)
+    capacity_waiting = []
+    unserved_stranded = []
+    for item in stranded:
+        slot_type = item.get("slot_type")
+        profile = "gpu" if slot_type in GPU_SLOT_TYPES else "cpu"
+        capacity = gpu_slot_capacity if profile == "gpu" else int(slot_capacity.get(CPU_SLOT_TYPE, 0) or 0)
+        live = live_by_profile[profile]
+        enriched = dict(item)
+        enriched["capacity_profile"] = profile
+        enriched["matching_live_roots"] = live
+        enriched["matching_slot_capacity"] = capacity
+        if capacity > 0 and live >= capacity:
+            enriched["classification"] = "capacity_waiting"
+            capacity_waiting.append(enriched)
+        else:
+            enriched["classification"] = "unserved"
+            unserved_stranded.append(enriched)
     return {
         "stale_roots": stale_roots,
         "stale_proofs": stale_proofs,
         "active_unregistered": active_unregistered,
         "stranded_benchmarks": stranded,
-        "healthy": stale_roots == 0 and stale_proofs == 0 and not active_unregistered and not stranded,
+        "unserved_stranded_benchmarks": unserved_stranded,
+        "capacity_waiting_benchmarks": capacity_waiting,
+        "live_by_profile": live_by_profile,
+        "slot_capacity": slot_capacity,
+        "healthy": (
+            stale_roots == 0
+            and stale_proofs == 0
+            and not active_unregistered
+            and not unserved_stranded
+        ),
     }
 
 
@@ -788,10 +837,10 @@ def _plan_config_change(report: dict, cfg: dict, clean_windows: int) -> dict:
     if report.get("master_config_error"):
         decision["reason"] = f"master_config_unavailable: {report['master_config_error']}"
         return decision
-    if health.get("stranded_benchmarks"):
+    if health.get("unserved_stranded_benchmarks"):
         current = int(cfg.get("max_concurrent_benchmarks") or 0)
         active_jobs = _active_unfinished_jobs()
-        stranded_count = len(health["stranded_benchmarks"])
+        stranded_count = len(health["unserved_stranded_benchmarks"])
         productive_jobs = max(0, active_jobs - stranded_count)
         gpu_slot_total, _ = _gpu_slot_counts(report)
         gpu_reserve = gpu_slot_total if _active_gpu_slave_count(report) else 0
@@ -813,7 +862,8 @@ def _plan_config_change(report: dict, cfg: dict, clean_windows: int) -> dict:
                 "productive_jobs": productive_jobs,
                 "buffer": STRANDED_BUFFER_BENCHMARKS,
                 "gpu_reserve": gpu_reserve,
-                "stranded": health["stranded_benchmarks"],
+                "stranded": health["unserved_stranded_benchmarks"],
+                "capacity_waiting": health.get("capacity_waiting_benchmarks", []),
             }
         }
         if next_max != current:
@@ -985,6 +1035,12 @@ def build_report() -> dict:
         "cpu": sum(1 for s in slaves if s["profile"] == "cpu" and _counts_for_capacity(s)),
         "gpu": sum(1 for s in slaves if s["profile"] == "gpu" and _counts_for_capacity(s)),
     }
+    health = _health_summary({
+        "slaves": slaves,
+        "challenges": challenges,
+        "slots": slots,
+        "stranded_benchmarks": stranded,
+    })
 
     return {
         "mode": "read_only",
@@ -1002,5 +1058,11 @@ def build_report() -> dict:
         "slots": slots,
         "challenges": challenges,
         "stranded_benchmarks": stranded,
+        "stranded_classification": {
+            "unserved": health.get("unserved_stranded_benchmarks", []),
+            "capacity_waiting": health.get("capacity_waiting_benchmarks", []),
+            "live_by_profile": health.get("live_by_profile", {}),
+            "slot_capacity": health.get("slot_capacity", {}),
+        },
         "recommendations": recommendations,
     }
