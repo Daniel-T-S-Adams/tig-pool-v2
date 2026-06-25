@@ -31,14 +31,26 @@ MIN_MAX_BENCHMARKS = int(os.environ.get("AUTOPILOT_MIN_MAX_BENCHMARKS", "3"))
 MAX_MAX_BENCHMARKS = int(os.environ.get("AUTOPILOT_MAX_MAX_BENCHMARKS", "96"))
 APPLY_MIN_CLEAN_WINDOWS = int(os.environ.get("AUTOPILOT_APPLY_MIN_CLEAN_WINDOWS", "2"))
 MAX_BENCHMARK_STEP = int(os.environ.get("AUTOPILOT_MAX_BENCHMARK_STEP", "2"))
+MAX_BENCHMARK_UP_STEP = int(os.environ.get("AUTOPILOT_MAX_BENCHMARK_UP_STEP", str(MAX_BENCHMARK_STEP)))
+MAX_BENCHMARK_DOWN_STEP = int(os.environ.get("AUTOPILOT_MAX_BENCHMARK_DOWN_STEP", str(MAX_BENCHMARK_STEP)))
 SLOT_STEP = int(os.environ.get("AUTOPILOT_SLOT_STEP", "1"))
+SLOT_UP_STEP = int(os.environ.get("AUTOPILOT_SLOT_UP_STEP", str(SLOT_STEP)))
+SLOT_DOWN_STEP = int(os.environ.get("AUTOPILOT_SLOT_DOWN_STEP", str(SLOT_STEP)))
 MAX_CPU_SLOTS = int(os.environ.get("AUTOPILOT_MAX_CPU_SLOTS", "64"))
 MAX_GPU_SLOTS_PER_TYPE = int(os.environ.get("AUTOPILOT_MAX_GPU_SLOTS_PER_TYPE", "6"))
+MAX_CPU_SLAVE_CAP = int(os.environ.get("AUTOPILOT_MAX_CPU_SLAVE_CAP", "16"))
+MAX_GPU_SLAVE_CAP = int(os.environ.get("AUTOPILOT_MAX_GPU_SLAVE_CAP", "12"))
+MIN_CPU_SLAVE_CAP = int(os.environ.get("AUTOPILOT_MIN_CPU_SLAVE_CAP", "4"))
+MIN_GPU_SLAVE_CAP = int(os.environ.get("AUTOPILOT_MIN_GPU_SLAVE_CAP", "1"))
+BENCHMARK_BUFFER = int(os.environ.get("AUTOPILOT_BENCHMARK_BUFFER", "2"))
 PRODUCTIVE_IDLE_CPU_SCALE_MIN = int(os.environ.get("AUTOPILOT_PRODUCTIVE_IDLE_CPU_SCALE_MIN", "5"))
 PRODUCTIVE_IDLE_CPU_PER_SLOT = int(os.environ.get("AUTOPILOT_PRODUCTIVE_IDLE_CPU_PER_SLOT", "4"))
 PRODUCTIVE_IDLE_STALE_ROOT_TOLERANCE = int(
     os.environ.get("AUTOPILOT_PRODUCTIVE_IDLE_STALE_ROOT_TOLERANCE", "5")
 )
+PRODUCTIVE_IDLE_GPU_SCALE_MIN = int(os.environ.get("AUTOPILOT_PRODUCTIVE_IDLE_GPU_SCALE_MIN", "1"))
+PRODUCTIVE_IDLE_GPU_PER_SLOT = int(os.environ.get("AUTOPILOT_PRODUCTIVE_IDLE_GPU_PER_SLOT", "1"))
+CAP_SCALE_COMPLETIONS_PER_STEP = int(os.environ.get("AUTOPILOT_CAP_SCALE_COMPLETIONS_PER_STEP", "20"))
 STRANDED_BENCHMARK_MS = int(os.environ.get("AUTOPILOT_STRANDED_BENCHMARK_MS", str(30 * 60 * 1000)))
 STRANDED_DOWNSCALE_STEP = int(os.environ.get("AUTOPILOT_STRANDED_DOWNSCALE_STEP", "2"))
 STRANDED_BUFFER_BENCHMARKS = int(os.environ.get("AUTOPILOT_STRANDED_BUFFER_BENCHMARKS", "2"))
@@ -598,7 +610,33 @@ def _stranded_benchmarks(now_ms: int) -> list[dict]:
     )
 
 
-def _recommendations(cfg: dict, slaves: list[dict], challenges: list[dict], slots: dict) -> list[dict]:
+def _slot_state_summary(slots: dict) -> tuple[dict[str, int], dict[str, int], dict[str, int]]:
+    counts: dict[str, int] = {}
+    idle: dict[str, int] = {}
+    busy: dict[str, int] = {}
+    for row in slots.get("summary", []):
+        slot_type = row.get("slot_type")
+        count = int(row.get("count") or 0)
+        counts[slot_type] = counts.get(slot_type, 0) + count
+        if row.get("state") == "idle":
+            idle[slot_type] = idle.get(slot_type, 0) + count
+        else:
+            busy[slot_type] = busy.get(slot_type, 0) + count
+    return counts, idle, busy
+
+
+def _avg_runtime(slaves: list[dict]) -> float | None:
+    runtimes = [
+        float(s.get("avg_runtime_sec"))
+        for s in slaves
+        if s.get("avg_runtime_sec") is not None
+    ]
+    if not runtimes:
+        return None
+    return round(sum(runtimes) / len(runtimes), 1)
+
+
+def _fleet_capacity(cfg: dict, slaves: list[dict], challenges: list[dict], slots: dict) -> dict:
     active_cpu = [s for s in slaves if s["profile"] == "cpu" and _counts_for_capacity(s)]
     active_gpu = [s for s in slaves if s["profile"] == "gpu" and _counts_for_capacity(s)]
     stale_roots = sum(int(s.get("stale_roots") or 0) for s in slaves) + sum(
@@ -610,11 +648,7 @@ def _recommendations(cfg: dict, slaves: list[dict], challenges: list[dict], slot
     stale_total = stale_roots + stale_proofs
 
     current_slots = (cfg.get("resource_slots") or {}).get("slots", {})
-    slot_counts: dict[str, int] = {}
-    for row in slots.get("summary", []):
-        slot_type = row.get("slot_type")
-        slot_counts.setdefault(slot_type, 0)
-        slot_counts[slot_type] += int(row.get("count") or 0)
+    slot_counts, slot_idle, slot_busy = _slot_state_summary(slots)
 
     cpu_pressure = sum(int(s.get("active_unfinished") or 0) for s in active_cpu)
     gpu_pressure = sum(int(s.get("active_unfinished") or 0) for s in active_gpu)
@@ -622,87 +656,188 @@ def _recommendations(cfg: dict, slaves: list[dict], challenges: list[dict], slot
         s for s in active_cpu
         if int(s.get("completed_recent") or 0) > 0 and int(s.get("active_unfinished") or 0) == 0
     ]
-    slot_idle = {
-        row.get("slot_type"): int(row.get("count") or 0)
-        for row in slots.get("summary", [])
-        if row.get("state") == "idle"
+    productive_idle_gpu = [
+        s for s in active_gpu
+        if int(s.get("completed_recent") or 0) > 0 and int(s.get("active_unfinished") or 0) == 0
+    ]
+    return {
+        "active_cpu": len(active_cpu),
+        "active_gpu": len(active_gpu),
+        "productive_idle_cpu": len(productive_idle_cpu),
+        "productive_idle_gpu": len(productive_idle_gpu),
+        "cpu_pressure": cpu_pressure,
+        "gpu_pressure": gpu_pressure,
+        "stale_roots": stale_roots,
+        "stale_proofs": stale_proofs,
+        "stale_total": stale_total,
+        "cpu_completed_recent": sum(int(s.get("completed_recent") or 0) for s in active_cpu),
+        "gpu_completed_recent": sum(int(s.get("completed_recent") or 0) for s in active_gpu),
+        "cpu_nonces_recent": sum(int(s.get("nonces_recent") or 0) for s in active_cpu),
+        "gpu_nonces_recent": sum(int(s.get("nonces_recent") or 0) for s in active_gpu),
+        "cpu_avg_runtime_sec": _avg_runtime(active_cpu),
+        "gpu_avg_runtime_sec": _avg_runtime(active_gpu),
+        "slot_counts": slot_counts,
+        "slot_idle": slot_idle,
+        "slot_busy": slot_busy,
+        "current_slots": current_slots,
+        "current_adaptive_caps": cfg.get("adaptive_slave_caps") or {},
     }
 
-    recommended_cpu_slots = int(current_slots.get(CPU_SLOT_TYPE, slot_counts.get(CPU_SLOT_TYPE, 0)) or 0)
-    if active_cpu:
-        if len(productive_idle_cpu) >= PRODUCTIVE_IDLE_CPU_SCALE_MIN:
-            extra_slots = max(1, len(productive_idle_cpu) // max(1, PRODUCTIVE_IDLE_CPU_PER_SLOT))
-            recommended_cpu_slots = min(recommended_cpu_slots + extra_slots, MAX_CPU_SLOTS)
-        elif stale_total:
-            recommended_cpu_slots = max(2, recommended_cpu_slots - 1)
-        elif slot_idle.get(CPU_SLOT_TYPE, 0) == 0 and cpu_pressure >= max(1, recommended_cpu_slots):
-            recommended_cpu_slots = min(recommended_cpu_slots + 2, MAX_CPU_SLOTS)
-        else:
-            recommended_cpu_slots = max(recommended_cpu_slots, min(12, max(2, len(active_cpu) * 2)))
-    else:
-        recommended_cpu_slots = 0
 
+def _target_resource_slots(capacity: dict) -> dict:
+    current_slots = capacity["current_slots"]
+    slot_counts = capacity["slot_counts"]
+    slot_idle = capacity["slot_idle"]
+    proposed = dict(current_slots)
+
+    current_cpu = int(current_slots.get(CPU_SLOT_TYPE, slot_counts.get(CPU_SLOT_TYPE, 0)) or 0)
+    if capacity["active_cpu"]:
+        active_floor = max(2, (capacity["active_cpu"] + PRODUCTIVE_IDLE_CPU_PER_SLOT - 1) // max(1, PRODUCTIVE_IDLE_CPU_PER_SLOT))
+        target_cpu = max(current_cpu, min(MAX_CPU_SLOTS, active_floor))
+        if capacity["productive_idle_cpu"] >= PRODUCTIVE_IDLE_CPU_SCALE_MIN:
+            extra_slots = max(
+                1,
+                (capacity["productive_idle_cpu"] + PRODUCTIVE_IDLE_CPU_PER_SLOT - 1)
+                // max(1, PRODUCTIVE_IDLE_CPU_PER_SLOT),
+            )
+            target_cpu = max(target_cpu, current_cpu + extra_slots)
+        elif (
+            capacity["stale_total"]
+            and capacity["productive_idle_cpu"] == 0
+            and slot_idle.get(CPU_SLOT_TYPE, 0) > 0
+        ):
+            target_cpu = max(2, current_cpu - 1)
+        elif slot_idle.get(CPU_SLOT_TYPE, 0) == 0 and capacity["cpu_pressure"] >= max(1, current_cpu):
+            target_cpu = max(target_cpu, current_cpu + 2)
+        proposed[CPU_SLOT_TYPE] = min(target_cpu, MAX_CPU_SLOTS)
+    else:
+        proposed[CPU_SLOT_TYPE] = 0
+
+    gpu_signal = max(
+        capacity["active_gpu"],
+        capacity["gpu_pressure"],
+        capacity["productive_idle_gpu"],
+    )
+    for slot_type in GPU_SLOT_TYPES:
+        current = int(current_slots.get(slot_type, slot_counts.get(slot_type, 0)) or 0)
+        if not capacity["active_gpu"]:
+            proposed[slot_type] = 0
+            continue
+        target = max(current, 1)
+        if capacity["productive_idle_gpu"] >= PRODUCTIVE_IDLE_GPU_SCALE_MIN:
+            extra_slots = max(
+                1,
+                (capacity["productive_idle_gpu"] + PRODUCTIVE_IDLE_GPU_PER_SLOT - 1)
+                // max(1, PRODUCTIVE_IDLE_GPU_PER_SLOT),
+            )
+            target = max(target, current + extra_slots)
+        elif slot_idle.get(slot_type, 0) == 0 and capacity["gpu_pressure"]:
+            target = max(target, current + 1)
+        target = max(target, (gpu_signal + len(GPU_SLOT_TYPES) - 1) // len(GPU_SLOT_TYPES))
+        proposed[slot_type] = min(target, MAX_GPU_SLOTS_PER_TYPE)
+    return proposed
+
+
+def _target_max_concurrent_benchmarks(capacity: dict, proposed_slots: dict) -> int:
+    active_gpu = capacity["active_gpu"] > 0
+    active_cpu = capacity["active_cpu"] > 0
+    cpu_slot_total = int(proposed_slots.get(CPU_SLOT_TYPE, 0) or 0) if active_cpu else 0
+    gpu_slot_total = (
+        sum(int(proposed_slots.get(k, 0) or 0) for k in GPU_SLOT_TYPES)
+        if active_gpu
+        else 0
+    )
+    buffer = BENCHMARK_BUFFER if (active_cpu or active_gpu) else 0
+    return _clamp(cpu_slot_total + gpu_slot_total + buffer, MIN_MAX_BENCHMARKS, MAX_MAX_BENCHMARKS)
+
+
+def _target_gpu_challenge_caps(cfg: dict, capacity: dict, proposed_slots: dict) -> dict:
+    current_per = cfg.get("per_challenge_max_benchmarks", {}) or {}
+    proposed = dict(current_per)
+    if capacity["active_gpu"]:
+        current_c004 = int(current_per.get("c004", 1) or 1)
+        proposed.update({
+            "c004": max(current_c004, int(proposed_slots.get("vector_search", 1) or 1)),
+            "c005": max(1, int(proposed_slots.get("hypergraph", 1) or 1)),
+            "c006": max(1, int(proposed_slots.get("neuralnet_optimizer", 1) or 1)),
+        })
+    else:
+        proposed.update({"c004": 1, "c005": 1, "c006": 1})
+    return proposed
+
+
+def _target_adaptive_slave_caps(capacity: dict) -> dict:
+    current = capacity.get("current_adaptive_caps") or {}
+    if not current:
+        return {}
+    proposed = dict(current)
+    cpu_max = int(current.get("cpu_max_cap", 0) or 0)
+    gpu_max = int(current.get("gpu_max_cap", 0) or 0)
+    if capacity["active_cpu"] and cpu_max:
+        if capacity["productive_idle_cpu"] >= PRODUCTIVE_IDLE_CPU_SCALE_MIN:
+            proposed["cpu_max_cap"] = max(MIN_CPU_SLAVE_CAP, min(cpu_max + 1, MAX_CPU_SLAVE_CAP))
+        elif capacity["cpu_completed_recent"] >= CAP_SCALE_COMPLETIONS_PER_STEP and capacity["cpu_pressure"] >= capacity["active_cpu"]:
+            proposed["cpu_max_cap"] = max(MIN_CPU_SLAVE_CAP, min(cpu_max + 1, MAX_CPU_SLAVE_CAP))
+    if capacity["active_gpu"] and gpu_max:
+        if capacity["productive_idle_gpu"] >= PRODUCTIVE_IDLE_GPU_SCALE_MIN:
+            proposed["gpu_max_cap"] = max(MIN_GPU_SLAVE_CAP, min(gpu_max + 1, MAX_GPU_SLAVE_CAP))
+        elif capacity["gpu_completed_recent"] >= CAP_SCALE_COMPLETIONS_PER_STEP and capacity["gpu_pressure"] >= capacity["active_gpu"]:
+            proposed["gpu_max_cap"] = max(MIN_GPU_SLAVE_CAP, min(gpu_max + 1, MAX_GPU_SLAVE_CAP))
+    return proposed
+
+
+def _recommendations(cfg: dict, slaves: list[dict], challenges: list[dict], slots: dict) -> list[dict]:
+    capacity = _fleet_capacity(cfg, slaves, challenges, slots)
+    current_slots = capacity["current_slots"]
+    proposed_slots = _target_resource_slots(capacity)
     recommendations = []
     if current_slots:
-        proposed_slots = dict(current_slots)
-        proposed_slots[CPU_SLOT_TYPE] = recommended_cpu_slots
-        for slot_type in GPU_SLOT_TYPES:
-            current = int(current_slots.get(slot_type, slot_counts.get(slot_type, 0)) or 0)
-            if active_gpu and stale_total == 0 and slot_idle.get(slot_type, 0) == 0 and gpu_pressure:
-                proposed_slots[slot_type] = min(current + 1, MAX_GPU_SLOTS_PER_TYPE)
-            elif not active_gpu:
-                proposed_slots[slot_type] = 0
-            else:
-                proposed_slots[slot_type] = current
         if proposed_slots != current_slots:
             recommendations.append({
                 "key": "resource_slots.slots",
                 "current": current_slots,
                 "proposed": proposed_slots,
                 "reason": (
-                    "Slot pressure is inferred from active slaves, idle slots, stale unfinished work, "
-                    f"and {len(productive_idle_cpu)} productive idle CPU slaves."
+                    "Resource slots are sized from active fleet capacity, productive idle workers, "
+                    "slot pressure, GPU reserve needs, and stale-work guardrails."
                 ),
-                "signals": {
-                    "productive_idle_cpu": len(productive_idle_cpu),
-                    "stale_roots": stale_roots,
-                    "stale_proofs": stale_proofs,
-                },
+                "signals": capacity,
                 "apply_now": False,
             })
 
-    gpu_slot_total = sum(int(current_slots.get(k, 0) or 0) for k in GPU_SLOT_TYPES) if active_gpu else 0
-    cpu_slot_total = int(current_slots.get(CPU_SLOT_TYPE, 0) or 0) if active_cpu else 0
-    proposed_max = _clamp(cpu_slot_total + gpu_slot_total, MIN_MAX_BENCHMARKS, MAX_MAX_BENCHMARKS)
+    proposed_max = _target_max_concurrent_benchmarks(capacity, proposed_slots)
     current_max = cfg.get("max_concurrent_benchmarks")
     if current_max is not None and proposed_max != int(current_max):
         recommendations.append({
             "key": "max_concurrent_benchmarks",
             "current": current_max,
             "proposed": proposed_max,
-            "reason": "Concurrent benchmark target should follow active CPU/GPU slot capacity.",
+            "reason": "Concurrent benchmark target reserves room for active CPU slots, GPU slots, and a small precommit buffer.",
+            "signals": capacity,
             "apply_now": False,
         })
 
     current_per = cfg.get("per_challenge_max_benchmarks", {}) or {}
-    proposed_per = dict(current_per)
-    if active_gpu:
-        # c004/vector-search is very fast, so keep extra benchmark buffer instead
-        # of mapping it strictly one-for-one to vector slots.
-        current_c004 = int(current_per.get("c004", 1) or 1)
-        proposed_per.update({
-            "c004": max(current_c004, int(current_slots.get("vector_search", 1) or 1)),
-            "c005": max(1, int(current_slots.get("hypergraph", 1) or 1)),
-            "c006": max(1, int(current_slots.get("neuralnet_optimizer", 1) or 1)),
-        })
-    else:
-        proposed_per.update({"c004": 1, "c005": 1, "c006": 1})
+    proposed_per = _target_gpu_challenge_caps(cfg, capacity, proposed_slots)
     if proposed_per != current_per:
         recommendations.append({
             "key": "per_challenge_max_benchmarks",
             "current": current_per,
             "proposed": proposed_per,
-            "reason": "GPU challenge benchmark caps should match currently available GPU slot types.",
+            "reason": "GPU challenge benchmark caps should match currently available GPU slot capacity.",
+            "signals": capacity,
+            "apply_now": False,
+        })
+
+    current_caps = cfg.get("adaptive_slave_caps", {}) or {}
+    proposed_caps = _target_adaptive_slave_caps(capacity)
+    if proposed_caps and proposed_caps != current_caps:
+        recommendations.append({
+            "key": "adaptive_slave_caps",
+            "current": current_caps,
+            "proposed": proposed_caps,
+            "reason": "Adaptive slave cap ceilings should rise when productive workers prove they can carry more concurrent batches.",
+            "signals": capacity,
             "apply_now": False,
         })
 
@@ -719,10 +854,10 @@ def _recommendations(cfg: dict, slaves: list[dict], challenges: list[dict], slot
                 "apply_now": False,
             })
 
-    if stale_proofs:
+    if capacity["stale_proofs"]:
         recommendations.append({
             "key": "proof_queue",
-            "current": {"stale_proofs": stale_proofs},
+            "current": {"stale_proofs": capacity["stale_proofs"]},
             "proposed": "check root-artifact ownership and proof slave logs",
             "reason": "Proof batches should normally clear quickly once roots are ready.",
             "apply_now": False,
@@ -840,6 +975,14 @@ def _next_value(current: int, target: int, step: int) -> int:
     return current
 
 
+def _next_value_bounded(current: int, target: int, up_step: int, down_step: int) -> int:
+    if target > current:
+        return min(target, current + max(1, up_step))
+    if target < current:
+        return max(target, current - max(1, down_step))
+    return current
+
+
 def _plan_config_change(report: dict, cfg: dict, clean_windows: int) -> dict:
     health = _health_summary(report)
     decision = {
@@ -861,6 +1004,7 @@ def _plan_config_change(report: dict, cfg: dict, clean_windows: int) -> dict:
     slots_rec = recommendations.get("resource_slots.slots") or {}
     slot_signals = slots_rec.get("signals") or {}
     productive_idle_cpu = int(slot_signals.get("productive_idle_cpu") or 0)
+    productive_idle_gpu = int(slot_signals.get("productive_idle_gpu") or 0)
     stale_roots = int(slot_signals.get("stale_roots") or health.get("stale_roots") or 0)
     stale_proofs = int(slot_signals.get("stale_proofs") or health.get("stale_proofs") or 0)
     productive_idle_cpu_scale = (
@@ -870,6 +1014,13 @@ def _plan_config_change(report: dict, cfg: dict, clean_windows: int) -> dict:
         and not health.get("active_unregistered")
         and not health.get("unserved_stranded_benchmarks")
     )
+    productive_idle_gpu_scale = (
+        productive_idle_gpu >= PRODUCTIVE_IDLE_GPU_SCALE_MIN
+        and stale_proofs == 0
+        and not health.get("active_unregistered")
+        and not health.get("unserved_stranded_benchmarks")
+    )
+    productive_capacity_scale = productive_idle_cpu_scale or productive_idle_gpu_scale
     if health.get("unserved_stranded_benchmarks"):
         current = int(cfg.get("max_concurrent_benchmarks") or 0)
         active_jobs = _active_unfinished_jobs()
@@ -906,10 +1057,10 @@ def _plan_config_change(report: dict, cfg: dict, clean_windows: int) -> dict:
         else:
             decision["reason"] = "stranded_benchmarks_at_drain_target"
         return decision
-    if not health["healthy"] and not productive_idle_cpu_scale:
+    if not health["healthy"] and not productive_capacity_scale:
         decision["reason"] = "blocked_by_stale_or_unregistered_work"
         return decision
-    if clean_windows < APPLY_MIN_CLEAN_WINDOWS:
+    if clean_windows < APPLY_MIN_CLEAN_WINDOWS and not productive_capacity_scale:
         decision["reason"] = "waiting_for_clean_windows"
         return decision
 
@@ -923,13 +1074,14 @@ def _plan_config_change(report: dict, cfg: dict, clean_windows: int) -> dict:
         for key, target in proposed_slots.items():
             current = int(current_slots.get(key, 0) or 0)
             target = int(target or 0)
-            next_slots[key] = _next_value(current, target, SLOT_STEP)
+            next_slots[key] = _next_value_bounded(current, target, SLOT_UP_STEP, SLOT_DOWN_STEP)
         if next_slots != current_slots:
             new_cfg.setdefault("resource_slots", {})["slots"] = next_slots
             changes["resource_slots.slots"] = {
                 "current": current_slots,
                 "target": proposed_slots,
                 "next": next_slots,
+                "signals": slot_signals,
             }
 
     max_rec = recommendations.get("max_concurrent_benchmarks")
@@ -948,15 +1100,21 @@ def _plan_config_change(report: dict, cfg: dict, clean_windows: int) -> dict:
                 "target": target,
                 "active_jobs": active_jobs,
             }
-        elif target > current and active_jobs < max(1, current - 1) and not gpu_needs_room:
+        elif (
+            target > current
+            and active_jobs < max(1, current - 1)
+            and not gpu_needs_room
+            and not productive_capacity_scale
+        ):
             decision.setdefault("guardrails", {})["max_concurrent_benchmarks"] = {
                 "skipped": "upscale_requires_saturated_precommit_capacity",
                 "current": current,
                 "target": target,
                 "active_jobs": active_jobs,
+                "signals": max_rec.get("signals") or {},
             }
         else:
-            next_max = _next_value(current, target, MAX_BENCHMARK_STEP)
+            next_max = _next_value_bounded(current, target, MAX_BENCHMARK_UP_STEP, MAX_BENCHMARK_DOWN_STEP)
             if next_max != current:
                 new_cfg["max_concurrent_benchmarks"] = next_max
                 changes["max_concurrent_benchmarks"] = {
@@ -965,6 +1123,8 @@ def _plan_config_change(report: dict, cfg: dict, clean_windows: int) -> dict:
                     "next": next_max,
                     "active_jobs": active_jobs,
                     "gpu_capacity_needs_room": gpu_needs_room,
+                    "productive_capacity_scale": productive_capacity_scale,
+                    "signals": max_rec.get("signals") or {},
                 }
 
     per_rec = recommendations.get("per_challenge_max_benchmarks")
@@ -987,6 +1147,30 @@ def _plan_config_change(report: dict, cfg: dict, clean_windows: int) -> dict:
         if per_changes:
             new_cfg["per_challenge_max_benchmarks"] = next_per
             changes["per_challenge_max_benchmarks"] = per_changes
+
+    caps_rec = recommendations.get("adaptive_slave_caps")
+    current_caps = new_cfg.get("adaptive_slave_caps") or {}
+    if caps_rec and current_caps:
+        proposed_caps = caps_rec.get("proposed") or {}
+        next_caps = dict(current_caps)
+        cap_changes = {}
+        for key in ("cpu_max_cap", "gpu_max_cap"):
+            current = int(current_caps.get(key, 0) or 0)
+            target = int(proposed_caps.get(key, current) or current)
+            if target > current:
+                next_value = current + 1
+                next_caps[key] = next_value
+                cap_changes[key] = {
+                    "current": current,
+                    "target": target,
+                    "next": next_value,
+                }
+        if cap_changes:
+            new_cfg["adaptive_slave_caps"] = next_caps
+            changes["adaptive_slave_caps"] = {
+                "changes": cap_changes,
+                "signals": caps_rec.get("signals") or {},
+            }
 
     if not changes:
         decision["reason"] = "no_safe_changes"
@@ -1060,6 +1244,8 @@ def build_report() -> dict:
     challenges = _challenge_metrics(now_ms)
     slots = _slot_metrics(now_ms)
     stranded = _stranded_benchmarks(now_ms)
+    capacity = _fleet_capacity(cfg, slaves, challenges, slots) if cfg else {}
+    target_slots = _target_resource_slots(capacity) if capacity else {}
     recommendations = _recommendations(cfg, slaves, challenges, slots) if cfg else []
 
     active_counts = {
@@ -1088,6 +1274,25 @@ def build_report() -> dict:
         "slaves": slaves,
         "slots": slots,
         "challenges": challenges,
+        "capacity_model": capacity,
+        "capacity_targets": {
+            "resource_slots": target_slots,
+            "max_concurrent_benchmarks": (
+                _target_max_concurrent_benchmarks(capacity, target_slots)
+                if capacity
+                else None
+            ),
+            "per_challenge_max_benchmarks": (
+                _target_gpu_challenge_caps(cfg, capacity, target_slots)
+                if capacity
+                else {}
+            ),
+            "adaptive_slave_caps": (
+                _target_adaptive_slave_caps(capacity)
+                if capacity
+                else {}
+            ),
+        },
         "stranded_benchmarks": stranded,
         "stranded_classification": {
             "unserved": health.get("unserved_stranded_benchmarks", []),

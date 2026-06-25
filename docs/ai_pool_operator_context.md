@@ -215,17 +215,41 @@ Current autopilot responsibilities:
 
 - Build a read-only health report.
 - Count active CPU/GPU slaves.
+- Build a `capacity_model` from active slaves, productive idle slaves, recent
+  completions, recent nonce throughput, average runtime, slot pressure, stale
+  roots/proofs, and current adaptive cap ceilings.
+- Build `capacity_targets` for `resource_slots`, `max_concurrent_benchmarks`,
+  GPU per-challenge benchmark caps, and `adaptive_slave_caps`.
 - Summarize stale roots/proofs.
 - Summarize challenge pressure.
 - Manage resource slot recommendations.
 - Manage `max_concurrent_benchmarks` recommendations.
 - Manage safe per-challenge cap increases for GPU challenges.
+- Manage safe upward tuning of adaptive slave cap ceilings when productive
+  workers prove they can carry more concurrent batches.
 - Clean stale assignments when enabled.
 - Save every decision to `autopilot_decisions`.
 - Apply bounded changes only when configured with `AUTOPILOT_MODE=apply`.
 
 The AI should not bypass autopilot guardrails. It should recommend target changes,
 explain evidence, and let deterministic code validate and apply.
+
+Autopilot is expected to scale proportionally with fleet size:
+
+- Many productive idle CPU slaves should raise CPU resource slots and benchmark
+  room faster than a single-slot nudge, within configured step limits.
+- Active GPU workers and C3 dispatchers reserve benchmark room so CPU work cannot
+  consume the whole global benchmark cap.
+- `c004`, `c005`, and `c006` caps should rise with GPU slot capacity when GPU
+  workers are active.
+- Minor stale roots may be tolerated for CPU scale-up when there are no stale
+  proofs, no unregistered active public slaves, and no truly unserved stranded
+  benchmarks.
+- Downscaling should be slower than upscaling and should require evidence such
+  as stale work, unserved stranded benchmarks, or persistent unused capacity.
+- Adaptive cap ceilings (`cpu_max_cap`, `gpu_max_cap`) may rise when recent
+  completions or productive idle workers show the slaves can safely carry more
+  concurrent batches.
 
 ## 9. What Healthy Looks Like
 
