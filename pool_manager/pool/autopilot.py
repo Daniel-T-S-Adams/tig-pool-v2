@@ -39,8 +39,8 @@ SLOT_UP_STEP = int(os.environ.get("AUTOPILOT_SLOT_UP_STEP", str(SLOT_STEP)))
 SLOT_DOWN_STEP = int(os.environ.get("AUTOPILOT_SLOT_DOWN_STEP", str(SLOT_STEP)))
 MAX_CPU_SLOTS = int(os.environ.get("AUTOPILOT_MAX_CPU_SLOTS", "64"))
 MAX_GPU_SLOTS_PER_TYPE = int(os.environ.get("AUTOPILOT_MAX_GPU_SLOTS_PER_TYPE", "6"))
-MAX_CPU_SLAVE_CAP = int(os.environ.get("AUTOPILOT_MAX_CPU_SLAVE_CAP", "16"))
-MAX_GPU_SLAVE_CAP = int(os.environ.get("AUTOPILOT_MAX_GPU_SLAVE_CAP", "12"))
+MAX_CPU_SLAVE_CAP = int(os.environ.get("AUTOPILOT_MAX_CPU_SLAVE_CAP", "256"))
+MAX_GPU_SLAVE_CAP = int(os.environ.get("AUTOPILOT_MAX_GPU_SLAVE_CAP", "24"))
 MIN_CPU_SLAVE_CAP = int(os.environ.get("AUTOPILOT_MIN_CPU_SLAVE_CAP", "4"))
 MIN_GPU_SLAVE_CAP = int(os.environ.get("AUTOPILOT_MIN_GPU_SLAVE_CAP", "1"))
 BENCHMARK_BUFFER = int(os.environ.get("AUTOPILOT_BENCHMARK_BUFFER", "2"))
@@ -625,7 +625,7 @@ def _track_config_economics(cfg: dict, workload: list[dict]) -> list[dict]:
                 if estimated_root_batches > BUNDLE_TARGET_MAX_ROOT_BATCHES:
                     notes.append("too_many_root_batches_for_single_benchmark")
                 elif estimated_root_batches < BUNDLE_TARGET_MIN_ROOT_BATCHES and configured_bundles > 1:
-                    notes.append("few_root_batches_consider_more_parallelism_or_bundles")
+                    notes.append("coarse_root_batch_granularity_check_runtime_before_changing_bundles")
             if avg_root_runtime is not None:
                 if float(avg_root_runtime) > BUNDLE_TARGET_ROOT_RUNTIME_SEC:
                     notes.append("root_batch_runtime_ties_worker_too_long")
@@ -899,15 +899,17 @@ def _target_adaptive_slave_caps(capacity: dict) -> dict:
     cpu_max = int(current.get("cpu_max_cap", 0) or 0)
     gpu_max = int(current.get("gpu_max_cap", 0) or 0)
     if capacity["active_cpu"] and cpu_max:
+        cpu_ceiling = max(cpu_max, MAX_CPU_SLAVE_CAP)
         if capacity["productive_idle_cpu"] >= PRODUCTIVE_IDLE_CPU_SCALE_MIN:
-            proposed["cpu_max_cap"] = max(MIN_CPU_SLAVE_CAP, min(cpu_max + 1, MAX_CPU_SLAVE_CAP))
+            proposed["cpu_max_cap"] = max(MIN_CPU_SLAVE_CAP, min(cpu_max + 1, cpu_ceiling))
         elif capacity["cpu_completed_recent"] >= CAP_SCALE_COMPLETIONS_PER_STEP and capacity["cpu_pressure"] >= capacity["active_cpu"]:
-            proposed["cpu_max_cap"] = max(MIN_CPU_SLAVE_CAP, min(cpu_max + 1, MAX_CPU_SLAVE_CAP))
+            proposed["cpu_max_cap"] = max(MIN_CPU_SLAVE_CAP, min(cpu_max + 1, cpu_ceiling))
     if capacity["active_gpu"] and gpu_max:
+        gpu_ceiling = max(gpu_max, MAX_GPU_SLAVE_CAP)
         if capacity["productive_idle_gpu"] >= PRODUCTIVE_IDLE_GPU_SCALE_MIN:
-            proposed["gpu_max_cap"] = max(MIN_GPU_SLAVE_CAP, min(gpu_max + 1, MAX_GPU_SLAVE_CAP))
+            proposed["gpu_max_cap"] = max(MIN_GPU_SLAVE_CAP, min(gpu_max + 1, gpu_ceiling))
         elif capacity["gpu_completed_recent"] >= CAP_SCALE_COMPLETIONS_PER_STEP and capacity["gpu_pressure"] >= capacity["active_gpu"]:
-            proposed["gpu_max_cap"] = max(MIN_GPU_SLAVE_CAP, min(gpu_max + 1, MAX_GPU_SLAVE_CAP))
+            proposed["gpu_max_cap"] = max(MIN_GPU_SLAVE_CAP, min(gpu_max + 1, gpu_ceiling))
     return proposed
 
 
@@ -933,8 +935,9 @@ def _track_economics_recommendations(track_economics: list[dict]) -> list[dict]:
             "proposed": "review_num_bundles_batch_size_and_hyperparameters",
             "reason": (
                 "num_bundles controls total nonces and reward-ticket count, while batch_size controls "
-                "root-batch granularity. Tracks with very high root-batch counts or very long root "
-                "runtimes need balancing before automatic algo_selection changes are safe."
+                "root-batch granularity. Track settings should be balanced using observed root runtime, "
+                "root batches per benchmark, stale/proof pressure, and reward evidence before automatic "
+                "algo_selection changes are safe."
             ),
             "apply_now": False,
         })

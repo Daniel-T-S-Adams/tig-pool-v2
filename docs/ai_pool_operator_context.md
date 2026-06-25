@@ -301,6 +301,13 @@ Autopilot is expected to scale proportionally with fleet size:
 - Adaptive cap ceilings (`cpu_max_cap`, `gpu_max_cap`) may rise when recent
   completions or productive idle workers show the slaves can safely carry more
   concurrent batches.
+- Autopilot max cap env vars are ceilings for future increases. They must not be
+  interpreted as desired downscale targets if the current live config is already
+  higher.
+- If deterministic autopilot recommends increasing `max_concurrent_benchmarks`,
+  `resource_slots`, or challenge caps and there is no stale work or unserved
+  stranded benchmark, the AI should treat that as the primary safe action unless
+  it has direct contrary evidence.
 - `track_economics` should be used when evaluating whether a track is too coarse,
   too fragmented, too slow, or under-bundled. Do not recommend bundle changes
   from stale counts alone.
