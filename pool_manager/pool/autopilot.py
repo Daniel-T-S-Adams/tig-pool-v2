@@ -60,6 +60,10 @@ BUNDLE_TARGET_ROOT_RUNTIME_SEC = int(os.environ.get("AUTOPILOT_BUNDLE_TARGET_ROO
 FUNNEL_TARGET_PROOF_SUBMIT_SEC = int(os.environ.get("AUTOPILOT_FUNNEL_TARGET_PROOF_SUBMIT_SEC", "1200"))
 FUNNEL_MIN_PROOF_CONVERSION_RATE = float(os.environ.get("AUTOPILOT_FUNNEL_MIN_PROOF_CONVERSION_RATE", "0.85"))
 FUNNEL_MAX_STOPPED_OR_EXPIRED_RATE = float(os.environ.get("AUTOPILOT_FUNNEL_MAX_STOPPED_OR_EXPIRED_RATE", "0.10"))
+WORKLOAD_MIN_BUNDLES = int(os.environ.get("AUTOPILOT_WORKLOAD_MIN_BUNDLES", "4"))
+WORKLOAD_MAX_BUNDLE_STEP = int(os.environ.get("AUTOPILOT_WORKLOAD_MAX_BUNDLE_STEP", "1"))
+WORKLOAD_FAST_PROOF_FACTOR = float(os.environ.get("AUTOPILOT_WORKLOAD_FAST_PROOF_FACTOR", "0.50"))
+WORKLOAD_HIGH_PROOF_CONVERSION_RATE = float(os.environ.get("AUTOPILOT_WORKLOAD_HIGH_PROOF_CONVERSION_RATE", "0.95"))
 STRANDED_BENCHMARK_MS = int(os.environ.get("AUTOPILOT_STRANDED_BENCHMARK_MS", str(30 * 60 * 1000)))
 STRANDED_DOWNSCALE_STEP = int(os.environ.get("AUTOPILOT_STRANDED_DOWNSCALE_STEP", "2"))
 STRANDED_BUFFER_BENCHMARKS = int(os.environ.get("AUTOPILOT_STRANDED_BUFFER_BENCHMARKS", "2"))
@@ -935,6 +939,185 @@ def _track_config_economics(cfg: dict, workload: list[dict]) -> list[dict]:
     return out
 
 
+def _previous_power_of_two(value: int) -> int:
+    value = max(1, int(value or 1))
+    return 1 << (value.bit_length() - 1)
+
+
+def _next_power_of_two(value: int) -> int:
+    value = max(1, int(value or 1))
+    if value & (value - 1) == 0:
+        return value
+    return 1 << value.bit_length()
+
+
+def _workload_controller_targets(
+    cfg: dict,
+    track_economics: list[dict],
+    reward_funnel: dict,
+) -> dict:
+    """Read-only high-risk workload controller.
+
+    This does not apply changes. It translates observed reward-funnel health into
+    conservative per-track targets for num_bundles, batch_size, and weight so the
+    operator can see how the pool would adapt to changing fleet capacity.
+    """
+    funnel_by_track = {
+        (row.get("algorithm_id"), row.get("track")): row
+        for row in (reward_funnel.get("by_track") or [])
+    }
+    current_weights = {
+        algo.get("algorithm_id"): int(algo.get("weight") or 0)
+        for algo in (cfg.get("algo_selection") or [])
+    }
+    targets = []
+    for row in track_economics:
+        algorithm_id = row.get("algorithm_id")
+        track = row.get("track")
+        configured = row.get("configured") or {}
+        derived = row.get("derived") or {}
+        observed = row.get("observed") or {}
+        funnel = dict(funnel_by_track.get((algorithm_id, track), {}))
+        current_bundles = int(configured.get("num_bundles") or 0)
+        current_batch_size = int(configured.get("effective_batch_size") or 1)
+        current_weight = int(configured.get("weight") or current_weights.get(algorithm_id) or 0)
+        target_bundles = current_bundles
+        target_batch_size = current_batch_size
+        target_weight = current_weight
+        action = "observe"
+        reasons = []
+
+        proof_required = int(funnel.get("proof_required_benchmarks") or 0)
+        proof_conversion = funnel.get("proof_conversion_rate")
+        stopped_rate = funnel.get("stopped_rate")
+        stopped_without_roots = int(funnel.get("stopped_without_roots") or 0)
+        avg_time_to_proof = funnel.get("avg_time_to_proof_submit_sec")
+        p95_root_runtime = funnel.get("p95_root_batch_runtime_sec")
+        estimated_root_batches = derived.get("estimated_root_batches")
+        estimated_nonces_per_bundle = derived.get("estimated_nonces_per_bundle")
+
+        if current_bundles <= 0:
+            action = "missing_bundle_config"
+            reasons.append("track has no configured num_bundles")
+        elif not funnel:
+            action = "observe_until_track_has_funnel_data"
+            reasons.append("no recent reward-funnel data for this track")
+        else:
+            proof_unhealthy = (
+                proof_required > 0
+                and proof_conversion is not None
+                and float(proof_conversion) < FUNNEL_MIN_PROOF_CONVERSION_RATE
+            )
+            stopped_unhealthy = stopped_rate is not None and float(stopped_rate) > FUNNEL_MAX_STOPPED_OR_EXPIRED_RATE
+            slow_to_proof = (
+                avg_time_to_proof is not None
+                and float(avg_time_to_proof) > FUNNEL_TARGET_PROOF_SUBMIT_SEC
+            )
+            fast_clean = (
+                proof_required > 0
+                and proof_conversion is not None
+                and float(proof_conversion) >= WORKLOAD_HIGH_PROOF_CONVERSION_RATE
+                and (stopped_rate is None or float(stopped_rate) <= FUNNEL_MAX_STOPPED_OR_EXPIRED_RATE / 2)
+                and avg_time_to_proof is not None
+                and float(avg_time_to_proof) <= FUNNEL_TARGET_PROOF_SUBMIT_SEC * WORKLOAD_FAST_PROOF_FACTOR
+            )
+
+            if stopped_without_roots:
+                action = "reduce_or_fix_unrunnable_track"
+                reasons.append("recent jobs stopped before root work; check max_job_batches/allowlist/TIG debt")
+                target_bundles = max(WORKLOAD_MIN_BUNDLES, current_bundles - WORKLOAD_MAX_BUNDLE_STEP)
+            elif proof_unhealthy:
+                action = "reduce_workload_until_proofs_convert"
+                reasons.append("proof conversion is below target")
+                target_bundles = max(WORKLOAD_MIN_BUNDLES, current_bundles - WORKLOAD_MAX_BUNDLE_STEP)
+                target_weight = max(1, current_weight - 1) if current_weight > 1 else current_weight
+            elif stopped_unhealthy:
+                action = "reduce_workload_until_stopped_rate_recovers"
+                reasons.append("stopped/expired benchmark rate is above target")
+                target_bundles = max(WORKLOAD_MIN_BUNDLES, current_bundles - WORKLOAD_MAX_BUNDLE_STEP)
+            elif slow_to_proof:
+                action = "reduce_tail_time"
+                reasons.append("time-to-proof-submission is above target")
+                target_bundles = max(WORKLOAD_MIN_BUNDLES, current_bundles - WORKLOAD_MAX_BUNDLE_STEP)
+                if p95_root_runtime is not None and float(p95_root_runtime) > BUNDLE_TARGET_ROOT_RUNTIME_SEC:
+                    target_batch_size = max(1, _previous_power_of_two(current_batch_size // 2))
+                    reasons.append("p95 root batch runtime is too high; smaller batches may reduce tail latency")
+            elif fast_clean:
+                action = "consider_small_workload_increase"
+                target_bundles = current_bundles + WORKLOAD_MAX_BUNDLE_STEP
+                reasons.append("proof conversion is strong and time-to-proof is well below target")
+                if (
+                    estimated_root_batches is not None
+                    and int(estimated_root_batches) > BUNDLE_TARGET_MAX_ROOT_BATCHES
+                    and p95_root_runtime is not None
+                    and float(p95_root_runtime) < BUNDLE_TARGET_ROOT_RUNTIME_SEC / 3
+                ):
+                    target_batch_size = _next_power_of_two(current_batch_size + 1)
+                    reasons.append("many root batches with short p95 runtime; larger batch_size may reduce scheduling overhead")
+            else:
+                reasons.append("track is not clearly constrained or underloaded yet")
+
+        estimated_target_batches = None
+        if estimated_nonces_per_bundle is not None and target_batch_size > 0 and target_bundles > 0:
+            estimated_target_batches = int(math.ceil(float(estimated_nonces_per_bundle) * target_bundles / target_batch_size))
+        max_job_batches = int(cfg.get("max_job_batches") or 256)
+        max_job_batches_margin_ok = (
+            estimated_target_batches is None
+            or not max_job_batches
+            or estimated_target_batches <= max(1, int(max_job_batches * 0.90))
+        )
+        if not max_job_batches_margin_ok:
+            action = "do_not_increase_exceeds_max_job_batches_margin"
+            target_bundles = current_bundles
+            target_batch_size = current_batch_size
+            reasons.append("target would exceed max_job_batches safety margin")
+
+        targets.append({
+            "challenge_id": row.get("challenge_id"),
+            "algorithm_id": algorithm_id,
+            "track": track,
+            "action": action,
+            "reasons": reasons,
+            "current": {
+                "weight": current_weight,
+                "num_bundles": current_bundles,
+                "effective_batch_size": current_batch_size,
+            },
+            "target": {
+                "weight": target_weight,
+                "num_bundles": target_bundles,
+                "effective_batch_size": target_batch_size,
+            },
+            "observed": {
+                "proof_required_benchmarks": proof_required,
+                "proof_conversion_rate": proof_conversion,
+                "stopped_rate": stopped_rate,
+                "stopped_without_roots": stopped_without_roots,
+                "avg_time_to_proof_submit_sec": avg_time_to_proof,
+                "p95_root_batch_runtime_sec": p95_root_runtime,
+                "avg_num_batches": observed.get("avg_num_batches"),
+                "avg_root_runtime_sec": observed.get("avg_root_runtime_sec"),
+            },
+            "derived": {
+                "estimated_nonces_per_bundle": estimated_nonces_per_bundle,
+                "current_estimated_root_batches": estimated_root_batches,
+                "target_estimated_root_batches": estimated_target_batches,
+                "max_job_batches_margin_ok": max_job_batches_margin_ok,
+            },
+            "apply_now": False,
+        })
+
+    actionable = [
+        row for row in targets
+        if row.get("action") not in {"observe", "observe_until_track_has_funnel_data"}
+    ]
+    return {
+        "mode": "read_only",
+        "targets": targets,
+        "actionable": actionable,
+    }
+
+
 def _slot_metrics(now_ms: int) -> dict:
     summary = _fetch_all(
         """
@@ -1300,6 +1483,7 @@ def _recommendations(
     track_economics: list[dict] | None = None,
     stale_totals: dict | None = None,
     reward_funnel: dict | None = None,
+    workload_targets: dict | None = None,
 ) -> list[dict]:
     capacity = _fleet_capacity(cfg, slaves, challenges, slots, stale_totals)
     current_slots = capacity["current_slots"]
@@ -1392,6 +1576,31 @@ def _recommendations(
             "reason": (
                 "The pool should scale work only when root work converts into benchmark submissions, "
                 "proof submissions, and clean finalized jobs. Root throughput alone is not a reward signal."
+            ),
+            "apply_now": False,
+        })
+
+    workload_actionable = (workload_targets or {}).get("actionable") or []
+    if workload_actionable:
+        recommendations.append({
+            "key": "workload_controller",
+            "current": [
+                {
+                    "algorithm_id": row.get("algorithm_id"),
+                    "track": row.get("track"),
+                    "action": row.get("action"),
+                    "current": row.get("current"),
+                    "target": row.get("target"),
+                    "reasons": row.get("reasons"),
+                    "observed": row.get("observed"),
+                }
+                for row in workload_actionable[:25]
+            ],
+            "proposed": "review_read_only_workload_targets",
+            "reason": (
+                "High-risk workload settings should follow measured proof conversion, "
+                "time-to-proof, stopped/no-proof debt, p95 batch runtime, and max_job_batches "
+                "margin. These targets are read-only until validated over multiple clean windows."
             ),
             "apply_now": False,
         })
@@ -1829,10 +2038,20 @@ def build_report() -> dict:
     workload = _track_workload_metrics(now_ms)
     reward_funnel = _reward_funnel_summary(now_ms)
     track_economics = _track_config_economics(cfg, workload) if cfg else []
+    workload_targets = _workload_controller_targets(cfg, track_economics, reward_funnel) if cfg else {}
     capacity = _fleet_capacity(cfg, slaves, challenges, slots, stale_totals) if cfg else {}
     target_slots = _target_resource_slots(capacity) if capacity else {}
     recommendations = (
-        _recommendations(cfg, slaves, challenges, slots, track_economics, stale_totals, reward_funnel)
+        _recommendations(
+            cfg,
+            slaves,
+            challenges,
+            slots,
+            track_economics,
+            stale_totals,
+            reward_funnel,
+            workload_targets,
+        )
         if cfg
         else []
     )
@@ -1867,6 +2086,7 @@ def build_report() -> dict:
         "stale_totals": stale_totals,
         "track_workload": workload,
         "reward_funnel": reward_funnel,
+        "workload_targets": workload_targets,
         "track_economics": track_economics,
         "capacity_model": capacity,
         "capacity_targets": {

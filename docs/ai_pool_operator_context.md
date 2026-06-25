@@ -289,6 +289,9 @@ Current autopilot responsibilities:
 - Build `reward_funnel` from jobs, root batches, benchmark submission attempts,
   sampled proof batches, proof completion, proof submissions, stopped/no-proof
   debt, and time-to-proof-submission.
+- Build read-only `workload_targets` for high-risk settings (`num_bundles`,
+  `batch_size`, and `weight`) from proof conversion, time-to-proof, stopped debt,
+  p95 batch runtime, and `max_job_batches` margin.
 - Summarize stale roots/proofs.
 - Summarize challenge pressure.
 - Manage resource slot recommendations.
@@ -298,6 +301,8 @@ Current autopilot responsibilities:
   workers prove they can carry more concurrent batches.
 - Block workload scaling when `reward_funnel.summary.safe_to_scale_workload` is
   false.
+- Never auto-apply `workload_targets` until they have been validated across
+  multiple clean windows and rounds.
 - Clean stale assignments when enabled.
 - Save every decision to `autopilot_decisions`.
 - Apply bounded changes only when configured with `AUTOPILOT_MODE=apply`.
@@ -348,6 +353,9 @@ Autopilot is expected to scale proportionally with fleet size:
   conversion is low, stopped/no-proof debt is high, or time-to-proof-submission
   is slow, do not increase workload merely because workers are idle or roots are
   completing.
+- `workload_targets` are read-only strategy outputs. They show how the controller
+  would adjust bundles, batch sizing, or weights when efficient miners join or
+  leave, but they must remain recommendation-only until proven stable.
 
 When recommending `num_bundles`, `batch_size`, `fuel_budget`, or
 `hyperparameters`, the AI must explain:
