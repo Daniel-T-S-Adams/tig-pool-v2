@@ -23,6 +23,12 @@ from pool import database as db
 logger = logging.getLogger("pool.ai_optimizer")
 
 AI_OPTIMIZER_MODE = os.environ.get("AI_OPTIMIZER_MODE", "off").lower()
+AI_OPTIMIZER_ENABLED = os.environ.get("AI_OPTIMIZER_ENABLED", "false").lower() in (
+    "1",
+    "true",
+    "yes",
+    "on",
+)
 AI_OPTIMIZER_INTERVAL_S = int(os.environ.get("AI_OPTIMIZER_INTERVAL_S", "600"))
 DEEPSEEK_API_KEY = os.environ.get("DEEPSEEK_API_KEY", "")
 DEEPSEEK_MODEL = os.environ.get("DEEPSEEK_MODEL", "deepseek-chat")
@@ -1111,6 +1117,8 @@ def _save_decision(
 def run_once(force: bool = False) -> dict:
     """Run one read-only AI recommendation cycle and store the result."""
     _ensure_decision_table()
+    if not AI_OPTIMIZER_ENABLED:
+        return {"status": "skipped", "reason": "ai_optimizer_disabled"}
     if AI_OPTIMIZER_MODE not in {"report", "off"}:
         return {"status": "skipped", "reason": f"unsupported_mode:{AI_OPTIMIZER_MODE}"}
     if AI_OPTIMIZER_MODE == "off" and not force:
@@ -1155,6 +1163,8 @@ def run_once(force: bool = False) -> dict:
 
 def maybe_run():
     global _last_run_ts
+    if not AI_OPTIMIZER_ENABLED:
+        return None
     if AI_OPTIMIZER_MODE != "report":
         return None
     now = time.time()

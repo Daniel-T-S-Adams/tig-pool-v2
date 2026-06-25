@@ -225,6 +225,18 @@ The delicate balance is:
   not either field alone; it is root batches per benchmark, observed root runtime,
   benchmark wall time, stale roots/proofs, and resulting solution quality.
 
+Reward-funnel rule:
+
+- Root completion is not a reward signal by itself. A healthy pool must convert
+  root work into benchmark submissions, sampled proof batches, completed proofs,
+  proof submissions, and active qualifying bundles.
+- Workload scaling must be blocked or treated as investigate-first when the
+  reward funnel reports low proof conversion, stopped/no-proof debt, or slow
+  time-to-proof-submission.
+- `num_bundles`, `batch_size`, `fuel_budget`, and hyperparameters should be
+  changed only after the deterministic funnel shows clean proof conversion and
+  benchmark completion within the target active-time window.
+
 Important adaptive cap fields:
 
 - `enabled`: whether adaptive caps are active.
@@ -259,7 +271,8 @@ Important behavior:
 ## 8. Current Autopilot Philosophy
 
 Autopilot is a deterministic controller. It should remain the trusted executor.
-The AI operator should act as a strategist and analyst above autopilot.
+The AI optimizer is disabled by default while deterministic reward-funnel
+telemetry is being validated.
 
 Current autopilot responsibilities:
 
@@ -273,6 +286,9 @@ Current autopilot responsibilities:
 - Build `track_economics` from configured `num_bundles`, effective batch size,
   observed nonces, observed root batch counts, root runtime, benchmark wall time,
   and stale/proof pressure.
+- Build `reward_funnel` from jobs, root batches, benchmark submission attempts,
+  sampled proof batches, proof completion, proof submissions, stopped/no-proof
+  debt, and time-to-proof-submission.
 - Summarize stale roots/proofs.
 - Summarize challenge pressure.
 - Manage resource slot recommendations.
@@ -280,12 +296,15 @@ Current autopilot responsibilities:
 - Manage safe per-challenge cap increases for GPU challenges.
 - Manage safe upward tuning of adaptive slave cap ceilings when productive
   workers prove they can carry more concurrent batches.
+- Block workload scaling when `reward_funnel.summary.safe_to_scale_workload` is
+  false.
 - Clean stale assignments when enabled.
 - Save every decision to `autopilot_decisions`.
 - Apply bounded changes only when configured with `AUTOPILOT_MODE=apply`.
 
-The AI should not bypass autopilot guardrails. It should recommend target changes,
-explain evidence, and let deterministic code validate and apply.
+If AI analysis is re-enabled later, it must not bypass autopilot guardrails. It
+should recommend target changes, explain evidence, and let deterministic code
+validate and apply.
 
 Autopilot is expected to scale proportionally with fleet size:
 
@@ -325,6 +344,10 @@ Autopilot is expected to scale proportionally with fleet size:
 - `track_economics` should be used when evaluating whether a track is too coarse,
   too fragmented, too slow, or under-bundled. Do not recommend bundle changes
   from stale counts alone.
+- `reward_funnel` is the primary safety gate for work-volume increases. If proof
+  conversion is low, stopped/no-proof debt is high, or time-to-proof-submission
+  is slow, do not increase workload merely because workers are idle or roots are
+  completing.
 
 When recommending `num_bundles`, `batch_size`, `fuel_budget`, or
 `hyperparameters`, the AI must explain:
@@ -348,6 +371,11 @@ A healthy pool usually has:
 - Low stale root count.
 - Low stale proof count.
 - Proofs assigned to the same slave that created the root.
+- High proof conversion from required proof batches to confirmed proof
+  submissions.
+- Low stopped/no-proof debt.
+- Time from job creation to proof submission inside the configured operational
+  target, usually around 20 minutes.
 - Few or no old active benchmarks with pending roots but no assigned workers.
 - Resource slots occupied by active jobs while workers are requesting work.
 - `max_concurrent_benchmarks` high enough to support the active CPU and GPU slot

@@ -57,6 +57,9 @@ CAP_SCALE_COMPLETIONS_PER_STEP = int(os.environ.get("AUTOPILOT_CAP_SCALE_COMPLET
 BUNDLE_TARGET_MIN_ROOT_BATCHES = int(os.environ.get("AUTOPILOT_BUNDLE_TARGET_MIN_ROOT_BATCHES", "8"))
 BUNDLE_TARGET_MAX_ROOT_BATCHES = int(os.environ.get("AUTOPILOT_BUNDLE_TARGET_MAX_ROOT_BATCHES", "192"))
 BUNDLE_TARGET_ROOT_RUNTIME_SEC = int(os.environ.get("AUTOPILOT_BUNDLE_TARGET_ROOT_RUNTIME_SEC", "900"))
+FUNNEL_TARGET_PROOF_SUBMIT_SEC = int(os.environ.get("AUTOPILOT_FUNNEL_TARGET_PROOF_SUBMIT_SEC", "1200"))
+FUNNEL_MIN_PROOF_CONVERSION_RATE = float(os.environ.get("AUTOPILOT_FUNNEL_MIN_PROOF_CONVERSION_RATE", "0.85"))
+FUNNEL_MAX_STOPPED_OR_EXPIRED_RATE = float(os.environ.get("AUTOPILOT_FUNNEL_MAX_STOPPED_OR_EXPIRED_RATE", "0.10"))
 STRANDED_BENCHMARK_MS = int(os.environ.get("AUTOPILOT_STRANDED_BENCHMARK_MS", str(30 * 60 * 1000)))
 STRANDED_DOWNSCALE_STEP = int(os.environ.get("AUTOPILOT_STRANDED_DOWNSCALE_STEP", "2"))
 STRANDED_BUFFER_BENCHMARKS = int(os.environ.get("AUTOPILOT_STRANDED_BUFFER_BENCHMARKS", "2"))
@@ -489,11 +492,15 @@ def _slave_metrics(now_ms: int) -> list[dict]:
             SELECT
                 slave AS slave_name,
                 COUNT(*) FILTER (WHERE ready IS NULL AND start_time IS NOT NULL) AS active_proofs,
+                COUNT(*) FILTER (WHERE ready = true AND end_time >= %s) AS proofs_completed_recent,
                 COUNT(*) FILTER (
                     WHERE ready IS NULL
                       AND start_time IS NOT NULL
                       AND start_time < %s
-                ) AS stale_proofs
+                ) AS stale_proofs,
+                ROUND(AVG(end_time - start_time) FILTER (
+                    WHERE ready = true AND end_time >= %s AND end_time IS NOT NULL
+                ) / 1000.0, 1) AS avg_proof_runtime_sec
             FROM proofs_batch
             WHERE slave IS NOT NULL
             GROUP BY slave
@@ -507,11 +514,13 @@ def _slave_metrics(now_ms: int) -> list[dict]:
             COALESCE(rs.completed_recent, 0) AS completed_recent,
             COALESCE(rs.active_unfinished, 0) AS active_unfinished,
             COALESCE(ps.active_proofs, 0) AS active_proofs,
+            COALESCE(ps.proofs_completed_recent, 0) AS proofs_completed_recent,
             COALESCE(rs.stale_roots, 0) AS stale_roots,
             COALESCE(ps.stale_proofs, 0) AS stale_proofs,
             COALESCE(rs.failed_recent, 0) AS failed_recent,
             COALESCE(rs.nonces_recent, 0) AS nonces_recent,
             rs.avg_runtime_sec,
+            ps.avg_proof_runtime_sec,
             rs.last_assigned_at,
             rs.last_completed_at
         FROM registered r
@@ -527,7 +536,9 @@ def _slave_metrics(now_ms: int) -> list[dict]:
             cutoff_metrics,
             cutoff_metrics,
             cutoff_metrics,
+            cutoff_metrics,
             now_ms - STALE_PROOF_MS,
+            cutoff_metrics,
         ),
     )
 
@@ -565,6 +576,7 @@ def _challenge_metrics(now_ms: int) -> list[dict]:
             COUNT(pb.*) AS proof_batches,
             COUNT(pb.*) FILTER (WHERE pb.ready = true) AS proofs_ready,
             COUNT(pb.*) FILTER (WHERE pb.ready IS NULL) AS proofs_pending,
+            COUNT(pb.*) FILTER (WHERE pb.ready = true AND pb.end_time >= %s) AS proofs_done_recent,
             COUNT(pb.*) FILTER (
                 WHERE pb.ready IS NULL
                   AND pb.start_time IS NOT NULL
@@ -573,7 +585,10 @@ def _challenge_metrics(now_ms: int) -> list[dict]:
             COUNT(rb.*) FILTER (WHERE rb.ready = true AND rb.end_time >= %s) AS roots_done_recent,
             ROUND(AVG(rb.end_time - rb.start_time) FILTER (
                 WHERE rb.ready = true AND rb.end_time >= %s AND rb.end_time IS NOT NULL
-            ) / 1000.0, 1) AS avg_root_runtime_sec
+            ) / 1000.0, 1) AS avg_root_runtime_sec,
+            ROUND(AVG(pb.end_time - pb.start_time) FILTER (
+                WHERE pb.ready = true AND pb.end_time >= %s AND pb.end_time IS NOT NULL
+            ) / 1000.0, 1) AS avg_proof_runtime_sec
         FROM job j
         LEFT JOIN root_batch rb ON rb.benchmark_id = j.benchmark_id
         LEFT JOIN proofs_batch pb
@@ -584,8 +599,219 @@ def _challenge_metrics(now_ms: int) -> list[dict]:
         GROUP BY j.challenge, j.algorithm, j.settings
         ORDER BY j.challenge, track
         """,
-        (now_ms - STALE_ROOT_MS, now_ms - STALE_PROOF_MS, cutoff_metrics, cutoff_metrics),
+        (
+            now_ms - STALE_ROOT_MS,
+            cutoff_metrics,
+            now_ms - STALE_PROOF_MS,
+            cutoff_metrics,
+            cutoff_metrics,
+            cutoff_metrics,
+        ),
     )
+
+
+def _safe_div(numerator: int | float | None, denominator: int | float | None) -> float | None:
+    if denominator in (None, 0):
+        return None
+    return round(float(numerator or 0) / float(denominator), 4)
+
+
+def _reward_funnel_summary(now_ms: int) -> dict:
+    cutoff_metrics = now_ms - METRIC_WINDOW_MS
+    total = _fetch_one(
+        """
+        WITH job_base AS (
+            SELECT
+                j.*,
+                j.settings->>'algorithm_id' AS algorithm_id,
+                j.settings->>'track_id' AS track
+            FROM job j
+            WHERE j.start_time >= %s
+               OR j.end_time IS NULL
+        ),
+        root_agg AS (
+            SELECT
+                benchmark_id,
+                COUNT(*) AS root_batches,
+                COUNT(*) FILTER (WHERE ready = true) AS roots_ready,
+                COUNT(*) FILTER (WHERE ready IS NULL) AS roots_pending,
+                COUNT(*) FILTER (WHERE ready = false) AS roots_failed,
+                MAX(end_time) FILTER (WHERE ready = true) AS all_roots_ready_at,
+                PERCENTILE_CONT(0.95) WITHIN GROUP (ORDER BY end_time - start_time)
+                    FILTER (WHERE ready = true AND end_time >= %s AND end_time IS NOT NULL) AS root_runtime_p95_ms
+            FROM root_batch
+            GROUP BY benchmark_id
+        ),
+        proof_agg AS (
+            SELECT
+                benchmark_id,
+                COUNT(*) AS proof_batches,
+                COUNT(*) FILTER (WHERE ready = true) AS proofs_ready,
+                COUNT(*) FILTER (WHERE ready IS NULL) AS proofs_pending,
+                COUNT(*) FILTER (WHERE ready = false) AS proofs_failed,
+                MAX(end_time) FILTER (WHERE ready = true) AS all_proofs_ready_at,
+                PERCENTILE_CONT(0.95) WITHIN GROUP (ORDER BY end_time - start_time)
+                    FILTER (WHERE ready = true AND end_time >= %s AND end_time IS NOT NULL) AS proof_runtime_p95_ms
+            FROM proofs_batch
+            GROUP BY benchmark_id
+        )
+        SELECT
+            COUNT(*) AS benchmarks_seen,
+            COUNT(*) FILTER (WHERE jb.stopped IS NULL AND jb.end_time IS NULL) AS active_benchmarks,
+            COUNT(*) FILTER (WHERE jb.stopped = true) AS stopped_benchmarks,
+            COUNT(*) FILTER (WHERE jb.stopped = true AND COALESCE(ra.root_batches, 0) = 0) AS stopped_without_roots,
+            COUNT(*) FILTER (WHERE jb.merkle_root_ready = true) AS root_ready_benchmarks,
+            COUNT(*) FILTER (WHERE jb.benchmark_submit_time IS NOT NULL) AS benchmark_submit_attempted,
+            COUNT(*) FILTER (WHERE jb.benchmark_submitted = true) AS benchmark_submitted_confirmed,
+            COUNT(*) FILTER (WHERE jb.sampled_nonces IS NOT NULL) AS sampled_benchmarks,
+            COUNT(*) FILTER (WHERE COALESCE(pa.proof_batches, 0) > 0) AS proof_required_benchmarks,
+            COUNT(*) FILTER (WHERE jb.merkle_proofs_ready = true) AS proof_ready_benchmarks,
+            COUNT(*) FILTER (WHERE jb.proof_submit_time IS NOT NULL) AS proof_submit_attempted,
+            COUNT(*) FILTER (WHERE jb.proof_submitted = true) AS proof_submitted_confirmed,
+            COALESCE(SUM(jb.num_nonces), 0) AS nonces_seen,
+            COALESCE(SUM(jb.num_batches), 0) AS root_batches_expected,
+            COALESCE(SUM(ra.root_batches), 0) AS root_batches_seen,
+            COALESCE(SUM(ra.roots_ready), 0) AS roots_ready,
+            COALESCE(SUM(ra.roots_pending), 0) AS roots_pending,
+            COALESCE(SUM(ra.roots_failed), 0) AS roots_failed,
+            COALESCE(SUM(pa.proof_batches), 0) AS proof_batches_seen,
+            COALESCE(SUM(pa.proofs_ready), 0) AS proofs_ready,
+            COALESCE(SUM(pa.proofs_pending), 0) AS proofs_pending,
+            COALESCE(SUM(pa.proofs_failed), 0) AS proofs_failed,
+            ROUND(AVG(ra.all_roots_ready_at - jb.start_time) FILTER (
+                WHERE ra.all_roots_ready_at IS NOT NULL AND jb.start_time IS NOT NULL
+            ) / 1000.0, 1) AS avg_root_phase_sec,
+            ROUND(AVG(pa.all_proofs_ready_at - jb.benchmark_submit_time) FILTER (
+                WHERE pa.all_proofs_ready_at IS NOT NULL AND jb.benchmark_submit_time IS NOT NULL
+            ) / 1000.0, 1) AS avg_proof_phase_sec,
+            ROUND(AVG(jb.proof_submit_time - jb.start_time) FILTER (
+                WHERE jb.proof_submit_time IS NOT NULL AND jb.start_time IS NOT NULL
+            ) / 1000.0, 1) AS avg_time_to_proof_submit_sec,
+            ROUND((AVG(ra.root_runtime_p95_ms) / 1000.0)::numeric, 1) AS p95_root_batch_runtime_sec,
+            ROUND((AVG(pa.proof_runtime_p95_ms) / 1000.0)::numeric, 1) AS p95_proof_batch_runtime_sec
+        FROM job_base jb
+        LEFT JOIN root_agg ra ON ra.benchmark_id = jb.benchmark_id
+        LEFT JOIN proof_agg pa ON pa.benchmark_id = jb.benchmark_id
+        """,
+        (cutoff_metrics, cutoff_metrics, cutoff_metrics),
+    )
+    by_track = _fetch_all(
+        """
+        WITH job_base AS (
+            SELECT
+                j.*,
+                j.settings->>'algorithm_id' AS algorithm_id,
+                j.settings->>'track_id' AS track
+            FROM job j
+            WHERE j.start_time >= %s
+               OR j.end_time IS NULL
+        ),
+        root_agg AS (
+            SELECT
+                benchmark_id,
+                COUNT(*) AS root_batches,
+                COUNT(*) FILTER (WHERE ready = true) AS roots_ready,
+                COUNT(*) FILTER (WHERE ready IS NULL) AS roots_pending,
+                MAX(end_time) FILTER (WHERE ready = true) AS all_roots_ready_at,
+                PERCENTILE_CONT(0.95) WITHIN GROUP (ORDER BY end_time - start_time)
+                    FILTER (WHERE ready = true AND end_time >= %s AND end_time IS NOT NULL) AS root_runtime_p95_ms
+            FROM root_batch
+            GROUP BY benchmark_id
+        ),
+        proof_agg AS (
+            SELECT
+                benchmark_id,
+                COUNT(*) AS proof_batches,
+                COUNT(*) FILTER (WHERE ready = true) AS proofs_ready,
+                COUNT(*) FILTER (WHERE ready IS NULL) AS proofs_pending,
+                MAX(end_time) FILTER (WHERE ready = true) AS all_proofs_ready_at
+            FROM proofs_batch
+            GROUP BY benchmark_id
+        )
+        SELECT
+            jb.challenge,
+            jb.algorithm_id,
+            jb.track,
+            COUNT(*) AS benchmarks_seen,
+            COUNT(*) FILTER (WHERE jb.stopped IS NULL AND jb.end_time IS NULL) AS active_benchmarks,
+            COUNT(*) FILTER (WHERE jb.stopped = true) AS stopped_benchmarks,
+            COUNT(*) FILTER (WHERE jb.stopped = true AND COALESCE(ra.root_batches, 0) = 0) AS stopped_without_roots,
+            COUNT(*) FILTER (WHERE jb.merkle_root_ready = true) AS root_ready_benchmarks,
+            COUNT(*) FILTER (WHERE jb.benchmark_submitted = true) AS benchmark_submitted_confirmed,
+            COUNT(*) FILTER (WHERE jb.sampled_nonces IS NOT NULL) AS sampled_benchmarks,
+            COUNT(*) FILTER (WHERE COALESCE(pa.proof_batches, 0) > 0) AS proof_required_benchmarks,
+            COUNT(*) FILTER (WHERE jb.merkle_proofs_ready = true) AS proof_ready_benchmarks,
+            COUNT(*) FILTER (WHERE jb.proof_submitted = true) AS proof_submitted_confirmed,
+            ROUND(AVG(jb.num_nonces)::numeric, 1) AS avg_num_nonces,
+            ROUND(AVG(jb.num_batches)::numeric, 1) AS avg_num_batches,
+            ROUND(AVG(jb.batch_size)::numeric, 1) AS avg_batch_size,
+            COALESCE(SUM(ra.roots_ready), 0) AS roots_ready,
+            COALESCE(SUM(ra.roots_pending), 0) AS roots_pending,
+            COALESCE(SUM(pa.proofs_ready), 0) AS proofs_ready,
+            COALESCE(SUM(pa.proofs_pending), 0) AS proofs_pending,
+            ROUND(AVG(ra.all_roots_ready_at - jb.start_time) FILTER (
+                WHERE ra.all_roots_ready_at IS NOT NULL AND jb.start_time IS NOT NULL
+            ) / 1000.0, 1) AS avg_root_phase_sec,
+            ROUND(AVG(pa.all_proofs_ready_at - jb.benchmark_submit_time) FILTER (
+                WHERE pa.all_proofs_ready_at IS NOT NULL AND jb.benchmark_submit_time IS NOT NULL
+            ) / 1000.0, 1) AS avg_proof_phase_sec,
+            ROUND(AVG(jb.proof_submit_time - jb.start_time) FILTER (
+                WHERE jb.proof_submit_time IS NOT NULL AND jb.start_time IS NOT NULL
+            ) / 1000.0, 1) AS avg_time_to_proof_submit_sec,
+            ROUND((AVG(ra.root_runtime_p95_ms) / 1000.0)::numeric, 1) AS p95_root_batch_runtime_sec
+        FROM job_base jb
+        LEFT JOIN root_agg ra ON ra.benchmark_id = jb.benchmark_id
+        LEFT JOIN proof_agg pa ON pa.benchmark_id = jb.benchmark_id
+        GROUP BY jb.challenge, jb.algorithm_id, jb.track
+        ORDER BY jb.challenge, jb.algorithm_id, jb.track
+        """,
+        (cutoff_metrics, cutoff_metrics),
+    )
+    for row in by_track:
+        seen = int(row.get("benchmarks_seen") or 0)
+        root_ready = int(row.get("root_ready_benchmarks") or 0)
+        proof_required = int(row.get("proof_required_benchmarks") or 0)
+        proof_submitted = int(row.get("proof_submitted_confirmed") or 0)
+        stopped = int(row.get("stopped_benchmarks") or 0)
+        row["root_ready_rate"] = _safe_div(root_ready, seen)
+        row["proof_conversion_rate"] = _safe_div(proof_submitted, proof_required)
+        row["stopped_rate"] = _safe_div(stopped, seen)
+    total = dict(total or {})
+    seen = int(total.get("benchmarks_seen") or 0)
+    root_ready = int(total.get("root_ready_benchmarks") or 0)
+    proof_required = int(total.get("proof_required_benchmarks") or 0)
+    proof_submitted = int(total.get("proof_submitted_confirmed") or 0)
+    stopped = int(total.get("stopped_benchmarks") or 0)
+    stopped_without_roots = int(total.get("stopped_without_roots") or 0)
+    avg_time_to_proof = total.get("avg_time_to_proof_submit_sec")
+    proof_conversion = _safe_div(proof_submitted, proof_required)
+    stopped_rate = _safe_div(stopped, seen)
+    issues = []
+    if proof_required and (proof_conversion or 0.0) < FUNNEL_MIN_PROOF_CONVERSION_RATE:
+        issues.append("low_proof_conversion")
+    if stopped_rate is not None and stopped_rate > FUNNEL_MAX_STOPPED_OR_EXPIRED_RATE:
+        issues.append("high_stopped_or_expired_rate")
+    if stopped_without_roots:
+        issues.append("stopped_without_root_work")
+    if avg_time_to_proof is not None and float(avg_time_to_proof) > FUNNEL_TARGET_PROOF_SUBMIT_SEC:
+        issues.append("slow_time_to_proof_submission")
+    return {
+        "window_ms": METRIC_WINDOW_MS,
+        "targets": {
+            "proof_submit_sec": FUNNEL_TARGET_PROOF_SUBMIT_SEC,
+            "min_proof_conversion_rate": FUNNEL_MIN_PROOF_CONVERSION_RATE,
+            "max_stopped_or_expired_rate": FUNNEL_MAX_STOPPED_OR_EXPIRED_RATE,
+        },
+        "summary": {
+            **total,
+            "root_ready_rate": _safe_div(root_ready, seen),
+            "proof_conversion_rate": proof_conversion,
+            "stopped_rate": stopped_rate,
+            "safe_to_scale_workload": not issues,
+            "issues": issues,
+        },
+        "by_track": by_track,
+    }
 
 
 def _track_workload_metrics(now_ms: int) -> list[dict]:
@@ -1073,6 +1299,7 @@ def _recommendations(
     slots: dict,
     track_economics: list[dict] | None = None,
     stale_totals: dict | None = None,
+    reward_funnel: dict | None = None,
 ) -> list[dict]:
     capacity = _fleet_capacity(cfg, slaves, challenges, slots, stale_totals)
     current_slots = capacity["current_slots"]
@@ -1147,6 +1374,25 @@ def _recommendations(
             "current": {"stale_proofs": capacity["stale_proofs"]},
             "proposed": "check root-artifact ownership and proof slave logs",
             "reason": "Proof batches should normally clear quickly once roots are ready.",
+            "apply_now": False,
+        })
+
+    funnel_summary = (reward_funnel or {}).get("summary") or {}
+    if funnel_summary.get("issues"):
+        recommendations.append({
+            "key": "reward_funnel",
+            "current": {
+                "issues": funnel_summary.get("issues"),
+                "proof_conversion_rate": funnel_summary.get("proof_conversion_rate"),
+                "stopped_rate": funnel_summary.get("stopped_rate"),
+                "avg_time_to_proof_submit_sec": funnel_summary.get("avg_time_to_proof_submit_sec"),
+                "stopped_without_roots": funnel_summary.get("stopped_without_roots"),
+            },
+            "proposed": "stabilize_proof_submission_before_scaling_workload",
+            "reason": (
+                "The pool should scale work only when root work converts into benchmark submissions, "
+                "proof submissions, and clean finalized jobs. Root throughput alone is not a reward signal."
+            ),
             "apply_now": False,
         })
 
@@ -1294,6 +1540,8 @@ def _next_value_bounded(current: int, target: int, up_step: int, down_step: int)
 
 def _plan_config_change(report: dict, cfg: dict, clean_windows: int) -> dict:
     health = _health_summary(report)
+    funnel_summary = (report.get("reward_funnel") or {}).get("summary") or {}
+    funnel_safe = bool(funnel_summary.get("safe_to_scale_workload", True))
     decision = {
         "mode": AUTOPILOT_MODE,
         "healthy": health["healthy"],
@@ -1302,6 +1550,7 @@ def _plan_config_change(report: dict, cfg: dict, clean_windows: int) -> dict:
         "reason": "report_only",
         "changes": {},
         "health": health,
+        "reward_funnel_safe": funnel_safe,
     }
 
     if AUTOPILOT_MODE != "apply":
@@ -1321,12 +1570,14 @@ def _plan_config_change(report: dict, cfg: dict, clean_windows: int) -> dict:
         productive_idle_cpu >= PRODUCTIVE_IDLE_CPU_SCALE_MIN
         and stale_roots <= PRODUCTIVE_IDLE_STALE_ROOT_TOLERANCE
         and stale_proofs == 0
+        and funnel_safe
         and not health.get("active_unregistered")
         and not health.get("unserved_stranded_benchmarks")
     )
     productive_idle_gpu_scale = (
         productive_idle_gpu >= PRODUCTIVE_IDLE_GPU_SCALE_MIN
         and stale_proofs == 0
+        and funnel_safe
         and not health.get("active_unregistered")
         and not health.get("unserved_stranded_benchmarks")
     )
@@ -1335,6 +1586,7 @@ def _plan_config_change(report: dict, cfg: dict, clean_windows: int) -> dict:
     proposed_per_for_gate = per_rec.get("proposed") or {}
     safe_per_challenge_scale = (
         stale_proofs == 0
+        and funnel_safe
         and not health.get("active_unregistered")
         and not health.get("unserved_stranded_benchmarks")
         and any(
@@ -1342,7 +1594,15 @@ def _plan_config_change(report: dict, cfg: dict, clean_windows: int) -> dict:
             for key, current in current_per_for_gate.items()
         )
     )
-    capacity_change_allowed = health["healthy"] or productive_capacity_scale
+    capacity_change_allowed = (health["healthy"] and funnel_safe) or productive_capacity_scale
+    if not funnel_safe:
+        decision.setdefault("guardrails", {})["reward_funnel"] = {
+            "skipped": "funnel_unhealthy_blocks_workload_scale",
+            "issues": funnel_summary.get("issues", []),
+            "proof_conversion_rate": funnel_summary.get("proof_conversion_rate"),
+            "stopped_rate": funnel_summary.get("stopped_rate"),
+            "avg_time_to_proof_submit_sec": funnel_summary.get("avg_time_to_proof_submit_sec"),
+        }
     if health.get("unserved_stranded_benchmarks"):
         current = int(cfg.get("max_concurrent_benchmarks") or 0)
         active_jobs = _active_unfinished_jobs()
@@ -1567,10 +1827,15 @@ def build_report() -> dict:
     stranded = _stranded_benchmarks(now_ms)
     stale_totals = _stale_totals(now_ms)
     workload = _track_workload_metrics(now_ms)
+    reward_funnel = _reward_funnel_summary(now_ms)
     track_economics = _track_config_economics(cfg, workload) if cfg else []
     capacity = _fleet_capacity(cfg, slaves, challenges, slots, stale_totals) if cfg else {}
     target_slots = _target_resource_slots(capacity) if capacity else {}
-    recommendations = _recommendations(cfg, slaves, challenges, slots, track_economics, stale_totals) if cfg else []
+    recommendations = (
+        _recommendations(cfg, slaves, challenges, slots, track_economics, stale_totals, reward_funnel)
+        if cfg
+        else []
+    )
 
     active_counts = {
         "cpu": sum(1 for s in slaves if s["profile"] == "cpu" and _counts_for_capacity(s)),
@@ -1601,6 +1866,7 @@ def build_report() -> dict:
         "challenges": challenges,
         "stale_totals": stale_totals,
         "track_workload": workload,
+        "reward_funnel": reward_funnel,
         "track_economics": track_economics,
         "capacity_model": capacity,
         "capacity_targets": {
