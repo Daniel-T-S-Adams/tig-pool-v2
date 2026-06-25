@@ -165,6 +165,42 @@ def _active_unfinished_jobs() -> int:
     return int(row.get("count") or 0)
 
 
+def _stale_totals(now_ms: int) -> dict:
+    roots = _fetch_one(
+        """
+        SELECT COUNT(*) AS count
+        FROM root_batch rb
+        JOIN job j ON j.benchmark_id = rb.benchmark_id
+        WHERE rb.ready IS NULL
+          AND rb.start_time IS NOT NULL
+          AND rb.start_time < %s
+          AND j.stopped IS NULL
+          AND j.end_time IS NULL
+        """,
+        (now_ms - STALE_ROOT_MS,),
+    )
+    proofs = _fetch_one(
+        """
+        SELECT COUNT(*) AS count
+        FROM proofs_batch pb
+        JOIN job j ON j.benchmark_id = pb.benchmark_id
+        WHERE pb.ready IS NULL
+          AND pb.start_time IS NOT NULL
+          AND pb.start_time < %s
+          AND j.stopped IS NULL
+          AND j.end_time IS NULL
+        """,
+        (now_ms - STALE_PROOF_MS,),
+    )
+    stale_roots = int(roots.get("count") or 0)
+    stale_proofs = int(proofs.get("count") or 0)
+    return {
+        "roots": stale_roots,
+        "proofs": stale_proofs,
+        "combined": stale_roots + stale_proofs,
+    }
+
+
 def _ensure_decision_table():
     global _decision_table_ready
     if _decision_table_ready:
@@ -763,15 +799,27 @@ def _avg_runtime(slaves: list[dict]) -> float | None:
     return round(sum(runtimes) / len(runtimes), 1)
 
 
-def _fleet_capacity(cfg: dict, slaves: list[dict], challenges: list[dict], slots: dict) -> dict:
+def _fleet_capacity(
+    cfg: dict,
+    slaves: list[dict],
+    challenges: list[dict],
+    slots: dict,
+    stale_totals: dict | None = None,
+) -> dict:
     active_cpu = [s for s in slaves if s["profile"] == "cpu" and _counts_for_capacity(s)]
     active_gpu = [s for s in slaves if s["profile"] == "gpu" and _counts_for_capacity(s)]
-    stale_roots = sum(int(s.get("stale_roots") or 0) for s in slaves) + sum(
-        int(c.get("stale_roots") or 0) for c in challenges
-    )
-    stale_proofs = sum(int(s.get("stale_proofs") or 0) for s in slaves) + sum(
-        int(c.get("stale_proofs") or 0) for c in challenges
-    )
+    if stale_totals is None:
+        stale_roots = max(
+            sum(int(s.get("stale_roots") or 0) for s in slaves),
+            sum(int(c.get("stale_roots") or 0) for c in challenges),
+        )
+        stale_proofs = max(
+            sum(int(s.get("stale_proofs") or 0) for s in slaves),
+            sum(int(c.get("stale_proofs") or 0) for c in challenges),
+        )
+    else:
+        stale_roots = int(stale_totals.get("roots") or 0)
+        stale_proofs = int(stale_totals.get("proofs") or 0)
     stale_total = stale_roots + stale_proofs
 
     current_slots = (cfg.get("resource_slots") or {}).get("slots", {})
@@ -986,8 +1034,9 @@ def _recommendations(
     challenges: list[dict],
     slots: dict,
     track_economics: list[dict] | None = None,
+    stale_totals: dict | None = None,
 ) -> list[dict]:
-    capacity = _fleet_capacity(cfg, slaves, challenges, slots)
+    capacity = _fleet_capacity(cfg, slaves, challenges, slots, stale_totals)
     current_slots = capacity["current_slots"]
     proposed_slots = _target_resource_slots(capacity)
     recommendations = []
@@ -1071,12 +1120,19 @@ def _health_summary(report: dict) -> dict:
     slaves = report.get("slaves") or []
     challenges = report.get("challenges") or []
     slots = report.get("slots") or {}
-    stale_roots = sum(int(s.get("stale_roots") or 0) for s in slaves) + sum(
-        int(c.get("stale_roots") or 0) for c in challenges
-    )
-    stale_proofs = sum(int(s.get("stale_proofs") or 0) for s in slaves) + sum(
-        int(c.get("stale_proofs") or 0) for c in challenges
-    )
+    stale_totals = report.get("stale_totals") or {}
+    if stale_totals:
+        stale_roots = int(stale_totals.get("roots") or 0)
+        stale_proofs = int(stale_totals.get("proofs") or 0)
+    else:
+        stale_roots = max(
+            sum(int(s.get("stale_roots") or 0) for s in slaves),
+            sum(int(c.get("stale_roots") or 0) for c in challenges),
+        )
+        stale_proofs = max(
+            sum(int(s.get("stale_proofs") or 0) for s in slaves),
+            sum(int(c.get("stale_proofs") or 0) for c in challenges),
+        )
     active_unregistered = [
         s["slave_name"]
         for s in slaves
@@ -1445,11 +1501,12 @@ def build_report() -> dict:
     challenges = _challenge_metrics(now_ms)
     slots = _slot_metrics(now_ms)
     stranded = _stranded_benchmarks(now_ms)
+    stale_totals = _stale_totals(now_ms)
     workload = _track_workload_metrics(now_ms)
     track_economics = _track_config_economics(cfg, workload) if cfg else []
-    capacity = _fleet_capacity(cfg, slaves, challenges, slots) if cfg else {}
+    capacity = _fleet_capacity(cfg, slaves, challenges, slots, stale_totals) if cfg else {}
     target_slots = _target_resource_slots(capacity) if capacity else {}
-    recommendations = _recommendations(cfg, slaves, challenges, slots, track_economics) if cfg else []
+    recommendations = _recommendations(cfg, slaves, challenges, slots, track_economics, stale_totals) if cfg else []
 
     active_counts = {
         "cpu": sum(1 for s in slaves if s["profile"] == "cpu" and _counts_for_capacity(s)),
@@ -1459,6 +1516,7 @@ def build_report() -> dict:
         "slaves": slaves,
         "challenges": challenges,
         "slots": slots,
+        "stale_totals": stale_totals,
         "stranded_benchmarks": stranded,
     })
 
@@ -1477,6 +1535,7 @@ def build_report() -> dict:
         "slaves": slaves,
         "slots": slots,
         "challenges": challenges,
+        "stale_totals": stale_totals,
         "track_workload": workload,
         "track_economics": track_economics,
         "capacity_model": capacity,

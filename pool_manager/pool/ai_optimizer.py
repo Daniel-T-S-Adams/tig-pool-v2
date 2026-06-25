@@ -273,11 +273,13 @@ def _recommendation_signals(report: dict) -> list[dict]:
 def _derived_pool_facts(report: dict) -> dict:
     gpu_slaves = []
     cpu_slaves = []
-    stale_roots = 0
-    stale_proofs = 0
+    exact_stale_totals = report.get("stale_totals") or {}
+    stale_roots = int(exact_stale_totals.get("roots") or 0)
+    stale_proofs = int(exact_stale_totals.get("proofs") or 0)
     for slave in report.get("slaves") or []:
-        stale_roots += int(slave.get("stale_roots") or 0)
-        stale_proofs += int(slave.get("stale_proofs") or 0)
+        if not exact_stale_totals:
+            stale_roots += int(slave.get("stale_roots") or 0)
+            stale_proofs += int(slave.get("stale_proofs") or 0)
         if not slave.get("active_now"):
             continue
         item = {
@@ -295,9 +297,14 @@ def _derived_pool_facts(report: dict) -> dict:
         elif slave.get("profile") == "cpu":
             cpu_slaves.append(item)
 
-    for challenge in report.get("challenges") or []:
-        stale_roots += int(challenge.get("stale_roots") or 0)
-        stale_proofs += int(challenge.get("stale_proofs") or 0)
+    if not exact_stale_totals:
+        challenge_stale_roots = 0
+        challenge_stale_proofs = 0
+        for challenge in report.get("challenges") or []:
+            challenge_stale_roots += int(challenge.get("stale_roots") or 0)
+            challenge_stale_proofs += int(challenge.get("stale_proofs") or 0)
+        stale_roots = max(stale_roots, challenge_stale_roots)
+        stale_proofs = max(stale_proofs, challenge_stale_proofs)
 
     recommendation_signals = _recommendation_signals(report)
     stale_roots = max(
@@ -329,6 +336,17 @@ def _derived_pool_facts(report: dict) -> dict:
                 cap_key: {"current": current.get(cap_key), "proposed": proposed.get(cap_key)}
                 for cap_key in ("cpu_max_cap", "gpu_max_cap")
                 if int(proposed.get(cap_key) or 0) > int(current.get(cap_key) or 0)
+            }
+            if cap_changes:
+                safe_capacity_upscale.append({
+                    "key": key,
+                    "changes": cap_changes,
+                })
+        elif key == "per_challenge_max_benchmarks" and isinstance(current, dict) and isinstance(proposed, dict):
+            cap_changes = {
+                challenge_id: {"current": current.get(challenge_id), "proposed": proposed.get(challenge_id)}
+                for challenge_id, target in proposed.items()
+                if int(target or 0) > int(current.get(challenge_id) or 0)
             }
             if cap_changes:
                 safe_capacity_upscale.append({
