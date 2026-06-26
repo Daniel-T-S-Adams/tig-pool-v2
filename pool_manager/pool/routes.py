@@ -665,7 +665,7 @@ _MASTER_PORT     = os.environ.get("MASTER_PORT", "5115")
 _PUBLIC_MASTER_HOST = os.environ.get("PUBLIC_MASTER_HOST") or _POOL_SERVER_IP
 _PUBLIC_MASTER_PORT = os.environ.get("PUBLIC_MASTER_PORT") or _MASTER_PORT
 _POOL_NAME       = os.environ.get("POOL_NAME", "InnoPool")
-_TIG_VERSION     = os.environ.get("TIG_VERSION", "0.0.6")
+_TIG_VERSION     = os.environ.get("TIG_VERSION", "0.0.7")
 _POOL_PUBLIC_URL = os.environ.get("POOL_PUBLIC_URL", "https://www.innopool.co.uk").rstrip("/")
 
 
