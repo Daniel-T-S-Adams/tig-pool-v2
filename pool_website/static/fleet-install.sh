@@ -50,17 +50,53 @@ curl -fsSL "$CONFIG_URL" > "$TMP_JSON"
 
 python3 - "$TMP_JSON" <<'PY'
 import json
+import os
 import pathlib
+import re
 import sys
 
 data = json.loads(pathlib.Path(sys.argv[1]).read_text())
 if not data.get("success"):
     raise SystemExit("Fleet config request failed")
 
+def detect_cpu_workers():
+    override = os.environ.get("NUM_WORKERS")
+    if override and override.isdigit() and int(override) > 0:
+        return int(override)
+
+    cores = set()
+    current = {}
+    try:
+        for raw in pathlib.Path("/proc/cpuinfo").read_text().splitlines():
+            line = raw.strip()
+            if not line:
+                if "physical id" in current and "core id" in current:
+                    cores.add((current["physical id"], current["core id"]))
+                current = {}
+                continue
+            if ":" not in line:
+                continue
+            key, value = [part.strip() for part in line.split(":", 1)]
+            if key in {"physical id", "core id"}:
+                current[key] = value
+        if "physical id" in current and "core id" in current:
+            cores.add((current["physical id"], current["core id"]))
+    except OSError:
+        pass
+
+    if cores:
+        return max(1, len(cores))
+    return max(1, os.cpu_count() or 1)
+
 pathlib.Path("algorithms").mkdir(exist_ok=True)
 pathlib.Path("results").mkdir(exist_ok=True)
 env_text = data["setup_command"].split("cat > .env <<EOF\n", 1)[1].split("\nEOF", 1)[0]
 env_text = env_text.replace("$(pwd)", str(pathlib.Path.cwd()))
+if data.get("worker_type") == "gpu":
+    workers = int(os.environ.get("NUM_WORKERS") or "1")
+else:
+    workers = detect_cpu_workers()
+env_text = re.sub(r"^NUM_WORKERS=.*$", f"NUM_WORKERS={workers}", env_text, flags=re.MULTILINE)
 pathlib.Path(".env").write_text(env_text + "\n")
 
 print("InnoPool fleet slave configured")
@@ -68,6 +104,7 @@ print(f"  slave_name   : {data['slave_name']}")
 print(f"  fleet_id     : {data['fleet_id']}")
 print(f"  worker_type  : {data['worker_type']}")
 print(f"  machine_index: {data['machine_index']}")
+print(f"  num_workers  : {workers}")
 print()
 print("Next commands:")
 print(data.get("preflight_command") or "")

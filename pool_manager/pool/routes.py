@@ -679,7 +679,7 @@ SLAVE_NAME={slave_name}
 MASTER_IP={_PUBLIC_MASTER_HOST}
 MASTER_PORT={_PUBLIC_MASTER_PORT}
 # Adjust NUM_WORKERS for your machine.
-# CPU: start around your available CPU threads, then reduce if the machine becomes unstable.
+# CPU: defaults to detected physical cores in the fleet installer.
 # GPU: normally use 1 worker per GPU.
 NUM_WORKERS={num_workers}
 ALGORITHMS_DIR=./algorithms
@@ -697,13 +697,45 @@ def _build_slave_setup_command(slave_name: str, num_workers: int = 8) -> str:
     into /app. Writing absolute host paths avoids bad mounts from a partial
     or previously-created .env.
     """
-    return f"""mkdir -p algorithms results
+    worker_setup = (
+        'DETECTED_NUM_WORKERS="${NUM_WORKERS:-1}"'
+        if num_workers == 1
+        else """DETECTED_NUM_WORKERS="${NUM_WORKERS:-$(python3 - <<'PY'
+from pathlib import Path
+import os
+
+cores = set()
+current = {}
+try:
+    for raw in Path('/proc/cpuinfo').read_text().splitlines():
+        line = raw.strip()
+        if not line:
+            if 'physical id' in current and 'core id' in current:
+                cores.add((current['physical id'], current['core id']))
+            current = {}
+            continue
+        if ':' not in line:
+            continue
+        key, value = [part.strip() for part in line.split(':', 1)]
+        if key in {'physical id', 'core id'}:
+            current[key] = value
+    if 'physical id' in current and 'core id' in current:
+        cores.add((current['physical id'], current['core id']))
+except OSError:
+    pass
+print(max(1, len(cores) or (os.cpu_count() or 1)))
+PY
+)}"
+"""
+    )
+    return f"""{worker_setup}
+mkdir -p algorithms results
 cat > .env <<EOF
 VERSION={_TIG_VERSION}
 SLAVE_NAME={slave_name}
 MASTER_IP={_PUBLIC_MASTER_HOST}
 MASTER_PORT={_PUBLIC_MASTER_PORT}
-NUM_WORKERS={num_workers}
+NUM_WORKERS=$DETECTED_NUM_WORKERS
 ALGORITHMS_DIR=$(pwd)/algorithms
 RESULTS_DIR=$(pwd)/results
 TTL=300
