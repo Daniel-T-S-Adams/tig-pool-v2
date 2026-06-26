@@ -77,6 +77,10 @@ class PrecommitManager:
         selection = copy.deepcopy(random.choices(eligible, weights=[x["weight"] for x in eligible])[0])
         a_id = selection["algorithm_id"]
         c_id = a_id[:4]
+        compute_type = selection.get("compute_type")
+        if not compute_type:
+            logger.error(f"Selected algorithm '{a_id}' is missing required compute_type")
+            return
         if c_id not in self.challenge_configs:
             logger.error(f"Invalid selected challenge_id '{c_id}'. Valid challenge_ids: {sorted(self.challenge_configs)}")
             return
@@ -126,6 +130,7 @@ class PrecommitManager:
                 track_id="",
             ),
             track_settings=selection["track_settings"],
+            compute_type=compute_type,
         )
         logger.info(f"Created precommit with algorithm: {a_id}")
         return req
