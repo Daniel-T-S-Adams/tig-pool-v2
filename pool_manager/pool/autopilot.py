@@ -60,6 +60,7 @@ BUNDLE_TARGET_ROOT_RUNTIME_SEC = int(os.environ.get("AUTOPILOT_BUNDLE_TARGET_ROO
 FUNNEL_TARGET_PROOF_SUBMIT_SEC = int(os.environ.get("AUTOPILOT_FUNNEL_TARGET_PROOF_SUBMIT_SEC", "1200"))
 FUNNEL_MIN_PROOF_CONVERSION_RATE = float(os.environ.get("AUTOPILOT_FUNNEL_MIN_PROOF_CONVERSION_RATE", "0.85"))
 FUNNEL_MAX_STOPPED_OR_EXPIRED_RATE = float(os.environ.get("AUTOPILOT_FUNNEL_MAX_STOPPED_OR_EXPIRED_RATE", "0.10"))
+FUNNEL_DRAIN_MIN_MAX_BENCHMARKS = int(os.environ.get("AUTOPILOT_FUNNEL_DRAIN_MIN_MAX_BENCHMARKS", "12"))
 WORKLOAD_MIN_BUNDLES = int(os.environ.get("AUTOPILOT_WORKLOAD_MIN_BUNDLES", "4"))
 WORKLOAD_MAX_BUNDLE_STEP = int(os.environ.get("AUTOPILOT_WORKLOAD_MAX_BUNDLE_STEP", "1"))
 WORKLOAD_FAST_PROOF_FACTOR = float(os.environ.get("AUTOPILOT_WORKLOAD_FAST_PROOF_FACTOR", "0.50"))
@@ -1889,8 +1890,9 @@ def _plan_config_change(report: dict, cfg: dict, clean_windows: int) -> dict:
         }
         active_issues = set(funnel_summary.get("issues") or [])
         current = int(cfg.get("max_concurrent_benchmarks") or 0)
-        if current > MIN_MAX_BENCHMARKS and active_issues.intersection(drain_issues):
-            next_max = max(MIN_MAX_BENCHMARKS, current - max(1, MAX_BENCHMARK_DOWN_STEP))
+        drain_floor = max(MIN_MAX_BENCHMARKS, FUNNEL_DRAIN_MIN_MAX_BENCHMARKS)
+        if current > drain_floor and active_issues.intersection(drain_issues):
+            next_max = max(drain_floor, current - max(1, MAX_BENCHMARK_DOWN_STEP))
             new_cfg = json.loads(json.dumps(cfg))
             new_cfg["max_concurrent_benchmarks"] = next_max
             decision["reason"] = "drain_unhealthy_reward_funnel"
@@ -1902,6 +1904,7 @@ def _plan_config_change(report: dict, cfg: dict, clean_windows: int) -> dict:
                     "proof_conversion_rate": funnel_summary.get("proof_conversion_rate"),
                     "unexpected_stopped_rate": funnel_summary.get("unexpected_stopped_rate"),
                     "avg_time_to_proof_submit_sec": funnel_summary.get("avg_time_to_proof_submit_sec"),
+                    "drain_floor": drain_floor,
                 }
             }
             decision["config"] = new_cfg
