@@ -1016,6 +1016,7 @@ def _workload_controller_targets(
     cfg: dict,
     track_economics: list[dict],
     reward_funnel: dict,
+    policy_posture: dict | None = None,
 ) -> dict:
     """Read-only high-risk workload controller.
 
@@ -1031,6 +1032,8 @@ def _workload_controller_targets(
         algo.get("algorithm_id"): int(algo.get("weight") or 0)
         for algo in (cfg.get("algo_selection") or [])
     }
+    posture = (policy_posture or {}).get("posture") or "balanced"
+    posture_blocks_increase = posture in {"recovery", "conservative"}
     targets = []
     for row in track_economics:
         algorithm_id = row.get("algorithm_id")
@@ -1110,17 +1113,21 @@ def _workload_controller_targets(
                     target_batch_size = max(1, _previous_power_of_two(current_batch_size // 2))
                     reasons.append("p95 root batch runtime is too high; smaller batches may reduce tail latency")
             elif fast_clean:
-                action = "consider_small_workload_increase"
-                target_bundles = current_bundles + WORKLOAD_MAX_BUNDLE_STEP
-                reasons.append("proof conversion is strong and time-to-proof is well below target")
-                if (
-                    estimated_root_batches is not None
-                    and int(estimated_root_batches) > BUNDLE_TARGET_MAX_ROOT_BATCHES
-                    and p95_root_runtime is not None
-                    and float(p95_root_runtime) < BUNDLE_TARGET_ROOT_RUNTIME_SEC / 3
-                ):
-                    target_batch_size = _next_power_of_two(current_batch_size + 1)
-                    reasons.append("many root batches with short p95 runtime; larger batch_size may reduce scheduling overhead")
+                if posture_blocks_increase:
+                    action = "hold_workload_until_policy_posture_improves"
+                    reasons.append(f"policy posture is {posture}; clean track increases stay read-only")
+                else:
+                    action = "consider_small_workload_increase"
+                    target_bundles = current_bundles + WORKLOAD_MAX_BUNDLE_STEP
+                    reasons.append("proof conversion is strong and time-to-proof is well below target")
+                    if (
+                        estimated_root_batches is not None
+                        and int(estimated_root_batches) > BUNDLE_TARGET_MAX_ROOT_BATCHES
+                        and p95_root_runtime is not None
+                        and float(p95_root_runtime) < BUNDLE_TARGET_ROOT_RUNTIME_SEC / 3
+                    ):
+                        target_batch_size = _next_power_of_two(current_batch_size + 1)
+                        reasons.append("many root batches with short p95 runtime; larger batch_size may reduce scheduling overhead")
             else:
                 reasons.append("track is not clearly constrained or underloaded yet")
 
@@ -1173,6 +1180,7 @@ def _workload_controller_targets(
                 "current_estimated_root_batches": estimated_root_batches,
                 "target_estimated_root_batches": estimated_target_batches,
                 "max_job_batches_margin_ok": max_job_batches_margin_ok,
+                "policy_posture": posture,
             },
             "apply_now": False,
         })
@@ -1183,6 +1191,7 @@ def _workload_controller_targets(
     ]
     return {
         "mode": "read_only",
+        "policy_posture": policy_posture or {"posture": posture},
         "targets": targets,
         "actionable": actionable,
     }
@@ -1775,6 +1784,97 @@ def _health_summary(report: dict) -> dict:
     }
 
 
+def _policy_posture(
+    report: dict,
+    health: dict,
+    capacity: dict | None = None,
+    clean_windows: int | None = None,
+) -> dict:
+    """Classify the pool state before deciding how ambitious tuning can be.
+
+    Posture is deliberately conservative. It tells the controller whether it is
+    looking at a recovery, low-compute, normal, or proven high-throughput world.
+    """
+    funnel_summary = (report.get("reward_funnel") or {}).get("summary") or {}
+    issues = list(funnel_summary.get("issues") or [])
+    proof_conversion = funnel_summary.get("proof_conversion_rate")
+    stopped_rate = funnel_summary.get("stopped_rate")
+    avg_time_to_proof = funnel_summary.get("avg_time_to_proof_submit_sec")
+    funnel_safe = bool(funnel_summary.get("safe_to_scale_workload", True))
+    capacity = capacity or {}
+    active_cpu = int(capacity.get("active_cpu") or 0)
+    active_gpu = int(capacity.get("active_gpu") or 0)
+    cpu_pressure = int(capacity.get("cpu_pressure") or 0)
+    gpu_pressure = int(capacity.get("gpu_pressure") or 0)
+    completions = int(capacity.get("cpu_completed_recent") or 0) + int(capacity.get("gpu_completed_recent") or 0)
+    active_profiles = active_cpu + active_gpu
+    active_work = cpu_pressure + gpu_pressure
+    reasons = []
+
+    if not health.get("healthy"):
+        reasons.append("health_has_stale_unregistered_or_unserved_work")
+    if not funnel_safe:
+        reasons.append("reward_funnel_not_safe")
+    if issues:
+        reasons.append("reward_funnel_has_issues")
+    if health.get("stale_proofs"):
+        reasons.append("stale_proof_debt")
+    if health.get("unserved_stranded_benchmarks"):
+        reasons.append("unserved_stranded_precommits")
+    if health.get("active_unregistered"):
+        reasons.append("active_unregistered_slaves")
+
+    if reasons:
+        posture = "recovery"
+    else:
+        high_conversion = (
+            proof_conversion is not None
+            and float(proof_conversion) >= WORKLOAD_HIGH_PROOF_CONVERSION_RATE
+        )
+        low_stopped = (
+            stopped_rate is None
+            or float(stopped_rate) <= FUNNEL_MAX_STOPPED_OR_EXPIRED_RATE / 2
+        )
+        fast_proof = (
+            avg_time_to_proof is not None
+            and float(avg_time_to_proof) <= FUNNEL_TARGET_PROOF_SUBMIT_SEC * WORKLOAD_FAST_PROOF_FACTOR
+        )
+        enough_clean_windows = clean_windows is None or clean_windows >= APPLY_MIN_CLEAN_WINDOWS
+        low_compute = active_profiles <= 1 and active_work < 4 and completions < 20
+        high_compute = active_work >= 16 or completions >= 100
+        if low_compute:
+            posture = "conservative"
+            reasons.append("low_observed_compute")
+        elif high_compute and high_conversion and low_stopped and fast_proof and enough_clean_windows:
+            posture = "aggressive"
+            reasons.append("high_compute_clean_fast_reward_funnel")
+        else:
+            posture = "balanced"
+            reasons.append("normal_guarded_operation")
+
+    return {
+        "posture": posture,
+        "reasons": reasons,
+        "signals": {
+            "funnel_safe": funnel_safe,
+            "issues": issues,
+            "proof_conversion_rate": proof_conversion,
+            "stopped_rate": stopped_rate,
+            "avg_time_to_proof_submit_sec": avg_time_to_proof,
+            "clean_windows": clean_windows,
+            "active_cpu": active_cpu,
+            "active_gpu": active_gpu,
+            "active_work": active_work,
+            "completed_recent": completions,
+            "stale_roots": health.get("stale_roots"),
+            "stale_proofs": health.get("stale_proofs"),
+            "unserved_stranded": len(health.get("unserved_stranded_benchmarks") or []),
+            "active_unregistered": len(health.get("active_unregistered") or []),
+        },
+        "workload_auto_apply_allowed": False,
+    }
+
+
 def _gpu_slot_counts(report: dict) -> tuple[int, int]:
     total = 0
     idle = 0
@@ -1821,6 +1921,13 @@ def _plan_config_change(report: dict, cfg: dict, clean_windows: int) -> dict:
     health = _health_summary(report)
     funnel_summary = (report.get("reward_funnel") or {}).get("summary") or {}
     funnel_safe = bool(funnel_summary.get("safe_to_scale_workload", True))
+    policy_posture = report.get("policy_posture") or _policy_posture(
+        report,
+        health,
+        report.get("capacity_model") or {},
+        clean_windows,
+    )
+    posture = policy_posture.get("posture", "balanced")
     decision = {
         "mode": AUTOPILOT_MODE,
         "healthy": health["healthy"],
@@ -1830,6 +1937,7 @@ def _plan_config_change(report: dict, cfg: dict, clean_windows: int) -> dict:
         "changes": {},
         "health": health,
         "reward_funnel_safe": funnel_safe,
+        "policy_posture": policy_posture,
     }
 
     if AUTOPILOT_MODE != "apply":
@@ -1873,7 +1981,13 @@ def _plan_config_change(report: dict, cfg: dict, clean_windows: int) -> dict:
             for key, current in current_per_for_gate.items()
         )
     )
-    capacity_change_allowed = (health["healthy"] and funnel_safe) or productive_capacity_scale
+    if posture == "recovery":
+        productive_capacity_scale = False
+        safe_per_challenge_scale = False
+    capacity_change_allowed = (
+        ((health["healthy"] and funnel_safe) or productive_capacity_scale)
+        and posture != "recovery"
+    )
     if not funnel_safe:
         decision.setdefault("guardrails", {})["reward_funnel"] = {
             "skipped": "funnel_unhealthy_blocks_workload_scale",
@@ -2002,7 +2116,8 @@ def _plan_config_change(report: dict, cfg: dict, clean_windows: int) -> dict:
                 "signals": max_rec.get("signals") or {},
             }
         else:
-            next_max = _next_value_bounded(current, target, MAX_BENCHMARK_UP_STEP, MAX_BENCHMARK_DOWN_STEP)
+            max_up_step = 1 if posture == "conservative" else MAX_BENCHMARK_UP_STEP
+            next_max = _next_value_bounded(current, target, max_up_step, MAX_BENCHMARK_DOWN_STEP)
             if next_max != current:
                 new_cfg["max_concurrent_benchmarks"] = next_max
                 changes["max_concurrent_benchmarks"] = {
@@ -2012,6 +2127,7 @@ def _plan_config_change(report: dict, cfg: dict, clean_windows: int) -> dict:
                     "active_jobs": active_jobs,
                     "gpu_capacity_needs_room": gpu_needs_room,
                     "productive_capacity_scale": productive_capacity_scale,
+                    "policy_posture": posture,
                     "signals": max_rec.get("signals") or {},
                 }
 
@@ -2135,8 +2251,37 @@ def build_report() -> dict:
     workload = _track_workload_metrics(now_ms)
     reward_funnel = _reward_funnel_summary(now_ms)
     track_economics = _track_config_economics(cfg, workload) if cfg else []
-    workload_targets = _workload_controller_targets(cfg, track_economics, reward_funnel) if cfg else {}
     capacity = _fleet_capacity(cfg, slaves, challenges, slots, stale_totals) if cfg else {}
+    health = _health_summary({
+        "slaves": slaves,
+        "challenges": challenges,
+        "slots": slots,
+        "stale_totals": stale_totals,
+        "stranded_benchmarks": stranded,
+        "reward_funnel": reward_funnel,
+    })
+    try:
+        clean_windows = int(db.get_setting("autopilot_clean_windows", "0") or 0)
+    except Exception:
+        clean_windows = None
+    policy_posture = _policy_posture(
+        {
+            "slaves": slaves,
+            "challenges": challenges,
+            "slots": slots,
+            "stale_totals": stale_totals,
+            "stranded_benchmarks": stranded,
+            "reward_funnel": reward_funnel,
+        },
+        health,
+        capacity,
+        clean_windows,
+    ) if cfg else {}
+    workload_targets = (
+        _workload_controller_targets(cfg, track_economics, reward_funnel, policy_posture)
+        if cfg
+        else {}
+    )
     target_slots = _target_resource_slots(capacity) if capacity else {}
     recommendations = (
         _recommendations(
@@ -2157,13 +2302,6 @@ def build_report() -> dict:
         "cpu": sum(1 for s in slaves if s["profile"] == "cpu" and _counts_for_capacity(s)),
         "gpu": sum(1 for s in slaves if s["profile"] == "gpu" and _counts_for_capacity(s)),
     }
-    health = _health_summary({
-        "slaves": slaves,
-        "challenges": challenges,
-        "slots": slots,
-        "stale_totals": stale_totals,
-        "stranded_benchmarks": stranded,
-    })
 
     return {
         "mode": "read_only",
@@ -2183,6 +2321,7 @@ def build_report() -> dict:
         "stale_totals": stale_totals,
         "track_workload": workload,
         "reward_funnel": reward_funnel,
+        "policy_posture": policy_posture,
         "workload_targets": workload_targets,
         "track_economics": track_economics,
         "capacity_model": capacity,

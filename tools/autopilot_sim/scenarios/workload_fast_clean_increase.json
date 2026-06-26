@@ -105,6 +105,13 @@
         }
       ]
     },
+    "policy_posture": {
+      "posture": "aggressive",
+      "reasons": [
+        "scenario focuses on clean workload increase behavior"
+      ],
+      "workload_auto_apply_allowed": false
+    },
     "recommendations": []
   }
 }

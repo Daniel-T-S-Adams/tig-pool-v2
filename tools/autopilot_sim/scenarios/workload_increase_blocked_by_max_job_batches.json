@@ -97,6 +97,13 @@
         }
       ]
     },
+    "policy_posture": {
+      "posture": "aggressive",
+      "reasons": [
+        "scenario focuses on max_job_batches margin guard"
+      ],
+      "workload_auto_apply_allowed": false
+    },
     "recommendations": []
   }
 }

@@ -117,9 +117,17 @@ def _scenario_to_report_and_config(data: dict) -> tuple[dict, dict, int]:
     return report, config, clean_windows
 
 
-def _enrich_workload_targets(autopilot: Any, report: dict, config: dict) -> None:
+def _enrich_workload_targets(autopilot: Any, report: dict, config: dict, clean_windows: int) -> None:
     if not config or not report.get("track_workload"):
         return
+    if not report.get("policy_posture"):
+        health = autopilot._health_summary(report)
+        report["policy_posture"] = autopilot._policy_posture(
+            report,
+            health,
+            report.get("capacity_model") or {},
+            clean_windows,
+        )
     if not report.get("track_economics"):
         report["track_economics"] = autopilot._track_config_economics(
             config,
@@ -130,6 +138,7 @@ def _enrich_workload_targets(autopilot: Any, report: dict, config: dict) -> None
             config,
             report.get("track_economics") or [],
             report.get("reward_funnel") or {},
+            report.get("policy_posture") or {},
         )
 
 
@@ -234,7 +243,7 @@ def _validate_decision(data: dict, report: dict, decision: dict) -> list[dict]:
 def run_simulation(data: dict) -> dict:
     autopilot = _load_autopilot()
     report, config, clean_windows = _scenario_to_report_and_config(data)
-    _enrich_workload_targets(autopilot, report, config)
+    _enrich_workload_targets(autopilot, report, config, clean_windows)
     active_jobs = _active_jobs_from_report(report)
     autopilot._active_unfinished_jobs = lambda: active_jobs
     decision = autopilot._plan_config_change(report, config, clean_windows)
