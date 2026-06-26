@@ -133,27 +133,31 @@ def _observed_tracks(report: dict) -> list[dict]:
 
     out = []
     seen = set()
-    for source in (
+    sources = [
         report.get("track_economics") or [],
         report.get("track_workload") or [],
         (report.get("reward_funnel") or {}).get("by_track") or [],
-    ):
-        algorithm_id = str(source.get("algorithm_id") or "")
-        track = str(source.get("track") or "default")
-        key = (algorithm_id, track)
-        if key in seen:
-            continue
-        seen.add(key)
-        challenge_id = str(source.get("challenge_id") or algorithm_id.split("_")[0] or source.get("challenge") or "")
-        configured = source.get("configured") or {}
-        out.append({
-            "algorithm_id": algorithm_id,
-            "challenge_id": challenge_id,
-            "track": track,
-            "weight": _as_int(configured.get("weight"), 1),
-            "batch_size": _as_int(configured.get("effective_batch_size"), 32),
-            "num_bundles": _as_int(configured.get("num_bundles"), 8),
-        })
+    ]
+    for rows in sources:
+        for source in rows:
+            if not isinstance(source, dict):
+                continue
+            algorithm_id = str(source.get("algorithm_id") or "")
+            track = str(source.get("track") or "default")
+            key = (algorithm_id, track)
+            if key in seen:
+                continue
+            seen.add(key)
+            challenge_id = str(source.get("challenge_id") or algorithm_id.split("_")[0] or source.get("challenge") or "")
+            configured = source.get("configured") or {}
+            out.append({
+                "algorithm_id": algorithm_id,
+                "challenge_id": challenge_id,
+                "track": track,
+                "weight": _as_int(configured.get("weight"), 1),
+                "batch_size": _as_int(configured.get("effective_batch_size"), 32),
+                "num_bundles": _as_int(configured.get("num_bundles"), 8),
+            })
     return out
 
 
