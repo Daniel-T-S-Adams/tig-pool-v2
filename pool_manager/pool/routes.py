@@ -573,14 +573,18 @@ def register_member(req: RegisterRequest):
     if setup_type in ("fleet", "cloud") or req.cpu_machines > 1 or req.gpu_machines > 1:
         cpu_count = max(0, int(req.cpu_machines or 0))
         gpu_count = max(0, int(req.gpu_machines or 0))
-        if cpu_count == 0 and gpu_count == 0:
-            if wtype == "gpu":
-                gpu_count = 1
-            elif wtype == "both":
-                cpu_count = 1
-                gpu_count = 1
-            else:
-                cpu_count = 1
+        # Hardware type is the source of truth. The form has default machine
+        # counts, so normalize them to avoid "GPU fleet" accidentally becoming
+        # CPU-only when the default CPU count is still 1.
+        if wtype == "gpu":
+            cpu_count = 0
+            gpu_count = max(1, gpu_count)
+        elif wtype == "both":
+            cpu_count = max(1, cpu_count)
+            gpu_count = max(1, gpu_count)
+        else:
+            gpu_count = 0
+            cpu_count = max(1, cpu_count)
         fleet_type = "mixed" if cpu_count and gpu_count else ("gpu" if gpu_count else "cpu")
         now_ms = int(time.time() * 1000)
         fleet = _create_fleet(
