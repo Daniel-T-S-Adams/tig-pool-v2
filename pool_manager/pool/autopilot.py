@@ -1749,7 +1749,7 @@ def _health_summary(report: dict) -> dict:
                 ),
             )
         else:
-            near_capacity_threshold = capacity
+            near_capacity_threshold = max(1, math.floor(capacity * 0.60))
         if capacity > 0 and live >= near_capacity_threshold:
             enriched["classification"] = "capacity_waiting"
             capacity_waiting.append(enriched)
@@ -1881,6 +1881,31 @@ def _plan_config_change(report: dict, cfg: dict, clean_windows: int) -> dict:
             "stopped_rate": funnel_summary.get("stopped_rate"),
             "avg_time_to_proof_submit_sec": funnel_summary.get("avg_time_to_proof_submit_sec"),
         }
+        drain_issues = {
+            "slow_time_to_proof_submission",
+            "low_proof_conversion",
+            "high_stopped_or_expired_rate",
+            "high_unexpected_stopped_rate",
+        }
+        active_issues = set(funnel_summary.get("issues") or [])
+        current = int(cfg.get("max_concurrent_benchmarks") or 0)
+        if current > MIN_MAX_BENCHMARKS and active_issues.intersection(drain_issues):
+            next_max = max(MIN_MAX_BENCHMARKS, current - max(1, MAX_BENCHMARK_DOWN_STEP))
+            new_cfg = json.loads(json.dumps(cfg))
+            new_cfg["max_concurrent_benchmarks"] = next_max
+            decision["reason"] = "drain_unhealthy_reward_funnel"
+            decision["changes"] = {
+                "max_concurrent_benchmarks": {
+                    "current": current,
+                    "next": next_max,
+                    "issues": funnel_summary.get("issues", []),
+                    "proof_conversion_rate": funnel_summary.get("proof_conversion_rate"),
+                    "unexpected_stopped_rate": funnel_summary.get("unexpected_stopped_rate"),
+                    "avg_time_to_proof_submit_sec": funnel_summary.get("avg_time_to_proof_submit_sec"),
+                }
+            }
+            decision["config"] = new_cfg
+            return decision
     if health.get("unserved_stranded_benchmarks"):
         current = int(cfg.get("max_concurrent_benchmarks") or 0)
         active_jobs = _active_unfinished_jobs()
