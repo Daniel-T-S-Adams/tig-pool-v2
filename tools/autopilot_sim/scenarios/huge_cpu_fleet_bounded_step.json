@@ -1,0 +1,125 @@
+{
+  "name": "huge_cpu_fleet_bounded_step",
+  "lesson": "Even if a 100-machine CPU fleet joins, the controller must not jump straight to the theoretical target; it should prove conversion over repeated clean windows.",
+  "clean_windows": 5,
+  "assertions": [
+    {
+      "expect_reason": "ready_to_apply"
+    },
+    {
+      "expect_max_direction": "up"
+    },
+    {
+      "expect_max_step_lte": 2
+    }
+  ],
+  "config": {
+    "max_concurrent_benchmarks": 20,
+    "resource_slots": {
+      "slots": {
+        "satisfiability_cpu": 10,
+        "vehicle_routing_cpu": 10
+      }
+    },
+    "per_challenge_max_benchmarks": {
+      "satisfiability": 10,
+      "vehicle_routing": 10
+    },
+    "adaptive_slave_caps": {
+      "cpu_max_cap": 8,
+      "gpu_max_cap": 1
+    },
+    "slaves": []
+  },
+  "report": {
+    "mode": "read_only",
+    "master_config_error": null,
+    "current_config": {
+      "max_concurrent_benchmarks": 20,
+      "resource_slots": {
+        "slots": {
+          "satisfiability_cpu": 10,
+          "vehicle_routing_cpu": 10
+        }
+      },
+      "per_challenge_max_benchmarks": {
+        "satisfiability": 10,
+        "vehicle_routing": 10
+      },
+      "adaptive_slave_caps": {
+        "cpu_max_cap": 8,
+        "gpu_max_cap": 1
+      },
+      "slaves": []
+    },
+    "slaves": [
+      {
+        "slave_name": "pool-cpu-whale-100-machines",
+        "profile": "cpu",
+        "registered": true,
+        "registered_active": true,
+        "active_now": true,
+        "active_unfinished": 19,
+        "stale_roots": 0,
+        "stale_proofs": 0,
+        "completed_recent": 2000,
+        "nonces_recent": 48000000
+      }
+    ],
+    "slots": {
+      "summary": [
+        {
+          "slot_type": "cpu",
+          "state": "busy",
+          "count": 20
+        }
+      ]
+    },
+    "challenges": [
+      {
+        "challenge_id": "satisfiability",
+        "compute_type": "cpu",
+        "active_benchmarks": 19,
+        "stale_roots": 0,
+        "stale_proofs": 0
+      }
+    ],
+    "stale_totals": {
+      "roots": 0,
+      "proofs": 0
+    },
+    "stranded_benchmarks": [],
+    "reward_funnel": {
+      "summary": {
+        "safe_to_scale_workload": true,
+        "active_benchmarks": 19,
+        "proof_conversion_rate": 0.98,
+        "stopped_rate": 0.01,
+        "avg_time_to_proof_submit_sec": 420,
+        "issues": []
+      }
+    },
+    "recommendations": [
+      {
+        "key": "max_concurrent_benchmarks",
+        "proposed": 96,
+        "signals": {
+          "slot_capacity": 400
+        }
+      },
+      {
+        "key": "resource_slots.slots",
+        "proposed": {
+          "satisfiability_cpu": 64,
+          "vehicle_routing_cpu": 64
+        },
+        "signals": {
+          "productive_idle_cpu": 380,
+          "productive_idle_gpu": 0,
+          "stale_roots": 0,
+          "stale_proofs": 0
+        }
+      }
+    ]
+  }
+}

@@ -1,0 +1,135 @@
+{
+  "name": "capacity_waiting_not_unserved",
+  "lesson": "When live CPU work is already near matching slot capacity, old waiting precommits should not force a drain; the pool can still scale if the reward funnel is clean.",
+  "clean_windows": 3,
+  "assertions": [
+    {
+      "expect_reason": "ready_to_apply"
+    },
+    {
+      "expect_change_key": "max_concurrent_benchmarks"
+    },
+    {
+      "expect_max_direction": "up"
+    },
+    {
+      "expect_max_step_lte": 2
+    }
+  ],
+  "config": {
+    "max_concurrent_benchmarks": 32,
+    "resource_slots": {
+      "slots": {
+        "satisfiability_cpu": 16,
+        "vehicle_routing_cpu": 16
+      }
+    },
+    "per_challenge_max_benchmarks": {
+      "satisfiability": 16,
+      "vehicle_routing": 16
+    },
+    "adaptive_slave_caps": {
+      "cpu_max_cap": 8,
+      "gpu_max_cap": 1
+    },
+    "slaves": []
+  },
+  "report": {
+    "mode": "read_only",
+    "master_config_error": null,
+    "current_config": {
+      "max_concurrent_benchmarks": 32,
+      "resource_slots": {
+        "slots": {
+          "satisfiability_cpu": 16,
+          "vehicle_routing_cpu": 16
+        }
+      },
+      "per_challenge_max_benchmarks": {
+        "satisfiability": 16,
+        "vehicle_routing": 16
+      },
+      "adaptive_slave_caps": {
+        "cpu_max_cap": 8,
+        "gpu_max_cap": 1
+      },
+      "slaves": []
+    },
+    "slaves": [
+      {
+        "slave_name": "pool-cpu-busy-001",
+        "profile": "cpu",
+        "registered": true,
+        "registered_active": true,
+        "active_now": true,
+        "active_unfinished": 30,
+        "stale_roots": 0,
+        "stale_proofs": 0,
+        "completed_recent": 140,
+        "nonces_recent": 1900000
+      }
+    ],
+    "slots": {
+      "summary": [
+        {
+          "slot_type": "cpu",
+          "state": "busy",
+          "count": 32
+        }
+      ]
+    },
+    "challenges": [
+      {
+        "challenge_id": "satisfiability",
+        "compute_type": "cpu",
+        "active_benchmarks": 32,
+        "stale_roots": 0,
+        "stale_proofs": 0
+      }
+    ],
+    "stale_totals": {
+      "roots": 0,
+      "proofs": 0
+    },
+    "stranded_benchmarks": [
+      {
+        "benchmark_id": "capacity-waiting-example",
+        "challenge": "satisfiability",
+        "slot_type": "cpu",
+        "age_min": 34
+      }
+    ],
+    "reward_funnel": {
+      "summary": {
+        "safe_to_scale_workload": true,
+        "active_benchmarks": 32,
+        "proof_conversion_rate": 0.97,
+        "stopped_rate": 0.01,
+        "avg_time_to_proof_submit_sec": 480,
+        "issues": []
+      }
+    },
+    "recommendations": [
+      {
+        "key": "max_concurrent_benchmarks",
+        "proposed": 44,
+        "signals": {
+          "slot_capacity": 44
+        }
+      },
+      {
+        "key": "resource_slots.slots",
+        "proposed": {
+          "satisfiability_cpu": 22,
+          "vehicle_routing_cpu": 22
+        },
+        "signals": {
+          "productive_idle_cpu": 0,
+          "productive_idle_gpu": 0,
+          "stale_roots": 0,
+          "stale_proofs": 0
+        }
+      }
+    ]
+  }
+}

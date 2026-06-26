@@ -1,0 +1,56 @@
+{
+  "name": "low_compute_bundle_tradeoff",
+  "lesson": "With low compute, aggressive bundles can create long benchmark tails; a guarded policy should earn more net reward by keeping proof conversion fresh.",
+  "ticks": 24,
+  "tick_minutes": 5,
+  "expected_not_winner": [
+    "aggressive"
+  ],
+  "fleets": [
+    {
+      "name": "one_i7_cpu",
+      "profile": "cpu",
+      "machines": 1,
+      "units_per_machine": 8,
+      "efficiency": 0.75
+    }
+  ],
+  "tracks": [
+    {
+      "id": "sat_small",
+      "profile": "cpu",
+      "weight": 2,
+      "base_bundles": 8,
+      "min_bundles": 4,
+      "max_bundles": 20,
+      "base_batch_size": 32,
+      "nonces_per_bundle": 512,
+      "runtime_sec_per_bundle": 105,
+      "solution_rate_per_nonce": 0.0000011,
+      "reward_value": 1.0,
+      "proof_conversion_rate": 0.94,
+      "stopped_rate": 0.03,
+      "proof_time_sec": 850,
+      "freshness_target_sec": 1800,
+      "congestion_tail_factor": 0.55
+    },
+    {
+      "id": "vrp_small",
+      "profile": "cpu",
+      "weight": 1,
+      "base_bundles": 8,
+      "min_bundles": 4,
+      "max_bundles": 20,
+      "base_batch_size": 32,
+      "nonces_per_bundle": 512,
+      "runtime_sec_per_bundle": 130,
+      "solution_rate_per_nonce": 0.0000013,
+      "reward_value": 1.15,
+      "proof_conversion_rate": 0.92,
+      "stopped_rate": 0.04,
+      "proof_time_sec": 1050,
+      "freshness_target_sec": 1800,
+      "congestion_tail_factor": 0.65
+    }
+  ]
+}

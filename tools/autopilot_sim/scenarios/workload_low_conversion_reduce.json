@@ -1,0 +1,112 @@
+{
+  "name": "workload_low_conversion_reduce",
+  "lesson": "If a track creates proof-required work but conversion is poor, the workload controller should reduce bundles and lower weight.",
+  "clean_windows": 0,
+  "assertions": [
+    {
+      "expect_workload_action": {
+        "algorithm_id": "c004_vector_algo",
+        "track": "n=500",
+        "action": "reduce_workload_until_proofs_convert"
+      }
+    },
+    {
+      "expect_workload_target_direction": {
+        "algorithm_id": "c004_vector_algo",
+        "track": "n=500",
+        "field": "num_bundles",
+        "direction": "down"
+      }
+    },
+    {
+      "expect_workload_target_direction": {
+        "algorithm_id": "c004_vector_algo",
+        "track": "n=500",
+        "field": "weight",
+        "direction": "down"
+      }
+    }
+  ],
+  "config": {
+    "max_job_batches": 512,
+    "max_concurrent_benchmarks": 12,
+    "resource_slots": {
+      "slots": {
+        "vector_search": 4
+      }
+    },
+    "per_challenge_max_benchmarks": {
+      "vector_search": 4
+    },
+    "adaptive_slave_caps": {
+      "cpu_max_cap": 4,
+      "gpu_max_cap": 1
+    },
+    "algo_selection": [
+      {
+        "algorithm_id": "c004_vector_algo",
+        "weight": 4,
+        "batch_size": 32,
+        "track_settings": {
+          "n=500": {
+            "batch_size": 32,
+            "num_bundles": 8
+          }
+        }
+      }
+    ],
+    "slaves": []
+  },
+  "report": {
+    "mode": "read_only",
+    "master_config_error": null,
+    "current_config": {
+      "max_concurrent_benchmarks": 12,
+      "slaves": []
+    },
+    "slaves": [],
+    "slots": {
+      "summary": []
+    },
+    "challenges": [],
+    "stale_totals": {
+      "roots": 0,
+      "proofs": 0
+    },
+    "stranded_benchmarks": [],
+    "track_workload": [
+      {
+        "algorithm_id": "c004_vector_algo",
+        "track": "n=500",
+        "avg_num_nonces": 4096,
+        "avg_num_batches": 128,
+        "avg_root_runtime_sec": 300,
+        "avg_benchmark_wall_sec": 1800
+      }
+    ],
+    "reward_funnel": {
+      "summary": {
+        "safe_to_scale_workload": false,
+        "active_benchmarks": 8,
+        "proof_conversion_rate": 0.55,
+        "stopped_rate": 0.04,
+        "avg_time_to_proof_submit_sec": 1000,
+        "issues": [
+          "low_proof_conversion"
+        ]
+      },
+      "by_track": [
+        {
+          "algorithm_id": "c004_vector_algo",
+          "track": "n=500",
+          "proof_required_benchmarks": 20,
+          "proof_conversion_rate": 0.55,
+          "stopped_rate": 0.04,
+          "avg_time_to_proof_submit_sec": 1000,
+          "p95_root_batch_runtime_sec": 300
+        }
+      ]
+    },
+    "recommendations": []
+  }
+}

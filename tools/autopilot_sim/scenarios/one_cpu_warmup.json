@@ -1,0 +1,105 @@
+{
+  "name": "one_cpu_warmup",
+  "clean_windows": 3,
+  "assertions": [
+    {
+      "expect_reason": "ready_to_apply"
+    }
+  ],
+  "config": {
+    "max_concurrent_benchmarks": 8,
+    "resource_slots": {
+      "slots": {
+        "satisfiability_cpu": 4,
+        "vehicle_routing_cpu": 4
+      }
+    },
+    "per_challenge_max_benchmarks": {
+      "satisfiability": 4,
+      "vehicle_routing": 4
+    },
+    "adaptive_slave_caps": {
+      "cpu_max_cap": 1,
+      "gpu_max_cap": 1
+    },
+    "slaves": []
+  },
+  "report": {
+    "mode": "read_only",
+    "master_config_error": null,
+    "current_config": {
+      "max_concurrent_benchmarks": 8,
+      "resource_slots": {
+        "slots": {
+          "satisfiability_cpu": 4,
+          "vehicle_routing_cpu": 4
+        }
+      },
+      "per_challenge_max_benchmarks": {
+        "satisfiability": 4,
+        "vehicle_routing": 4
+      },
+      "adaptive_slave_caps": {
+        "cpu_max_cap": 1,
+        "gpu_max_cap": 1
+      },
+      "slaves": []
+    },
+    "slaves": [
+      {
+        "slave_name": "pool-cpu-example-1",
+        "profile": "cpu",
+        "registered": true,
+        "online": true,
+        "active": true,
+        "last_seen_ms": 0,
+        "root_capacity": 4,
+        "proof_capacity": 0
+      }
+    ],
+    "slots": [],
+    "challenges": [
+      {
+        "challenge_id": "satisfiability",
+        "compute_type": "cpu",
+        "active_benchmarks": 7
+      }
+    ],
+    "stale_totals": {
+      "roots": 0,
+      "proofs": 0
+    },
+    "stranded_benchmarks": [],
+    "reward_funnel": {
+      "summary": {
+        "safe_to_scale_workload": true,
+        "active_benchmarks": 7,
+        "proof_conversion_rate": 0.9,
+        "stopped_rate": 0.02,
+        "issues": []
+      }
+    },
+    "recommendations": [
+      {
+        "key": "max_concurrent_benchmarks",
+        "proposed": 12,
+        "signals": {
+          "slot_capacity": 12
+        }
+      },
+      {
+        "key": "resource_slots.slots",
+        "proposed": {
+          "satisfiability_cpu": 6,
+          "vehicle_routing_cpu": 6
+        },
+        "signals": {
+          "productive_idle_cpu": 0,
+          "productive_idle_gpu": 0,
+          "stale_roots": 0,
+          "stale_proofs": 0
+        }
+      }
+    ]
+  }
+}

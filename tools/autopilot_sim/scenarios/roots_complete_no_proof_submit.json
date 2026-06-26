@@ -1,0 +1,138 @@
+{
+  "name": "roots_complete_no_proof_submit",
+  "lesson": "Root throughput alone is not a reward signal; if roots finish but proofs do not submit, the pool should block scaling and drain if the funnel is unsafe.",
+  "clean_windows": 3,
+  "assertions": [
+    {
+      "expect_reason": "drain_unhealthy_reward_funnel"
+    },
+    {
+      "expect_max_direction": "down"
+    },
+    {
+      "expect_workload_action": {
+        "algorithm_id": "c004_vector_algo",
+        "track": "n=500",
+        "action": "reduce_workload_until_proofs_convert"
+      }
+    }
+  ],
+  "config": {
+    "max_job_batches": 512,
+    "max_concurrent_benchmarks": 24,
+    "resource_slots": {
+      "slots": {
+        "vector_search": 8
+      }
+    },
+    "per_challenge_max_benchmarks": {
+      "vector_search": 8
+    },
+    "adaptive_slave_caps": {
+      "cpu_max_cap": 4,
+      "gpu_max_cap": 1
+    },
+    "algo_selection": [
+      {
+        "algorithm_id": "c004_vector_algo",
+        "weight": 4,
+        "batch_size": 32,
+        "track_settings": {
+          "n=500": {
+            "batch_size": 32,
+            "num_bundles": 8
+          }
+        }
+      }
+    ],
+    "slaves": []
+  },
+  "report": {
+    "mode": "read_only",
+    "master_config_error": null,
+    "current_config": {
+      "max_concurrent_benchmarks": 24,
+      "slaves": []
+    },
+    "slaves": [
+      {
+        "slave_name": "pool-gpu-fast-roots-001",
+        "profile": "gpu",
+        "registered": true,
+        "registered_active": true,
+        "active_now": true,
+        "active_unfinished": 8,
+        "stale_roots": 0,
+        "stale_proofs": 6,
+        "completed_recent": 120,
+        "nonces_recent": 2000000
+      }
+    ],
+    "slots": {
+      "summary": [
+        {
+          "slot_type": "vector_search",
+          "state": "busy",
+          "count": 8
+        }
+      ]
+    },
+    "challenges": [
+      {
+        "challenge_id": "vector_search",
+        "compute_type": "gpu",
+        "active_benchmarks": 24,
+        "stale_roots": 0,
+        "stale_proofs": 6
+      }
+    ],
+    "stale_totals": {
+      "roots": 0,
+      "proofs": 6
+    },
+    "stranded_benchmarks": [],
+    "track_workload": [
+      {
+        "algorithm_id": "c004_vector_algo",
+        "track": "n=500",
+        "avg_num_nonces": 4096,
+        "avg_num_batches": 128,
+        "avg_root_runtime_sec": 120,
+        "avg_benchmark_wall_sec": 2600
+      }
+    ],
+    "reward_funnel": {
+      "summary": {
+        "safe_to_scale_workload": false,
+        "active_benchmarks": 24,
+        "proof_conversion_rate": 0.25,
+        "stopped_rate": 0.08,
+        "avg_time_to_proof_submit_sec": 3600,
+        "issues": [
+          "low_proof_conversion",
+          "slow_time_to_proof_submission"
+        ]
+      },
+      "by_track": [
+        {
+          "algorithm_id": "c004_vector_algo",
+          "track": "n=500",
+          "proof_required_benchmarks": 20,
+          "proof_conversion_rate": 0.25,
+          "stopped_rate": 0.08,
+          "avg_time_to_proof_submit_sec": 3600,
+          "p95_root_batch_runtime_sec": 120
+        }
+      ]
+    },
+    "recommendations": [
+      {
+        "key": "max_concurrent_benchmarks",
+        "proposed": 48,
+        "signals": {
+          "slot_capacity": 48
+        }
+      }
+    ]
+  }
+}

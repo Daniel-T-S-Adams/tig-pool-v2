@@ -1,0 +1,111 @@
+{
+  "name": "unhealthy_funnel",
+  "clean_windows": 4,
+  "assertions": [
+    "must_not_scale_when_funnel_unsafe",
+    {
+      "expect_reason": "drain_unhealthy_reward_funnel"
+    }
+  ],
+  "config": {
+    "max_concurrent_benchmarks": 32,
+    "resource_slots": {
+      "slots": {
+        "satisfiability_cpu": 16,
+        "vehicle_routing_cpu": 16
+      }
+    },
+    "per_challenge_max_benchmarks": {
+      "satisfiability": 16,
+      "vehicle_routing": 16
+    },
+    "adaptive_slave_caps": {
+      "cpu_max_cap": 2,
+      "gpu_max_cap": 1
+    },
+    "slaves": []
+  },
+  "report": {
+    "mode": "read_only",
+    "master_config_error": null,
+    "current_config": {
+      "max_concurrent_benchmarks": 32,
+      "resource_slots": {
+        "slots": {
+          "satisfiability_cpu": 16,
+          "vehicle_routing_cpu": 16
+        }
+      },
+      "per_challenge_max_benchmarks": {
+        "satisfiability": 16,
+        "vehicle_routing": 16
+      },
+      "adaptive_slave_caps": {
+        "cpu_max_cap": 2,
+        "gpu_max_cap": 1
+      },
+      "slaves": []
+    },
+    "slaves": [
+      {
+        "slave_name": "pool-cpu-example-1",
+        "profile": "cpu",
+        "registered": true,
+        "online": true,
+        "active": true,
+        "last_seen_ms": 0,
+        "root_capacity": 16,
+        "proof_capacity": 0
+      }
+    ],
+    "slots": [],
+    "challenges": [
+      {
+        "challenge_id": "satisfiability",
+        "compute_type": "cpu",
+        "active_benchmarks": 28
+      }
+    ],
+    "stale_totals": {
+      "roots": 0,
+      "proofs": 0
+    },
+    "stranded_benchmarks": [],
+    "reward_funnel": {
+      "summary": {
+        "safe_to_scale_workload": false,
+        "active_benchmarks": 28,
+        "proof_conversion_rate": 0.42,
+        "stopped_rate": 0.31,
+        "unexpected_stopped_rate": 0.18,
+        "avg_time_to_proof_submit_sec": 5200,
+        "issues": [
+          "slow_time_to_proof_submission",
+          "high_stopped_or_expired_rate"
+        ]
+      }
+    },
+    "recommendations": [
+      {
+        "key": "max_concurrent_benchmarks",
+        "proposed": 48,
+        "signals": {
+          "slot_capacity": 48
+        }
+      },
+      {
+        "key": "resource_slots.slots",
+        "proposed": {
+          "satisfiability_cpu": 24,
+          "vehicle_routing_cpu": 24
+        },
+        "signals": {
+          "productive_idle_cpu": 8,
+          "productive_idle_gpu": 0,
+          "stale_roots": 0,
+          "stale_proofs": 0
+        }
+      }
+    ]
+  }
+}

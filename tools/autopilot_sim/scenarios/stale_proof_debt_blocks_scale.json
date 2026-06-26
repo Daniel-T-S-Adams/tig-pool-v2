@@ -1,0 +1,125 @@
+{
+  "name": "stale_proof_debt_blocks_scale",
+  "lesson": "Proof debt means reward conversion is blocked; the pool should stabilize/clear proofs before increasing workload.",
+  "clean_windows": 0,
+  "assertions": [
+    {
+      "expect_reason": "blocked_by_stale_or_unregistered_work"
+    },
+    {
+      "expect_no_change_key": "max_concurrent_benchmarks"
+    },
+    {
+      "expect_max_direction": "flat"
+    }
+  ],
+  "config": {
+    "max_concurrent_benchmarks": 24,
+    "resource_slots": {
+      "slots": {
+        "satisfiability_cpu": 12,
+        "vehicle_routing_cpu": 12
+      }
+    },
+    "per_challenge_max_benchmarks": {
+      "satisfiability": 12,
+      "vehicle_routing": 12
+    },
+    "adaptive_slave_caps": {
+      "cpu_max_cap": 6,
+      "gpu_max_cap": 1
+    },
+    "slaves": []
+  },
+  "report": {
+    "mode": "read_only",
+    "master_config_error": null,
+    "current_config": {
+      "max_concurrent_benchmarks": 24,
+      "resource_slots": {
+        "slots": {
+          "satisfiability_cpu": 12,
+          "vehicle_routing_cpu": 12
+        }
+      },
+      "per_challenge_max_benchmarks": {
+        "satisfiability": 12,
+        "vehicle_routing": 12
+      },
+      "adaptive_slave_caps": {
+        "cpu_max_cap": 6,
+        "gpu_max_cap": 1
+      },
+      "slaves": []
+    },
+    "slaves": [
+      {
+        "slave_name": "pool-cpu-proof-debt-001",
+        "profile": "cpu",
+        "registered": true,
+        "registered_active": true,
+        "active_now": true,
+        "active_unfinished": 20,
+        "stale_roots": 0,
+        "stale_proofs": 3,
+        "completed_recent": 120,
+        "nonces_recent": 1200000
+      }
+    ],
+    "slots": {
+      "summary": [
+        {
+          "slot_type": "cpu",
+          "state": "busy",
+          "count": 24
+        }
+      ]
+    },
+    "challenges": [
+      {
+        "challenge_id": "satisfiability",
+        "compute_type": "cpu",
+        "active_benchmarks": 24,
+        "stale_roots": 0,
+        "stale_proofs": 3
+      }
+    ],
+    "stale_totals": {
+      "roots": 0,
+      "proofs": 3
+    },
+    "stranded_benchmarks": [],
+    "reward_funnel": {
+      "summary": {
+        "safe_to_scale_workload": true,
+        "active_benchmarks": 24,
+        "proof_conversion_rate": 0.9,
+        "stopped_rate": 0.04,
+        "avg_time_to_proof_submit_sec": 950,
+        "issues": []
+      }
+    },
+    "recommendations": [
+      {
+        "key": "max_concurrent_benchmarks",
+        "proposed": 48,
+        "signals": {
+          "slot_capacity": 48
+        }
+      },
+      {
+        "key": "resource_slots.slots",
+        "proposed": {
+          "satisfiability_cpu": 24,
+          "vehicle_routing_cpu": 24
+        },
+        "signals": {
+          "productive_idle_cpu": 8,
+          "productive_idle_gpu": 0,
+          "stale_roots": 0,
+          "stale_proofs": 3
+        }
+      }
+    ]
+  }
+}

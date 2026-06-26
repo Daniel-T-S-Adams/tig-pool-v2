@@ -1,0 +1,53 @@
+{
+  "name": "bundle_reward_frontier",
+  "lesson": "Bigger bundles increase nonces and solution chances, but only win while runtime and proof submission stay fresh.",
+  "ticks": 30,
+  "tick_minutes": 5,
+  "fleets": [
+    {
+      "name": "medium_cpu_pool",
+      "profile": "cpu",
+      "machines": 16,
+      "units_per_machine": 16,
+      "efficiency": 0.85
+    }
+  ],
+  "tracks": [
+    {
+      "id": "sat_frontier",
+      "profile": "cpu",
+      "weight": 2,
+      "base_bundles": 8,
+      "min_bundles": 4,
+      "max_bundles": 32,
+      "base_batch_size": 64,
+      "nonces_per_bundle": 768,
+      "runtime_sec_per_bundle": 95,
+      "solution_rate_per_nonce": 0.0000011,
+      "reward_value": 1.0,
+      "proof_conversion_rate": 0.97,
+      "stopped_rate": 0.02,
+      "proof_time_sec": 520,
+      "freshness_target_sec": 1800,
+      "congestion_tail_factor": 0.45
+    },
+    {
+      "id": "job_frontier",
+      "profile": "cpu",
+      "weight": 1,
+      "base_bundles": 8,
+      "min_bundles": 4,
+      "max_bundles": 32,
+      "base_batch_size": 64,
+      "nonces_per_bundle": 768,
+      "runtime_sec_per_bundle": 135,
+      "solution_rate_per_nonce": 0.00000145,
+      "reward_value": 1.2,
+      "proof_conversion_rate": 0.93,
+      "stopped_rate": 0.04,
+      "proof_time_sec": 950,
+      "freshness_target_sec": 1800,
+      "congestion_tail_factor": 0.55
+    }
+  ]
+}

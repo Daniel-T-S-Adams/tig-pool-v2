@@ -1,0 +1,84 @@
+{
+  "name": "c3_gpu_failure",
+  "lesson": "When C3 GPU runtimes fail after startup, policies that keep pushing GPU work should lose net reward to stopped/stale penalties.",
+  "ticks": 30,
+  "tick_minutes": 5,
+  "expected_not_winner": [
+    "aggressive"
+  ],
+  "fleets": [
+    {
+      "name": "local_gpu",
+      "profile": "gpu",
+      "machines": 1,
+      "units_per_machine": 1,
+      "efficiency": 0.9
+    },
+    {
+      "name": "c3_gpu_batch",
+      "profile": "gpu",
+      "machines": 12,
+      "units_per_machine": 1,
+      "efficiency": 0.95,
+      "start_tick": 4
+    }
+  ],
+  "tracks": [
+    {
+      "id": "hypergraph_gpu",
+      "profile": "gpu",
+      "weight": 1,
+      "base_bundles": 8,
+      "min_bundles": 4,
+      "max_bundles": 18,
+      "base_batch_size": 32,
+      "nonces_per_bundle": 1024,
+      "runtime_sec_per_bundle": 80,
+      "solution_rate_per_nonce": 0.0000014,
+      "reward_value": 1.4,
+      "proof_conversion_rate": 0.96,
+      "stopped_rate": 0.03,
+      "proof_time_sec": 520,
+      "freshness_target_sec": 1800,
+      "congestion_tail_factor": 0.4,
+      "events": [
+        {
+          "start_tick": 8,
+          "set": {
+            "proof_conversion_rate": 0.25,
+            "stopped_rate": 0.45,
+            "proof_time_sec": 3600
+          }
+        }
+      ]
+    },
+    {
+      "id": "vector_gpu",
+      "profile": "gpu",
+      "weight": 1,
+      "base_bundles": 8,
+      "min_bundles": 4,
+      "max_bundles": 18,
+      "base_batch_size": 32,
+      "nonces_per_bundle": 1024,
+      "runtime_sec_per_bundle": 90,
+      "solution_rate_per_nonce": 0.0000012,
+      "reward_value": 1.25,
+      "proof_conversion_rate": 0.96,
+      "stopped_rate": 0.03,
+      "proof_time_sec": 540,
+      "freshness_target_sec": 1800,
+      "congestion_tail_factor": 0.4,
+      "events": [
+        {
+          "start_tick": 8,
+          "set": {
+            "proof_conversion_rate": 0.3,
+            "stopped_rate": 0.4,
+            "proof_time_sec": 3200
+          }
+        }
+      ]
+    }
+  ]
+}

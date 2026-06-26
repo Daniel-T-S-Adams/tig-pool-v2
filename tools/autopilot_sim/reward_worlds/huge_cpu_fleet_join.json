@@ -1,0 +1,61 @@
+{
+  "name": "huge_cpu_fleet_join",
+  "lesson": "When a large CPU fleet joins mid-run, expected reward should rise by scaling concurrency gradually without losing proof conversion.",
+  "ticks": 36,
+  "tick_minutes": 5,
+  "fleets": [
+    {
+      "name": "baseline_cpu",
+      "profile": "cpu",
+      "machines": 4,
+      "units_per_machine": 16,
+      "efficiency": 0.85
+    },
+    {
+      "name": "epyc_whale",
+      "profile": "cpu",
+      "machines": 100,
+      "units_per_machine": 32,
+      "efficiency": 0.92,
+      "start_tick": 12
+    }
+  ],
+  "tracks": [
+    {
+      "id": "sat_reward",
+      "profile": "cpu",
+      "weight": 3,
+      "base_bundles": 10,
+      "min_bundles": 4,
+      "max_bundles": 28,
+      "base_batch_size": 64,
+      "nonces_per_bundle": 640,
+      "runtime_sec_per_bundle": 80,
+      "solution_rate_per_nonce": 0.000001,
+      "reward_value": 1.0,
+      "proof_conversion_rate": 0.97,
+      "stopped_rate": 0.02,
+      "proof_time_sec": 500,
+      "freshness_target_sec": 1800,
+      "congestion_tail_factor": 0.25
+    },
+    {
+      "id": "vrp_reward",
+      "profile": "cpu",
+      "weight": 2,
+      "base_bundles": 10,
+      "min_bundles": 4,
+      "max_bundles": 28,
+      "base_batch_size": 64,
+      "nonces_per_bundle": 640,
+      "runtime_sec_per_bundle": 95,
+      "solution_rate_per_nonce": 0.00000125,
+      "reward_value": 1.05,
+      "proof_conversion_rate": 0.96,
+      "stopped_rate": 0.02,
+      "proof_time_sec": 580,
+      "freshness_target_sec": 1800,
+      "congestion_tail_factor": 0.3
+    }
+  ]
+}

@@ -1,0 +1,120 @@
+{
+  "name": "fleet_leaves_no_stranded_work",
+  "lesson": "A quiet fleet should not cause max_concurrent_benchmarks to crash downward unless there is stranded work or an unhealthy reward funnel.",
+  "clean_windows": 3,
+  "assertions": [
+    {
+      "expect_reason_in": [
+        "ready_to_apply",
+        "no_safe_changes"
+      ]
+    },
+    {
+      "expect_no_change_key": "max_concurrent_benchmarks"
+    },
+    {
+      "expect_max_direction": "flat"
+    }
+  ],
+  "config": {
+    "max_concurrent_benchmarks": 32,
+    "resource_slots": {
+      "slots": {
+        "satisfiability_cpu": 16,
+        "vehicle_routing_cpu": 16
+      }
+    },
+    "per_challenge_max_benchmarks": {
+      "satisfiability": 16,
+      "vehicle_routing": 16
+    },
+    "adaptive_slave_caps": {
+      "cpu_max_cap": 8,
+      "gpu_max_cap": 1
+    },
+    "slaves": []
+  },
+  "report": {
+    "mode": "read_only",
+    "master_config_error": null,
+    "current_config": {
+      "max_concurrent_benchmarks": 32,
+      "resource_slots": {
+        "slots": {
+          "satisfiability_cpu": 16,
+          "vehicle_routing_cpu": 16
+        }
+      },
+      "per_challenge_max_benchmarks": {
+        "satisfiability": 16,
+        "vehicle_routing": 16
+      },
+      "adaptive_slave_caps": {
+        "cpu_max_cap": 8,
+        "gpu_max_cap": 1
+      },
+      "slaves": []
+    },
+    "slaves": [
+      {
+        "slave_name": "pool-cpu-whale-001",
+        "profile": "cpu",
+        "registered": true,
+        "registered_active": true,
+        "active_now": false,
+        "active_unfinished": 0,
+        "stale_roots": 0,
+        "stale_proofs": 0,
+        "completed_recent": 0,
+        "nonces_recent": 0
+      }
+    ],
+    "slots": {
+      "summary": [
+        {
+          "slot_type": "cpu",
+          "state": "idle",
+          "count": 4
+        }
+      ]
+    },
+    "challenges": [],
+    "stale_totals": {
+      "roots": 0,
+      "proofs": 0
+    },
+    "stranded_benchmarks": [],
+    "reward_funnel": {
+      "summary": {
+        "safe_to_scale_workload": true,
+        "active_benchmarks": 2,
+        "proof_conversion_rate": 0.95,
+        "stopped_rate": 0.02,
+        "avg_time_to_proof_submit_sec": 600,
+        "issues": []
+      }
+    },
+    "recommendations": [
+      {
+        "key": "max_concurrent_benchmarks",
+        "proposed": 8,
+        "signals": {
+          "slot_capacity": 8
+        }
+      },
+      {
+        "key": "resource_slots.slots",
+        "proposed": {
+          "satisfiability_cpu": 8,
+          "vehicle_routing_cpu": 8
+        },
+        "signals": {
+          "productive_idle_cpu": 0,
+          "productive_idle_gpu": 0,
+          "stale_roots": 0,
+          "stale_proofs": 0
+        }
+      }
+    ]
+  }
+}

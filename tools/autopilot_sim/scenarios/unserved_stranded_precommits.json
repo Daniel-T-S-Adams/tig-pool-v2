@@ -1,0 +1,146 @@
+{
+  "name": "unserved_stranded_precommits",
+  "lesson": "If precommits are genuinely unserved by matching live capacity, the pool should drain concurrent benchmark creation instead of piling on more work.",
+  "clean_windows": 0,
+  "assertions": [
+    {
+      "expect_reason": "drain_stranded_benchmarks"
+    },
+    {
+      "expect_change_key": "max_concurrent_benchmarks"
+    },
+    {
+      "expect_max_direction": "down"
+    },
+    {
+      "expect_max_step_lte": 2
+    }
+  ],
+  "config": {
+    "max_concurrent_benchmarks": 42,
+    "resource_slots": {
+      "slots": {
+        "satisfiability_cpu": 32,
+        "vehicle_routing_cpu": 10
+      }
+    },
+    "per_challenge_max_benchmarks": {
+      "satisfiability": 16,
+      "vehicle_routing": 16
+    },
+    "adaptive_slave_caps": {
+      "cpu_max_cap": 8,
+      "gpu_max_cap": 1
+    },
+    "slaves": []
+  },
+  "report": {
+    "mode": "read_only",
+    "master_config_error": null,
+    "current_config": {
+      "max_concurrent_benchmarks": 42,
+      "resource_slots": {
+        "slots": {
+          "satisfiability_cpu": 32,
+          "vehicle_routing_cpu": 10
+        }
+      },
+      "per_challenge_max_benchmarks": {
+        "satisfiability": 16,
+        "vehicle_routing": 16
+      },
+      "adaptive_slave_caps": {
+        "cpu_max_cap": 8,
+        "gpu_max_cap": 1
+      },
+      "slaves": []
+    },
+    "slaves": [
+      {
+        "slave_name": "pool-cpu-small-001",
+        "profile": "cpu",
+        "registered": true,
+        "registered_active": true,
+        "active_now": true,
+        "active_unfinished": 6,
+        "stale_roots": 0,
+        "stale_proofs": 0,
+        "completed_recent": 10,
+        "nonces_recent": 100000
+      }
+    ],
+    "slots": {
+      "summary": [
+        {
+          "slot_type": "cpu",
+          "state": "busy",
+          "count": 42
+        }
+      ]
+    },
+    "challenges": [
+      {
+        "challenge_id": "satisfiability",
+        "compute_type": "cpu",
+        "active_benchmarks": 42,
+        "stale_roots": 0,
+        "stale_proofs": 0
+      }
+    ],
+    "stale_totals": {
+      "roots": 0,
+      "proofs": 0
+    },
+    "stranded_benchmarks": [
+      {
+        "benchmark_id": "dfa1a0a4df6-example-1",
+        "challenge": "satisfiability",
+        "slot_type": "cpu",
+        "age_min": 41
+      },
+      {
+        "benchmark_id": "dfa1a0a4df6-example-2",
+        "challenge": "vehicle_routing",
+        "slot_type": "cpu",
+        "age_min": 39
+      },
+      {
+        "benchmark_id": "dfa1a0a4df6-example-3",
+        "challenge": "satisfiability",
+        "slot_type": "cpu",
+        "age_min": 38
+      },
+      {
+        "benchmark_id": "dfa1a0a4df6-example-4",
+        "challenge": "vehicle_routing",
+        "slot_type": "cpu",
+        "age_min": 37
+      },
+      {
+        "benchmark_id": "dfa1a0a4df6-example-5",
+        "challenge": "satisfiability",
+        "slot_type": "cpu",
+        "age_min": 36
+      }
+    ],
+    "reward_funnel": {
+      "summary": {
+        "safe_to_scale_workload": true,
+        "active_benchmarks": 42,
+        "proof_conversion_rate": 0.93,
+        "stopped_rate": 0.04,
+        "avg_time_to_proof_submit_sec": 900,
+        "issues": []
+      }
+    },
+    "recommendations": [
+      {
+        "key": "max_concurrent_benchmarks",
+        "proposed": 60,
+        "signals": {
+          "slot_capacity": 60
+        }
+      }
+    ]
+  }
+}

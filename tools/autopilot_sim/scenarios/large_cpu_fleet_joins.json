@@ -1,0 +1,138 @@
+{
+  "name": "large_cpu_fleet_joins",
+  "lesson": "A large productive CPU fleet should make the pool scale up, but only by bounded steps so precommit creation does not overshoot proof conversion.",
+  "clean_windows": 3,
+  "assertions": [
+    {
+      "expect_reason": "ready_to_apply"
+    },
+    {
+      "expect_change_key": "max_concurrent_benchmarks"
+    },
+    {
+      "expect_max_direction": "up"
+    },
+    {
+      "expect_max_step_lte": 2
+    }
+  ],
+  "config": {
+    "max_concurrent_benchmarks": 16,
+    "resource_slots": {
+      "slots": {
+        "satisfiability_cpu": 8,
+        "vehicle_routing_cpu": 8
+      }
+    },
+    "per_challenge_max_benchmarks": {
+      "satisfiability": 8,
+      "vehicle_routing": 8
+    },
+    "adaptive_slave_caps": {
+      "cpu_max_cap": 4,
+      "gpu_max_cap": 1
+    },
+    "slaves": []
+  },
+  "report": {
+    "mode": "read_only",
+    "master_config_error": null,
+    "current_config": {
+      "max_concurrent_benchmarks": 16,
+      "resource_slots": {
+        "slots": {
+          "satisfiability_cpu": 8,
+          "vehicle_routing_cpu": 8
+        }
+      },
+      "per_challenge_max_benchmarks": {
+        "satisfiability": 8,
+        "vehicle_routing": 8
+      },
+      "adaptive_slave_caps": {
+        "cpu_max_cap": 4,
+        "gpu_max_cap": 1
+      },
+      "slaves": []
+    },
+    "slaves": [
+      {
+        "slave_name": "pool-cpu-whale-001",
+        "profile": "cpu",
+        "registered": true,
+        "registered_active": true,
+        "active_now": true,
+        "active_unfinished": 14,
+        "stale_roots": 0,
+        "stale_proofs": 0,
+        "completed_recent": 180,
+        "nonces_recent": 2400000
+      }
+    ],
+    "slots": {
+      "summary": [
+        {
+          "slot_type": "cpu",
+          "state": "busy",
+          "count": 16
+        }
+      ]
+    },
+    "challenges": [
+      {
+        "challenge_id": "satisfiability",
+        "compute_type": "cpu",
+        "active_benchmarks": 15,
+        "stale_roots": 0,
+        "stale_proofs": 0
+      }
+    ],
+    "stale_totals": {
+      "roots": 0,
+      "proofs": 0
+    },
+    "stranded_benchmarks": [],
+    "reward_funnel": {
+      "summary": {
+        "safe_to_scale_workload": true,
+        "active_benchmarks": 15,
+        "proof_conversion_rate": 0.96,
+        "stopped_rate": 0.02,
+        "avg_time_to_proof_submit_sec": 520,
+        "issues": []
+      }
+    },
+    "recommendations": [
+      {
+        "key": "max_concurrent_benchmarks",
+        "proposed": 36,
+        "signals": {
+          "slot_capacity": 36
+        }
+      },
+      {
+        "key": "resource_slots.slots",
+        "proposed": {
+          "satisfiability_cpu": 18,
+          "vehicle_routing_cpu": 18
+        },
+        "signals": {
+          "productive_idle_cpu": 12,
+          "productive_idle_gpu": 0,
+          "stale_roots": 0,
+          "stale_proofs": 0
+        }
+      },
+      {
+        "key": "adaptive_slave_caps",
+        "proposed": {
+          "cpu_max_cap": 8,
+          "gpu_max_cap": 1
+        },
+        "signals": {
+          "completed_recent": 180
+        }
+      }
+    ]
+  }
+}
