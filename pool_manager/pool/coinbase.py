@@ -32,27 +32,79 @@ POOL_FEE = float(os.environ.get("POOL_FEE", "0.05"))
 MASTER_URL = os.environ.get("MASTER_INTERNAL_URL", "http://master:3336")
 
 
-def _get_current_block() -> int | None:
-    """Fetch current block height from the master's latest-data endpoint."""
+def _get_current_block_info() -> dict | None:
+    """Fetch current block metadata from the master's latest-data endpoint."""
     try:
         resp = requests.get(f"{MASTER_URL}/get-latest-data", timeout=5)
         if resp.status_code == 200:
             data = resp.json()
             block = data.get("block") or data.get("latest_block")
             if block:
-                return block.get("details", {}).get("height") or block.get("height")
+                details = block.get("details") or {}
+                return {
+                    "height": details.get("height") or block.get("height"),
+                    "round": details.get("round") or block.get("round"),
+                    "id": block.get("id"),
+                }
     except Exception as e:
-        logger.warning(f"Could not fetch block height from master: {e}")
+        logger.warning(f"Could not fetch block metadata from master: {e}")
     return None
+
+
+def _get_current_block() -> int | None:
+    """Fetch current block height from the master's latest-data endpoint."""
+    info = _get_current_block_info()
+    return info.get("height") if info else None
+
+
+def _get_tig_config() -> dict:
+    """Read api_key and api_url from the master's config table."""
+    row = db.fetch_one("SELECT config FROM config LIMIT 1")
+    if row and row["config"]:
+        return row["config"]
+    return {}
 
 
 def _get_tig_credentials() -> tuple[str, str] | tuple[None, None]:
     """Read api_key and api_url from the master's config table."""
-    row = db.fetch_one("SELECT config FROM config LIMIT 1")
-    if row and row["config"]:
-        cfg = row["config"]
-        return cfg.get("api_key"), cfg.get("api_url")
-    return None, None
+    cfg = _get_tig_config()
+    return cfg.get("api_key"), cfg.get("api_url")
+
+
+def _ensure_current_round_window(current_block: int, current_round: int | None) -> bool:
+    """Reset the contribution window automatically when TIG enters a new round."""
+    if current_round is None:
+        logger.warning(
+            "Latest block did not include a round number; keeping existing coinbase contribution window."
+        )
+        return False
+
+    round_id = int(current_round)
+    stored_round_id = db.get_setting("current_round_id", None)
+    if stored_round_id == str(round_id):
+        return False
+
+    now_ms = int(time.time() * 1000)
+    db.set_setting("current_round_id", str(round_id))
+    db.set_setting("current_round_start_ms", str(now_ms))
+    # Keep the legacy key in sync for older admin/reporting code.
+    db.set_setting("current_round_start", str(now_ms))
+    logger.info(
+        "Detected TIG round rollover. Starting fresh contribution window: "
+        f"round_id={round_id}, block={current_block}, start_ms={now_ms}"
+    )
+    return True
+
+
+def _current_round_start_ms() -> int | None:
+    raw = db.get_setting("current_round_start_ms", None) or db.get_setting("current_round_start", None)
+    if not raw:
+        return None
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        logger.warning("Ignoring invalid current_round_start value: %r", raw)
+        return None
 
 
 def _compute_allocation() -> dict[str, float]:
@@ -68,16 +120,16 @@ def _compute_allocation() -> dict[str, float]:
     Members who benchmarked early in the week and then stopped still receive
     their fair share — contributions accumulate for the full round.
     """
-    round_start = db.get_setting("current_round_start", None)
-    if round_start:
+    round_start_ms = _current_round_start_ms()
+    if round_start_ms is not None:
         rows = db.fetch_all(
             """
             SELECT wallet_address, SUM(nonces_computed) AS total_nonces
             FROM pool_contributions
-            WHERE created_at >= %s
+            WHERE snapshot_end_ms >= %s
             GROUP BY wallet_address
             """,
-            (round_start,),
+            (round_start_ms,),
         )
     else:
         # No round start recorded yet — sum all contributions ever
@@ -120,21 +172,27 @@ def maybe_update_coinbase():
     token allocation to member wallets only materialises when the operator
     claims at the end of the round.
     """
-    current_block = _get_current_block()
-    if current_block is None:
+    block_info = _get_current_block_info()
+    if block_info is None or block_info.get("height") is None:
         return
+    current_block = int(block_info["height"])
+    current_round = block_info.get("round")
+
+    round_changed = _ensure_current_round_window(current_block, current_round)
+    round_label = current_round if current_round is not None else "unknown"
 
     last_block = int(db.get_setting("last_coinbase_block", "0"))
     update_period = int(db.get_setting("coinbase_update_period", "50"))
 
-    if current_block - last_block < update_period:
+    if not round_changed and current_block - last_block < update_period:
         logger.debug(
             f"Allocation update not due yet: "
             f"current={current_block}, last={last_block}, period={update_period}"
         )
         return
 
-    api_key, api_url = _get_tig_credentials()
+    tig_cfg = _get_tig_config()
+    api_key, api_url = tig_cfg.get("api_key"), tig_cfg.get("api_url")
     if not api_key or api_key == "00000000000000000000000000000000":
         logger.warning(
             "TIG API key not configured — skipping /set-coinbase. "
@@ -144,11 +202,18 @@ def maybe_update_coinbase():
 
     allocation = _compute_allocation()
     if not allocation:
-        logger.info("No contribution data yet — skipping coinbase update.")
-        return
+        operator_wallet = tig_cfg.get("player_id")
+        if not operator_wallet:
+            logger.warning("No contribution data yet and player_id unavailable — skipping coinbase update.")
+            return
+        allocation = {operator_wallet: 1.0}
+        logger.info(
+            "No current-round contribution data yet — clearing stale member split "
+            "by assigning 100% coinbase to operator/player wallet."
+        )
 
     logger.info(
-        f"Updating /set-coinbase at block {current_block} "
+        f"Updating /set-coinbase for round {round_label} at block {current_block} "
         f"(last update: block {last_block}).  "
         f"{len(allocation)} member(s), pool fee={POOL_FEE:.0%}"
     )

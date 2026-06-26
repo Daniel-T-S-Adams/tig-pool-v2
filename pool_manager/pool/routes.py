@@ -1158,6 +1158,7 @@ def new_round(x_admin_secret: str = Header(None)):
     round will no longer affect future allocations.
     """
     _check_admin(x_admin_secret)
-    now = __import__("datetime").datetime.utcnow().isoformat()
-    db.set_setting("current_round_start", now)
-    return {"success": True, "new_round_start": now}
+    now_ms = int(__import__("time").time() * 1000)
+    db.set_setting("current_round_start_ms", str(now_ms))
+    db.set_setting("current_round_start", str(now_ms))
+    return {"success": True, "new_round_start": now_ms}
