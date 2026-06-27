@@ -89,6 +89,14 @@ STALE_CLEANUP_MAX_ROWS = int(os.environ.get("AUTOPILOT_STALE_CLEANUP_MAX_ROWS", 
 
 GPU_CHALLENGES = {"vector_search", "hypergraph", "neuralnet_optimizer"}
 GPU_SLOT_TYPES = ("vector_search", "hypergraph", "neuralnet_optimizer")
+GPU_CHALLENGE_ID_TO_SLOT = {
+    "c004": "vector_search",
+    "c005": "hypergraph",
+    "c006": "neuralnet_optimizer",
+    "vector_search": "vector_search",
+    "hypergraph": "hypergraph",
+    "neuralnet_optimizer": "neuralnet_optimizer",
+}
 CPU_SLOT_TYPE = "cpu"
 CHALLENGE_NAME_TO_ID = {
     "satisfiability": "c001",
@@ -1336,6 +1344,13 @@ def _fleet_capacity(
 
     current_slots = (cfg.get("resource_slots") or {}).get("slots", {})
     slot_counts, slot_idle, slot_busy = _slot_state_summary(slots)
+    active_gpu_slot_types = []
+    for challenge in challenges:
+        if int(challenge.get("active_benchmarks") or 0) <= 0:
+            continue
+        slot_type = GPU_CHALLENGE_ID_TO_SLOT.get(str(challenge.get("challenge_id") or challenge.get("challenge") or ""))
+        if slot_type and slot_type not in active_gpu_slot_types:
+            active_gpu_slot_types.append(slot_type)
 
     cpu_pressure = sum(int(s.get("active_unfinished") or 0) for s in active_cpu)
     gpu_pressure = sum(int(s.get("active_unfinished") or 0) for s in active_gpu)
@@ -1367,6 +1382,7 @@ def _fleet_capacity(
         "slot_counts": slot_counts,
         "slot_idle": slot_idle,
         "slot_busy": slot_busy,
+        "active_gpu_slot_types": active_gpu_slot_types,
         "current_slots": current_slots,
         "current_adaptive_caps": cfg.get("adaptive_slave_caps") or {},
     }
@@ -1414,6 +1430,19 @@ def _target_resource_slots(capacity: dict) -> dict:
             slot_type: int(slot_busy.get(slot_type, 0) or 0)
             for slot_type in GPU_SLOT_TYPES
         }
+        if int(capacity["active_gpu"] or 0) <= 1:
+            focus_order = list(capacity.get("active_gpu_slot_types") or [])
+            if not focus_order:
+                focus_order = sorted(
+                    GPU_SLOT_TYPES,
+                    key=lambda key: (-busy_gpu_slots.get(key, 0), -current_gpu_slots.get(key, 0), key),
+                )
+            focus_slot = next((slot_type for slot_type in focus_order if slot_type in GPU_SLOT_TYPES), GPU_SLOT_TYPES[0])
+            proposed_gpu_slots = {slot_type: 0 for slot_type in GPU_SLOT_TYPES}
+            proposed_gpu_slots[focus_slot] = 1
+            proposed.update(proposed_gpu_slots)
+            return proposed
+
         gpu_target_total = max(1, int(capacity["active_gpu"] or 0))
         if capacity["productive_idle_gpu"] >= PRODUCTIVE_IDLE_GPU_SCALE_MIN:
             extra_slots = max(
@@ -1504,19 +1533,19 @@ def _target_per_challenge_caps(cfg: dict, capacity: dict, proposed_slots: dict) 
         current_c004 = int(current_per.get("c004", 1) or 1)
         proposed.update({
             "c004": min(
-                int(proposed_slots.get("vector_search", 1) or 1)
+                max(0, int(proposed_slots.get("vector_search", 0) or 0))
                 if not (stale_blocking and "c004" in stale_challenge_ids)
                 else current_c004,
                 MAX_GPU_CHALLENGE_BENCHMARKS,
             ),
             "c005": min(
-                int(proposed_slots.get("hypergraph", 1) or 1)
+                max(0, int(proposed_slots.get("hypergraph", 0) or 0))
                 if not (stale_blocking and "c005" in stale_challenge_ids)
                 else int(current_per.get("c005", 1) or 1),
                 MAX_GPU_CHALLENGE_BENCHMARKS,
             ),
             "c006": min(
-                int(proposed_slots.get("neuralnet_optimizer", 1) or 1)
+                max(0, int(proposed_slots.get("neuralnet_optimizer", 0) or 0))
                 if not (stale_blocking and "c006" in stale_challenge_ids)
                 else int(current_per.get("c006", 1) or 1),
                 MAX_GPU_CHALLENGE_BENCHMARKS,
@@ -2152,6 +2181,14 @@ def _plan_config_change(report: dict, cfg: dict, clean_windows: int) -> dict:
     slots_rec = recommendations.get("resource_slots.slots") or {}
     per_rec = recommendations.get("per_challenge_max_benchmarks") or {}
     slot_signals = slots_rec.get("signals") or {}
+    current_slots_for_gate = ((cfg.get("resource_slots") or {}).get("slots") or {})
+    proposed_slots_for_gate = slots_rec.get("proposed") or {}
+    current_gpu_slot_total_for_gate = sum(int(current_slots_for_gate.get(key, 0) or 0) for key in GPU_SLOT_TYPES)
+    proposed_gpu_slot_total_for_gate = sum(int(proposed_slots_for_gate.get(key, 0) or 0) for key in GPU_SLOT_TYPES)
+    single_gpu_serialization = (
+        int(slot_signals.get("active_gpu") or 0) <= 1
+        and current_gpu_slot_total_for_gate > proposed_gpu_slot_total_for_gate
+    )
     productive_idle_cpu = int(slot_signals.get("productive_idle_cpu") or 0)
     productive_idle_gpu = int(slot_signals.get("productive_idle_gpu") or 0)
     stale_roots = int(slot_signals.get("stale_roots") or health.get("stale_roots") or 0)
@@ -2291,10 +2328,10 @@ def _plan_config_change(report: dict, cfg: dict, clean_windows: int) -> dict:
     if workload_safety_guard:
         decision.setdefault("guardrails", {})["workload_controller"] = workload_safety_guard
 
-    if not health["healthy"] and not productive_capacity_scale and not safe_per_challenge_scale:
+    if not health["healthy"] and not productive_capacity_scale and not safe_per_challenge_scale and not single_gpu_serialization:
         decision["reason"] = "blocked_by_stale_or_unregistered_work"
         return decision
-    if clean_windows < APPLY_MIN_CLEAN_WINDOWS and not productive_capacity_scale and not safe_per_challenge_scale:
+    if clean_windows < APPLY_MIN_CLEAN_WINDOWS and not productive_capacity_scale and not safe_per_challenge_scale and not single_gpu_serialization:
         decision["reason"] = "waiting_for_clean_windows"
         return decision
 
@@ -2302,7 +2339,7 @@ def _plan_config_change(report: dict, cfg: dict, clean_windows: int) -> dict:
     changes: dict[str, dict] = {}
 
     current_slots = ((new_cfg.get("resource_slots") or {}).get("slots") or {})
-    if slots_rec and current_slots and capacity_change_allowed:
+    if slots_rec and current_slots and (capacity_change_allowed or single_gpu_serialization):
         proposed_slots = slots_rec.get("proposed") or {}
         next_slots = dict(current_slots)
         for key, target in proposed_slots.items():
@@ -2364,15 +2401,15 @@ def _plan_config_change(report: dict, cfg: dict, clean_windows: int) -> dict:
                 }
 
     current_per = new_cfg.get("per_challenge_max_benchmarks") or {}
-    if per_rec and current_per and (capacity_change_allowed or safe_per_challenge_scale):
+    if per_rec and current_per and (capacity_change_allowed or safe_per_challenge_scale or single_gpu_serialization):
         proposed_per = per_rec.get("proposed") or {}
         next_per = dict(current_per)
         per_changes = {}
         for key, proposed_value in proposed_per.items():
             current = int(current_per.get(key, 0) or 0)
-            target = int(proposed_value or current)
-            if target > current:
-                next_value = target
+            target = int(current if proposed_value is None else proposed_value)
+            if target > current or (single_gpu_serialization and key in {"c004", "c005", "c006"} and target < current):
+                next_value = _next_value_bounded(current, target, 1, 1)
                 next_per[key] = next_value
                 per_changes[key] = {
                     "current": current,

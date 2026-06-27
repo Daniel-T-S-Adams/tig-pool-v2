@@ -1,0 +1,154 @@
+{
+  "name": "single_gpu_serializes_gpu_challenges_in_recovery",
+  "lesson": "With one physical GPU, recovery mode should keep only the active GPU challenge open instead of allowing one benchmark per GPU challenge.",
+  "clean_windows": 0,
+  "assertions": [
+    {
+      "expect_reason": "ready_to_apply"
+    },
+    {
+      "expect_change_key": "resource_slots.slots"
+    },
+    {
+      "expect_change_key": "per_challenge_max_benchmarks"
+    },
+    {
+      "expect_resource_slot_sum_direction": {
+        "slot_types": [
+          "vector_search",
+          "hypergraph",
+          "neuralnet_optimizer"
+        ],
+        "direction": "down"
+      }
+    },
+    {
+      "expect_max_direction": "flat"
+    }
+  ],
+  "config": {
+    "max_concurrent_benchmarks": 12,
+    "resource_slots": {
+      "slots": {
+        "vector_search": 1,
+        "hypergraph": 1,
+        "neuralnet_optimizer": 1
+      }
+    },
+    "per_challenge_max_benchmarks": {
+      "c004": 1,
+      "c005": 1,
+      "c006": 1
+    },
+    "adaptive_slave_caps": {
+      "cpu_max_cap": 4,
+      "gpu_max_cap": 1
+    },
+    "algo_selection": [
+      {
+        "algorithm_id": "c004_vector_algo",
+        "weight": 1
+      },
+      {
+        "algorithm_id": "c005_hypergraph_algo",
+        "weight": 1
+      },
+      {
+        "algorithm_id": "c006_neural_algo",
+        "weight": 1
+      }
+    ],
+    "slaves": []
+  },
+  "report": {
+    "mode": "read_only",
+    "master_config_error": null,
+    "current_config": {
+      "max_concurrent_benchmarks": 12,
+      "resource_slots": {
+        "slots": {
+          "vector_search": 1,
+          "hypergraph": 1,
+          "neuralnet_optimizer": 1
+        }
+      },
+      "per_challenge_max_benchmarks": {
+        "c004": 1,
+        "c005": 1,
+        "c006": 1
+      },
+      "adaptive_slave_caps": {
+        "cpu_max_cap": 4,
+        "gpu_max_cap": 1
+      },
+      "slaves": []
+    },
+    "slaves": [
+      {
+        "slave_name": "pool-gpu-local-a330c544ec5b",
+        "profile": "gpu",
+        "registered": true,
+        "registered_active": true,
+        "active_now": true,
+        "active_unfinished": 1,
+        "stale_roots": 0,
+        "stale_proofs": 0,
+        "completed_recent": 4,
+        "nonces_recent": 100000
+      }
+    ],
+    "slots": {
+      "summary": [
+        {
+          "slot_type": "vector_search",
+          "state": "idle",
+          "count": 1
+        },
+        {
+          "slot_type": "hypergraph",
+          "state": "root",
+          "count": 1
+        },
+        {
+          "slot_type": "neuralnet_optimizer",
+          "state": "idle",
+          "count": 1
+        }
+      ]
+    },
+    "challenges": [
+      {
+        "challenge_id": "hypergraph",
+        "compute_type": "gpu",
+        "active_benchmarks": 1,
+        "stale_roots": 0,
+        "stale_proofs": 0
+      }
+    ],
+    "stale_totals": {
+      "roots": 0,
+      "proofs": 0
+    },
+    "stranded_benchmarks": [
+      {
+        "benchmark_id": "gpu-stranded-hypergraph",
+        "challenge": "hypergraph",
+        "slot_type": "hypergraph",
+        "age_min": 36
+      }
+    ],
+    "reward_funnel": {
+      "summary": {
+        "safe_to_scale_workload": false,
+        "active_benchmarks": 12,
+        "proof_conversion_rate": 0.96,
+        "stopped_rate": 0.46,
+        "avg_time_to_proof_submit_sec": 1501,
+        "issues": [
+          "high_stopped_or_expired_rate",
+          "slow_time_to_proof_submission"
+        ]
+      }
+    }
+  }
+}
