@@ -1,0 +1,99 @@
+{
+  "name": "workload_batch_size_floor_blocks_overcorrection",
+  "lesson": "Safety reductions must not keep cutting batch_size below the workload floor while waiting for the metrics window to recover.",
+  "clean_windows": 0,
+  "assertions": [
+    {
+      "expect_workload_action": {
+        "algorithm_id": "c001_sat_algo",
+        "track": "n_vars=7500,ratio=4267",
+        "action": "reduce_tail_time"
+      }
+    },
+    {
+      "expect_no_change_key": "workload_controller"
+    }
+  ],
+  "config": {
+    "max_job_batches": 512,
+    "max_concurrent_benchmarks": 12,
+    "resource_slots": {
+      "slots": {
+        "cpu": 8
+      }
+    },
+    "per_challenge_max_benchmarks": {
+      "c001": 8
+    },
+    "adaptive_slave_caps": {
+      "cpu_max_cap": 4,
+      "gpu_max_cap": 1
+    },
+    "algo_selection": [
+      {
+        "algorithm_id": "c001_sat_algo",
+        "weight": 3,
+        "batch_size": 64,
+        "track_settings": {
+          "n_vars=7500,ratio=4267": {
+            "batch_size": 8,
+            "num_bundles": 1
+          }
+        }
+      }
+    ],
+    "slaves": []
+  },
+  "report": {
+    "mode": "read_only",
+    "master_config_error": null,
+    "current_config": {
+      "max_concurrent_benchmarks": 12,
+      "slaves": []
+    },
+    "slaves": [],
+    "slots": {
+      "summary": []
+    },
+    "challenges": [],
+    "stale_totals": {
+      "roots": 0,
+      "proofs": 0
+    },
+    "stranded_benchmarks": [],
+    "track_workload": [
+      {
+        "algorithm_id": "c001_sat_algo",
+        "track": "n_vars=7500,ratio=4267",
+        "avg_num_nonces": 64,
+        "avg_num_batches": 8,
+        "avg_root_runtime_sec": 1500,
+        "avg_benchmark_wall_sec": 3200
+      }
+    ],
+    "reward_funnel": {
+      "summary": {
+        "safe_to_scale_workload": false,
+        "active_benchmarks": 8,
+        "proof_conversion_rate": 0.9,
+        "stopped_rate": 0.03,
+        "avg_time_to_proof_submit_sec": 2500,
+        "issues": [
+          "slow_time_to_proof_submission"
+        ]
+      },
+      "by_track": [
+        {
+          "algorithm_id": "c001_sat_algo",
+          "track": "n_vars=7500,ratio=4267",
+          "proof_required_benchmarks": 20,
+          "proof_conversion_rate": 0.9,
+          "stopped_rate": 0.03,
+          "avg_time_to_proof_submit_sec": 2500,
+          "p95_root_batch_runtime_sec": 1500
+        }
+      ]
+    },
+    "recommendations": []
+  }
+}

@@ -62,6 +62,8 @@ FUNNEL_MIN_PROOF_CONVERSION_RATE = float(os.environ.get("AUTOPILOT_FUNNEL_MIN_PR
 FUNNEL_MAX_STOPPED_OR_EXPIRED_RATE = float(os.environ.get("AUTOPILOT_FUNNEL_MAX_STOPPED_OR_EXPIRED_RATE", "0.10"))
 FUNNEL_DRAIN_MIN_MAX_BENCHMARKS = int(os.environ.get("AUTOPILOT_FUNNEL_DRAIN_MIN_MAX_BENCHMARKS", "12"))
 WORKLOAD_MIN_BUNDLES = int(os.environ.get("AUTOPILOT_WORKLOAD_MIN_BUNDLES", "4"))
+WORKLOAD_MIN_BATCH_SIZE = int(os.environ.get("AUTOPILOT_WORKLOAD_MIN_BATCH_SIZE", "8"))
+WORKLOAD_MIN_WEIGHT = int(os.environ.get("AUTOPILOT_WORKLOAD_MIN_WEIGHT", "1"))
 WORKLOAD_MAX_BUNDLE_STEP = int(os.environ.get("AUTOPILOT_WORKLOAD_MAX_BUNDLE_STEP", "1"))
 WORKLOAD_FAST_PROOF_FACTOR = float(os.environ.get("AUTOPILOT_WORKLOAD_FAST_PROOF_FACTOR", "0.50"))
 WORKLOAD_HIGH_PROOF_CONVERSION_RATE = float(os.environ.get("AUTOPILOT_WORKLOAD_HIGH_PROOF_CONVERSION_RATE", "0.95"))
@@ -1963,12 +1965,14 @@ def _apply_workload_target(new_cfg: dict, target: dict) -> dict | None:
     next_settings = dict(settings)
     changed = {}
 
-    for field, config_key in (
-        ("num_bundles", "num_bundles"),
-        ("effective_batch_size", "batch_size"),
+    for field, config_key, floor in (
+        ("num_bundles", "num_bundles", WORKLOAD_MIN_BUNDLES),
+        ("effective_batch_size", "batch_size", WORKLOAD_MIN_BATCH_SIZE),
     ):
         current_value = int(current.get(field) or next_settings.get(config_key) or 0)
         target_value = int(desired.get(field) or current_value)
+        if target_value < current_value:
+            target_value = max(floor, target_value)
         if target_value != current_value:
             next_settings[config_key] = target_value
             changed[config_key] = {
@@ -1979,6 +1983,8 @@ def _apply_workload_target(new_cfg: dict, target: dict) -> dict | None:
 
     current_weight = int(current.get("weight") or algo.get("weight") or 0)
     target_weight = int(desired.get("weight") or current_weight)
+    if target_weight < current_weight:
+        target_weight = max(WORKLOAD_MIN_WEIGHT, target_weight)
     if target_weight != current_weight:
         algo["weight"] = target_weight
         changed["weight"] = {
