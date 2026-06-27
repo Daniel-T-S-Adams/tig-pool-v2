@@ -2183,11 +2183,14 @@ def _plan_config_change(report: dict, cfg: dict, clean_windows: int) -> dict:
     slot_signals = slots_rec.get("signals") or {}
     current_slots_for_gate = ((cfg.get("resource_slots") or {}).get("slots") or {})
     proposed_slots_for_gate = slots_rec.get("proposed") or {}
-    current_gpu_slot_total_for_gate = sum(int(current_slots_for_gate.get(key, 0) or 0) for key in GPU_SLOT_TYPES)
-    proposed_gpu_slot_total_for_gate = sum(int(proposed_slots_for_gate.get(key, 0) or 0) for key in GPU_SLOT_TYPES)
     single_gpu_serialization = (
-        int(slot_signals.get("active_gpu") or 0) <= 1
-        and current_gpu_slot_total_for_gate > proposed_gpu_slot_total_for_gate
+        int(slot_signals.get("active_gpu") or 0) == 1
+        and bool(proposed_slots_for_gate)
+        and sum(int(proposed_slots_for_gate.get(key, 0) or 0) for key in GPU_SLOT_TYPES) == 1
+        and any(
+            int(current_slots_for_gate.get(key, 0) or 0) != int(proposed_slots_for_gate.get(key, 0) or 0)
+            for key in GPU_SLOT_TYPES
+        )
     )
     productive_idle_cpu = int(slot_signals.get("productive_idle_cpu") or 0)
     productive_idle_gpu = int(slot_signals.get("productive_idle_gpu") or 0)
@@ -2343,6 +2346,8 @@ def _plan_config_change(report: dict, cfg: dict, clean_windows: int) -> dict:
         proposed_slots = slots_rec.get("proposed") or {}
         next_slots = dict(current_slots)
         for key, target in proposed_slots.items():
+            if single_gpu_serialization and not capacity_change_allowed and key not in GPU_SLOT_TYPES:
+                continue
             current = int(current_slots.get(key, 0) or 0)
             target = int(target or 0)
             next_slots[key] = _next_value_bounded(current, target, SLOT_UP_STEP, SLOT_DOWN_STEP)
