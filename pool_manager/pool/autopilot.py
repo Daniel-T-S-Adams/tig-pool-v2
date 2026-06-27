@@ -112,6 +112,15 @@ _last_run_ts = 0.0
 _decision_table_ready = False
 
 
+def _capacity_profile_for_work(item: dict) -> str:
+    challenge = item.get("challenge")
+    challenge_id = item.get("challenge_id")
+    slot_type = item.get("slot_type")
+    if challenge in GPU_CHALLENGES or challenge_id in GPU_CHALLENGE_ID_TO_SLOT:
+        return "gpu"
+    return "gpu" if slot_type in GPU_SLOT_TYPES else "cpu"
+
+
 def _json_safe(value: Any) -> Any:
     if isinstance(value, Decimal):
         return float(value)
@@ -1793,8 +1802,7 @@ def _health_summary(report: dict) -> dict:
     capacity_waiting = []
     unserved_stranded = []
     for item in stranded:
-        slot_type = item.get("slot_type")
-        profile = "gpu" if slot_type in GPU_SLOT_TYPES else "cpu"
+        profile = _capacity_profile_for_work(item)
         capacity = gpu_slot_capacity if profile == "gpu" else int(slot_capacity.get(CPU_SLOT_TYPE, 0) or 0)
         live = live_by_profile[profile]
         enriched = dict(item)

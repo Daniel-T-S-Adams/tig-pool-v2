@@ -1,0 +1,148 @@
+{
+  "name": "gpu_stranded_without_slot_classifies_as_gpu",
+  "lesson": "A stranded GPU challenge can lose its slot row while pending; classify it from challenge identity before slot_type so CPU workers do not appear eligible.",
+  "clean_windows": 0,
+  "assertions": [
+    {
+      "expect_reason": "blocked_by_stale_or_unregistered_work"
+    },
+    {
+      "expect_unserved_stranded_fields": {
+        "benchmark": "dd87c693db",
+        "fields": {
+          "capacity_profile": "gpu",
+          "matching_live_roots": 0,
+          "matching_slot_capacity": 0
+        }
+      }
+    }
+  ],
+  "config": {
+    "max_concurrent_benchmarks": 12,
+    "resource_slots": {
+      "slots": {
+        "cpu": 64,
+        "hypergraph": 0,
+        "neuralnet_optimizer": 0,
+        "vector_search": 0
+      }
+    },
+    "per_challenge_max_benchmarks": {
+      "c001": 13,
+      "c005": 1,
+      "c007": 13
+    },
+    "adaptive_slave_caps": {
+      "cpu_max_cap": 256,
+      "gpu_max_cap": 1
+    },
+    "slaves": []
+  },
+  "report": {
+    "mode": "read_only",
+    "master_config_error": null,
+    "current_config": {
+      "max_concurrent_benchmarks": 12,
+      "resource_slots": {
+        "slots": {
+          "cpu": 64,
+          "hypergraph": 0,
+          "neuralnet_optimizer": 0,
+          "vector_search": 0
+        }
+      },
+      "per_challenge_max_benchmarks": {
+        "c001": 13,
+        "c005": 1,
+        "c007": 13
+      },
+      "adaptive_slave_caps": {
+        "cpu_max_cap": 256,
+        "gpu_max_cap": 1
+      },
+      "slaves": []
+    },
+    "slaves": [
+      {
+        "slave_name": "pool-cpu-001",
+        "profile": "cpu",
+        "registered": true,
+        "registered_active": true,
+        "active_now": true,
+        "active_unfinished": 15,
+        "stale_roots": 0,
+        "stale_proofs": 0,
+        "completed_recent": 12,
+        "nonces_recent": 100000
+      }
+    ],
+    "slots": {
+      "summary": [
+        {
+          "slot_type": "cpu",
+          "state": "busy",
+          "count": 64
+        }
+      ]
+    },
+    "challenges": [
+      {
+        "challenge_id": "c001",
+        "compute_type": "cpu",
+        "active_benchmarks": 10,
+        "stale_roots": 0,
+        "stale_proofs": 0
+      },
+      {
+        "challenge_id": "c005",
+        "compute_type": "gpu",
+        "active_benchmarks": 1,
+        "stale_roots": 0,
+        "stale_proofs": 0
+      },
+      {
+        "challenge_id": "c007",
+        "compute_type": "cpu",
+        "active_benchmarks": 1,
+        "stale_roots": 0,
+        "stale_proofs": 0
+      }
+    ],
+    "stale_totals": {
+      "roots": 0,
+      "proofs": 0
+    },
+    "stranded_benchmarks": [
+      {
+        "age_min": 63.7,
+        "algorithm": "sigma_freud_v8",
+        "algorithm_id": "c005_a025",
+        "assigned_roots": 0,
+        "benchmark": "dd87c693db",
+        "benchmark_id": "dd87c693db650a4332397a862022958c",
+        "challenge": "hypergraph",
+        "pending_proofs": 0,
+        "pending_roots": 25,
+        "slot_id": null,
+        "slot_state": null,
+        "slot_type": null,
+        "track": "n_h_edges=100000"
+      }
+    ],
+    "reward_funnel": {
+      "summary": {
+        "safe_to_scale_workload": false,
+        "active_benchmarks": 12,
+        "proof_conversion_rate": null,
+        "stopped_rate": 0.25,
+        "avg_time_to_proof_submit_sec": null,
+        "issues": [
+          "warming_up_no_proof_samples",
+          "root_phase_not_complete",
+          "high_stopped_or_expired_rate"
+        ]
+      }
+    },
+    "recommendations": []
+  }
+}

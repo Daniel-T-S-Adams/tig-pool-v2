@@ -292,6 +292,26 @@ def _validate_decision(data: dict, report: dict, decision: dict) -> list[dict]:
             actual = algo.get("weight")
             ok = actual == spec["value"]
             detail = f"expected={spec['value']} actual={actual}"
+        elif isinstance(assertion, dict) and assertion.get("expect_unserved_stranded_fields"):
+            spec = assertion["expect_unserved_stranded_fields"]
+            health = decision.get("health") or {}
+            rows = health.get("unserved_stranded_benchmarks") or []
+            row = next(
+                (
+                    item
+                    for item in rows
+                    if item.get("benchmark_id") == spec.get("benchmark_id")
+                    or item.get("benchmark") == spec.get("benchmark")
+                ),
+                {},
+            )
+            mismatches = {
+                key: {"expected": value, "actual": row.get(key)}
+                for key, value in (spec.get("fields") or {}).items()
+                if row.get(key) != value
+            }
+            ok = bool(row) and not mismatches
+            detail = f"row_found={bool(row)} mismatches={mismatches}"
         else:
             ok = False
             detail = f"unknown assertion: {assertion!r}"
