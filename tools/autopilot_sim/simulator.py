@@ -142,6 +142,30 @@ def _enrich_workload_targets(autopilot: Any, report: dict, config: dict, clean_w
         )
 
 
+def _slots_from_report(report: dict) -> dict:
+    slots = report.get("slots") or {}
+    if isinstance(slots, dict):
+        return slots
+    if isinstance(slots, list):
+        return {"summary": slots}
+    return {"summary": []}
+
+
+def _enrich_recommendations(autopilot: Any, report: dict, config: dict) -> None:
+    if report.get("recommendations") is not None:
+        return
+    report["recommendations"] = autopilot._recommendations(
+        config,
+        report.get("slaves") or [],
+        report.get("challenges") or [],
+        _slots_from_report(report),
+        report.get("track_economics") or [],
+        report.get("stale_totals") or {},
+        report.get("reward_funnel") or {},
+        report.get("workload_targets") or {},
+    )
+
+
 def _changed_max(decision: dict) -> tuple[int | None, int | None]:
     change = (decision.get("changes") or {}).get("max_concurrent_benchmarks") or {}
     current = change.get("current")
@@ -164,6 +188,11 @@ def _direction(current: int | None, target: int | None) -> str:
     if current is None or target is None or target == current:
         return "flat"
     return "up" if target > current else "down"
+
+
+def _sum_slots(slots: dict | None, slot_types: list[str]) -> int:
+    slots = slots or {}
+    return sum(int(slots.get(slot_type) or 0) for slot_type in slot_types)
 
 
 def _validate_decision(data: dict, report: dict, decision: dict) -> list[dict]:
@@ -233,6 +262,14 @@ def _validate_decision(data: dict, report: dict, decision: dict) -> list[dict]:
             )
             ok = actual == spec["direction"]
             detail = f"field={field} expected={spec['direction']} actual={actual} current={current} target={target}"
+        elif isinstance(assertion, dict) and assertion.get("expect_resource_slot_sum_direction"):
+            spec = assertion["expect_resource_slot_sum_direction"]
+            change = (decision.get("changes") or {}).get("resource_slots.slots") or {}
+            current = _sum_slots(change.get("current"), spec["slot_types"])
+            next_value = _sum_slots(change.get("next"), spec["slot_types"])
+            actual = _direction(current, next_value)
+            ok = actual == spec["direction"]
+            detail = f"slot_types={spec['slot_types']} expected={spec['direction']} actual={actual} current={current} next={next_value}"
         else:
             ok = False
             detail = f"unknown assertion: {assertion!r}"
@@ -244,6 +281,7 @@ def run_simulation(data: dict) -> dict:
     autopilot = _load_autopilot()
     report, config, clean_windows = _scenario_to_report_and_config(data)
     _enrich_workload_targets(autopilot, report, config, clean_windows)
+    _enrich_recommendations(autopilot, report, config)
     active_jobs = _active_jobs_from_report(report)
     autopilot._active_unfinished_jobs = lambda: active_jobs
     decision = autopilot._plan_config_change(report, config, clean_windows)

@@ -1033,7 +1033,9 @@ def _workload_controller_targets(
         for algo in (cfg.get("algo_selection") or [])
     }
     posture = (policy_posture or {}).get("posture") or "balanced"
-    posture_blocks_increase = posture in {"recovery", "conservative"}
+    funnel_summary = (reward_funnel or {}).get("summary") or {}
+    global_funnel_safe = bool(funnel_summary.get("safe_to_scale_workload", True))
+    posture_blocks_increase = posture in {"recovery", "conservative"} or not global_funnel_safe
     targets = []
     for row in track_economics:
         algorithm_id = row.get("algorithm_id")
@@ -1115,7 +1117,10 @@ def _workload_controller_targets(
             elif fast_clean:
                 if posture_blocks_increase:
                     action = "hold_workload_until_policy_posture_improves"
-                    reasons.append(f"policy posture is {posture}; clean track increases stay read-only")
+                    if not global_funnel_safe:
+                        reasons.append("global reward funnel is unsafe; clean track increases stay read-only")
+                    else:
+                        reasons.append(f"policy posture is {posture}; clean track increases stay read-only")
                 else:
                     action = "consider_small_workload_increase"
                     target_bundles = current_bundles + WORKLOAD_MAX_BUNDLE_STEP
@@ -1367,6 +1372,7 @@ def _target_resource_slots(capacity: dict) -> dict:
     current_slots = capacity["current_slots"]
     slot_counts = capacity["slot_counts"]
     slot_idle = capacity["slot_idle"]
+    slot_busy = capacity["slot_busy"]
     proposed = dict(current_slots)
 
     current_cpu = int(current_slots.get(CPU_SLOT_TYPE, slot_counts.get(CPU_SLOT_TYPE, 0)) or 0)
@@ -1392,28 +1398,53 @@ def _target_resource_slots(capacity: dict) -> dict:
     else:
         proposed[CPU_SLOT_TYPE] = 0
 
-    gpu_signal = max(
-        capacity["active_gpu"],
-        capacity["gpu_pressure"],
-        capacity["productive_idle_gpu"],
-    )
-    for slot_type in GPU_SLOT_TYPES:
-        current = int(current_slots.get(slot_type, slot_counts.get(slot_type, 0)) or 0)
-        if not capacity["active_gpu"]:
+    if not capacity["active_gpu"]:
+        for slot_type in GPU_SLOT_TYPES:
             proposed[slot_type] = 0
-            continue
-        target = max(current, 1)
+    else:
+        current_gpu_slots = {
+            slot_type: int(current_slots.get(slot_type, slot_counts.get(slot_type, 0)) or 0)
+            for slot_type in GPU_SLOT_TYPES
+        }
+        busy_gpu_slots = {
+            slot_type: int(slot_busy.get(slot_type, 0) or 0)
+            for slot_type in GPU_SLOT_TYPES
+        }
+        gpu_target_total = max(1, int(capacity["active_gpu"] or 0))
         if capacity["productive_idle_gpu"] >= PRODUCTIVE_IDLE_GPU_SCALE_MIN:
             extra_slots = max(
                 1,
                 (capacity["productive_idle_gpu"] + PRODUCTIVE_IDLE_GPU_PER_SLOT - 1)
                 // max(1, PRODUCTIVE_IDLE_GPU_PER_SLOT),
             )
-            target = max(target, current + extra_slots)
-        elif slot_idle.get(slot_type, 0) == 0 and capacity["gpu_pressure"]:
-            target = max(target, current + 1)
-        target = max(target, (gpu_signal + len(GPU_SLOT_TYPES) - 1) // len(GPU_SLOT_TYPES))
-        proposed[slot_type] = min(target, MAX_GPU_SLOTS_PER_TYPE)
+            gpu_target_total += extra_slots
+        elif capacity["gpu_pressure"] > gpu_target_total and sum(busy_gpu_slots.values()) >= gpu_target_total:
+            gpu_target_total += 1
+        gpu_target_total = min(gpu_target_total, MAX_GPU_SLOTS_PER_TYPE * len(GPU_SLOT_TYPES))
+
+        proposed_gpu_slots = {slot_type: 0 for slot_type in GPU_SLOT_TYPES}
+        for slot_type in sorted(GPU_SLOT_TYPES, key=lambda key: (-busy_gpu_slots.get(key, 0), -current_gpu_slots.get(key, 0), key)):
+            if gpu_target_total <= 0:
+                break
+            target = min(
+                MAX_GPU_SLOTS_PER_TYPE,
+                max(1 if current_gpu_slots.get(slot_type, 0) or busy_gpu_slots.get(slot_type, 0) else 0, busy_gpu_slots.get(slot_type, 0)),
+                gpu_target_total,
+            )
+            proposed_gpu_slots[slot_type] = target
+            gpu_target_total -= target
+        if gpu_target_total > 0:
+            for slot_type in GPU_SLOT_TYPES:
+                if gpu_target_total <= 0:
+                    break
+                room = MAX_GPU_SLOTS_PER_TYPE - proposed_gpu_slots[slot_type]
+                if room <= 0:
+                    continue
+                add = min(room, gpu_target_total)
+                proposed_gpu_slots[slot_type] += add
+                gpu_target_total -= add
+
+        proposed.update(proposed_gpu_slots)
     return proposed
 
 
@@ -1469,30 +1500,21 @@ def _target_per_challenge_caps(cfg: dict, capacity: dict, proposed_slots: dict) 
         current_c004 = int(current_per.get("c004", 1) or 1)
         proposed.update({
             "c004": min(
-                max(
-                    current_c004,
-                    int(proposed_slots.get("vector_search", 1) or 1)
-                    if not (stale_blocking and "c004" in stale_challenge_ids)
-                    else current_c004,
-                ),
+                int(proposed_slots.get("vector_search", 1) or 1)
+                if not (stale_blocking and "c004" in stale_challenge_ids)
+                else current_c004,
                 MAX_GPU_CHALLENGE_BENCHMARKS,
             ),
             "c005": min(
-                max(
-                    int(current_per.get("c005", 1) or 1),
-                    int(proposed_slots.get("hypergraph", 1) or 1)
-                    if not (stale_blocking and "c005" in stale_challenge_ids)
-                    else int(current_per.get("c005", 1) or 1),
-                ),
+                int(proposed_slots.get("hypergraph", 1) or 1)
+                if not (stale_blocking and "c005" in stale_challenge_ids)
+                else int(current_per.get("c005", 1) or 1),
                 MAX_GPU_CHALLENGE_BENCHMARKS,
             ),
             "c006": min(
-                max(
-                    int(current_per.get("c006", 1) or 1),
-                    int(proposed_slots.get("neuralnet_optimizer", 1) or 1)
-                    if not (stale_blocking and "c006" in stale_challenge_ids)
-                    else int(current_per.get("c006", 1) or 1),
-                ),
+                int(proposed_slots.get("neuralnet_optimizer", 1) or 1)
+                if not (stale_blocking and "c006" in stale_challenge_ids)
+                else int(current_per.get("c006", 1) or 1),
                 MAX_GPU_CHALLENGE_BENCHMARKS,
             ),
         })
