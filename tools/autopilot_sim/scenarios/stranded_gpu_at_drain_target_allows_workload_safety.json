@@ -1,0 +1,165 @@
+{
+  "name": "stranded_gpu_at_drain_target_allows_workload_safety",
+  "lesson": "If GPU-stranded work is already at the drain target, autopilot should still apply workload safety reductions instead of returning a no-op.",
+  "clean_windows": 0,
+  "assertions": [
+    {
+      "expect_reason": "workload_safety_adjustment"
+    },
+    {
+      "expect_no_change_key": "max_concurrent_benchmarks"
+    },
+    {
+      "expect_change_key": "workload_controller"
+    },
+    {
+      "expect_config_track_setting": {
+        "algorithm_id": "c004_vector_algo",
+        "track": "n_queries=11000",
+        "field": "num_bundles",
+        "value": 7
+      }
+    }
+  ],
+  "config": {
+    "max_job_batches": 512,
+    "max_concurrent_benchmarks": 12,
+    "resource_slots": {
+      "slots": {
+        "vector_search": 6,
+        "hypergraph": 6,
+        "neuralnet_optimizer": 6
+      }
+    },
+    "per_challenge_max_benchmarks": {
+      "c004": 6,
+      "c005": 6,
+      "c006": 6
+    },
+    "adaptive_slave_caps": {
+      "cpu_max_cap": 4,
+      "gpu_max_cap": 1
+    },
+    "algo_selection": [
+      {
+        "algorithm_id": "c004_vector_algo",
+        "weight": 1,
+        "batch_size": 128,
+        "track_settings": {
+          "n_queries=11000": {
+            "batch_size": 128,
+            "num_bundles": 8
+          }
+        }
+      }
+    ],
+    "slaves": []
+  },
+  "report": {
+    "mode": "read_only",
+    "master_config_error": null,
+    "current_config": {
+      "max_concurrent_benchmarks": 12,
+      "slaves": []
+    },
+    "slaves": [
+      {
+        "slave_name": "pool-gpu-local-a330c544ec5b",
+        "profile": "gpu",
+        "registered": true,
+        "registered_active": true,
+        "active_now": true,
+        "active_unfinished": 1,
+        "stale_roots": 0,
+        "stale_proofs": 0,
+        "completed_recent": 4,
+        "nonces_recent": 100000
+      }
+    ],
+    "slots": {
+      "summary": [
+        {
+          "slot_type": "vector_search",
+          "state": "busy",
+          "count": 6
+        },
+        {
+          "slot_type": "hypergraph",
+          "state": "busy",
+          "count": 6
+        },
+        {
+          "slot_type": "neuralnet_optimizer",
+          "state": "busy",
+          "count": 6
+        }
+      ]
+    },
+    "challenges": [
+      {
+        "challenge_id": "vector_search",
+        "compute_type": "gpu",
+        "active_benchmarks": 12,
+        "stale_roots": 0,
+        "stale_proofs": 0
+      }
+    ],
+    "stale_totals": {
+      "roots": 0,
+      "proofs": 0
+    },
+    "stranded_benchmarks": [
+      {
+        "benchmark_id": "gpu-stranded-example-1",
+        "challenge": "vector_search",
+        "slot_type": "vector_search",
+        "age_min": 62
+      },
+      {
+        "benchmark_id": "gpu-stranded-example-2",
+        "challenge": "hypergraph",
+        "slot_type": "hypergraph",
+        "age_min": 54
+      },
+      {
+        "benchmark_id": "gpu-stranded-example-3",
+        "challenge": "neuralnet_optimizer",
+        "slot_type": "neuralnet_optimizer",
+        "age_min": 50
+      }
+    ],
+    "track_workload": [
+      {
+        "algorithm_id": "c004_vector_algo",
+        "track": "n_queries=11000",
+        "avg_num_nonces": 1024,
+        "avg_num_batches": 64,
+        "avg_root_runtime_sec": 120,
+        "avg_benchmark_wall_sec": 900
+      }
+    ],
+    "reward_funnel": {
+      "summary": {
+        "safe_to_scale_workload": false,
+        "active_benchmarks": 12,
+        "proof_conversion_rate": 0.92,
+        "stopped_rate": 0.31,
+        "avg_time_to_proof_submit_sec": 994,
+        "issues": [
+          "high_stopped_or_expired_rate"
+        ]
+      },
+      "by_track": [
+        {
+          "algorithm_id": "c004_vector_algo",
+          "track": "n_queries=11000",
+          "proof_required_benchmarks": 10,
+          "proof_conversion_rate": 0.92,
+          "stopped_rate": 0.31,
+          "avg_time_to_proof_submit_sec": 994,
+          "p95_root_batch_runtime_sec": 120
+        }
+      ]
+    }
+  }
+}

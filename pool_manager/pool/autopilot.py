@@ -2189,7 +2189,11 @@ def _plan_config_change(report: dict, cfg: dict, clean_windows: int) -> dict:
         stranded_count = len(health["unserved_stranded_benchmarks"])
         productive_jobs = max(0, active_jobs - stranded_count)
         gpu_slot_total, _ = _gpu_slot_counts(report)
-        gpu_reserve = gpu_slot_total if _active_gpu_slave_count(report) else 0
+        active_gpu_reserve = max(
+            _active_gpu_slave_count(report),
+            int((health.get("live_by_profile") or {}).get("gpu") or 0),
+        )
+        gpu_reserve = min(gpu_slot_total, active_gpu_reserve) if gpu_slot_total else active_gpu_reserve
         drain_target = _clamp(
             productive_jobs + STRANDED_BUFFER_BENCHMARKS + gpu_reserve,
             MIN_MAX_BENCHMARKS,
@@ -2198,27 +2202,32 @@ def _plan_config_change(report: dict, cfg: dict, clean_windows: int) -> dict:
         next_max = current
         if current > drain_target:
             next_max = max(drain_target, current - STRANDED_DOWNSCALE_STEP)
-        decision["reason"] = "drain_stranded_benchmarks"
-        decision["changes"] = {
-            "max_concurrent_benchmarks": {
-                "current": current,
-                "target": drain_target,
-                "next": next_max,
-                "active_jobs": active_jobs,
-                "productive_jobs": productive_jobs,
-                "buffer": STRANDED_BUFFER_BENCHMARKS,
-                "gpu_reserve": gpu_reserve,
-                "stranded": health["unserved_stranded_benchmarks"],
-                "capacity_waiting": health.get("capacity_waiting_benchmarks", []),
-            }
+        stranded_plan = {
+            "current": current,
+            "target": drain_target,
+            "next": next_max,
+            "active_jobs": active_jobs,
+            "productive_jobs": productive_jobs,
+            "buffer": STRANDED_BUFFER_BENCHMARKS,
+            "gpu_reserve": gpu_reserve,
+            "configured_gpu_slots": gpu_slot_total,
+            "active_gpu_reserve": active_gpu_reserve,
+            "stranded": health["unserved_stranded_benchmarks"],
+            "capacity_waiting": health.get("capacity_waiting_benchmarks", []),
         }
         if next_max != current:
             new_cfg = json.loads(json.dumps(cfg))
             new_cfg["max_concurrent_benchmarks"] = next_max
+            decision["reason"] = "drain_stranded_benchmarks"
+            decision["changes"] = {
+                "max_concurrent_benchmarks": stranded_plan
+            }
             decision["config"] = new_cfg
-        else:
-            decision["reason"] = "stranded_benchmarks_at_drain_target"
-        return decision
+            return decision
+        decision.setdefault("guardrails", {})["stranded_benchmarks"] = {
+            **stranded_plan,
+            "skipped": "already_at_or_below_drain_target",
+        }
 
     safety_cfg = json.loads(json.dumps(cfg))
     workload_safety_change, _workload_guard = _next_workload_change(
