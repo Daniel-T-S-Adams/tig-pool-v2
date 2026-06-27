@@ -25,6 +25,23 @@
         "field": "weight",
         "direction": "down"
       }
+    },
+    {
+      "expect_change_key": "workload_controller"
+    },
+    {
+      "expect_config_track_setting": {
+        "algorithm_id": "c004_vector_algo",
+        "track": "n=500",
+        "field": "num_bundles",
+        "value": 7
+      }
+    },
+    {
+      "expect_config_algo_weight": {
+        "algorithm_id": "c004_vector_algo",
+        "value": 3
+      }
     }
   ],
   "config": {

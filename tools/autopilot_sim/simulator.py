@@ -195,6 +195,13 @@ def _sum_slots(slots: dict | None, slot_types: list[str]) -> int:
     return sum(int(slots.get(slot_type) or 0) for slot_type in slot_types)
 
 
+def _algo_from_config(config: dict, algorithm_id: str) -> dict:
+    for algo in config.get("algo_selection") or []:
+        if algo.get("algorithm_id") == algorithm_id:
+            return algo
+    return {}
+
+
 def _validate_decision(data: dict, report: dict, decision: dict) -> list[dict]:
     requested = list(data.get("assertions") or [])
     funnel_safe = bool(((report.get("reward_funnel") or {}).get("summary") or {}).get("safe_to_scale_workload", True))
@@ -270,6 +277,21 @@ def _validate_decision(data: dict, report: dict, decision: dict) -> list[dict]:
             actual = _direction(current, next_value)
             ok = actual == spec["direction"]
             detail = f"slot_types={spec['slot_types']} expected={spec['direction']} actual={actual} current={current} next={next_value}"
+        elif isinstance(assertion, dict) and assertion.get("expect_config_track_setting"):
+            spec = assertion["expect_config_track_setting"]
+            config = decision.get("config") or {}
+            algo = _algo_from_config(config, spec["algorithm_id"])
+            track_settings = (algo.get("track_settings") or {}).get(spec["track"]) or {}
+            actual = track_settings.get(spec["field"])
+            ok = actual == spec["value"]
+            detail = f"field={spec['field']} expected={spec['value']} actual={actual}"
+        elif isinstance(assertion, dict) and assertion.get("expect_config_algo_weight"):
+            spec = assertion["expect_config_algo_weight"]
+            config = decision.get("config") or {}
+            algo = _algo_from_config(config, spec["algorithm_id"])
+            actual = algo.get("weight")
+            ok = actual == spec["value"]
+            detail = f"expected={spec['value']} actual={actual}"
         else:
             ok = False
             detail = f"unknown assertion: {assertion!r}"

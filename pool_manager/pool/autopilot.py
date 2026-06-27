@@ -1893,7 +1893,7 @@ def _policy_posture(
             "unserved_stranded": len(health.get("unserved_stranded_benchmarks") or []),
             "active_unregistered": len(health.get("active_unregistered") or []),
         },
-        "workload_auto_apply_allowed": False,
+        "workload_auto_apply_allowed": posture == "aggressive",
     }
 
 
@@ -1937,6 +1937,144 @@ def _next_value_bounded(current: int, target: int, up_step: int, down_step: int)
     if target < current:
         return max(target, current - max(1, down_step))
     return current
+
+
+def _find_algo_selection(cfg: dict, algorithm_id: str) -> dict | None:
+    for algo in cfg.get("algo_selection") or []:
+        if algo.get("algorithm_id") == algorithm_id:
+            return algo
+    return None
+
+
+def _apply_workload_target(new_cfg: dict, target: dict) -> dict | None:
+    algorithm_id = target.get("algorithm_id")
+    track = target.get("track")
+    if not algorithm_id or not track:
+        return None
+    algo = _find_algo_selection(new_cfg, algorithm_id)
+    if not algo:
+        return None
+    track_settings = algo.get("track_settings") or {}
+    if track not in track_settings:
+        return None
+    settings = track_settings.get(track) or {}
+    current = target.get("current") or {}
+    desired = target.get("target") or {}
+    next_settings = dict(settings)
+    changed = {}
+
+    for field, config_key in (
+        ("num_bundles", "num_bundles"),
+        ("effective_batch_size", "batch_size"),
+    ):
+        current_value = int(current.get(field) or next_settings.get(config_key) or 0)
+        target_value = int(desired.get(field) or current_value)
+        if target_value != current_value:
+            next_settings[config_key] = target_value
+            changed[config_key] = {
+                "current": current_value,
+                "target": target_value,
+                "next": target_value,
+            }
+
+    current_weight = int(current.get("weight") or algo.get("weight") or 0)
+    target_weight = int(desired.get("weight") or current_weight)
+    if target_weight != current_weight:
+        algo["weight"] = target_weight
+        changed["weight"] = {
+            "current": current_weight,
+            "target": target_weight,
+            "next": target_weight,
+        }
+
+    if not changed:
+        return None
+    algo.setdefault("track_settings", {})[track] = next_settings
+    return {
+        "algorithm_id": algorithm_id,
+        "track": track,
+        "action": target.get("action"),
+        "changes": changed,
+        "reasons": target.get("reasons") or [],
+        "observed": target.get("observed") or {},
+        "derived": target.get("derived") or {},
+    }
+
+
+def _next_workload_change(
+    new_cfg: dict,
+    workload_targets: dict,
+    health: dict,
+    funnel_safe: bool,
+    policy_posture: dict,
+    clean_windows: int,
+    allow_canary: bool = True,
+) -> tuple[dict | None, dict | None]:
+    actionable = list((workload_targets or {}).get("actionable") or [])
+    if not actionable:
+        return None, None
+
+    safety_actions = {
+        "reduce_or_fix_unrunnable_track",
+        "reduce_workload_until_proofs_convert",
+        "reduce_workload_until_stopped_rate_recovers",
+        "reduce_tail_time",
+    }
+    for row in actionable:
+        if row.get("action") not in safety_actions:
+            continue
+        current = row.get("current") or {}
+        target = row.get("target") or {}
+        reduces_work = (
+            int(target.get("num_bundles") or current.get("num_bundles") or 0)
+            < int(current.get("num_bundles") or 0)
+            or int(target.get("effective_batch_size") or current.get("effective_batch_size") or 0)
+            < int(current.get("effective_batch_size") or 0)
+            or int(target.get("weight") or current.get("weight") or 0)
+            < int(current.get("weight") or 0)
+        )
+        if not reduces_work:
+            continue
+        change = _apply_workload_target(new_cfg, row)
+        if change:
+            return change, None
+
+    if not allow_canary:
+        return None, None
+
+    canary_guard = {
+        "required": "aggressive_posture_clean_global_funnel_and_no_health_debt",
+        "posture": policy_posture.get("posture"),
+        "workload_auto_apply_allowed": bool(policy_posture.get("workload_auto_apply_allowed")),
+        "funnel_safe": funnel_safe,
+        "healthy": bool(health.get("healthy")),
+        "clean_windows": clean_windows,
+    }
+    canary_allowed = (
+        policy_posture.get("posture") == "aggressive"
+        and bool(policy_posture.get("workload_auto_apply_allowed"))
+        and funnel_safe
+        and health.get("healthy")
+        and clean_windows >= APPLY_MIN_CLEAN_WINDOWS
+    )
+    if not canary_allowed:
+        return None, canary_guard
+
+    for row in actionable:
+        if row.get("action") != "consider_small_workload_increase":
+            continue
+        current = row.get("current") or {}
+        target = row.get("target") or {}
+        bundle_step = int(target.get("num_bundles") or 0) - int(current.get("num_bundles") or 0)
+        batch_step = int(target.get("effective_batch_size") or 0) - int(current.get("effective_batch_size") or 0)
+        weight_step = int(target.get("weight") or 0) - int(current.get("weight") or 0)
+        if bundle_step != 1 or batch_step > 0 or weight_step > 0:
+            continue
+        change = _apply_workload_target(new_cfg, row)
+        if change:
+            change["canary"] = True
+            return change, None
+    return None, canary_guard
 
 
 def _plan_config_change(report: dict, cfg: dict, clean_windows: int) -> dict:
@@ -2081,6 +2219,23 @@ def _plan_config_change(report: dict, cfg: dict, clean_windows: int) -> dict:
         else:
             decision["reason"] = "stranded_benchmarks_at_drain_target"
         return decision
+
+    safety_cfg = json.loads(json.dumps(cfg))
+    workload_safety_change, _workload_guard = _next_workload_change(
+        safety_cfg,
+        report.get("workload_targets") or {},
+        health,
+        funnel_safe,
+        policy_posture,
+        clean_windows,
+        allow_canary=False,
+    )
+    if workload_safety_change:
+        decision["reason"] = "workload_safety_adjustment"
+        decision["changes"] = {"workload_controller": workload_safety_change}
+        decision["config"] = safety_cfg
+        return decision
+
     if not health["healthy"] and not productive_capacity_scale and not safe_per_challenge_scale:
         decision["reason"] = "blocked_by_stale_or_unregistered_work"
         return decision
@@ -2196,6 +2351,21 @@ def _plan_config_change(report: dict, cfg: dict, clean_windows: int) -> dict:
                 "changes": cap_changes,
                 "signals": caps_rec.get("signals") or {},
             }
+
+    if not changes:
+        workload_canary_change, workload_guard = _next_workload_change(
+            new_cfg,
+            report.get("workload_targets") or {},
+            health,
+            funnel_safe,
+            policy_posture,
+            clean_windows,
+            allow_canary=True,
+        )
+        if workload_canary_change:
+            changes["workload_controller"] = workload_canary_change
+        elif workload_guard:
+            decision.setdefault("guardrails", {})["workload_controller"] = workload_guard
 
     if not changes:
         decision["reason"] = "no_safe_changes"

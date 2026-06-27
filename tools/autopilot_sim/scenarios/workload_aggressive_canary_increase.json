@@ -1,0 +1,112 @@
+{
+  "name": "workload_aggressive_canary_increase",
+  "lesson": "When the pool is healthy, globally clean, and explicitly in aggressive posture, autopilot may apply one small bundle canary so new miner capacity can be tested.",
+  "clean_windows": 5,
+  "assertions": [
+    {
+      "expect_workload_action": {
+        "algorithm_id": "c005_hypergraph_algo",
+        "track": "n=1000",
+        "action": "consider_small_workload_increase"
+      }
+    },
+    {
+      "expect_change_key": "workload_controller"
+    },
+    {
+      "expect_config_track_setting": {
+        "algorithm_id": "c005_hypergraph_algo",
+        "track": "n=1000",
+        "field": "num_bundles",
+        "value": 9
+      }
+    }
+  ],
+  "config": {
+    "max_job_batches": 512,
+    "max_concurrent_benchmarks": 24,
+    "resource_slots": {
+      "slots": {
+        "hypergraph": 8
+      }
+    },
+    "per_challenge_max_benchmarks": {
+      "hypergraph": 8
+    },
+    "adaptive_slave_caps": {
+      "cpu_max_cap": 4,
+      "gpu_max_cap": 2
+    },
+    "algo_selection": [
+      {
+        "algorithm_id": "c005_hypergraph_algo",
+        "weight": 3,
+        "batch_size": 32,
+        "track_settings": {
+          "n=1000": {
+            "batch_size": 32,
+            "num_bundles": 8
+          }
+        }
+      }
+    ],
+    "slaves": []
+  },
+  "report": {
+    "mode": "read_only",
+    "master_config_error": null,
+    "current_config": {
+      "max_concurrent_benchmarks": 24,
+      "slaves": []
+    },
+    "slaves": [],
+    "slots": {
+      "summary": []
+    },
+    "challenges": [],
+    "stale_totals": {
+      "roots": 0,
+      "proofs": 0
+    },
+    "stranded_benchmarks": [],
+    "track_workload": [
+      {
+        "algorithm_id": "c005_hypergraph_algo",
+        "track": "n=1000",
+        "avg_num_nonces": 4096,
+        "avg_num_batches": 128,
+        "avg_root_runtime_sec": 100,
+        "avg_benchmark_wall_sec": 700
+      }
+    ],
+    "reward_funnel": {
+      "summary": {
+        "safe_to_scale_workload": true,
+        "active_benchmarks": 18,
+        "proof_conversion_rate": 0.98,
+        "stopped_rate": 0.01,
+        "avg_time_to_proof_submit_sec": 420,
+        "issues": []
+      },
+      "by_track": [
+        {
+          "algorithm_id": "c005_hypergraph_algo",
+          "track": "n=1000",
+          "proof_required_benchmarks": 20,
+          "proof_conversion_rate": 0.98,
+          "stopped_rate": 0.01,
+          "avg_time_to_proof_submit_sec": 420,
+          "p95_root_batch_runtime_sec": 100
+        }
+      ]
+    },
+    "policy_posture": {
+      "posture": "aggressive",
+      "reasons": [
+        "scenario explicitly allows one workload canary"
+      ],
+      "workload_auto_apply_allowed": true
+    },
+    "recommendations": []
+  }
+}
