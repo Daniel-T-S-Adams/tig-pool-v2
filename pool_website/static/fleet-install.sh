@@ -64,28 +64,6 @@ def detect_cpu_workers():
     if override and override.isdigit() and int(override) > 0:
         return int(override)
 
-    cores = set()
-    current = {}
-    try:
-        for raw in pathlib.Path("/proc/cpuinfo").read_text().splitlines():
-            line = raw.strip()
-            if not line:
-                if "physical id" in current and "core id" in current:
-                    cores.add((current["physical id"], current["core id"]))
-                current = {}
-                continue
-            if ":" not in line:
-                continue
-            key, value = [part.strip() for part in line.split(":", 1)]
-            if key in {"physical id", "core id"}:
-                current[key] = value
-        if "physical id" in current and "core id" in current:
-            cores.add((current["physical id"], current["core id"]))
-    except OSError:
-        pass
-
-    if cores:
-        return max(1, len(cores))
     return max(1, os.cpu_count() or 1)
 
 pathlib.Path("algorithms").mkdir(exist_ok=True)

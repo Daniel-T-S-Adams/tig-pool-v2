@@ -683,7 +683,7 @@ SLAVE_NAME={slave_name}
 MASTER_IP={_PUBLIC_MASTER_HOST}
 MASTER_PORT={_PUBLIC_MASTER_PORT}
 # Adjust NUM_WORKERS for your machine.
-# CPU: defaults to detected physical cores in the fleet installer.
+# CPU: defaults to detected logical threads in the fleet installer.
 # GPU: normally use 1 worker per GPU.
 NUM_WORKERS={num_workers}
 ALGORITHMS_DIR=./algorithms
@@ -693,7 +693,7 @@ VERBOSE=
 """
 
 
-def _build_slave_setup_command(slave_name: str, num_workers: int = 8) -> str:
+def _build_slave_setup_command(slave_name: str, num_workers: int = 8, worker_type: str = "cpu") -> str:
     """Return a copy-paste setup command to run from tig-benchmarker.
 
     The official slave uses in-container paths (algorithms/results), while
@@ -703,31 +703,11 @@ def _build_slave_setup_command(slave_name: str, num_workers: int = 8) -> str:
     """
     worker_setup = (
         'DETECTED_NUM_WORKERS="${NUM_WORKERS:-1}"'
-        if num_workers == 1
+        if worker_type == "gpu"
         else """DETECTED_NUM_WORKERS="${NUM_WORKERS:-$(python3 - <<'PY'
-from pathlib import Path
 import os
 
-cores = set()
-current = {}
-try:
-    for raw in Path('/proc/cpuinfo').read_text().splitlines():
-        line = raw.strip()
-        if not line:
-            if 'physical id' in current and 'core id' in current:
-                cores.add((current['physical id'], current['core id']))
-            current = {}
-            continue
-        if ':' not in line:
-            continue
-        key, value = [part.strip() for part in line.split(':', 1)]
-        if key in {'physical id', 'core id'}:
-            current[key] = value
-    if 'physical id' in current and 'core id' in current:
-        cores.add((current['physical id'], current['core id']))
-except OSError:
-    pass
-print(max(1, len(cores) or (os.cpu_count() or 1)))
+print(max(1, os.cpu_count() or 1))
 PY
 )}"
 """
@@ -767,7 +747,7 @@ def _slave_payload(slave_name: str, worker_type: str) -> dict:
     return {
         "slave_name": slave_name,
         "slave_config": _build_slave_config(slave_name, num_workers),
-        "setup_command": _build_slave_setup_command(slave_name, num_workers),
+        "setup_command": _build_slave_setup_command(slave_name, num_workers, worker_type),
         "preflight_command": _build_slave_preflight_command(services),
         "start_command": _build_slave_start_command(services),
         "services": services,
@@ -871,7 +851,10 @@ def add_member_direct(req: AddMemberDirectRequest, x_admin_secret: str = Header(
     """Add a member directly without an invite code (admin bypass)."""
     _check_admin(x_admin_secret)
     wallet = req.wallet_address.lower().strip()
-    slave_name = _wallet_to_slave_name(wallet, req.worker_type)
+    worker_type = req.worker_type.lower().strip()
+    if worker_type not in ("cpu", "gpu"):
+        raise HTTPException(status_code=400, detail="worker_type must be cpu or gpu")
+    slave_name = _wallet_to_slave_name(wallet, worker_type)
     now_ms = int(time.time() * 1000)
 
     existing = db.fetch_one(
@@ -890,8 +873,12 @@ def add_member_direct(req: AddMemberDirectRequest, x_admin_secret: str = Header(
     return {
         "wallet_address": wallet,
         "slave_name": slave_name,
-        "slave_config": _build_slave_config(slave_name),
-        "setup_command": _build_slave_setup_command(slave_name),
+        "slave_config": _build_slave_config(slave_name, 1 if worker_type == "gpu" else 8),
+        "setup_command": _build_slave_setup_command(
+            slave_name,
+            1 if worker_type == "gpu" else 8,
+            worker_type,
+        ),
     }
 
 
