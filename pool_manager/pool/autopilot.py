@@ -65,6 +65,8 @@ WORKLOAD_MIN_BUNDLES = int(os.environ.get("AUTOPILOT_WORKLOAD_MIN_BUNDLES", "4")
 WORKLOAD_MIN_BATCH_SIZE = int(os.environ.get("AUTOPILOT_WORKLOAD_MIN_BATCH_SIZE", "8"))
 WORKLOAD_MIN_WEIGHT = int(os.environ.get("AUTOPILOT_WORKLOAD_MIN_WEIGHT", "1"))
 WORKLOAD_MAX_BUNDLE_STEP = int(os.environ.get("AUTOPILOT_WORKLOAD_MAX_BUNDLE_STEP", "1"))
+WORKLOAD_SAFETY_COOLDOWN_MS = int(os.environ.get("AUTOPILOT_WORKLOAD_SAFETY_COOLDOWN_MS", str(METRIC_WINDOW_MS)))
+WORKLOAD_CANARY_COOLDOWN_MS = int(os.environ.get("AUTOPILOT_WORKLOAD_CANARY_COOLDOWN_MS", str(METRIC_WINDOW_MS)))
 WORKLOAD_FAST_PROOF_FACTOR = float(os.environ.get("AUTOPILOT_WORKLOAD_FAST_PROOF_FACTOR", "0.50"))
 WORKLOAD_HIGH_PROOF_CONVERSION_RATE = float(os.environ.get("AUTOPILOT_WORKLOAD_HIGH_PROOF_CONVERSION_RATE", "0.95"))
 STRANDED_BENCHMARK_MS = int(os.environ.get("AUTOPILOT_STRANDED_BENCHMARK_MS", str(30 * 60 * 1000)))
@@ -2007,8 +2009,36 @@ def _apply_workload_target(new_cfg: dict, target: dict) -> dict | None:
     }
 
 
+def _workload_cooldown_state(report: dict) -> dict:
+    state = report.get("workload_cooldown") or {}
+    if isinstance(state, dict):
+        return state
+    return {}
+
+
+def _workload_cooldown_guard(report: dict, action_kind: str) -> dict | None:
+    now_ms = int(report.get("generated_at_ms") or int(time.time() * 1000))
+    state = _workload_cooldown_state(report)
+    if action_kind == "safety":
+        last_ms = int(state.get("last_safety_change_ms") or 0)
+        cooldown_ms = WORKLOAD_SAFETY_COOLDOWN_MS
+    else:
+        last_ms = int(state.get("last_canary_change_ms") or 0)
+        cooldown_ms = WORKLOAD_CANARY_COOLDOWN_MS
+    if last_ms and now_ms - last_ms < cooldown_ms:
+        return {
+            "skipped": f"workload_{action_kind}_cooldown_active",
+            "last_change_ms": last_ms,
+            "elapsed_ms": max(0, now_ms - last_ms),
+            "cooldown_ms": cooldown_ms,
+            "last_change": state.get("last_change") or {},
+        }
+    return None
+
+
 def _next_workload_change(
     new_cfg: dict,
+    report: dict,
     workload_targets: dict,
     health: dict,
     funnel_safe: bool,
@@ -2026,6 +2056,9 @@ def _next_workload_change(
         "reduce_workload_until_stopped_rate_recovers",
         "reduce_tail_time",
     }
+    safety_cooldown_guard = _workload_cooldown_guard(report, "safety")
+    if safety_cooldown_guard:
+        return None, safety_cooldown_guard
     for row in actionable:
         if row.get("action") not in safety_actions:
             continue
@@ -2048,6 +2081,7 @@ def _next_workload_change(
     if not allow_canary:
         return None, None
 
+    cooldown_guard = _workload_cooldown_guard(report, "canary")
     canary_guard = {
         "required": "aggressive_posture_clean_global_funnel_and_no_health_debt",
         "posture": policy_posture.get("posture"),
@@ -2056,6 +2090,9 @@ def _next_workload_change(
         "healthy": bool(health.get("healthy")),
         "clean_windows": clean_windows,
     }
+    if cooldown_guard:
+        canary_guard.update(cooldown_guard)
+        return None, canary_guard
     canary_allowed = (
         policy_posture.get("posture") == "aggressive"
         and bool(policy_posture.get("workload_auto_apply_allowed"))
@@ -2236,8 +2273,9 @@ def _plan_config_change(report: dict, cfg: dict, clean_windows: int) -> dict:
         }
 
     safety_cfg = json.loads(json.dumps(cfg))
-    workload_safety_change, _workload_guard = _next_workload_change(
+    workload_safety_change, workload_safety_guard = _next_workload_change(
         safety_cfg,
+        report,
         report.get("workload_targets") or {},
         health,
         funnel_safe,
@@ -2250,6 +2288,8 @@ def _plan_config_change(report: dict, cfg: dict, clean_windows: int) -> dict:
         decision["changes"] = {"workload_controller": workload_safety_change}
         decision["config"] = safety_cfg
         return decision
+    if workload_safety_guard:
+        decision.setdefault("guardrails", {})["workload_controller"] = workload_safety_guard
 
     if not health["healthy"] and not productive_capacity_scale and not safe_per_challenge_scale:
         decision["reason"] = "blocked_by_stale_or_unregistered_work"
@@ -2370,6 +2410,7 @@ def _plan_config_change(report: dict, cfg: dict, clean_windows: int) -> dict:
     if not changes:
         workload_canary_change, workload_guard = _next_workload_change(
             new_cfg,
+            report,
             report.get("workload_targets") or {},
             health,
             funnel_safe,
@@ -2429,6 +2470,23 @@ def maybe_run():
     if decision.get("config"):
         _push_config(decision["config"])
         decision["applied"] = True
+        workload_change = (decision.get("changes") or {}).get("workload_controller")
+        if workload_change:
+            cooldown_state = dict(report.get("workload_cooldown") or {})
+            cooldown_state["last_change_ms"] = now_ms
+            cooldown_state["last_change"] = {
+                "algorithm_id": workload_change.get("algorithm_id"),
+                "track": workload_change.get("track"),
+                "action": workload_change.get("action"),
+                "changes": workload_change.get("changes"),
+                "canary": bool(workload_change.get("canary")),
+            }
+            if workload_change.get("canary"):
+                cooldown_state["last_canary_change_ms"] = now_ms
+            else:
+                cooldown_state["last_safety_change_ms"] = now_ms
+            db.set_setting("autopilot_workload_cooldown", json.dumps(cooldown_state, separators=(",", ":")))
+            decision["workload_cooldown"] = cooldown_state
         if decision.get("reason") == "ready_to_apply":
             decision["reason"] = "applied"
         elif decision.get("reason") == "drain_stranded_benchmarks":
@@ -2471,6 +2529,10 @@ def build_report() -> dict:
         clean_windows = int(db.get_setting("autopilot_clean_windows", "0") or 0)
     except Exception:
         clean_windows = None
+    try:
+        workload_cooldown = json.loads(db.get_setting("autopilot_workload_cooldown", "{}") or "{}")
+    except Exception:
+        workload_cooldown = {}
     policy_posture = _policy_posture(
         {
             "slaves": slaves,
@@ -2529,6 +2591,7 @@ def build_report() -> dict:
         "track_workload": workload,
         "reward_funnel": reward_funnel,
         "policy_posture": policy_posture,
+        "workload_cooldown": workload_cooldown,
         "workload_targets": workload_targets,
         "track_economics": track_economics,
         "capacity_model": capacity,

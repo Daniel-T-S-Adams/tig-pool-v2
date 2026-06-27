@@ -1,0 +1,108 @@
+{
+  "name": "workload_safety_cooldown_blocks_repeated_changes",
+  "lesson": "After a workload safety edit, autopilot must wait for the metrics window before applying another workload edit from stale observations.",
+  "clean_windows": 0,
+  "assertions": [
+    {
+      "expect_workload_action": {
+        "algorithm_id": "c008_energy_algo",
+        "track": "s=dense",
+        "action": "reduce_workload_until_stopped_rate_recovers"
+      }
+    },
+    {
+      "expect_no_change_key": "workload_controller"
+    }
+  ],
+  "config": {
+    "max_job_batches": 512,
+    "max_concurrent_benchmarks": 12,
+    "resource_slots": {
+      "slots": {
+        "cpu": 8
+      }
+    },
+    "per_challenge_max_benchmarks": {
+      "c008": 8
+    },
+    "adaptive_slave_caps": {
+      "cpu_max_cap": 4,
+      "gpu_max_cap": 1
+    },
+    "algo_selection": [
+      {
+        "algorithm_id": "c008_energy_algo",
+        "weight": 2,
+        "batch_size": 64,
+        "track_settings": {
+          "s=dense": {
+            "batch_size": 64,
+            "num_bundles": 5
+          }
+        }
+      }
+    ],
+    "slaves": []
+  },
+  "report": {
+    "mode": "read_only",
+    "generated_at_ms": 2000000,
+    "master_config_error": null,
+    "current_config": {
+      "max_concurrent_benchmarks": 12,
+      "slaves": []
+    },
+    "workload_cooldown": {
+      "last_safety_change_ms": 1000000,
+      "last_change": {
+        "algorithm_id": "c001_sat_algo",
+        "track": "n_vars=7500,ratio=4267",
+        "action": "reduce_tail_time"
+      }
+    },
+    "slaves": [],
+    "slots": {
+      "summary": []
+    },
+    "challenges": [],
+    "stale_totals": {
+      "roots": 0,
+      "proofs": 0
+    },
+    "stranded_benchmarks": [],
+    "track_workload": [
+      {
+        "algorithm_id": "c008_energy_algo",
+        "track": "s=dense",
+        "avg_num_nonces": 320,
+        "avg_num_batches": 5,
+        "avg_root_runtime_sec": 200,
+        "avg_benchmark_wall_sec": 1200
+      }
+    ],
+    "reward_funnel": {
+      "summary": {
+        "safe_to_scale_workload": false,
+        "active_benchmarks": 8,
+        "proof_conversion_rate": 0.92,
+        "stopped_rate": 0.31,
+        "avg_time_to_proof_submit_sec": 994,
+        "issues": [
+          "high_stopped_or_expired_rate"
+        ]
+      },
+      "by_track": [
+        {
+          "algorithm_id": "c008_energy_algo",
+          "track": "s=dense",
+          "proof_required_benchmarks": 10,
+          "proof_conversion_rate": 0.92,
+          "stopped_rate": 0.31,
+          "avg_time_to_proof_submit_sec": 994,
+          "p95_root_batch_runtime_sec": 200
+        }
+      ]
+    },
+    "recommendations": []
+  }
+}
