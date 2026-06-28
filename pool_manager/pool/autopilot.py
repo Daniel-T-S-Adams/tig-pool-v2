@@ -99,6 +99,13 @@ PRECOMMIT_PROOF_RECLAIM_AGE_MS = int(
 PRECOMMIT_ABANDON_NO_ROOT_AGE_MS = int(
     os.environ.get("AUTOPILOT_PRECOMMIT_ABANDON_NO_ROOT_AGE_MS", str(75 * 60 * 1000))
 )
+BENCHMARK_MAX_AGE_CLEANUP_ENABLED = os.environ.get(
+    "AUTOPILOT_BENCHMARK_MAX_AGE_CLEANUP_ENABLED",
+    "true",
+).lower() in ("1", "true", "yes", "on")
+BENCHMARK_MAX_AGE_MS = int(
+    os.environ.get("AUTOPILOT_BENCHMARK_MAX_AGE_MS", str(90 * 60 * 1000))
+)
 
 GPU_CHALLENGES = {"vector_search", "hypergraph", "neuralnet_optimizer"}
 GPU_SLOT_TYPES = ("vector_search", "hypergraph", "neuralnet_optimizer")
@@ -156,6 +163,18 @@ def _aws_batch_capacity(cfg: dict | None) -> dict:
 def _route_is_cpu(slave: dict) -> bool:
     regex = str(slave.get("algorithm_id_regex") or "")
     return any(challenge_id in regex for challenge_id in CPU_CHALLENGE_IDS)
+
+
+def _benchmark_max_age_cleanup(cfg: dict | None) -> dict:
+    raw = ((cfg or {}).get("benchmark_max_age_cleanup") or {})
+    enabled = raw.get("enabled", BENCHMARK_MAX_AGE_CLEANUP_ENABLED)
+    if isinstance(enabled, str):
+        enabled = enabled.lower() in {"1", "true", "yes", "on"}
+    max_age_ms = int(raw.get("max_age_ms") or raw.get("age_ms") or BENCHMARK_MAX_AGE_MS)
+    return {
+        "enabled": bool(enabled),
+        "max_age_ms": max_age_ms,
+    }
 
 
 def _capacity_profile_for_work(item: dict) -> str:
@@ -346,28 +365,32 @@ def _cleanup_stale_assignments(cfg: dict, now_ms: int) -> dict:
     separate minimum age floor. This avoids cancelling slow-but-valid work too
     early on weaker CPUs.
     """
+    max_age_cleanup = _benchmark_max_age_cleanup(cfg)
     result = {
         "enabled": STALE_CLEANUP_ENABLED,
         "precommit_expiry_enabled": PRECOMMIT_EXPIRY_CLEANUP_ENABLED,
+        "benchmark_max_age_enabled": max_age_cleanup["enabled"],
         "released_roots": [],
         "released_orphan_roots": [],
         "released_proofs": [],
         "expiry_released_roots": [],
         "expiry_released_proofs": [],
         "stopped_precommits": [],
+        "stopped_old_benchmarks": [],
         "thresholds_ms": {
             "stale_root_cleanup": STALE_ROOT_CLEANUP_MIN_AGE_MS,
             "stale_proof_cleanup": STALE_PROOF_CLEANUP_MIN_AGE_MS,
             "precommit_root_reclaim": PRECOMMIT_ROOT_RECLAIM_AGE_MS,
             "precommit_proof_reclaim": PRECOMMIT_PROOF_RECLAIM_AGE_MS,
             "precommit_abandon_no_root": PRECOMMIT_ABANDON_NO_ROOT_AGE_MS,
+            "benchmark_max_age": max_age_cleanup["max_age_ms"],
         },
         "skipped": "",
     }
     if AUTOPILOT_MODE != "apply":
         result["skipped"] = "report_only"
         return result
-    if not STALE_CLEANUP_ENABLED and not PRECOMMIT_EXPIRY_CLEANUP_ENABLED:
+    if not STALE_CLEANUP_ENABLED and not PRECOMMIT_EXPIRY_CLEANUP_ENABLED and not max_age_cleanup["enabled"]:
         result["skipped"] = "disabled"
         return result
     if not cfg:
@@ -471,6 +494,7 @@ def _cleanup_stale_assignments(cfg: dict, now_ms: int) -> dict:
     expiry_roots_to_release = []
     expiry_proofs_to_release = []
     precommits_to_stop = []
+    old_benchmarks_to_stop = []
     if PRECOMMIT_EXPIRY_CLEANUP_ENABLED:
         expiry_root_candidates = _fetch_all(
             """
@@ -555,6 +579,34 @@ def _cleanup_stale_assignments(cfg: dict, now_ms: int) -> dict:
             LIMIT %s
             """,
             (now_ms - PRECOMMIT_ABANDON_NO_ROOT_AGE_MS, STALE_CLEANUP_MAX_ROWS),
+        )
+
+    if max_age_cleanup["enabled"] and max_age_cleanup["max_age_ms"] > 0:
+        old_benchmarks_to_stop = _fetch_all(
+            """
+            SELECT
+                j.benchmark_id,
+                j.start_time AS job_start_time,
+                j.challenge,
+                j.settings->>'algorithm_id' AS algorithm_id,
+                j.settings->>'track_id' AS track,
+                j.merkle_root_ready,
+                COUNT(rb.*) FILTER (WHERE rb.ready = true) AS roots_ready,
+                COUNT(rb.*) FILTER (WHERE rb.ready IS NULL) AS roots_pending,
+                COUNT(pb.*) FILTER (WHERE pb.ready = true) AS proofs_ready,
+                COUNT(pb.*) FILTER (WHERE pb.ready IS NULL) AS proofs_pending
+            FROM job j
+            LEFT JOIN root_batch rb ON rb.benchmark_id = j.benchmark_id
+            LEFT JOIN proofs_batch pb ON pb.benchmark_id = j.benchmark_id
+            WHERE j.stopped IS NULL
+              AND j.end_time IS NULL
+              AND j.start_time IS NOT NULL
+              AND j.start_time < %s
+            GROUP BY j.benchmark_id, j.start_time, j.challenge, j.settings, j.merkle_root_ready
+            ORDER BY j.start_time
+            LIMIT %s
+            """,
+            (now_ms - int(max_age_cleanup["max_age_ms"]), STALE_CLEANUP_MAX_ROWS),
         )
 
     queries = []
@@ -734,6 +786,73 @@ def _cleanup_stale_assignments(cfg: dict, now_ms: int) -> dict:
             "reason": "precommit_no_root_progress_abandon_age_exceeded",
         })
 
+    stopped_precommit_ids = {row["benchmark_id"] for row in precommits_to_stop}
+    for row in old_benchmarks_to_stop:
+        if row["benchmark_id"] in stopped_precommit_ids:
+            continue
+        queries.extend([
+            (
+                """
+                UPDATE job
+                SET stopped = true,
+                    end_time = %s
+                WHERE benchmark_id = %s
+                  AND stopped IS NULL
+                  AND end_time IS NULL
+                """,
+                (now_ms, row["benchmark_id"]),
+            ),
+            (
+                """
+                UPDATE root_batch
+                SET slave = NULL,
+                    start_time = NULL,
+                    end_time = NULL
+                WHERE benchmark_id = %s
+                  AND ready IS NULL
+                """,
+                (row["benchmark_id"],),
+            ),
+            (
+                """
+                UPDATE proofs_batch
+                SET slave = NULL,
+                    start_time = NULL,
+                    end_time = NULL
+                WHERE benchmark_id = %s
+                  AND ready IS NULL
+                """,
+                (row["benchmark_id"],),
+            ),
+            (
+                """
+                UPDATE benchmark_slot
+                SET benchmark_id = NULL,
+                    challenge = NULL,
+                    algorithm_id = NULL,
+                    track_id = NULL,
+                    assigned_at = NULL,
+                    last_activity_at = NULL,
+                    state = 'idle'
+                WHERE benchmark_id = %s
+                """,
+                (row["benchmark_id"],),
+            ),
+        ])
+        result["stopped_old_benchmarks"].append({
+            "benchmark": str(row["benchmark_id"])[:10],
+            "challenge": row["challenge"],
+            "algorithm_id": row["algorithm_id"],
+            "track": row["track"],
+            "job_age_min": round((now_ms - int(row["job_start_time"])) / 60000.0, 1),
+            "merkle_root_ready": bool(row.get("merkle_root_ready")),
+            "roots_ready": int(row.get("roots_ready") or 0),
+            "roots_pending": int(row.get("roots_pending") or 0),
+            "proofs_ready": int(row.get("proofs_ready") or 0),
+            "proofs_pending": int(row.get("proofs_pending") or 0),
+            "reason": "benchmark_max_age_exceeded",
+        })
+
     if queries:
         db.execute_many(*queries)
     return result
@@ -748,6 +867,7 @@ def _current_config_summary(cfg: dict) -> dict:
         "resource_slots": cfg.get("resource_slots", {}),
         "adaptive_slave_caps": cfg.get("adaptive_slave_caps", {}),
         "aws_batch_capacity": cfg.get("aws_batch_capacity", {}),
+        "benchmark_max_age_cleanup": cfg.get("benchmark_max_age_cleanup", {}),
         "slaves": cfg.get("slaves", []),
     }
 
@@ -3119,6 +3239,7 @@ def maybe_run():
         or cleanup.get("expiry_released_roots")
         or cleanup.get("expiry_released_proofs")
         or cleanup.get("stopped_precommits")
+        or cleanup.get("stopped_old_benchmarks")
     ):
         decision.setdefault("changes", {})["stale_cleanup"] = {
             "released_roots": cleanup.get("released_roots", []),
@@ -3127,6 +3248,7 @@ def maybe_run():
             "expiry_released_roots": cleanup.get("expiry_released_roots", []),
             "expiry_released_proofs": cleanup.get("expiry_released_proofs", []),
             "stopped_precommits": cleanup.get("stopped_precommits", []),
+            "stopped_old_benchmarks": cleanup.get("stopped_old_benchmarks", []),
         }
     if decision.get("config"):
         _push_config(decision["config"])
