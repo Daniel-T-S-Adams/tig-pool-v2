@@ -236,8 +236,9 @@ apt-get install -y "linux-modules-extra-$(uname -r)" || true
 
 ubuntu-drivers devices || true
 
-apt-get install -y nvidia-driver-570-server nvidia-utils-570-server nvidia-dkms-570-server \\
-  || apt-get install -y nvidia-driver-550-server nvidia-utils-550-server nvidia-dkms-550-server \\
+apt-get install -y nvidia-driver-595-open nvidia-utils-595 \\
+  || apt-get install -y nvidia-driver-580-open nvidia-utils-580 \\
+  || apt-get install -y nvidia-driver-580-server nvidia-utils-580-server nvidia-dkms-580-server \\
   || ubuntu-drivers install
 
 dkms autoinstall || true
