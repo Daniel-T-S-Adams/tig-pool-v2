@@ -1877,31 +1877,18 @@ def _target_resource_slots(capacity: dict) -> dict:
     else:
         proposed[CPU_SLOT_TYPE] = 0
 
-    if not capacity["active_gpu"]:
-        for slot_type in GPU_SLOT_TYPES:
-            proposed[slot_type] = 0
-    else:
-        current_gpu_slots = {
-            slot_type: int(current_slots.get(slot_type, slot_counts.get(slot_type, 0)) or 0)
-            for slot_type in GPU_SLOT_TYPES
-        }
+    current_gpu_slots = {
+        slot_type: int(current_slots.get(slot_type, slot_counts.get(slot_type, 0)) or 0)
+        for slot_type in GPU_SLOT_TYPES
+    }
+    for slot_type, current in current_gpu_slots.items():
+        proposed[slot_type] = current
+
+    if capacity["active_gpu"]:
         busy_gpu_slots = {
             slot_type: int(slot_busy.get(slot_type, 0) or 0)
             for slot_type in GPU_SLOT_TYPES
         }
-        if int(capacity["active_gpu"] or 0) <= 1:
-            focus_order = list(capacity.get("active_gpu_slot_types") or [])
-            if not focus_order:
-                focus_order = sorted(
-                    GPU_SLOT_TYPES,
-                    key=lambda key: (-busy_gpu_slots.get(key, 0), -current_gpu_slots.get(key, 0), key),
-                )
-            focus_slot = next((slot_type for slot_type in focus_order if slot_type in GPU_SLOT_TYPES), GPU_SLOT_TYPES[0])
-            proposed_gpu_slots = {slot_type: 0 for slot_type in GPU_SLOT_TYPES}
-            proposed_gpu_slots[focus_slot] = 1
-            proposed.update(proposed_gpu_slots)
-            return proposed
-
         gpu_target_total = max(1, int(capacity["active_gpu"] or 0))
         if capacity["productive_idle_gpu"] >= PRODUCTIVE_IDLE_GPU_SCALE_MIN:
             extra_slots = max(
@@ -1914,17 +1901,20 @@ def _target_resource_slots(capacity: dict) -> dict:
             gpu_target_total += 1
         gpu_target_total = min(gpu_target_total, MAX_GPU_SLOTS_PER_TYPE * len(GPU_SLOT_TYPES))
 
-        proposed_gpu_slots = {slot_type: 0 for slot_type in GPU_SLOT_TYPES}
+        proposed_gpu_slots = dict(current_gpu_slots)
         for slot_type in sorted(GPU_SLOT_TYPES, key=lambda key: (-busy_gpu_slots.get(key, 0), -current_gpu_slots.get(key, 0), key)):
             if gpu_target_total <= 0:
                 break
-            target = min(
+            target = max(
+                current_gpu_slots.get(slot_type, 0),
+                min(
                 MAX_GPU_SLOTS_PER_TYPE,
                 max(1 if current_gpu_slots.get(slot_type, 0) or busy_gpu_slots.get(slot_type, 0) else 0, busy_gpu_slots.get(slot_type, 0)),
                 gpu_target_total,
+                ),
             )
             proposed_gpu_slots[slot_type] = target
-            gpu_target_total -= target
+            gpu_target_total -= max(0, target - current_gpu_slots.get(slot_type, 0))
         if gpu_target_total > 0:
             for slot_type in GPU_SLOT_TYPES:
                 if gpu_target_total <= 0:
