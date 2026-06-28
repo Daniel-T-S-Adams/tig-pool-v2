@@ -887,6 +887,11 @@ class SlaveManager:
                 merkle_root = MerkleHash.from_str(result["merkle_root"])
                 solution_quality = result["solution_quality"]
                 assert isinstance(solution_quality, list) and all(isinstance(x, int) for x in solution_quality)
+                expected_nonces = int(b["batch"]["num_nonces"])
+                if len(solution_quality) != expected_nonces:
+                    raise ValueError(
+                        f"solution_quality length {len(solution_quality)} != expected {expected_nonces}"
+                    )
                 logger.debug(f"slave {slave_name} submitted root for {batch_id}")
             except Exception as e:
                 logger.error(f"slave {slave_name} submitted INVALID root for {batch_id}: {e}")
