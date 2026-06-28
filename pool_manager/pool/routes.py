@@ -180,6 +180,23 @@ def _fleet_services(worker_type: str) -> str:
 
 def _fleet_linux_install_script(token: str, worker_type: str) -> str:
     services = _fleet_services(worker_type)
+    if worker_type == "gpu":
+        start_commands = """$SUDO docker compose -f slave.yml up -d --force-recreate vector_search hypergraph neuralnet_optimizer
+
+for service in vector_search hypergraph neuralnet_optimizer; do
+  for attempt in $(seq 1 60); do
+    status="$($SUDO docker compose -f slave.yml ps --status running --services | grep -x "$service" || true)"
+    if [ "$status" = "$service" ]; then
+      break
+    fi
+    sleep 2
+  done
+  $SUDO docker compose -f slave.yml ps --status running --services | grep -x "$service"
+done
+
+$SUDO docker compose -f slave.yml up -d --force-recreate slave"""
+    else:
+        start_commands = f"$SUDO docker compose -f slave.yml up -d --force-recreate {services}"
     return f"""#!/usr/bin/env bash
 set -euxo pipefail
 
@@ -207,7 +224,7 @@ curl -fsSL "{_POOL_PUBLIC_URL}/static/fleet-install.sh?cachebust=$(date +%s)" | 
   --worker-type {worker_type} \\
   --machine-index "$(hostname)"
 
-$SUDO docker compose -f slave.yml up -d --force-recreate {services}
+{start_commands}
 """
 
 
@@ -283,7 +300,20 @@ curl -fsSL "{_POOL_PUBLIC_URL}/static/fleet-install.sh?cachebust=$(date +%s)" | 
   --worker-type gpu \\
   --machine-index "$INSTANCE_ID"
 
-docker compose -f slave.yml up -d --force-recreate {services}
+docker compose -f slave.yml up -d --force-recreate vector_search hypergraph neuralnet_optimizer
+
+for service in vector_search hypergraph neuralnet_optimizer; do
+  for attempt in $(seq 1 60); do
+    status="$(docker compose -f slave.yml ps --status running --services | grep -x "$service" || true)"
+    if [ "$status" = "$service" ]; then
+      break
+    fi
+    sleep 2
+  done
+  docker compose -f slave.yml ps --status running --services | grep -x "$service"
+done
+
+docker compose -f slave.yml up -d --force-recreate slave
 
 docker compose -f slave.yml ps
 docker compose -f slave.yml logs --tail=80 slave
