@@ -259,7 +259,7 @@ class SlaveManager:
             return "J.challenge NOT IN ('vector_search', 'hypergraph', 'neuralnet_optimizer')"
         return "J.challenge = %s"
 
-    def _assign_idle_slots(self, slot_types: List[str]):
+    def _assign_idle_slots(self, slot_types: List[str], algorithm_id_regex: str = ""):
         if not slot_types:
             return
         now_ms = int(time.time() * 1000)
@@ -283,6 +283,7 @@ class SlaveManager:
                         WHERE J.stopped IS NULL
                           AND J.end_time IS NULL
                           AND J.challenge NOT IN ('vector_search', 'hypergraph', 'neuralnet_optimizer')
+                          AND (%s = '' OR J.settings->>'algorithm_id' ~ %s)
                           AND NOT EXISTS (
                             SELECT 1 FROM benchmark_slot S WHERE S.benchmark_id = J.benchmark_id
                           )
@@ -298,7 +299,8 @@ class SlaveManager:
                           )
                         ORDER BY J.block_started, J.start_time, J.benchmark_id
                         LIMIT 1
-                        """
+                        """,
+                        (algorithm_id_regex, algorithm_id_regex)
                     )
                 else:
                     job = get_db_conn().fetch_one(
@@ -655,7 +657,7 @@ class SlaveManager:
             if slot_types:
                 self._sync_slots()
                 self._release_slots()
-                self._assign_idle_slots(slot_types)
+                self._assign_idle_slots(slot_types, slave["algorithm_id_regex"])
                 slot_benchmark_ids = self._slot_benchmark_ids(slot_types)
                 starved_slot_benchmarks = self._starved_slot_benchmarks(slot_types, int(now))
 
