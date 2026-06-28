@@ -1240,6 +1240,7 @@ def _reward_funnel_summary(now_ms: int) -> dict:
         row["allowlist_blocked"] = allowlist_blocked
         row["intentional_stopped_without_roots"] = stopped_without_roots if allowlist_blocked else 0
         row["unexpected_stopped_without_roots"] = 0 if allowlist_blocked else stopped_without_roots
+        row["unexpected_stopped_without_roots_rate"] = 0.0 if allowlist_blocked else _safe_div(stopped_without_roots, seen)
         row["unexpected_stopped_rate"] = 0.0 if allowlist_blocked else _safe_div(stopped, seen)
         row["root_ready_rate"] = _safe_div(root_ready, seen)
         row["proof_conversion_rate"] = _safe_div(proof_submitted, proof_required)
@@ -1264,6 +1265,7 @@ def _reward_funnel_summary(now_ms: int) -> dict:
     proof_attempt_rate = _safe_div(proof_attempted, proof_required)
     stopped_rate = _safe_div(stopped, seen)
     unexpected_stopped_rate = _safe_div(unexpected_stopped, seen)
+    unexpected_stopped_without_roots_rate = _safe_div(unexpected_stopped_without_roots, seen)
     issues = []
     if seen >= 5 and proof_required == 0:
         issues.append("warming_up_no_proof_samples")
@@ -1271,8 +1273,11 @@ def _reward_funnel_summary(now_ms: int) -> dict:
         issues.append("root_phase_not_complete")
     if proof_required and (proof_conversion or 0.0) < FUNNEL_MIN_PROOF_CONVERSION_RATE:
         issues.append("low_proof_conversion")
-    if unexpected_stopped_rate is not None and unexpected_stopped_rate > FUNNEL_MAX_STOPPED_OR_EXPIRED_RATE:
-        issues.append("high_unexpected_stopped_or_expired_rate")
+    if (
+        unexpected_stopped_without_roots_rate is not None
+        and unexpected_stopped_without_roots_rate > FUNNEL_MAX_STOPPED_OR_EXPIRED_RATE
+    ):
+        issues.append("high_unexpected_stopped_without_roots_rate")
     if unexpected_stopped_without_roots:
         issues.append("stopped_without_root_work")
     if avg_time_to_proof is not None and float(avg_time_to_proof) > FUNNEL_TARGET_PROOF_SUBMIT_SEC:
@@ -1291,6 +1296,7 @@ def _reward_funnel_summary(now_ms: int) -> dict:
             "proof_submit_attempt_rate": proof_attempt_rate,
             "stopped_rate": stopped_rate,
             "unexpected_stopped_rate": unexpected_stopped_rate,
+            "unexpected_stopped_without_roots_rate": unexpected_stopped_without_roots_rate,
             "intentional_stopped_without_roots": intentional_stopped_without_roots,
             "unexpected_stopped_without_roots": unexpected_stopped_without_roots,
             "safe_to_scale_workload": not issues,
@@ -1434,7 +1440,10 @@ def _next_power_of_two(value: int) -> int:
 
 
 def _effective_stopped_rate(funnel: dict):
-    return funnel.get("unexpected_stopped_rate", funnel.get("stopped_rate"))
+    return funnel.get(
+        "unexpected_stopped_without_roots_rate",
+        funnel.get("unexpected_stopped_rate", funnel.get("stopped_rate")),
+    )
 
 
 def _workload_confidence(funnel: dict, observed: dict) -> dict:
@@ -2221,6 +2230,7 @@ def _recommendations(
                 "proof_conversion_rate": funnel_summary.get("proof_conversion_rate"),
                 "stopped_rate": funnel_summary.get("stopped_rate"),
                 "unexpected_stopped_rate": funnel_summary.get("unexpected_stopped_rate"),
+                "unexpected_stopped_without_roots_rate": funnel_summary.get("unexpected_stopped_without_roots_rate"),
                 "avg_time_to_proof_submit_sec": funnel_summary.get("avg_time_to_proof_submit_sec"),
                 "stopped_without_roots": funnel_summary.get("stopped_without_roots"),
             },
@@ -2434,6 +2444,7 @@ def _policy_posture(
             "proof_conversion_rate": proof_conversion,
             "stopped_rate": stopped_rate,
             "unexpected_stopped_rate": funnel_summary.get("unexpected_stopped_rate"),
+            "unexpected_stopped_without_roots_rate": funnel_summary.get("unexpected_stopped_without_roots_rate"),
             "avg_time_to_proof_submit_sec": avg_time_to_proof,
             "clean_windows": clean_windows,
             "active_cpu": active_cpu,
@@ -2880,6 +2891,8 @@ def _plan_config_change(report: dict, cfg: dict, clean_windows: int) -> dict:
             "issues": funnel_summary.get("issues", []),
             "proof_conversion_rate": funnel_summary.get("proof_conversion_rate"),
             "stopped_rate": funnel_summary.get("stopped_rate"),
+            "unexpected_stopped_rate": funnel_summary.get("unexpected_stopped_rate"),
+            "unexpected_stopped_without_roots_rate": funnel_summary.get("unexpected_stopped_without_roots_rate"),
             "avg_time_to_proof_submit_sec": funnel_summary.get("avg_time_to_proof_submit_sec"),
         }
         drain_issues = {
@@ -2888,6 +2901,7 @@ def _plan_config_change(report: dict, cfg: dict, clean_windows: int) -> dict:
             "high_stopped_or_expired_rate",
             "high_unexpected_stopped_or_expired_rate",
             "high_unexpected_stopped_rate",
+            "high_unexpected_stopped_without_roots_rate",
         }
         active_issues = set(funnel_summary.get("issues") or [])
         current = int(cfg.get("max_concurrent_benchmarks") or 0)
@@ -2904,6 +2918,7 @@ def _plan_config_change(report: dict, cfg: dict, clean_windows: int) -> dict:
                     "issues": funnel_summary.get("issues", []),
                     "proof_conversion_rate": funnel_summary.get("proof_conversion_rate"),
                     "unexpected_stopped_rate": funnel_summary.get("unexpected_stopped_rate"),
+                    "unexpected_stopped_without_roots_rate": funnel_summary.get("unexpected_stopped_without_roots_rate"),
                     "avg_time_to_proof_submit_sec": funnel_summary.get("avg_time_to_proof_submit_sec"),
                     "drain_floor": drain_floor,
                 }
@@ -3220,6 +3235,7 @@ def _scale_readiness_summary(
             "proof_conversion_rate": funnel_summary.get("proof_conversion_rate"),
             "stopped_rate": funnel_summary.get("stopped_rate"),
             "unexpected_stopped_rate": funnel_summary.get("unexpected_stopped_rate"),
+            "unexpected_stopped_without_roots_rate": funnel_summary.get("unexpected_stopped_without_roots_rate"),
             "avg_time_to_proof_submit_sec": funnel_summary.get("avg_time_to_proof_submit_sec"),
         },
     }
