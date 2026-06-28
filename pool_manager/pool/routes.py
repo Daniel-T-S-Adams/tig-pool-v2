@@ -220,15 +220,30 @@ exec > >(tee -a /var/log/innopool-gpu-userdata.log) 2>&1
 
 FLEET_TOKEN="{token}"
 
+export DEBIAN_FRONTEND=noninteractive
+
 apt-get update
-apt-get install -y curl git ca-certificates gnupg python3 ubuntu-drivers-common docker.io docker-compose-v2
+apt-get install -y curl git ca-certificates gnupg python3 docker.io docker-compose-v2
 
 systemctl enable --now docker
 
-ubuntu-drivers devices || true
-ubuntu-drivers install
+apt-get install -y \\
+  "linux-headers-$(uname -r)" \\
+  ubuntu-drivers-common \\
+  dkms \\
+  build-essential
+apt-get install -y "linux-modules-extra-$(uname -r)" || true
 
-modprobe nvidia || true
+ubuntu-drivers devices || true
+
+apt-get install -y nvidia-driver-570-server nvidia-utils-570-server nvidia-dkms-570-server \\
+  || apt-get install -y nvidia-driver-550-server nvidia-utils-550-server nvidia-dkms-550-server \\
+  || ubuntu-drivers install
+
+dkms autoinstall || true
+depmod -a
+
+modprobe nvidia
 nvidia-smi
 
 curl -fsSL https://nvidia.github.io/libnvidia-container/gpgkey \\
