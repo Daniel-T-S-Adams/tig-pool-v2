@@ -70,11 +70,22 @@ class PrecommitManager:
             logger.debug("All algorithms are at their per-challenge max concurrent benchmarks")
             return
 
-        logger.debug(f"Selecting algorithm from: {[(x['algorithm_id'], x['weight']) for x in eligible]}")
+        weighted_eligible = [
+            x for x in eligible
+            if int(x.get("weight") or 0) > 0
+        ]
+        if not weighted_eligible:
+            logger.debug(
+                "All eligible algorithms have zero weight: %s",
+                [(x.get("algorithm_id"), x.get("weight")) for x in eligible],
+            )
+            return
+
+        logger.debug(f"Selecting algorithm from: {[(x['algorithm_id'], x['weight']) for x in weighted_eligible]}")
         # Deep copy so mutations below (stripping unknown keys, filling defaults)
         # don't corrupt the live CONFIG["algo_selection"] — especially batch_size
         # which lives in track_settings but must not be sent to mainnet.
-        selection = copy.deepcopy(random.choices(eligible, weights=[x["weight"] for x in eligible])[0])
+        selection = copy.deepcopy(random.choices(weighted_eligible, weights=[x["weight"] for x in weighted_eligible])[0])
         a_id = selection["algorithm_id"]
         c_id = a_id[:4]
         compute_type = selection.get("compute_type")
