@@ -1516,6 +1516,7 @@ def _workload_controller_targets(
     targets = []
     for row in track_economics:
         algorithm_id = row.get("algorithm_id")
+        challenge_id = str(algorithm_id or "").split("_", 1)[0]
         track = row.get("track")
         configured = row.get("configured") or {}
         derived = row.get("derived") or {}
