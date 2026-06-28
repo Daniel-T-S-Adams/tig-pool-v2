@@ -165,6 +165,19 @@ def _route_is_cpu(slave: dict) -> bool:
     return any(challenge_id in regex for challenge_id in CPU_CHALLENGE_IDS)
 
 
+def _gpu_slot_floor(cfg: dict | None) -> dict[str, int]:
+    """Minimum GPU slots the operator expects autopilot to preserve.
+
+    A previous single-GPU recovery path could write GPU slots to zero. Using a
+    floor lets autopilot repair that state instead of treating zero as intent.
+    """
+    raw = ((cfg or {}).get("gpu_slot_floor") or {})
+    return {
+        slot_type: max(0, int(raw.get(slot_type, 1)))
+        for slot_type in GPU_SLOT_TYPES
+    }
+
+
 def _benchmark_max_age_cleanup(cfg: dict | None) -> dict:
     raw = ((cfg or {}).get("benchmark_max_age_cleanup") or {})
     enabled = raw.get("enabled", BENCHMARK_MAX_AGE_CLEANUP_ENABLED)
@@ -865,6 +878,7 @@ def _current_config_summary(cfg: dict) -> dict:
         "max_batches_per_benchmark": cfg.get("max_batches_per_benchmark"),
         "per_challenge_max_benchmarks": cfg.get("per_challenge_max_benchmarks", {}),
         "resource_slots": cfg.get("resource_slots", {}),
+        "gpu_slot_floor": cfg.get("gpu_slot_floor", {}),
         "adaptive_slave_caps": cfg.get("adaptive_slave_caps", {}),
         "aws_batch_capacity": cfg.get("aws_batch_capacity", {}),
         "benchmark_max_age_cleanup": cfg.get("benchmark_max_age_cleanup", {}),
@@ -1836,6 +1850,7 @@ def _fleet_capacity(
         "slot_busy": slot_busy,
         "active_gpu_slot_types": active_gpu_slot_types,
         "current_slots": current_slots,
+        "gpu_slot_floor": _gpu_slot_floor(cfg),
         "current_adaptive_caps": cfg.get("adaptive_slave_caps") or {},
         "aws_batch_capacity": aws_capacity,
         "aws_cpu_jobs": aws_capacity.get("max_concurrent_cpu_jobs", 0),
@@ -1881,8 +1896,9 @@ def _target_resource_slots(capacity: dict) -> dict:
         slot_type: int(current_slots.get(slot_type, slot_counts.get(slot_type, 0)) or 0)
         for slot_type in GPU_SLOT_TYPES
     }
+    gpu_slot_floor = capacity.get("gpu_slot_floor") or {}
     for slot_type, current in current_gpu_slots.items():
-        proposed[slot_type] = current
+        proposed[slot_type] = max(current, int(gpu_slot_floor.get(slot_type, 0) or 0))
 
     if capacity["active_gpu"]:
         busy_gpu_slots = {
@@ -1901,12 +1917,16 @@ def _target_resource_slots(capacity: dict) -> dict:
             gpu_target_total += 1
         gpu_target_total = min(gpu_target_total, MAX_GPU_SLOTS_PER_TYPE * len(GPU_SLOT_TYPES))
 
-        proposed_gpu_slots = dict(current_gpu_slots)
+        proposed_gpu_slots = {
+            slot_type: max(current, int(gpu_slot_floor.get(slot_type, 0) or 0))
+            for slot_type, current in current_gpu_slots.items()
+        }
         for slot_type in sorted(GPU_SLOT_TYPES, key=lambda key: (-busy_gpu_slots.get(key, 0), -current_gpu_slots.get(key, 0), key)):
             if gpu_target_total <= 0:
                 break
             target = max(
                 current_gpu_slots.get(slot_type, 0),
+                int(gpu_slot_floor.get(slot_type, 0) or 0),
                 min(
                 MAX_GPU_SLOTS_PER_TYPE,
                 max(1 if current_gpu_slots.get(slot_type, 0) or busy_gpu_slots.get(slot_type, 0) else 0, busy_gpu_slots.get(slot_type, 0)),
@@ -1982,21 +2002,22 @@ def _target_per_challenge_caps(cfg: dict, capacity: dict, proposed_slots: dict) 
         current_c004 = int(current_per.get("c004", 1) or 1)
         current_c005 = int(current_per.get("c005", 1) or 1)
         current_c006 = int(current_per.get("c006", 1) or 1)
+        slot_floor = capacity.get("gpu_slot_floor") or {}
         proposed.update({
             "c004": min(
-                max(current_c004, int(proposed_slots.get("vector_search", 0) or 0))
+                max(current_c004, int(slot_floor.get("vector_search", 0) or 0), int(proposed_slots.get("vector_search", 0) or 0))
                 if not (stale_blocking and "c004" in stale_challenge_ids)
                 else current_c004,
                 MAX_GPU_CHALLENGE_BENCHMARKS,
             ),
             "c005": min(
-                max(current_c005, int(proposed_slots.get("hypergraph", 0) or 0))
+                max(current_c005, int(slot_floor.get("hypergraph", 0) or 0), int(proposed_slots.get("hypergraph", 0) or 0))
                 if not (stale_blocking and "c005" in stale_challenge_ids)
                 else current_c005,
                 MAX_GPU_CHALLENGE_BENCHMARKS,
             ),
             "c006": min(
-                max(current_c006, int(proposed_slots.get("neuralnet_optimizer", 0) or 0))
+                max(current_c006, int(slot_floor.get("neuralnet_optimizer", 0) or 0), int(proposed_slots.get("neuralnet_optimizer", 0) or 0))
                 if not (stale_blocking and "c006" in stale_challenge_ids)
                 else current_c006,
                 MAX_GPU_CHALLENGE_BENCHMARKS,
@@ -3382,6 +3403,7 @@ def build_report() -> dict:
         "capacity_model": capacity,
         "capacity_targets": {
             "aws_batch_capacity": capacity.get("aws_batch_capacity") if capacity else {},
+            "gpu_slot_floor": capacity.get("gpu_slot_floor") if capacity else {},
             "resource_slots": target_slots,
             "max_concurrent_benchmarks": (
                 _target_max_concurrent_benchmarks(capacity, target_slots)
