@@ -86,6 +86,19 @@ STALE_PROOF_CLEANUP_MIN_AGE_MS = int(
     os.environ.get("AUTOPILOT_STALE_PROOF_CLEANUP_MIN_AGE_MS", str(20 * 60 * 1000))
 )
 STALE_CLEANUP_MAX_ROWS = int(os.environ.get("AUTOPILOT_STALE_CLEANUP_MAX_ROWS", "50"))
+PRECOMMIT_EXPIRY_CLEANUP_ENABLED = os.environ.get(
+    "AUTOPILOT_PRECOMMIT_EXPIRY_CLEANUP_ENABLED",
+    "true",
+).lower() in ("1", "true", "yes", "on")
+PRECOMMIT_ROOT_RECLAIM_AGE_MS = int(
+    os.environ.get("AUTOPILOT_PRECOMMIT_ROOT_RECLAIM_AGE_MS", str(50 * 60 * 1000))
+)
+PRECOMMIT_PROOF_RECLAIM_AGE_MS = int(
+    os.environ.get("AUTOPILOT_PRECOMMIT_PROOF_RECLAIM_AGE_MS", str(20 * 60 * 1000))
+)
+PRECOMMIT_ABANDON_NO_ROOT_AGE_MS = int(
+    os.environ.get("AUTOPILOT_PRECOMMIT_ABANDON_NO_ROOT_AGE_MS", str(75 * 60 * 1000))
+)
 
 GPU_CHALLENGES = {"vector_search", "hypergraph", "neuralnet_optimizer"}
 GPU_SLOT_TYPES = ("vector_search", "hypergraph", "neuralnet_optimizer")
@@ -302,39 +315,57 @@ def _cleanup_stale_assignments(cfg: dict, now_ms: int) -> dict:
     """
     result = {
         "enabled": STALE_CLEANUP_ENABLED,
+        "precommit_expiry_enabled": PRECOMMIT_EXPIRY_CLEANUP_ENABLED,
         "released_roots": [],
         "released_orphan_roots": [],
         "released_proofs": [],
+        "expiry_released_roots": [],
+        "expiry_released_proofs": [],
+        "stopped_precommits": [],
+        "thresholds_ms": {
+            "stale_root_cleanup": STALE_ROOT_CLEANUP_MIN_AGE_MS,
+            "stale_proof_cleanup": STALE_PROOF_CLEANUP_MIN_AGE_MS,
+            "precommit_root_reclaim": PRECOMMIT_ROOT_RECLAIM_AGE_MS,
+            "precommit_proof_reclaim": PRECOMMIT_PROOF_RECLAIM_AGE_MS,
+            "precommit_abandon_no_root": PRECOMMIT_ABANDON_NO_ROOT_AGE_MS,
+        },
         "skipped": "",
     }
-    if not STALE_CLEANUP_ENABLED:
+    if AUTOPILOT_MODE != "apply":
+        result["skipped"] = "report_only"
+        return result
+    if not STALE_CLEANUP_ENABLED and not PRECOMMIT_EXPIRY_CLEANUP_ENABLED:
         result["skipped"] = "disabled"
         return result
     if not cfg:
         result["skipped"] = "missing_config"
         return result
 
-    root_candidates = _fetch_all(
-        """
-        SELECT
-            rb.benchmark_id,
-            rb.batch_idx,
-            rb.slave,
-            rb.start_time,
-            rb.num_attempts,
-            j.challenge,
-            j.settings->>'track_id' AS track
-        FROM root_batch rb
-        JOIN job j ON j.benchmark_id = rb.benchmark_id
-        WHERE rb.ready IS NULL
-          AND rb.slave IS NOT NULL
-          AND rb.start_time IS NOT NULL
-          AND rb.start_time < %s
-        ORDER BY rb.start_time
-        LIMIT %s
-        """,
-        (now_ms - STALE_ROOT_CLEANUP_MIN_AGE_MS, STALE_CLEANUP_MAX_ROWS),
-    )
+    root_candidates = []
+    if STALE_CLEANUP_ENABLED:
+        root_candidates = _fetch_all(
+            """
+            SELECT
+                rb.benchmark_id,
+                rb.batch_idx,
+                rb.slave,
+                rb.start_time,
+                rb.num_attempts,
+                j.challenge,
+                j.settings->>'track_id' AS track
+            FROM root_batch rb
+            JOIN job j ON j.benchmark_id = rb.benchmark_id
+            WHERE rb.ready IS NULL
+              AND rb.slave IS NOT NULL
+              AND rb.start_time IS NOT NULL
+              AND rb.start_time < %s
+              AND j.stopped IS NULL
+              AND j.end_time IS NULL
+            ORDER BY rb.start_time
+            LIMIT %s
+            """,
+            (now_ms - STALE_ROOT_CLEANUP_MIN_AGE_MS, STALE_CLEANUP_MAX_ROWS),
+        )
     roots_to_release = []
     for row in root_candidates:
         age_ms = now_ms - int(row.get("start_time") or now_ms)
@@ -342,26 +373,30 @@ def _cleanup_stale_assignments(cfg: dict, now_ms: int) -> dict:
         if age_ms >= timeout_ms:
             roots_to_release.append(row)
 
-    orphan_root_candidates = _fetch_all(
-        """
-        SELECT
-            rb.benchmark_id,
-            rb.batch_idx,
-            rb.start_time,
-            rb.num_attempts,
-            j.challenge,
-            j.settings->>'track_id' AS track
-        FROM root_batch rb
-        JOIN job j ON j.benchmark_id = rb.benchmark_id
-        WHERE rb.ready IS NULL
-          AND rb.slave IS NULL
-          AND rb.start_time IS NOT NULL
-          AND rb.start_time < %s
-        ORDER BY rb.start_time
-        LIMIT %s
-        """,
-        (now_ms - STALE_ROOT_CLEANUP_MIN_AGE_MS, STALE_CLEANUP_MAX_ROWS),
-    )
+    orphan_root_candidates = []
+    if STALE_CLEANUP_ENABLED:
+        orphan_root_candidates = _fetch_all(
+            """
+            SELECT
+                rb.benchmark_id,
+                rb.batch_idx,
+                rb.start_time,
+                rb.num_attempts,
+                j.challenge,
+                j.settings->>'track_id' AS track
+            FROM root_batch rb
+            JOIN job j ON j.benchmark_id = rb.benchmark_id
+            WHERE rb.ready IS NULL
+              AND rb.slave IS NULL
+              AND rb.start_time IS NOT NULL
+              AND rb.start_time < %s
+              AND j.stopped IS NULL
+              AND j.end_time IS NULL
+            ORDER BY rb.start_time
+            LIMIT %s
+            """,
+            (now_ms - STALE_ROOT_CLEANUP_MIN_AGE_MS, STALE_CLEANUP_MAX_ROWS),
+        )
     orphan_roots_to_release = []
     for row in orphan_root_candidates:
         age_ms = now_ms - int(row.get("start_time") or now_ms)
@@ -369,32 +404,125 @@ def _cleanup_stale_assignments(cfg: dict, now_ms: int) -> dict:
         if age_ms >= timeout_ms:
             orphan_roots_to_release.append(row)
 
-    proof_candidates = _fetch_all(
-        """
-        SELECT
-            pb.benchmark_id,
-            pb.batch_idx,
-            pb.slave,
-            pb.start_time,
-            pb.num_attempts,
-            j.challenge,
-            j.settings->>'track_id' AS track
-        FROM proofs_batch pb
-        JOIN job j ON j.benchmark_id = pb.benchmark_id
-        WHERE pb.ready IS NULL
-          AND pb.start_time IS NOT NULL
-          AND pb.start_time < %s
-        ORDER BY pb.start_time
-        LIMIT %s
-        """,
-        (now_ms - STALE_PROOF_CLEANUP_MIN_AGE_MS, STALE_CLEANUP_MAX_ROWS),
-    )
+    proof_candidates = []
+    if STALE_CLEANUP_ENABLED:
+        proof_candidates = _fetch_all(
+            """
+            SELECT
+                pb.benchmark_id,
+                pb.batch_idx,
+                pb.slave,
+                pb.start_time,
+                pb.num_attempts,
+                j.challenge,
+                j.settings->>'track_id' AS track
+            FROM proofs_batch pb
+            JOIN job j ON j.benchmark_id = pb.benchmark_id
+            WHERE pb.ready IS NULL
+              AND pb.start_time IS NOT NULL
+              AND pb.start_time < %s
+              AND j.stopped IS NULL
+              AND j.end_time IS NULL
+            ORDER BY pb.start_time
+            LIMIT %s
+            """,
+            (now_ms - STALE_PROOF_CLEANUP_MIN_AGE_MS, STALE_CLEANUP_MAX_ROWS),
+        )
     proofs_to_release = []
     for row in proof_candidates:
         age_ms = now_ms - int(row.get("start_time") or now_ms)
         timeout_ms = STALE_PROOF_CLEANUP_MIN_AGE_MS
         if age_ms >= timeout_ms:
             proofs_to_release.append(row)
+
+    expiry_roots_to_release = []
+    expiry_proofs_to_release = []
+    precommits_to_stop = []
+    if PRECOMMIT_EXPIRY_CLEANUP_ENABLED:
+        expiry_root_candidates = _fetch_all(
+            """
+            SELECT
+                rb.benchmark_id,
+                rb.batch_idx,
+                rb.slave,
+                rb.start_time,
+                rb.num_attempts,
+                j.start_time AS job_start_time,
+                j.challenge,
+                j.settings->>'track_id' AS track
+            FROM root_batch rb
+            JOIN job j ON j.benchmark_id = rb.benchmark_id
+            WHERE rb.ready IS NULL
+              AND rb.slave IS NOT NULL
+              AND rb.start_time IS NOT NULL
+              AND j.stopped IS NULL
+              AND j.end_time IS NULL
+              AND j.merkle_root_ready IS NULL
+              AND j.start_time < %s
+            ORDER BY j.start_time, rb.start_time
+            LIMIT %s
+            """,
+            (now_ms - PRECOMMIT_ROOT_RECLAIM_AGE_MS, STALE_CLEANUP_MAX_ROWS),
+        )
+        stale_root_keys = {(row["benchmark_id"], row["batch_idx"]) for row in roots_to_release}
+        for row in expiry_root_candidates:
+            key = (row["benchmark_id"], row["batch_idx"])
+            if key not in stale_root_keys:
+                expiry_roots_to_release.append(row)
+
+        expiry_proof_candidates = _fetch_all(
+            """
+            SELECT
+                pb.benchmark_id,
+                pb.batch_idx,
+                pb.slave,
+                pb.start_time,
+                pb.num_attempts,
+                j.start_time AS job_start_time,
+                j.challenge,
+                j.settings->>'track_id' AS track
+            FROM proofs_batch pb
+            JOIN job j ON j.benchmark_id = pb.benchmark_id
+            WHERE pb.ready IS NULL
+              AND pb.slave IS NOT NULL
+              AND pb.start_time IS NOT NULL
+              AND j.stopped IS NULL
+              AND j.end_time IS NULL
+              AND j.start_time < %s
+            ORDER BY j.start_time, pb.start_time
+            LIMIT %s
+            """,
+            (now_ms - PRECOMMIT_PROOF_RECLAIM_AGE_MS, STALE_CLEANUP_MAX_ROWS),
+        )
+        stale_proof_keys = {(row["benchmark_id"], row["batch_idx"]) for row in proofs_to_release}
+        for row in expiry_proof_candidates:
+            key = (row["benchmark_id"], row["batch_idx"])
+            if key not in stale_proof_keys:
+                expiry_proofs_to_release.append(row)
+
+        precommits_to_stop = _fetch_all(
+            """
+            SELECT
+                j.benchmark_id,
+                j.start_time AS job_start_time,
+                j.challenge,
+                j.settings->>'algorithm_id' AS algorithm_id,
+                j.settings->>'track_id' AS track,
+                COUNT(rb.*) FILTER (WHERE rb.ready = true) AS roots_ready,
+                COUNT(rb.*) FILTER (WHERE rb.ready IS NULL) AS roots_pending
+            FROM job j
+            JOIN root_batch rb ON rb.benchmark_id = j.benchmark_id
+            WHERE j.stopped IS NULL
+              AND j.end_time IS NULL
+              AND j.merkle_root_ready IS NULL
+              AND j.start_time < %s
+            GROUP BY j.benchmark_id, j.start_time, j.challenge, j.settings
+            HAVING COUNT(rb.*) FILTER (WHERE rb.ready = true) = 0
+            ORDER BY j.start_time
+            LIMIT %s
+            """,
+            (now_ms - PRECOMMIT_ABANDON_NO_ROOT_AGE_MS, STALE_CLEANUP_MAX_ROWS),
+        )
 
     queries = []
     for row in roots_to_release:
@@ -441,6 +569,30 @@ def _cleanup_stale_assignments(cfg: dict, now_ms: int) -> dict:
             "age_min": round((now_ms - int(row["start_time"])) / 60000.0, 1),
         })
 
+    for row in expiry_roots_to_release:
+        queries.append((
+            """
+            UPDATE root_batch
+            SET slave = NULL,
+                start_time = NULL,
+                end_time = NULL
+            WHERE benchmark_id = %s
+              AND batch_idx = %s
+              AND ready IS NULL
+            """,
+            (row["benchmark_id"], row["batch_idx"]),
+        ))
+        result["expiry_released_roots"].append({
+            "benchmark": str(row["benchmark_id"])[:10],
+            "batch_idx": row["batch_idx"],
+            "slave": row["slave"],
+            "challenge": row["challenge"],
+            "track": row["track"],
+            "job_age_min": round((now_ms - int(row["job_start_time"])) / 60000.0, 1),
+            "assignment_age_min": round((now_ms - int(row["start_time"])) / 60000.0, 1),
+            "reason": "precommit_root_reclaim_age_exceeded",
+        })
+
     for row in proofs_to_release:
         queries.append((
             """
@@ -461,6 +613,92 @@ def _cleanup_stale_assignments(cfg: dict, now_ms: int) -> dict:
             "challenge": row["challenge"],
             "track": row["track"],
             "age_min": round((now_ms - int(row["start_time"])) / 60000.0, 1),
+        })
+
+    for row in expiry_proofs_to_release:
+        queries.append((
+            """
+            UPDATE proofs_batch
+            SET slave = NULL,
+                start_time = NULL,
+                end_time = NULL
+            WHERE benchmark_id = %s
+              AND batch_idx = %s
+              AND ready IS NULL
+            """,
+            (row["benchmark_id"], row["batch_idx"]),
+        ))
+        result["expiry_released_proofs"].append({
+            "benchmark": str(row["benchmark_id"])[:10],
+            "batch_idx": row["batch_idx"],
+            "slave": row["slave"],
+            "challenge": row["challenge"],
+            "track": row["track"],
+            "job_age_min": round((now_ms - int(row["job_start_time"])) / 60000.0, 1),
+            "assignment_age_min": round((now_ms - int(row["start_time"])) / 60000.0, 1),
+            "reason": "precommit_proof_reclaim_age_exceeded",
+        })
+
+    for row in precommits_to_stop:
+        queries.extend([
+            (
+                """
+                UPDATE job
+                SET stopped = true,
+                    end_time = %s
+                WHERE benchmark_id = %s
+                  AND stopped IS NULL
+                  AND end_time IS NULL
+                  AND merkle_root_ready IS NULL
+                """,
+                (now_ms, row["benchmark_id"]),
+            ),
+            (
+                """
+                UPDATE root_batch
+                SET slave = NULL,
+                    start_time = NULL,
+                    end_time = NULL
+                WHERE benchmark_id = %s
+                  AND ready IS NULL
+                """,
+                (row["benchmark_id"],),
+            ),
+            (
+                """
+                UPDATE proofs_batch
+                SET slave = NULL,
+                    start_time = NULL,
+                    end_time = NULL
+                WHERE benchmark_id = %s
+                  AND ready IS NULL
+                """,
+                (row["benchmark_id"],),
+            ),
+            (
+                """
+                UPDATE benchmark_slot
+                SET benchmark_id = NULL,
+                    challenge = NULL,
+                    algorithm_id = NULL,
+                    track_id = NULL,
+                    assigned_at = NULL,
+                    last_activity_at = NULL,
+                    state = 'idle'
+                WHERE benchmark_id = %s
+                """,
+                (row["benchmark_id"],),
+            ),
+        ])
+        result["stopped_precommits"].append({
+            "benchmark": str(row["benchmark_id"])[:10],
+            "challenge": row["challenge"],
+            "algorithm_id": row["algorithm_id"],
+            "track": row["track"],
+            "job_age_min": round((now_ms - int(row["job_start_time"])) / 60000.0, 1),
+            "roots_ready": int(row.get("roots_ready") or 0),
+            "roots_pending": int(row.get("roots_pending") or 0),
+            "reason": "precommit_no_root_progress_abandon_age_exceeded",
         })
 
     if queries:
@@ -2713,11 +2951,17 @@ def maybe_run():
         cleanup.get("released_roots")
         or cleanup.get("released_orphan_roots")
         or cleanup.get("released_proofs")
+        or cleanup.get("expiry_released_roots")
+        or cleanup.get("expiry_released_proofs")
+        or cleanup.get("stopped_precommits")
     ):
         decision.setdefault("changes", {})["stale_cleanup"] = {
             "released_roots": cleanup.get("released_roots", []),
             "released_orphan_roots": cleanup.get("released_orphan_roots", []),
             "released_proofs": cleanup.get("released_proofs", []),
+            "expiry_released_roots": cleanup.get("expiry_released_roots", []),
+            "expiry_released_proofs": cleanup.get("expiry_released_proofs", []),
+            "stopped_precommits": cleanup.get("stopped_precommits", []),
         }
     if decision.get("config"):
         _push_config(decision["config"])
