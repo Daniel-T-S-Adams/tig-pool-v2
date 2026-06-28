@@ -1,0 +1,119 @@
+{
+  "name": "workload_canary_rollback_on_funnel_regression",
+  "lesson": "If a workload canary is followed by an unsafe reward funnel or health regression, autopilot should revert the canary before making broader workload cuts.",
+  "clean_windows": 0,
+  "assertions": [
+    {
+      "expect_reason": "workload_canary_rollback"
+    },
+    {
+      "expect_change_key": "workload_controller"
+    },
+    {
+      "expect_config_track_setting": {
+        "algorithm_id": "c005_hypergraph_algo",
+        "track": "n=1000",
+        "field": "num_bundles",
+        "value": 8
+      }
+    }
+  ],
+  "config": {
+    "max_job_batches": 512,
+    "max_concurrent_benchmarks": 12,
+    "resource_slots": {
+      "slots": {
+        "hypergraph": 8
+      }
+    },
+    "per_challenge_max_benchmarks": {
+      "c005": 8
+    },
+    "adaptive_slave_caps": {
+      "cpu_max_cap": 4,
+      "gpu_max_cap": 2
+    },
+    "algo_selection": [
+      {
+        "algorithm_id": "c005_hypergraph_algo",
+        "weight": 3,
+        "batch_size": 32,
+        "track_settings": {
+          "n=1000": {
+            "batch_size": 32,
+            "num_bundles": 9
+          }
+        }
+      }
+    ],
+    "slaves": []
+  },
+  "report": {
+    "mode": "read_only",
+    "master_config_error": null,
+    "current_config": {
+      "max_concurrent_benchmarks": 12,
+      "slaves": []
+    },
+    "slaves": [],
+    "slots": {
+      "summary": []
+    },
+    "challenges": [],
+    "stale_totals": {
+      "roots": 0,
+      "proofs": 0
+    },
+    "stranded_benchmarks": [],
+    "workload_cooldown": {
+      "last_change_ms": 1000000,
+      "last_canary_change_ms": 1000000,
+      "last_change": {
+        "algorithm_id": "c005_hypergraph_algo",
+        "track": "n=1000",
+        "action": "consider_small_workload_increase",
+        "canary": true,
+        "changes": {
+          "num_bundles": {
+            "current": 8,
+            "target": 9,
+            "next": 9
+          }
+        }
+      }
+    },
+    "reward_funnel": {
+      "summary": {
+        "safe_to_scale_workload": false,
+        "active_benchmarks": 12,
+        "proof_conversion_rate": 0.5,
+        "stopped_rate": 0.01,
+        "avg_time_to_proof_submit_sec": 1800,
+        "issues": [
+          "low_proof_conversion",
+          "slow_time_to_proof_submission"
+        ]
+      },
+      "by_track": [
+        {
+          "algorithm_id": "c005_hypergraph_algo",
+          "track": "n=1000",
+          "benchmarks_seen": 20,
+          "proof_required_benchmarks": 12,
+          "proof_conversion_rate": 0.5,
+          "stopped_rate": 0.01,
+          "avg_time_to_proof_submit_sec": 1800,
+          "p95_root_batch_runtime_sec": 120
+        }
+      ]
+    },
+    "policy_posture": {
+      "posture": "recovery",
+      "reasons": [
+        "reward_funnel_not_safe"
+      ],
+      "workload_auto_apply_allowed": false
+    },
+    "recommendations": []
+  }
+}

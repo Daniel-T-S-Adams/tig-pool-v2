@@ -13,7 +13,7 @@ Usage:
   python3 admin.py deactivate <wallet|slave> # deactivate a member/slave
   python3 admin.py clear-slave <slave>       # unassign unfinished batches
   python3 admin.py member-health <slave>     # show slave assignment health
-  python3 admin.py autopilot [--json]        # read-only scheduler report
+  python3 admin.py autopilot [--json]        # read-only scheduler/scale readiness report
   python3 admin.py ai-optimizer [--json]     # run read-only DeepSeek analyst
   python3 admin.py ai-decisions [N]          # show recent AI recommendations
   python3 admin.py compute-types [--apply]   # validate/add TIG 0.0.7 compute_type
@@ -320,10 +320,16 @@ def cmd_autopilot(args):
     active = report.get("active_slave_counts", {})
     current = report.get("current_config", {})
     recommendations = report.get("recommendations") or []
+    readiness = report.get("scale_readiness") or {}
 
     print("Autopilot report (read-only)")
     print(f"  active slaves : CPU={active.get('cpu', 0)} GPU={active.get('gpu', 0)}")
     print(f"  metric window : {int(windows.get('metric_window_ms', 0) / 60000)} min")
+    if readiness:
+        print(f"  scale gate    : {readiness.get('gate')} ({readiness.get('posture')})")
+        blockers = readiness.get("blockers") or []
+        if blockers:
+            print(f"  blockers      : {', '.join(blockers)}")
     if report.get("master_config_error"):
         print(f"  master config : ERROR {report['master_config_error']}")
     else:

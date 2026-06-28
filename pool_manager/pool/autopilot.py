@@ -1026,6 +1026,40 @@ def _next_power_of_two(value: int) -> int:
     return 1 << value.bit_length()
 
 
+def _workload_confidence(funnel: dict, observed: dict) -> dict:
+    samples = int(funnel.get("benchmarks_seen") or observed.get("benchmarks_seen") or 0)
+    proof_required = int(funnel.get("proof_required_benchmarks") or 0)
+    root_batches = int(observed.get("root_batches_seen") or 0)
+    has_proof_rate = funnel.get("proof_conversion_rate") is not None
+    has_stopped_rate = funnel.get("stopped_rate") is not None
+    has_time_to_proof = funnel.get("avg_time_to_proof_submit_sec") is not None
+
+    score = 0.0
+    score += min(0.30, samples / 50.0)
+    score += min(0.25, proof_required / 40.0)
+    score += min(0.15, root_batches / 500.0)
+    if has_proof_rate:
+        score += 0.15
+    if has_stopped_rate:
+        score += 0.10
+    if has_time_to_proof:
+        score += 0.05
+    score = round(min(1.0, score), 2)
+    if score >= 0.75:
+        level = "high"
+    elif score >= 0.45:
+        level = "medium"
+    else:
+        level = "low"
+    return {
+        "score": score,
+        "level": level,
+        "benchmarks_seen": samples,
+        "proof_required_benchmarks": proof_required,
+        "root_batches_seen": root_batches,
+    }
+
+
 def _decrease_bundles(current: int) -> int:
     current = int(current or 0)
     if current <= WORKLOAD_MIN_BUNDLES:
@@ -1085,6 +1119,7 @@ def _workload_controller_targets(
         p95_root_runtime = funnel.get("p95_root_batch_runtime_sec")
         estimated_root_batches = derived.get("estimated_root_batches")
         estimated_nonces_per_bundle = derived.get("estimated_nonces_per_bundle")
+        confidence = _workload_confidence(funnel, observed)
 
         if current_bundles <= 0:
             action = "missing_bundle_config"
@@ -1208,6 +1243,7 @@ def _workload_controller_targets(
                 "max_job_batches_margin_ok": max_job_batches_margin_ok,
                 "policy_posture": posture,
             },
+            "confidence": confidence,
             "apply_now": False,
         })
 
@@ -2073,6 +2109,83 @@ def _workload_cooldown_guard(report: dict, action_kind: str) -> dict | None:
     return None
 
 
+def _rollback_last_canary(
+    new_cfg: dict,
+    report: dict,
+    health: dict,
+    funnel_safe: bool,
+    policy_posture: dict,
+) -> dict | None:
+    state = _workload_cooldown_state(report)
+    last = state.get("last_change") or {}
+    if not last.get("canary"):
+        return None
+    if funnel_safe and health.get("healthy") and policy_posture.get("posture") != "recovery":
+        return None
+
+    algorithm_id = last.get("algorithm_id")
+    track = last.get("track")
+    if not algorithm_id or not track:
+        return None
+    algo = _find_algo_selection(new_cfg, algorithm_id)
+    if not algo:
+        return None
+    track_settings = algo.get("track_settings") or {}
+    if track not in track_settings:
+        return None
+
+    settings = dict(track_settings.get(track) or {})
+    rollback_changes = {}
+    for field in ("num_bundles", "batch_size"):
+        change = (last.get("changes") or {}).get(field) or {}
+        if change.get("current") is None:
+            continue
+        current_value = settings.get(field)
+        previous_value = int(change.get("current") or 0)
+        if int(current_value or 0) != previous_value:
+            settings[field] = previous_value
+            rollback_changes[field] = {
+                "current": current_value,
+                "next": previous_value,
+                "canary_next": change.get("next"),
+            }
+
+    weight_change = (last.get("changes") or {}).get("weight") or {}
+    if weight_change.get("current") is not None:
+        current_weight = algo.get("weight")
+        previous_weight = int(weight_change.get("current") or 0)
+        if int(current_weight or 0) != previous_weight:
+            algo["weight"] = previous_weight
+            rollback_changes["weight"] = {
+                "current": current_weight,
+                "next": previous_weight,
+                "canary_next": weight_change.get("next"),
+            }
+
+    if not rollback_changes:
+        return None
+
+    algo.setdefault("track_settings", {})[track] = settings
+    funnel_summary = (report.get("reward_funnel") or {}).get("summary") or {}
+    return {
+        "algorithm_id": algorithm_id,
+        "track": track,
+        "action": "rollback_failed_workload_canary",
+        "canary_rollback": True,
+        "changes": rollback_changes,
+        "rollback_of": last,
+        "reasons": [
+            "previous workload canary is being reverted because pool health or reward funnel regressed"
+        ],
+        "observed": {
+            "funnel_safe": funnel_safe,
+            "funnel_issues": funnel_summary.get("issues") or [],
+            "healthy": bool(health.get("healthy")),
+            "policy_posture": policy_posture.get("posture"),
+        },
+    }
+
+
 def _next_workload_change(
     new_cfg: dict,
     report: dict,
@@ -2320,6 +2433,20 @@ def _plan_config_change(report: dict, cfg: dict, clean_windows: int) -> dict:
             "skipped": "already_at_or_below_drain_target",
         }
 
+    rollback_cfg = json.loads(json.dumps(cfg))
+    canary_rollback = _rollback_last_canary(
+        rollback_cfg,
+        report,
+        health,
+        funnel_safe,
+        policy_posture,
+    )
+    if canary_rollback:
+        decision["reason"] = "workload_canary_rollback"
+        decision["changes"] = {"workload_controller": canary_rollback}
+        decision["config"] = rollback_cfg
+        return decision
+
     safety_cfg = json.loads(json.dumps(cfg))
     workload_safety_change, workload_safety_guard = _next_workload_change(
         safety_cfg,
@@ -2483,6 +2610,81 @@ def _plan_config_change(report: dict, cfg: dict, clean_windows: int) -> dict:
     return decision
 
 
+def _scale_readiness_summary(
+    cfg: dict,
+    health: dict,
+    policy_posture: dict,
+    capacity: dict,
+    reward_funnel: dict,
+    stale_totals: dict,
+    target_slots: dict,
+) -> dict:
+    funnel_summary = (reward_funnel or {}).get("summary") or {}
+    current_slots = ((cfg.get("resource_slots") or {}).get("slots") or {}) if cfg else {}
+    current_max = cfg.get("max_concurrent_benchmarks") if cfg else None
+    target_max = (
+        _target_max_concurrent_benchmarks(capacity, target_slots)
+        if capacity and target_slots
+        else None
+    )
+    blockers = []
+    if int(stale_totals.get("roots") or 0) or int(stale_totals.get("proofs") or 0):
+        blockers.append("stale_work")
+    if health.get("active_unregistered"):
+        blockers.append("active_unregistered_workers")
+    if health.get("unserved_stranded_benchmarks"):
+        blockers.append("unserved_stranded_precommits")
+    if not funnel_summary.get("safe_to_scale_workload", True):
+        blockers.append("reward_funnel_unsafe")
+    if policy_posture.get("posture") == "recovery":
+        blockers.append("policy_posture_recovery")
+
+    if blockers:
+        gate = "blocked"
+    elif policy_posture.get("posture") in {"aggressive", "balanced"}:
+        gate = "ready"
+    else:
+        gate = "caution"
+
+    remediation = []
+    if "stale_work" in blockers:
+        remediation.append("clear stale root/proof assignments before raising workload")
+    if "unserved_stranded_precommits" in blockers:
+        remediation.append("restore matching capacity or cleanup orphaned stranded benchmarks")
+    if "active_unregistered_workers" in blockers:
+        remediation.append("register or deactivate active unregistered public workers")
+    if "reward_funnel_unsafe" in blockers:
+        remediation.append("wait for roots to convert into benchmark/proof submissions")
+
+    return {
+        "gate": gate,
+        "blockers": blockers,
+        "remediation": remediation,
+        "posture": policy_posture.get("posture"),
+        "active_cpu": capacity.get("active_cpu"),
+        "active_gpu": capacity.get("active_gpu"),
+        "productive_idle_cpu": capacity.get("productive_idle_cpu"),
+        "productive_idle_gpu": capacity.get("productive_idle_gpu"),
+        "current": {
+            "max_concurrent_benchmarks": current_max,
+            "cpu_slots": current_slots.get(CPU_SLOT_TYPE),
+            "gpu_slots_total": sum(int(current_slots.get(key, 0) or 0) for key in GPU_SLOT_TYPES),
+        },
+        "targets": {
+            "max_concurrent_benchmarks": target_max,
+            "cpu_slots": target_slots.get(CPU_SLOT_TYPE),
+            "gpu_slots_total": sum(int(target_slots.get(key, 0) or 0) for key in GPU_SLOT_TYPES),
+        },
+        "reward_funnel": {
+            "safe_to_scale_workload": funnel_summary.get("safe_to_scale_workload"),
+            "issues": funnel_summary.get("issues") or [],
+            "proof_conversion_rate": funnel_summary.get("proof_conversion_rate"),
+            "stopped_rate": funnel_summary.get("stopped_rate"),
+            "avg_time_to_proof_submit_sec": funnel_summary.get("avg_time_to_proof_submit_sec"),
+        },
+    }
+
+
 def maybe_run():
     """Run the autopilot background loop when AUTOPILOT_MODE is report/apply."""
     global _last_run_ts
@@ -2530,9 +2732,12 @@ def maybe_run():
                 "action": workload_change.get("action"),
                 "changes": workload_change.get("changes"),
                 "canary": bool(workload_change.get("canary")),
+                "canary_rollback": bool(workload_change.get("canary_rollback")),
             }
             if workload_change.get("canary"):
                 cooldown_state["last_canary_change_ms"] = now_ms
+            elif workload_change.get("canary_rollback"):
+                cooldown_state["last_canary_rollback_ms"] = now_ms
             else:
                 cooldown_state["last_safety_change_ms"] = now_ms
             db.set_setting("autopilot_workload_cooldown", json.dumps(cooldown_state, separators=(",", ":")))
@@ -2621,6 +2826,19 @@ def build_report() -> dict:
         "cpu": sum(1 for s in slaves if s["profile"] == "cpu" and _counts_for_capacity(s)),
         "gpu": sum(1 for s in slaves if s["profile"] == "gpu" and _counts_for_capacity(s)),
     }
+    scale_readiness = (
+        _scale_readiness_summary(
+            cfg,
+            health,
+            policy_posture,
+            capacity,
+            reward_funnel,
+            stale_totals,
+            target_slots,
+        )
+        if cfg
+        else {}
+    )
 
     return {
         "mode": "read_only",
@@ -2641,6 +2859,7 @@ def build_report() -> dict:
         "track_workload": workload,
         "reward_funnel": reward_funnel,
         "policy_posture": policy_posture,
+        "scale_readiness": scale_readiness,
         "workload_cooldown": workload_cooldown,
         "workload_targets": workload_targets,
         "track_economics": track_economics,
