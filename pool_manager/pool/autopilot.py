@@ -428,8 +428,6 @@ def _cleanup_stale_assignments(cfg: dict, now_ms: int) -> dict:
               AND rb.slave IS NOT NULL
               AND rb.start_time IS NOT NULL
               AND rb.start_time < %s
-              AND j.stopped IS NULL
-              AND j.end_time IS NULL
             ORDER BY rb.start_time
             LIMIT %s
             """,
@@ -459,8 +457,6 @@ def _cleanup_stale_assignments(cfg: dict, now_ms: int) -> dict:
               AND rb.slave IS NULL
               AND rb.start_time IS NOT NULL
               AND rb.start_time < %s
-              AND j.stopped IS NULL
-              AND j.end_time IS NULL
             ORDER BY rb.start_time
             LIMIT %s
             """,
@@ -490,8 +486,6 @@ def _cleanup_stale_assignments(cfg: dict, now_ms: int) -> dict:
             WHERE pb.ready IS NULL
               AND pb.start_time IS NOT NULL
               AND pb.start_time < %s
-              AND j.stopped IS NULL
-              AND j.end_time IS NULL
             ORDER BY pb.start_time
             LIMIT %s
             """,
