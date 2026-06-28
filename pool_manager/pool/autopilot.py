@@ -63,7 +63,6 @@ FUNNEL_MAX_STOPPED_OR_EXPIRED_RATE = float(os.environ.get("AUTOPILOT_FUNNEL_MAX_
 FUNNEL_DRAIN_MIN_MAX_BENCHMARKS = int(os.environ.get("AUTOPILOT_FUNNEL_DRAIN_MIN_MAX_BENCHMARKS", "12"))
 WORKLOAD_MIN_BUNDLES = int(os.environ.get("AUTOPILOT_WORKLOAD_MIN_BUNDLES", "4"))
 WORKLOAD_MIN_BATCH_SIZE = int(os.environ.get("AUTOPILOT_WORKLOAD_MIN_BATCH_SIZE", "8"))
-AWS_CPU_WORKER_TARGET = int(os.environ.get("AUTOPILOT_AWS_CPU_WORKER_TARGET", "32"))
 WORKLOAD_MIN_WEIGHT = int(os.environ.get("AUTOPILOT_WORKLOAD_MIN_WEIGHT", "1"))
 WORKLOAD_MAX_BUNDLE_STEP = int(os.environ.get("AUTOPILOT_WORKLOAD_MAX_BUNDLE_STEP", "1"))
 WORKLOAD_SAFETY_COOLDOWN_MS = int(os.environ.get("AUTOPILOT_WORKLOAD_SAFETY_COOLDOWN_MS", str(METRIC_WINDOW_MS)))
@@ -112,6 +111,7 @@ GPU_CHALLENGE_ID_TO_SLOT = {
     "neuralnet_optimizer": "neuralnet_optimizer",
 }
 CPU_SLOT_TYPE = "cpu"
+CPU_CHALLENGE_IDS = {"c001", "c002", "c003", "c007", "c008"}
 CHALLENGE_NAME_TO_ID = {
     "satisfiability": "c001",
     "vehicle_routing": "c002",
@@ -124,6 +124,38 @@ CHALLENGE_NAME_TO_ID = {
 }
 _last_run_ts = 0.0
 _decision_table_ready = False
+
+
+def _aws_batch_capacity(cfg: dict | None) -> dict:
+    raw = ((cfg or {}).get("aws_batch_capacity") or {})
+    enabled = str(raw.get("enabled", "false")).lower() in {"1", "true", "yes", "on"}
+    if not enabled:
+        return {
+            "enabled": False,
+            "cpu_instances": 0,
+            "cpu_threads_per_instance": 0,
+            "max_concurrent_cpu_jobs": 0,
+            "cpu_batch_size_floor": WORKLOAD_MIN_BATCH_SIZE,
+        }
+
+    instances = max(0, int(raw.get("cpu_instances") or raw.get("instances") or 0))
+    threads = max(1, int(raw.get("cpu_threads_per_instance") or raw.get("threads_per_instance") or 1))
+    max_jobs = int(raw.get("max_concurrent_cpu_jobs") or raw.get("max_concurrent_jobs") or instances or 0)
+    max_jobs = max(0, max_jobs)
+    batch_floor = int(raw.get("cpu_batch_size_floor") or raw.get("batch_size_floor") or threads)
+    batch_floor = max(WORKLOAD_MIN_BATCH_SIZE, batch_floor)
+    return {
+        "enabled": True,
+        "cpu_instances": instances,
+        "cpu_threads_per_instance": threads,
+        "max_concurrent_cpu_jobs": max_jobs,
+        "cpu_batch_size_floor": batch_floor,
+    }
+
+
+def _route_is_cpu(slave: dict) -> bool:
+    regex = str(slave.get("algorithm_id_regex") or "")
+    return any(challenge_id in regex for challenge_id in CPU_CHALLENGE_IDS)
 
 
 def _capacity_profile_for_work(item: dict) -> str:
@@ -715,6 +747,7 @@ def _current_config_summary(cfg: dict) -> dict:
         "per_challenge_max_benchmarks": cfg.get("per_challenge_max_benchmarks", {}),
         "resource_slots": cfg.get("resource_slots", {}),
         "adaptive_slave_caps": cfg.get("adaptive_slave_caps", {}),
+        "aws_batch_capacity": cfg.get("aws_batch_capacity", {}),
         "slaves": cfg.get("slaves", []),
     }
 
@@ -1330,6 +1363,8 @@ def _workload_controller_targets(
     funnel_summary = (reward_funnel or {}).get("summary") or {}
     global_funnel_safe = bool(funnel_summary.get("safe_to_scale_workload", True))
     posture_blocks_increase = posture in {"recovery", "conservative"} or not global_funnel_safe
+    aws_capacity = _aws_batch_capacity(cfg)
+    cpu_batch_size_floor = int(aws_capacity.get("cpu_batch_size_floor") or WORKLOAD_MIN_BATCH_SIZE)
     targets = []
     for row in track_economics:
         algorithm_id = row.get("algorithm_id")
@@ -1343,7 +1378,7 @@ def _workload_controller_targets(
         min_batch_size = WORKLOAD_MIN_BATCH_SIZE
         is_cpu_challenge = challenge_id not in {"c004", "c005", "c006"}
         if is_cpu_challenge:
-            min_batch_size = max(min_batch_size, AWS_CPU_WORKER_TARGET)
+            min_batch_size = max(min_batch_size, cpu_batch_size_floor)
         current_weight = int(configured.get("weight") or current_weights.get(algorithm_id) or 0)
         target_bundles = current_bundles
         target_batch_size = current_batch_size
@@ -1639,6 +1674,7 @@ def _fleet_capacity(
     } - {None})
 
     current_slots = (cfg.get("resource_slots") or {}).get("slots", {})
+    aws_capacity = _aws_batch_capacity(cfg)
     slot_counts, slot_idle, slot_busy = _slot_state_summary(slots)
     active_gpu_slot_types = []
     for challenge in challenges:
@@ -1681,6 +1717,10 @@ def _fleet_capacity(
         "active_gpu_slot_types": active_gpu_slot_types,
         "current_slots": current_slots,
         "current_adaptive_caps": cfg.get("adaptive_slave_caps") or {},
+        "aws_batch_capacity": aws_capacity,
+        "aws_cpu_jobs": aws_capacity.get("max_concurrent_cpu_jobs", 0),
+        "aws_cpu_threads_per_instance": aws_capacity.get("cpu_threads_per_instance", 0),
+        "aws_cpu_batch_size_floor": aws_capacity.get("cpu_batch_size_floor", WORKLOAD_MIN_BATCH_SIZE),
     }
 
 
@@ -1692,7 +1732,10 @@ def _target_resource_slots(capacity: dict) -> dict:
     proposed = dict(current_slots)
 
     current_cpu = int(current_slots.get(CPU_SLOT_TYPE, slot_counts.get(CPU_SLOT_TYPE, 0)) or 0)
-    if capacity["active_cpu"]:
+    aws_jobs = int(capacity.get("aws_cpu_jobs") or 0)
+    if aws_jobs > 0:
+        proposed[CPU_SLOT_TYPE] = min(MAX_CPU_SLOTS, max(current_cpu, aws_jobs))
+    elif capacity["active_cpu"]:
         active_floor = max(2, (capacity["active_cpu"] + PRODUCTIVE_IDLE_CPU_PER_SLOT - 1) // max(1, PRODUCTIVE_IDLE_CPU_PER_SLOT))
         target_cpu = max(current_cpu, min(MAX_CPU_SLOTS, active_floor))
         if capacity["productive_idle_cpu"] >= PRODUCTIVE_IDLE_CPU_SCALE_MIN:
@@ -1779,7 +1822,7 @@ def _target_resource_slots(capacity: dict) -> dict:
 
 def _target_max_concurrent_benchmarks(capacity: dict, proposed_slots: dict) -> int:
     active_gpu = capacity["active_gpu"] > 0
-    active_cpu = capacity["active_cpu"] > 0
+    active_cpu = capacity["active_cpu"] > 0 or int(capacity.get("aws_cpu_jobs") or 0) > 0
     cpu_slot_total = int(proposed_slots.get(CPU_SLOT_TYPE, 0) or 0) if active_cpu else 0
     gpu_slot_total = (
         sum(int(proposed_slots.get(k, 0) or 0) for k in GPU_SLOT_TYPES)
@@ -1814,7 +1857,7 @@ def _target_per_challenge_caps(cfg: dict, capacity: dict, proposed_slots: dict) 
         or int(capacity.get("stale_proofs") or 0) > 0
     )
     stale_challenge_ids = set(capacity.get("stale_challenge_ids") or [])
-    if capacity["active_cpu"] and cpu_ids:
+    if (capacity["active_cpu"] or int(capacity.get("aws_cpu_jobs") or 0) > 0) and cpu_ids:
         cpu_slots = int(proposed_slots.get(CPU_SLOT_TYPE, 0) or 0)
         per_cpu_target = max(1, math.ceil(cpu_slots / max(1, len(cpu_ids))))
         for challenge_id in cpu_ids:
@@ -1872,6 +1915,25 @@ def _target_adaptive_slave_caps(capacity: dict) -> dict:
         elif capacity["gpu_completed_recent"] >= CAP_SCALE_COMPLETIONS_PER_STEP and capacity["gpu_pressure"] >= capacity["active_gpu"]:
             proposed["gpu_max_cap"] = max(MIN_GPU_SLAVE_CAP, min(gpu_max + 1, gpu_ceiling))
     return proposed
+
+
+def _target_slave_route_caps(cfg: dict, capacity: dict) -> list[dict]:
+    aws_jobs = int(capacity.get("aws_cpu_jobs") or 0)
+    if aws_jobs <= 0:
+        return []
+    targets = []
+    for idx, slave in enumerate(cfg.get("slaves") or []):
+        if not _route_is_cpu(slave):
+            continue
+        current = int(slave.get("max_concurrent_batches") or 0)
+        if current < aws_jobs:
+            targets.append({
+                "index": idx,
+                "name_regex": slave.get("name_regex"),
+                "current": current,
+                "target": aws_jobs,
+            })
+    return targets
 
 
 def _track_economics_recommendations(track_economics: list[dict]) -> list[dict]:
@@ -1965,6 +2027,26 @@ def _recommendations(
             "current": current_caps,
             "proposed": proposed_caps,
             "reason": "Adaptive slave cap ceilings should rise when productive workers prove they can carry more concurrent batches.",
+            "signals": capacity,
+            "apply_now": False,
+        })
+
+    route_cap_targets = _target_slave_route_caps(cfg, capacity)
+    if route_cap_targets:
+        recommendations.append({
+            "key": "slaves.max_concurrent_batches",
+            "current": [
+                {
+                    "name_regex": row.get("name_regex"),
+                    "max_concurrent_batches": row.get("current"),
+                }
+                for row in route_cap_targets
+            ],
+            "proposed": route_cap_targets,
+            "reason": (
+                "CPU slave route caps clamp adaptive assignment. For AWS Batch, "
+                "CPU routes must allow the configured max_concurrent_cpu_jobs."
+            ),
             "signals": capacity,
             "apply_now": False,
         })
@@ -2456,8 +2538,25 @@ def _next_workload_change(
     if not actionable:
         return None, None
 
+    for row in actionable:
+        if row.get("action") != "enforce_aws_cpu_batch_size_floor":
+            continue
+        change = _apply_workload_target(new_cfg, row)
+        if change:
+            changes = [change]
+            for extra in actionable:
+                if extra is row or extra.get("action") != "enforce_aws_cpu_batch_size_floor":
+                    continue
+                extra_change = _apply_workload_target(new_cfg, extra)
+                if extra_change:
+                    changes.append(extra_change)
+            return {
+                "action": "enforce_aws_cpu_batch_size_floor",
+                "changes": changes,
+                "reasons": ["CPU track batch_size values were below the configured AWS CPU batch-size floor"],
+            }, None
+
     safety_actions = {
-        "enforce_aws_cpu_batch_size_floor",
         "reduce_or_fix_unrunnable_track",
         "reduce_workload_until_proofs_convert",
         "reduce_workload_until_stopped_rate_recovers",
@@ -2527,6 +2626,38 @@ def _next_workload_change(
     return None, canary_guard
 
 
+def _apply_route_cap_targets(new_cfg: dict, route_rec: dict) -> dict | None:
+    current_routes = new_cfg.get("slaves") or []
+    route_targets = route_rec.get("proposed") or []
+    if not route_targets or not current_routes:
+        return None
+
+    route_changes = []
+    for target in route_targets:
+        idx = int(target.get("index"))
+        if idx < 0 or idx >= len(current_routes):
+            continue
+        current = int(current_routes[idx].get("max_concurrent_batches") or 0)
+        proposed = int(target.get("target") or current)
+        if proposed <= current:
+            continue
+        current_routes[idx]["max_concurrent_batches"] = proposed
+        route_changes.append({
+            "name_regex": current_routes[idx].get("name_regex"),
+            "current": current,
+            "target": proposed,
+            "next": proposed,
+        })
+
+    if not route_changes:
+        return None
+    new_cfg["slaves"] = current_routes
+    return {
+        "changes": route_changes,
+        "signals": route_rec.get("signals") or {},
+    }
+
+
 def _plan_config_change(report: dict, cfg: dict, clean_windows: int) -> dict:
     health = _health_summary(report)
     funnel_summary = (report.get("reward_funnel") or {}).get("summary") or {}
@@ -2558,6 +2689,7 @@ def _plan_config_change(report: dict, cfg: dict, clean_windows: int) -> dict:
     recommendations = {r.get("key"): r for r in report.get("recommendations") or []}
     slots_rec = recommendations.get("resource_slots.slots") or {}
     per_rec = recommendations.get("per_challenge_max_benchmarks") or {}
+    route_rec = recommendations.get("slaves.max_concurrent_batches") or {}
     slot_signals = slots_rec.get("signals") or {}
     current_slots_for_gate = ((cfg.get("resource_slots") or {}).get("slots") or {})
     proposed_slots_for_gate = slots_rec.get("proposed") or {}
@@ -2723,6 +2855,15 @@ def _plan_config_change(report: dict, cfg: dict, clean_windows: int) -> dict:
     if workload_safety_guard:
         decision.setdefault("guardrails", {})["workload_controller"] = workload_safety_guard
 
+    if _aws_batch_capacity(cfg).get("enabled"):
+        route_cfg = json.loads(json.dumps(cfg))
+        route_change = _apply_route_cap_targets(route_cfg, route_rec)
+        if route_change:
+            decision["reason"] = "aws_batch_capacity_alignment"
+            decision["changes"] = {"slaves.max_concurrent_batches": route_change}
+            decision["config"] = route_cfg
+            return decision
+
     if not health["healthy"] and not productive_capacity_scale and not safe_per_challenge_scale and not single_gpu_serialization:
         decision["reason"] = "blocked_by_stale_or_unregistered_work"
         return decision
@@ -2840,6 +2981,11 @@ def _plan_config_change(report: dict, cfg: dict, clean_windows: int) -> dict:
                 "changes": cap_changes,
                 "signals": caps_rec.get("signals") or {},
             }
+
+    if route_rec and capacity_change_allowed:
+        route_change = _apply_route_cap_targets(new_cfg, route_rec)
+        if route_change:
+            changes["slaves.max_concurrent_batches"] = route_change
 
     if not changes:
         workload_canary_change, workload_guard = _next_workload_change(
@@ -3128,6 +3274,7 @@ def build_report() -> dict:
         "track_economics": track_economics,
         "capacity_model": capacity,
         "capacity_targets": {
+            "aws_batch_capacity": capacity.get("aws_batch_capacity") if capacity else {},
             "resource_slots": target_slots,
             "max_concurrent_benchmarks": (
                 _target_max_concurrent_benchmarks(capacity, target_slots)
@@ -3143,6 +3290,11 @@ def build_report() -> dict:
                 _target_adaptive_slave_caps(capacity)
                 if capacity
                 else {}
+            ),
+            "slave_route_caps": (
+                _target_slave_route_caps(cfg, capacity)
+                if capacity
+                else []
             ),
         },
         "stranded_benchmarks": stranded,
