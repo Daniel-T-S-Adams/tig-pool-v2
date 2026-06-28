@@ -1910,6 +1910,13 @@ def _target_resource_slots(capacity: dict) -> dict:
     for slot_type, current in current_gpu_slots.items():
         proposed[slot_type] = max(current, int(gpu_slot_floor.get(slot_type, 0) or 0))
 
+    adaptive_caps = capacity.get("current_adaptive_caps") or {}
+    gpu_floor_total = sum(int(gpu_slot_floor.get(slot_type, 0) or 0) for slot_type in GPU_SLOT_TYPES)
+    if gpu_floor_total > 0 and int(adaptive_caps.get("gpu_max_cap") or 0) <= 1:
+        for slot_type in GPU_SLOT_TYPES:
+            proposed[slot_type] = int(gpu_slot_floor.get(slot_type, 0) or 0)
+        return proposed
+
     if capacity["active_gpu"]:
         busy_gpu_slots = {
             slot_type: int(slot_busy.get(slot_type, 0) or 0)
