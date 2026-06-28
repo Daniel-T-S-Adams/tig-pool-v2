@@ -1979,6 +1979,21 @@ def _target_max_concurrent_benchmarks(capacity: dict, proposed_slots: dict) -> i
     return _clamp(cpu_slot_total + gpu_slot_total + buffer, MIN_MAX_BENCHMARKS, MAX_MAX_BENCHMARKS)
 
 
+def _capacity_floor_max_concurrent(capacity: dict, proposed_slots: dict | None = None) -> int:
+    proposed_slots = proposed_slots or {}
+    aws_cpu_jobs = int(capacity.get("aws_cpu_jobs") or 0)
+    cpu_slots = int(proposed_slots.get(CPU_SLOT_TYPE, 0) or 0)
+    active_cpu = capacity.get("active_cpu", 0) > 0 or aws_cpu_jobs > 0
+    cpu_floor = max(aws_cpu_jobs, cpu_slots if active_cpu else 0)
+
+    gpu_slots = sum(int(proposed_slots.get(k, 0) or 0) for k in GPU_SLOT_TYPES)
+    active_gpu = int(capacity.get("active_gpu") or 0)
+    gpu_floor = max(active_gpu, min(gpu_slots, active_gpu or gpu_slots))
+
+    buffer = BENCHMARK_BUFFER if (cpu_floor or gpu_floor) else 0
+    return _clamp(cpu_floor + gpu_floor + buffer, MIN_MAX_BENCHMARKS, MAX_MAX_BENCHMARKS)
+
+
 def _challenge_ids_by_profile(cfg: dict) -> tuple[list[str], list[str]]:
     cpu_ids = []
     gpu_ids = []
@@ -2906,7 +2921,13 @@ def _plan_config_change(report: dict, cfg: dict, clean_windows: int) -> dict:
         }
         active_issues = set(funnel_summary.get("issues") or [])
         current = int(cfg.get("max_concurrent_benchmarks") or 0)
-        drain_floor = max(MIN_MAX_BENCHMARKS, FUNNEL_DRAIN_MIN_MAX_BENCHMARKS)
+        capacity_model = report.get("capacity_model") or {}
+        target_slots = _target_resource_slots(capacity_model) if capacity_model else {}
+        drain_floor = max(
+            MIN_MAX_BENCHMARKS,
+            FUNNEL_DRAIN_MIN_MAX_BENCHMARKS,
+            _capacity_floor_max_concurrent(capacity_model, target_slots) if capacity_model else 0,
+        )
         if current > drain_floor and active_issues.intersection(drain_issues):
             next_max = max(drain_floor, current - max(1, MAX_BENCHMARK_DOWN_STEP))
             new_cfg = json.loads(json.dumps(cfg))
@@ -2937,8 +2958,14 @@ def _plan_config_change(report: dict, cfg: dict, clean_windows: int) -> dict:
             int((health.get("live_by_profile") or {}).get("gpu") or 0),
         )
         gpu_reserve = min(gpu_slot_total, active_gpu_reserve) if gpu_slot_total else active_gpu_reserve
+        capacity_model = report.get("capacity_model") or {}
+        target_slots = _target_resource_slots(capacity_model) if capacity_model else {}
+        capacity_floor = _capacity_floor_max_concurrent(capacity_model, target_slots) if capacity_model else MIN_MAX_BENCHMARKS
         drain_target = _clamp(
-            productive_jobs + STRANDED_BUFFER_BENCHMARKS + gpu_reserve,
+            max(
+                productive_jobs + STRANDED_BUFFER_BENCHMARKS + gpu_reserve,
+                capacity_floor,
+            ),
             MIN_MAX_BENCHMARKS,
             MAX_MAX_BENCHMARKS,
         )
@@ -2955,6 +2982,7 @@ def _plan_config_change(report: dict, cfg: dict, clean_windows: int) -> dict:
             "gpu_reserve": gpu_reserve,
             "configured_gpu_slots": gpu_slot_total,
             "active_gpu_reserve": active_gpu_reserve,
+            "capacity_floor": capacity_floor,
             "stranded": health["unserved_stranded_benchmarks"],
             "capacity_waiting": health.get("capacity_waiting_benchmarks", []),
         }
@@ -3047,6 +3075,9 @@ def _plan_config_change(report: dict, cfg: dict, clean_windows: int) -> dict:
     if max_rec and new_cfg.get("max_concurrent_benchmarks") is not None and capacity_change_allowed:
         current = int(new_cfg.get("max_concurrent_benchmarks") or 0)
         target = int(max_rec.get("proposed") or current)
+        capacity_model = report.get("capacity_model") or {}
+        capacity_floor = _capacity_floor_max_concurrent(capacity_model, current_slots) if capacity_model else MIN_MAX_BENCHMARKS
+        target = max(target, capacity_floor)
         active_jobs = _active_unfinished_jobs()
         gpu_needs_room = _gpu_capacity_needs_benchmark_room(report)
         if target < current:
@@ -3082,6 +3113,7 @@ def _plan_config_change(report: dict, cfg: dict, clean_windows: int) -> dict:
                     "target": target,
                     "next": next_max,
                     "active_jobs": active_jobs,
+                    "capacity_floor": capacity_floor,
                     "gpu_capacity_needs_room": gpu_needs_room,
                     "productive_capacity_scale": productive_capacity_scale,
                     "policy_posture": posture,
