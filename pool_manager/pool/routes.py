@@ -403,7 +403,15 @@ def get_pool_stats():
 
 @router.get("/leaderboard")
 def get_leaderboard():
-    """Top contributors over the last 24 hours."""
+    """Top contributors for the current TIG round, matching coinbase allocation."""
+    round_start = db.get_setting("current_round_start_ms", None) or db.get_setting("current_round_start", None)
+    try:
+        since_ms = int(round_start) if round_start else None
+    except (TypeError, ValueError):
+        since_ms = None
+    if since_ms is None:
+        since_ms = int(time.time() * 1000) - 86400000
+
     rows = db.fetch_all(
         """
         SELECT
@@ -411,16 +419,19 @@ def get_leaderboard():
             SUM(nonces_computed) AS nonces,
             SUM(batches_completed) AS batches
         FROM pool_contributions
-        WHERE snapshot_end_ms > (EXTRACT(EPOCH FROM NOW()) * 1000)::BIGINT - 86400000
+        WHERE snapshot_end_ms >= %s
         GROUP BY wallet_address
         ORDER BY nonces DESC
         LIMIT 20
-        """
+        """,
+        (since_ms,),
     )
     total = sum(r["nonces"] or 0 for r in rows)
     return [
         {
             "wallet_address": r["wallet_address"],
+            "nonces_round": int(r["nonces"] or 0),
+            "batches_round": int(r["batches"] or 0),
             "nonces_24h": int(r["nonces"] or 0),
             "batches_24h": int(r["batches"] or 0),
             "share_pct": round((r["nonces"] / total * 100), 2) if total > 0 else 0,

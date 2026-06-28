@@ -44,7 +44,7 @@ async function loadLeaderboard() {
       tr.innerHTML = `
         <td>${i + 1}</td>
         <td><a href="/dashboard.html?wallet=${r.wallet_address}">${shortWallet(r.wallet_address)}</a></td>
-        <td>${fmtNum(r.nonces_24h)}</td>
+        <td>${fmtNum(r.nonces_round ?? r.nonces_24h)}</td>
         <td>${r.share_pct}%</td>
       `;
       tbody.appendChild(tr);

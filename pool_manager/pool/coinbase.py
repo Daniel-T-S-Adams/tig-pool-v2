@@ -264,6 +264,13 @@ def maybe_update_coinbase():
             success,
         ),
     )
+    logger.info(
+        "Coinbase history recorded: success=%s block=%s members=%s response=%s",
+        success,
+        current_block,
+        len(allocation),
+        api_response[:200],
+    )
 
     if success:
         db.set_setting("last_coinbase_block", str(current_block))
