@@ -63,6 +63,7 @@ FUNNEL_MAX_STOPPED_OR_EXPIRED_RATE = float(os.environ.get("AUTOPILOT_FUNNEL_MAX_
 FUNNEL_DRAIN_MIN_MAX_BENCHMARKS = int(os.environ.get("AUTOPILOT_FUNNEL_DRAIN_MIN_MAX_BENCHMARKS", "12"))
 WORKLOAD_MIN_BUNDLES = int(os.environ.get("AUTOPILOT_WORKLOAD_MIN_BUNDLES", "4"))
 WORKLOAD_MIN_BATCH_SIZE = int(os.environ.get("AUTOPILOT_WORKLOAD_MIN_BATCH_SIZE", "8"))
+AWS_CPU_WORKER_TARGET = int(os.environ.get("AUTOPILOT_AWS_CPU_WORKER_TARGET", "32"))
 WORKLOAD_MIN_WEIGHT = int(os.environ.get("AUTOPILOT_WORKLOAD_MIN_WEIGHT", "1"))
 WORKLOAD_MAX_BUNDLE_STEP = int(os.environ.get("AUTOPILOT_WORKLOAD_MAX_BUNDLE_STEP", "1"))
 WORKLOAD_SAFETY_COOLDOWN_MS = int(os.environ.get("AUTOPILOT_WORKLOAD_SAFETY_COOLDOWN_MS", str(METRIC_WINDOW_MS)))
@@ -1339,6 +1340,10 @@ def _workload_controller_targets(
         funnel = dict(funnel_by_track.get((algorithm_id, track), {}))
         current_bundles = int(configured.get("num_bundles") or 0)
         current_batch_size = int(configured.get("effective_batch_size") or 1)
+        min_batch_size = WORKLOAD_MIN_BATCH_SIZE
+        is_cpu_challenge = challenge_id not in {"c004", "c005", "c006"}
+        if is_cpu_challenge:
+            min_batch_size = max(min_batch_size, AWS_CPU_WORKER_TARGET)
         current_weight = int(configured.get("weight") or current_weights.get(algorithm_id) or 0)
         target_bundles = current_bundles
         target_batch_size = current_batch_size
@@ -1406,7 +1411,7 @@ def _workload_controller_targets(
                 reasons.append("time-to-proof-submission is above target")
                 target_bundles = _decrease_bundles(current_bundles)
                 if p95_root_runtime is not None and float(p95_root_runtime) > BUNDLE_TARGET_ROOT_RUNTIME_SEC:
-                    target_batch_size = max(1, _previous_power_of_two(current_batch_size // 2))
+                    target_batch_size = max(min_batch_size, _previous_power_of_two(current_batch_size // 2))
                     reasons.append("p95 root batch runtime is too high; smaller batches may reduce tail latency")
             elif fast_clean:
                 if posture_blocks_increase:
@@ -1444,6 +1449,13 @@ def _workload_controller_targets(
             target_bundles = current_bundles
             target_batch_size = current_batch_size
             reasons.append("target would exceed max_job_batches safety margin")
+        if is_cpu_challenge and current_batch_size < min_batch_size:
+            action = "enforce_aws_cpu_batch_size_floor"
+            target_batch_size = min_batch_size
+            reasons.append(f"batch_size floor keeps AWS CPU jobs busy up to {min_batch_size} workers")
+        elif target_batch_size < min_batch_size:
+            target_batch_size = min_batch_size
+            reasons.append(f"batch_size floor keeps AWS CPU jobs busy up to {min_batch_size} workers")
 
         targets.append({
             "challenge_id": row.get("challenge_id"),
@@ -1478,6 +1490,7 @@ def _workload_controller_targets(
                 "estimated_nonces_per_bundle": estimated_nonces_per_bundle,
                 "current_estimated_root_batches": estimated_root_batches,
                 "target_estimated_root_batches": estimated_target_batches,
+                "min_batch_size": min_batch_size,
                 "max_job_batches_margin_ok": max_job_batches_margin_ok,
                 "policy_posture": posture,
             },
@@ -2275,6 +2288,7 @@ def _apply_workload_target(new_cfg: dict, target: dict) -> dict | None:
     settings = track_settings.get(track) or {}
     current = target.get("current") or {}
     desired = target.get("target") or {}
+    derived = target.get("derived") or {}
     next_settings = dict(settings)
     changed = {}
 
@@ -2284,8 +2298,12 @@ def _apply_workload_target(new_cfg: dict, target: dict) -> dict | None:
     ):
         current_value = int(current.get(field) or next_settings.get(config_key) or 0)
         target_value = int(desired.get(field) or current_value)
+        if config_key == "batch_size":
+            floor = max(floor, int(derived.get("min_batch_size") or 0))
         if target_value < current_value:
             target_value = max(floor, target_value)
+        elif target_value < floor:
+            target_value = floor
         if target_value != current_value:
             next_settings[config_key] = target_value
             changed[config_key] = {
@@ -2439,6 +2457,7 @@ def _next_workload_change(
         return None, None
 
     safety_actions = {
+        "enforce_aws_cpu_batch_size_floor",
         "reduce_or_fix_unrunnable_track",
         "reduce_workload_until_proofs_convert",
         "reduce_workload_until_stopped_rate_recovers",
@@ -2460,7 +2479,7 @@ def _next_workload_change(
             or int(target.get("weight") or current.get("weight") or 0)
             < int(current.get("weight") or 0)
         )
-        if not reduces_work:
+        if not reduces_work and row.get("action") != "enforce_aws_cpu_batch_size_floor":
             continue
         change = _apply_workload_target(new_cfg, row)
         if change:

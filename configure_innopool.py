@@ -231,10 +231,10 @@ def main():
               + ", ".join(f"{c}({len(t)})" for c, t in allowlist.items()))
 
     # ── batch_size overrides ───────────────────────────────────────────────────
-    # Larger batch_size = fewer batches per benchmark = less backlog buildup.
-    # CPU: 64 nonces/batch (7 batches for a 400-nonce job vs 50 at batch_size=8)
+    # For AWS Batch CPU workers, each root batch should contain enough nonces to
+    # keep one 32-vCPU instance busy without running multi-wave batches by default.
     # GPU: keep 8 — each GPU nonce takes minutes, so batches stay manageable.
-    CPU_BATCH_SIZE = int(os.environ.get("CPU_BATCH_SIZE", "64"))
+    CPU_BATCH_SIZE = int(os.environ.get("CPU_BATCH_SIZE", "32"))
     GPU_BATCH_SIZE = int(os.environ.get("GPU_BATCH_SIZE", "8"))
     gpu_id_set = set(gpu_ids)
     for s in cfg["algo_selection"]:
