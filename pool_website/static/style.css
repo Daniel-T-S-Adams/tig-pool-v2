@@ -146,10 +146,10 @@ code, pre, .mono {
 .hero-inner { max-width: 1120px; width: 100%; margin: 0 auto; position: relative; }
 .hero-brand-art {
   display: block;
-  width: min(100%, 900px);
-  max-height: 360px;
-  object-fit: contain;
-  object-position: center;
+  width: min(100%, 760px);
+  max-height: 300px;
+  object-fit: cover;
+  object-position: center 42%;
   margin: 0 auto 22px;
   border-radius: 16px;
   border: 1px solid rgba(127,247,255,.26);
@@ -699,7 +699,7 @@ code, pre, .mono {
   }
   .hero-brand-art {
     border-radius: 14px;
-    max-height: 260px;
+    max-height: 220px;
     margin-bottom: 20px;
   }
   .hero h1 {
