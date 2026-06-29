@@ -395,6 +395,22 @@ def cmd_ai_optimizer(args):
     print(f"  confidence: {rec.get('confidence')}")
     print(f"  approval  : {'yes' if rec.get('requires_human_approval') else 'no'}")
     print(f"  summary   : {rec.get('summary')}")
+    warnings = []
+    warnings.extend(rec.get("contract_warnings") or [])
+    for warning in rec.get("deterministic_consistency_warnings") or []:
+        if isinstance(warning, dict):
+            warnings.append(warning.get("reason") or str(warning))
+        else:
+            warnings.append(str(warning))
+    for warning in rec.get("query_validation_warnings") or []:
+        if isinstance(warning, dict):
+            warnings.append(warning.get("reason") or "; ".join(warning.get("errors") or []) or str(warning))
+        else:
+            warnings.append(str(warning))
+    if warnings:
+        print("\nValidation warnings:")
+        for warning in warnings[:10]:
+            print(f"  - {warning}")
     actions = rec.get("recommended_actions") or []
     print("\nRecommended actions:")
     if not actions:
@@ -408,6 +424,20 @@ def cmd_ai_optimizer(args):
             print(f"    {action.get('reason')}")
         if action.get("rollback_condition"):
             print(f"    rollback: {action.get('rollback_condition')}")
+    blocked = rec.get("blocked_actions") or []
+    if blocked:
+        print("\nBlocked actions:")
+        for action in blocked[:10]:
+            print(
+                f"  - {action.get('action_type', 'unknown')} {action.get('key', '')}: "
+                f"{action.get('reason', '')}"
+            )
+    queries = rec.get("queries_to_run_next") or []
+    if queries:
+        print("\nFollow-up checks:")
+        for query in queries[:10]:
+            check_id = query.get("check_id") or query.get("status") or "custom"
+            print(f"  - {check_id}: {query.get('purpose') or query.get('reason') or ''}")
 
 def cmd_ai_decisions(args):
     limit = int(args[0]) if args and args[0].isdigit() else 10
@@ -415,16 +445,21 @@ def cmd_ai_decisions(args):
     if not rows:
         print("No AI optimizer decisions yet.")
         return
-    print(f"{'ID':>4} {'STATUS':<8} {'CATEGORY':<24} {'CONF':>5} SUMMARY")
-    print("-" * 100)
+    print(f"{'ID':>4} {'STATUS':<8} {'CATEGORY':<24} {'CONF':>5} {'ACT':>3} {'BLK':>3} SUMMARY")
+    print("-" * 112)
     for row in rows:
         conf = row.get("confidence")
         conf_s = f"{float(conf):.2f}" if conf is not None else "-"
+        rec = row.get("recommendation") or {}
+        actions = rec.get("recommended_actions") or []
+        blocked = rec.get("blocked_actions") or []
         print(
             f"{int(row.get('id') or 0):>4} "
             f"{str(row.get('status') or ''):<8} "
             f"{str(row.get('decision_category') or ''):<24} "
             f"{conf_s:>5} "
+            f"{len(actions):>3} "
+            f"{len(blocked):>3} "
             f"{row.get('summary') or row.get('error') or ''}"
         )
 

@@ -274,6 +274,23 @@ Autopilot is a deterministic controller. It should remain the trusted executor.
 The AI optimizer is disabled by default while deterministic reward-funnel
 telemetry is being validated.
 
+The AI optimizer is an InnoPool co-pilot, not the driver. It may analyze,
+explain, recommend, and ask for more data, but it must never assume that its
+advice will be applied. Deterministic autopilot guardrails decide whether advice
+is usable. Human approval remains required for high-risk or ambiguous changes.
+
+Authority model:
+
+- Deterministic autopilot is the executor.
+- The AI co-pilot is an analyst and strategy recommender.
+- The human operator is the final authority for risky changes, economic changes,
+  emergency drains, or anything touching rewards, wallets, secrets, or cloud
+  infrastructure.
+- If AI advice conflicts with deterministic telemetry, deterministic telemetry
+  wins.
+- If the evidence is incomplete, the AI should recommend `request_more_data` or
+  `observe_only`, not guess.
+
 Current autopilot responsibilities:
 
 - Build a read-only health report.
@@ -390,6 +407,61 @@ A healthy pool usually has:
   budget.
 - No repeated Cloudflare 502s from slaves.
 
+## 9A. Worker Admission, Probation, And Trust
+
+InnoPool protects the reward funnel by preventing weak or unproven public
+workers from silently expanding global workload.
+
+Public worker preflight requirements:
+
+- CPU workers should have at least 24 logical threads.
+- CPU workers should have around 32 GB RAM and 100 GB free disk.
+- GPU workers need a working NVIDIA driver and visible `nvidia-smi`.
+- GPU workers should have 16 GB or more VRAM and around 100 GB free disk.
+- Low-spec workers can run only with an explicit low-spec override and may be
+  disabled if they harm pool health.
+
+Member fields relevant to scaling:
+
+- `pool_members.active` means the worker registration is enabled. It does not
+  mean the slave is currently connected.
+- `trust_state='probation'` means the worker may receive limited work, but should
+  not expand global capacity until it proves recent clean completions.
+- `trust_state='trusted'` means the worker can count toward capacity scaling if
+  it is active now.
+- `preflight_status='passed'` means local checks passed.
+- `preflight_status='low_spec_override'` means the worker bypassed minimums and
+  should be treated cautiously.
+
+Capacity-only trust gate:
+
+- Probation affects global capacity scaling only.
+- Existing master assignment and adaptive per-slave caps still limit how much
+  work a probationary worker can hold.
+- A probation worker can become capacity-eligible by completing enough recent
+  batches with zero stale root/proof debt and acceptable failure counts.
+- Offline registered workers must not be counted as probation pressure or active
+  capacity. Use `active_now`, not `pool_members.active`, for live capacity.
+
+Default proof-of-work trust thresholds:
+
+- CPU: at least 10 recent completed root batches, no stale roots/proofs, and no
+  recent failures above the configured threshold.
+- GPU: at least 2 recent completed root batches, no stale roots/proofs, and no
+  recent failures above the configured threshold.
+
+The AI must not recommend broad capacity increases just because many registered
+workers exist. It should distinguish:
+
+- enabled registrations
+- active connected workers
+- capacity-eligible workers
+- probationary active workers
+- low-spec override workers
+
+Weak or unproven workers are a pool-health risk because they can increase
+precommit pressure, slow proof submission, and dilute reward efficiency.
+
 ## 10. Known Failure Modes
 
 ### GPU Workers Idle Despite Unassigned Roots
@@ -493,7 +565,9 @@ long runtimes. Do not manually force high caps for weak public miners.
 
 ## 11. Safe Action Surface
 
-The AI may recommend changes to these keys, subject to deterministic validation:
+The AI may recommend changes to these keys, subject to deterministic validation.
+Recommendations outside this list are advisory text only and must be rejected by
+the executor:
 
 - `max_concurrent_benchmarks`
 - `per_challenge_max_benchmarks`
@@ -507,6 +581,18 @@ The AI may recommend changes to these keys, subject to deterministic validation:
 - `max_batches_per_benchmark`
 - `per_challenge_time_before_batch_retry`
 - `track_allowlist`
+
+Worker-state advice may recommend these non-config actions, but deterministic
+code or the human operator must decide whether to act:
+
+- keep a worker on probation
+- mark a worker for investigation
+- quarantine or disable a worker with stale/failing work
+- request a preflight rerun
+- request more data
+
+The AI must not mark workers trusted solely from registration or declared
+hardware. Trust requires recent clean work or explicit human/operator action.
 
 The AI may recommend investigation or cleanup for:
 
@@ -549,6 +635,13 @@ The executor must enforce these rules:
 - If live telemetry is missing or stale, output `observe_only`.
 - If deterministic stale totals show `proofs > 0`, do not write "no stale proofs";
   say exactly how many stale proofs were reported and whether action is required.
+- AI advice is a soft signal only. It must never bypass reward-funnel safety,
+  stale/proof blockers, trust/probation gates, route-cap limits, or configured
+  max step sizes.
+- If a recommendation affects global capacity, it must include the live active
+  CPU/GPU worker counts and capacity-eligible worker counts used as evidence.
+- If a recommendation affects worker trust, it must cite completed_recent,
+  stale_roots, stale_proofs, failed_recent, and preflight_status.
 
 ## 13. Evidence The AI Should Use
 
@@ -560,6 +653,8 @@ Each live request to the AI should include:
 - Active slave summary with CPU/GPU profiles.
 - Per-slave recent completions, active roots, active proofs, stale roots, stale
   proofs, average runtime, and idle time.
+- Worker trust/probation/preflight state.
+- Aggregate capacity-eligible/probation/low-spec override counts by CPU/GPU.
 - Challenge/track pressure.
 - Resource slot summary and detail.
 - Active job counts by challenge and algorithm.
@@ -603,7 +698,8 @@ Known tables:
   `algorithm_id`, `track_id`, `assigned_at`, `last_activity_at`, `state`.
 - `pool_members`: `slave_name`, `wallet_address`, `invite_code`,
   `registered_at`, `active`, `notes`, `fleet_id`, `worker_type`,
-  `machine_index`, `declared_cores`, `declared_gpu_model`.
+  `machine_index`, `declared_cores`, `declared_gpu_model`, `trust_state`,
+  `preflight_status`, `preflight_report`, `trusted_at`.
 - `autopilot_decisions`: `id`, `mode`, `generated_at_ms`, `clean_windows`,
   `healthy`, `applied`, `reason`, `changes`, `report`, `created_at`.
 - `ai_optimizer_decisions`: `id`, `mode`, `generated_at_ms`, `model`, `status`,
@@ -653,6 +749,17 @@ The AI should classify every recommendation into one category:
 - `investigate`: more telemetry is required.
 - `emergency_drain`: reduce or stop creating work to clear stale/stuck work.
 - `rollback`: undo or step back a previous change.
+
+Decision category rules:
+
+- Use `safe_config_change` only when the action is within the allowed action
+  surface, bounded, reversible, and consistent with deterministic guardrails.
+- Use `human_approval_required` for economic strategy, reward allocation,
+  high-risk workload changes, or anything whose impact cannot be validated from
+  current telemetry.
+- Use `investigate` when the pool looks unhealthy but the cause is ambiguous.
+- Use `observe_only` when no safe action exists or all blockers are expected
+  because there are no active miners.
 
 ## 17. Required AI Output Schema
 
@@ -706,7 +813,31 @@ Allowed `action_type` values:
 - `release_stale_assignments`
 - `quarantine_slave`
 - `request_more_data`
+- `worker_probation`
+- `worker_investigation`
+- `stale_track_attention`
+- `gpu_unserved_stranded_attention`
 - `no_op`
+
+Allowed config keys:
+
+- `max_concurrent_benchmarks`
+- `per_challenge_max_benchmarks`
+- `resource_slots.slots`
+- `adaptive_slave_caps.cpu_min_cap`
+- `adaptive_slave_caps.cpu_max_cap`
+- `adaptive_slave_caps.gpu_min_cap`
+- `adaptive_slave_caps.gpu_max_cap`
+- `adaptive_slave_caps.target_buffer_ms`
+- `adaptive_slave_caps.warmup_completed_batches`
+- `max_batches_per_benchmark`
+- `per_challenge_time_before_batch_retry`
+- `track_allowlist`
+
+Any action with `action_type` not in the allowed list should be treated as
+rejected. Any config change with a key outside the allowed config keys should be
+treated as rejected. Rejected actions should be moved to `blocked_actions` with a
+clear reason.
 
 If no action is safe, use:
 

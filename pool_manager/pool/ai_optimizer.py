@@ -107,6 +107,10 @@ KNOWN_SCHEMA = {
         "machine_index",
         "declared_cores",
         "declared_gpu_model",
+        "trust_state",
+        "preflight_status",
+        "preflight_report",
+        "trusted_at",
     },
     "autopilot_decisions": {
         "id",
@@ -135,6 +139,37 @@ KNOWN_SCHEMA = {
         "error",
         "created_at",
     },
+}
+
+ALLOWED_ACTION_TYPES = {
+    "set_config",
+    "increase_config",
+    "decrease_config",
+    "release_stale_assignments",
+    "quarantine_slave",
+    "request_more_data",
+    "worker_probation",
+    "worker_investigation",
+    "stale_track_attention",
+    "gpu_unserved_stranded_attention",
+    "no_op",
+}
+
+CONFIG_ACTION_TYPES = {"set_config", "increase_config", "decrease_config"}
+
+ALLOWED_CONFIG_KEYS = {
+    "max_concurrent_benchmarks",
+    "per_challenge_max_benchmarks",
+    "resource_slots.slots",
+    "adaptive_slave_caps.cpu_min_cap",
+    "adaptive_slave_caps.cpu_max_cap",
+    "adaptive_slave_caps.gpu_min_cap",
+    "adaptive_slave_caps.gpu_max_cap",
+    "adaptive_slave_caps.target_buffer_ms",
+    "adaptive_slave_caps.warmup_completed_batches",
+    "max_batches_per_benchmark",
+    "per_challenge_time_before_batch_retry",
+    "track_allowlist",
 }
 
 
@@ -307,6 +342,10 @@ def _normalize_gpu_stranded(stranded: dict) -> dict:
 def _derived_pool_facts(report: dict) -> dict:
     gpu_slaves = []
     cpu_slaves = []
+    worker_trust = {
+        "cpu": {"active": 0, "capacity_eligible": 0, "probation": 0, "low_spec_override": 0},
+        "gpu": {"active": 0, "capacity_eligible": 0, "probation": 0, "low_spec_override": 0},
+    }
     exact_stale_totals = report.get("stale_totals") or {}
     stale_roots = int(exact_stale_totals.get("roots") or 0)
     stale_proofs = int(exact_stale_totals.get("proofs") or 0)
@@ -316,19 +355,32 @@ def _derived_pool_facts(report: dict) -> dict:
             stale_proofs += int(slave.get("stale_proofs") or 0)
         if not slave.get("active_now"):
             continue
+        profile = slave.get("profile") if slave.get("profile") in ("cpu", "gpu") else "cpu"
+        worker_trust[profile]["active"] += 1
+        if slave.get("capacity_eligible"):
+            worker_trust[profile]["capacity_eligible"] += 1
+        elif slave.get("registered_active"):
+            worker_trust[profile]["probation"] += 1
+        if slave.get("preflight_status") == "low_spec_override":
+            worker_trust[profile]["low_spec_override"] += 1
         item = {
             "slave_name": slave.get("slave_name"),
             "completed_recent": int(slave.get("completed_recent") or 0),
             "live_roots": int(slave.get("active_unfinished") or 0),
             "live_proofs": int(slave.get("active_proofs") or 0),
             "stale_total": int(slave.get("stale_roots") or 0) + int(slave.get("stale_proofs") or 0),
+            "failed_recent": int(slave.get("failed_recent") or 0),
             "avg_runtime_sec": slave.get("avg_runtime_sec"),
             "idle_for_min": slave.get("idle_for_min"),
+            "trust_state": slave.get("trust_state") or "probation",
+            "preflight_status": slave.get("preflight_status") or "not_reported",
+            "capacity_eligible": bool(slave.get("capacity_eligible")),
+            "capacity_reason": slave.get("capacity_reason"),
             "health_note": _slave_health_note(slave),
         }
-        if slave.get("profile") == "gpu":
+        if profile == "gpu":
             gpu_slaves.append(item)
-        elif slave.get("profile") == "cpu":
+        elif profile == "cpu":
             cpu_slaves.append(item)
 
     if not exact_stale_totals:
@@ -409,6 +461,7 @@ def _derived_pool_facts(report: dict) -> dict:
         "slot_state_counts": _slot_state_counts(report),
         "active_gpu_slaves": gpu_slaves,
         "active_cpu_slave_count": len(cpu_slaves),
+        "worker_trust": worker_trust,
         "stranded_classification": stranded_classification,
         "stale_totals": {
             "roots": stale_roots,
@@ -431,6 +484,9 @@ def _derived_pool_facts(report: dict) -> dict:
             "If safe_capacity_upscale is non-empty and stale_roots_tolerated_for_capacity_upscale is true, do not say autopilot is blocked by stale work.",
             "If selective_challenge_upscale_allowed is true, say autopilot can selectively raise non-stale challenge caps even while stale tracks are investigated.",
             "Use exact values from derived_pool_facts when summarizing throughput.",
+            "Use worker_trust.active and worker_trust.capacity_eligible when discussing scaling readiness.",
+            "Do not count registered-but-offline workers as active miners or capacity-eligible workers.",
+            "Low-spec override workers should remain conservative unless recent clean completions prove them.",
         ],
     }
 
@@ -468,6 +524,74 @@ def _allowed_followup_checks() -> list[dict]:
             "purpose": "Verify C3 assignment, adaptive cap, and root submission activity.",
         },
     ]
+
+
+def _is_allowed_config_key(key: str | None) -> bool:
+    if not key:
+        return False
+    if key in ALLOWED_CONFIG_KEYS:
+        return True
+    return any(key.startswith(f"{allowed}.") for allowed in ALLOWED_CONFIG_KEYS)
+
+
+def _allowed_action_contract() -> dict:
+    return {
+        "allowed_action_types": sorted(ALLOWED_ACTION_TYPES),
+        "config_action_types": sorted(CONFIG_ACTION_TYPES),
+        "allowed_config_keys": sorted(ALLOWED_CONFIG_KEYS),
+        "policy": (
+            "Read-only co-pilot advice. Unsupported actions are blocked before "
+            "storage/display; deterministic autopilot remains the executor."
+        ),
+    }
+
+
+def _validate_recommendation_contract(recommendation: dict) -> None:
+    actions = recommendation.get("recommended_actions")
+    if not isinstance(actions, list):
+        actions = []
+
+    valid_actions = []
+    blocked = recommendation.setdefault("blocked_actions", [])
+    if not isinstance(blocked, list):
+        blocked = []
+        recommendation["blocked_actions"] = blocked
+    warnings = []
+
+    for action in actions:
+        if not isinstance(action, dict):
+            blocked.append({
+                "action_type": "invalid",
+                "reason": "Recommended action was not a JSON object.",
+            })
+            warnings.append("blocked_non_object_action")
+            continue
+
+        action_type = action.get("action_type")
+        key = action.get("key")
+        if action_type not in ALLOWED_ACTION_TYPES:
+            blocked.append({
+                "action_type": action_type,
+                "key": key,
+                "reason": "Action type is outside the allowed AI co-pilot contract.",
+            })
+            warnings.append(f"blocked_action_type:{action_type}")
+            continue
+
+        if action_type in CONFIG_ACTION_TYPES and not _is_allowed_config_key(key):
+            blocked.append({
+                "action_type": action_type,
+                "key": key,
+                "reason": "Config key is outside the allowed AI co-pilot action surface.",
+            })
+            warnings.append(f"blocked_config_key:{key}")
+            continue
+
+        valid_actions.append(action)
+
+    recommendation["recommended_actions"] = valid_actions
+    if warnings:
+        recommendation["contract_warnings"] = warnings
 
 
 def _compact_autopilot_report(report: dict, derived: dict) -> dict:
@@ -509,6 +633,7 @@ def _compact_autopilot_report(report: dict, derived: dict) -> dict:
             "unserved_examples": (stranded.get("unserved") or [])[:8],
             "capacity_waiting_examples": (stranded.get("capacity_waiting") or [])[:8],
         },
+        "worker_trust": derived.get("worker_trust"),
         "active_gpu_slaves": derived.get("active_gpu_slaves"),
         "active_cpu_slave_count": derived.get("active_cpu_slave_count"),
         "stale_track_signals": (derived.get("stale_track_signals") or [])[:10],
@@ -525,6 +650,7 @@ def _build_prompt_payload(report: dict) -> dict:
         "autopilot_report": _compact_autopilot_report(report, derived),
         "derived_pool_facts": derived,
         "known_database_schema": {table: sorted(cols) for table, cols in KNOWN_SCHEMA.items()},
+        "allowed_action_contract": _allowed_action_contract(),
         "allowed_followup_checks": _allowed_followup_checks(),
         "recent_autopilot_decisions": _recent_autopilot_decisions(),
         "recent_ai_optimizer_decisions": _recent_ai_decisions(),
@@ -534,6 +660,7 @@ def _build_prompt_payload(report: dict) -> dict:
             "if_uncertain": "Use request_more_data or observe_only.",
             "sql_policy": "Do not invent SQL. Prefer allowed_followup_checks check_id values. If SQL is included, it must use only known_database_schema tables and columns.",
             "accuracy_policy": "Use derived_pool_facts for throughput statements; do not call healthy GPU completion counts low throughput.",
+            "contract_policy": "Use only allowed_action_contract action types and config keys; unsupported suggestions will be blocked.",
         },
     }
 
@@ -1131,6 +1258,7 @@ def run_once(force: bool = False) -> dict:
         prompt_context = _build_prompt_payload(report)
         recommendation, raw = _call_deepseek(context_doc, prompt_context)
         _enforce_recommendation_consistency(recommendation, prompt_context)
+        _validate_recommendation_contract(recommendation)
         _save_decision(
             status="ok",
             recommendation=recommendation,
