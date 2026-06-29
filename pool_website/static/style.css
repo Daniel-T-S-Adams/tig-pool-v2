@@ -380,23 +380,39 @@ code, pre, .mono {
 .dashboard-divider { margin: 4px 0 44px; }
 .table-scroll {
   max-height: 360px;
-  overflow: auto;
+  overflow-y: auto;
+  overflow-x: hidden;
   border: 1px solid rgba(30,41,59,.45);
   border-radius: 10px;
 }
+.data-table.compact {
+  table-layout: fixed;
+}
 .data-table.compact th,
 .data-table.compact td {
-  padding: 9px 10px;
+  padding: 9px 8px;
   white-space: nowrap;
-}
-.data-table.compact td:nth-child(2) {
-  max-width: 220px;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+.data-table.compact th:nth-child(1) { width: 28%; }
+.data-table.compact th:nth-child(2) { width: 26%; }
+.data-table.compact th:nth-child(3) { width: 12%; }
+.data-table.compact th:nth-child(4) { width: 14%; }
+.data-table.compact th:nth-child(5) { width: 10%; }
+.data-table.compact th:nth-child(6) { width: 10%; }
+.data-table.compact td:nth-child(2) {
+  font-size: 12px;
+}
+.data-table.compact th:nth-child(n+3),
+.data-table.compact td:nth-child(n+3) {
+  text-align: right;
 }
 @media (max-width: 700px) {
   .dashboard-header { flex-direction: column; }
   .health-badge { align-self: flex-start; }
+  .table-scroll { overflow-x: auto; }
+  .data-table.compact { min-width: 620px; }
 }
 
 /* ── Dashboard compact stats ───────────────────────────────────────────── */

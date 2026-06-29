@@ -75,6 +75,7 @@
           <tr><td>Proof conversion</td><td class="val green" id="h-proof-conversion">—</td></tr>
           <tr><td>Avg proof submit time</td><td class="val blue" id="h-proof-time">—</td></tr>
           <tr><td>Latest coinbase update</td><td class="val" id="h-coinbase">—</td></tr>
+          <tr><td>Last refresh</td><td class="val" id="h-last-refresh">—</td></tr>
         </table>
       </div>
       <div class="card">
@@ -273,6 +274,11 @@
       return `${(s / 3600).toFixed(1)}h`;
     }
 
+    function readableChallenge(value) {
+      if (!value) return "—";
+      return value.replace(/_/g, " ");
+    }
+
     async function loadPoolHealth() {
       const errEl = document.getElementById("pool-health-error");
       try {
@@ -326,6 +332,7 @@
       document.getElementById("h-coinbase").textContent = coinbase
         ? `block ${coinbase.block_height} · ${timeAgo(coinbase.submitted_at)}`
         : "No updates yet";
+      document.getElementById("h-last-refresh").textContent = new Date().toLocaleTimeString();
 
       const tbody = document.getElementById("health-challenge-body");
       if (!challenges.length) {
@@ -335,7 +342,7 @@
 
       tbody.innerHTML = challenges.map((row) => `
         <tr>
-          <td>${row.challenge || "—"}</td>
+          <td title="${row.challenge || ""}">${readableChallenge(row.challenge)}</td>
           <td class="mono" title="${row.track || ""}">${row.track || "—"}</td>
           <td>${fmtNum(row.active_benchmarks || 0)}</td>
           <td>${fmtNum(row.roots_pending || 0)}</td>
