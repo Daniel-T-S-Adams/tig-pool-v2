@@ -1,154 +1,321 @@
 # InnoPool
 
-A self-hosted mining pool for [The Innovation Game](https://tig.foundation), built on top of the official `tig-benchmarker` master/slave architecture.
+A self-hosted, open-source mining pool for [The Innovation Game (TIG)](https://tig.foundation), built on the official `tig-benchmarker` master/slave architecture.
 
-## How It Works
-
-```
-Pool Members (slave nodes)  ──5115──►  TIG Master (Docker)
-                                              │
-                                     Pool Manager (Python)
-                                       - tracks contributions
-                                       - calls /set-coinbase
-                                              │
-                                     Pool Website (nginx)
-                                       - registration
-                                       - live stats
-```
-
-Slave nodes run on pool **members'** machines, pointing `MASTER_IP` at your pool server.  
-Rewards are distributed on-chain using TIG's `/set-coinbase` API every ~50 blocks.
+Pool members run TIG slave nodes pointing at your server. The pool manager tracks contributions, distributes rewards on-chain via `/set-coinbase`, and automatically tunes pool capacity through an autopilot system.
 
 ---
 
-## Local Setup (Testing First)
+## Features
 
-### Prerequisites
+- **Fleet-based registration** — members register with invite codes, receive a fleet token and auto-generated slave name
+- **Live pool website** — public stats, leaderboard, per-member dashboard, and fleet install scripts
+- **Autopilot** — continuously tunes benchmark slots, capacities, and workload based on live pool health
+- **Worker trust system** — probation/trust states gate capacity contributions from community miners
+- **AI co-pilot** — optional DeepSeek-backed advisor that reviews pool health and surfaces recommendations (read-only, operator-approved)
+- **Scheduler** — optional benchmark pre-seeding to keep the master active during quiet periods
+- **Admin CLI** — `admin.py` for all operator tasks without needing to call the API directly
+- **Security audit tool** — `tools/security_audit.py` for pre-release static analysis
 
-- Docker + Docker Compose installed in WSL
-- A TIG benchmarker `player_id` and `api_key` (get these from [tig.foundation](https://tig.foundation))
+---
 
-### 1. Configure
+## Architecture
+
+```
+Community Miners (slave nodes)
+        │ :5115
+        ▼
+  TIG Master (Docker)          ← manages jobs, roots, proofs
+        │ :3336 (internal)
+        ▼
+  Pool Manager (FastAPI)       ← tracks contributions, autopilot, coinbase
+        │
+  PostgreSQL (Docker)          ← shared schema for master + pool
+        │
+  Nginx (Docker)               ← serves pool website, proxies /api/ and /benchmarker/
+        │ :80 / :443
+        ▼
+  Public Internet
+```
+
+| Service | Internal port | Public port | Purpose |
+|---|---|---|---|
+| Nginx | 80 | 80 / 443 | Pool website + API proxy |
+| Master (slave) | 5115 | 5115 | Slave node connections |
+| Benchmarker UI | 7777 | 8081 | Operator-only master admin |
+| Pool Manager | 8080 | — | Internal only (proxied via nginx) |
+| PostgreSQL | 5432 | — | Internal only |
+
+> Port 3336 (master internal API) and 5432 (postgres) must **never** be exposed publicly.
+
+---
+
+## Prerequisites
+
+- Ubuntu 22.04+ (or any Linux host with Docker)
+- Docker + Docker Compose V2 (`docker compose`, not `docker-compose`)
+- A TIG benchmarker `player_id` and `api_key` from [tig.foundation](https://tig.foundation)
+- (Optional) A domain name + SSL certificate for production
+
+---
+
+## Quick Start
+
+### 1. Clone and configure
 
 ```bash
-cd /home/kevin/tig-pool
+git clone https://github.com/your-org/innopool.git
+cd innopool
 cp .env.example .env
 ```
 
-Edit `.env`:
-- Set a strong `POSTGRES_PASSWORD`
-- Set a strong `ADMIN_SECRET` (this protects your admin endpoints)
-- Leave `POOL_FEE=0.05` (5%) or adjust as you like
+Edit `.env` and set at minimum:
 
-### 2. Build and Start
+```env
+POSTGRES_PASSWORD=<strong-random-password>
+ADMIN_SECRET=<strong-random-secret>
+POOL_NAME=MyPool
+POOL_PUBLIC_URL=http://localhost   # or your domain
+POOL_FEE=0.05                      # 5% operator fee
+```
+
+See [Master Configuration](#master-configuration) below for how to seed your TIG credentials and algo selection into the pool master.
+
+### 2. Build and start
 
 ```bash
-docker-compose up --build
+docker compose up -d --build
 ```
 
-This starts:
-| Service | URL | Purpose |
-|---|---|---|
-| Pool website | http://localhost:80 | Public-facing pool site |
-| Benchmarker UI | http://localhost:80/benchmarker/ | Master admin (your eyes only) |
-| Master (slave port) | localhost:5115 | Slave nodes connect here |
-| Pool Manager API | http://localhost:80/api/ | REST API |
+### 3. Set your TIG credentials
 
-### 3. Set Your TIG Credentials
+Open the benchmarker UI at `http://localhost:8081/benchmarker/`, go to **Config**, and set your `player_id`, `api_key`, `api_url`, and `algo_selection`. Click **Update Config**.
 
-1. Open http://localhost:80/benchmarker/
-2. Go to **Config**
-3. Set your `player_id`, `api_key`, `api_url`, and `algo_selection`
-4. Click **Update Config**
-
-### 4. Add Your First Pool Member (Yourself)
-
-Use the admin API to add yourself directly:
+### 4. Register yourself as the first member
 
 ```bash
-curl -s -X POST http://localhost:80/api/admin/members \
-  -H "Content-Type: application/json" \
-  -H "X-Admin-Secret: YOUR_ADMIN_SECRET" \
-  -d '{"wallet_address": "0xYourWalletAddress"}'
+python3 admin.py add 0xYourWalletAddress cpu
 ```
 
-This returns your `slave_name` and a ready-to-use `.env` config.
+This prints a `slave_name`, fleet token, and a ready-to-paste slave `.env` block.
 
-Or create an invite code for others to self-register:
+Or generate invite codes for others to self-register:
 
 ```bash
-curl -s -X POST http://localhost:80/api/admin/invite \
-  -H "Content-Type: application/json" \
-  -H "X-Admin-Secret: YOUR_ADMIN_SECRET" \
-  -d '{"count": 5}'
+python3 admin.py invite 5
 ```
 
-### 5. Connect a Slave
+### 5. Connect a slave
 
-In a **separate** directory, clone tig-monorepo and configure it:
+The pool website serves a one-liner install script at `/static/fleet-install.sh`. Members run:
 
 ```bash
-git clone https://github.com/tig-foundation/tig-monorepo.git
-cd tig-monorepo/tig-benchmarker
+curl -s http://your-pool-domain/static/fleet-install.sh | bash
 ```
 
-Create/edit `.env`:
-```
-SLAVE_NAME=pool-<your_short_wallet>   # from registration response
-MASTER_IP=172.17.0.1                  # use this when master and slave are on same machine
-MASTER_PORT=5115
-NUM_WORKERS=8
-ALGORITHMS_DIR=./algorithms
-RESULTS_DIR=./results
-TTL=300
-```
+Or follow the manual steps on the pool website registration page.
 
-Start the slave:
+### 6. Verify
+
 ```bash
-docker-compose -f slave.yml up slave satisfiability vehicle_routing knapsack
+python3 admin.py autopilot
 ```
-
-### 6. Check the Pool Website
-
-Open http://localhost:80 — you should see your slave appear in the stats once it starts completing batches.
 
 ---
 
 ## Production Deployment
 
-### Hosting Recommendation
+### Recommended hosting
 
-- **VPS**: Hetzner Cloud CX22 (~€4/month) — enough for the master + pool manager
-- **Domain**: Any registrar (Namecheap, Cloudflare Registrar)
-- **SSL**: Add Certbot or use Cloudflare's proxy
+- **VPS**: Hetzner CX22 (~€4/month) is sufficient for the master + pool manager alone
+- Larger fleets (50+ slaves) benefit from a CX32 or CX42
+- **Domain**: Any registrar; Cloudflare proxy or Certbot for SSL
 
-### Steps
-
-1. Provision a Ubuntu 22.04 VPS
-2. Install Docker: `curl -fsSL https://get.docker.com | sh`
-3. `git clone` or `scp` this project to the VPS
-4. In `.env`, set `MASTER_PORT=5115` and open that port in your firewall
-5. `docker-compose up -d --build`
-6. Point a domain at your VPS IP, add SSL via Certbot
-
-### Firewall Rules
+### Firewall
 
 ```bash
-# SSH
-ufw allow 22
-
-# Pool website + API
-ufw allow 80
-ufw allow 443
-
-# Slave node connections (pool members need this)
-ufw allow 5115
-
+ufw allow 22    # SSH
+ufw allow 80    # Pool website + API
+ufw allow 443   # HTTPS (if using SSL)
+ufw allow 5115  # Slave node connections
 ufw enable
 ```
 
-> **Security note**: Port 3336 (benchmarker master internal API) and 5432 (postgres)
-> should **never** be exposed publicly. They are internal-only in this Docker setup.
+### Deploy
+
+```bash
+git clone https://github.com/your-org/innopool.git
+cd innopool
+cp .env.example .env
+# edit .env with production values
+docker compose up -d --build
+```
+
+### SSL with Certbot
+
+```bash
+apt install certbot python3-certbot-nginx
+certbot --nginx -d yourpool.example.com
+```
+
+Then update `POOL_PUBLIC_URL` in `.env` and restart nginx:
+
+```bash
+docker compose restart nginx
+```
+
+---
+
+## Autopilot
+
+The autopilot runs every `AUTOPILOT_INTERVAL_S` seconds (default 300) and automatically adjusts:
+
+- **Benchmark slots** — scales CPU and GPU slot counts based on connected worker capacity
+- **Max concurrent benchmarks** — tunes the master's workload cap to match proof throughput
+- **Stale work cleanup** — reclaims abandoned roots and proofs
+
+Enable it by setting `AUTOPILOT_MODE=on` in `.env`, then restart `pool_manager`:
+
+```bash
+docker compose up -d pool_manager
+```
+
+Key tuning parameters (all set in `.env`):
+
+| Variable | Default | Description |
+|---|---|---|
+| `AUTOPILOT_MODE` | `off` | `on` to enable, `off` to disable |
+| `AUTOPILOT_INTERVAL_S` | `300` | Seconds between autopilot runs |
+| `AUTOPILOT_MAX_CPU_SLOTS` | `128` | Hard cap on CPU benchmark slots |
+| `AUTOPILOT_MAX_GPU_SLOTS_PER_TYPE` | `6` | Hard cap on GPU slots per challenge type |
+| `AUTOPILOT_FUNNEL_MIN_PROOF_CONVERSION_RATE` | `0.85` | Minimum proof conversion before scaling is blocked |
+
+---
+
+## AI Co-pilot
+
+An optional DeepSeek-backed advisor that analyses pool state and surfaces recommendations for operator review. It is **read-only** — it never applies changes automatically.
+
+Enable by setting in `.env`:
+
+```env
+DEEPSEEK_API_KEY=sk-...
+AI_OPTIMIZER_ENABLED=true
+AI_OPTIMIZER_MODE=on
+AI_OPTIMIZER_INTERVAL_S=1800
+```
+
+View the latest recommendation:
+
+```bash
+python3 admin.py ai-optimizer
+```
+
+View decision history:
+
+```bash
+python3 admin.py ai-decisions
+```
+
+Recommendations are categorised as `observe_only`, `investigate`, or `act`. All proposed config changes are listed under `blocked_actions` until the operator manually applies them.
+
+---
+
+## Worker Trust System
+
+New community miners start on **probation**. The autopilot only counts their capacity once they have demonstrated consistent proof conversion and passed preflight checks.
+
+Trust states:
+
+| State | Meaning |
+|---|---|
+| `probation` | New miner, limited capacity contribution |
+| `trusted` | Verified miner, full capacity counted |
+| `suspended` | Removed from capacity calculations |
+
+View trust state for all members:
+
+```bash
+python3 admin.py members
+```
+
+Trust state is managed via the pool database or admin API. The `members` command shows `trust_state` and `preflight_status` columns for every registered slave.
+
+---
+
+## Admin CLI
+
+`admin.py` provides operator access to all pool management functions without needing to call the API directly.
+
+```bash
+python3 admin.py --help
+```
+
+Common commands:
+
+```bash
+python3 admin.py autopilot                            # Pool health + scale readiness report
+python3 admin.py autopilot --json                     # Same, machine-readable
+
+python3 admin.py members                              # List all registered members (with trust/preflight state)
+python3 admin.py fleets                               # List registered fleets
+
+python3 admin.py add <wallet> [cpu|gpu]               # Add a member directly (no invite needed)
+python3 admin.py create-fleet <wallet> <label> [cpu|gpu|mixed] [--cpu N] [--gpu N]
+python3 admin.py invite [N]                           # Generate N invite codes (default 1)
+python3 admin.py invites                              # List all invite codes
+
+python3 admin.py activate <wallet|slave>              # Re-activate a member or slave
+python3 admin.py deactivate <wallet|slave>            # Deactivate a member or slave
+python3 admin.py clear-slave <slave>                  # Unassign stale batches from a slave
+python3 admin.py member-health <slave>                # Detailed assignment health for a slave
+
+python3 admin.py ai-optimizer                         # Run AI co-pilot manually (read-only)
+python3 admin.py ai-decisions [N]                     # Show last N AI recommendations (default 10)
+
+python3 admin.py coinbase                             # Show last 10 coinbase distribution events
+python3 admin.py compute-types [--apply]              # Validate/fix TIG compute_type on algo_selection
+```
+
+---
+
+## Master Configuration
+
+### New operators (no prior TIG setup)
+
+Configure your `player_id`, `api_key`, and `algo_selection` via the benchmarker UI at `http://your-server:8081/benchmarker/`. This is the simplest path.
+
+### Migrating from an existing tig-benchmarker setup
+
+If you already run a standalone `tig-benchmarker` (tig-master) and want to transplant its full config into InnoPool, use `configure_innopool.py`:
+
+```bash
+# 1. Export your existing master config
+docker compose -f ~/tig-master/master.yml exec db \
+  psql -U postgres -d postgres -t \
+  -c 'SELECT config FROM config LIMIT 1;' \
+  | python3 -c 'import sys,json; print(json.dumps(json.loads(sys.stdin.read().strip()), indent=2))' \
+  > ~/tig-master/saved_config.json
+
+# 2. Create your API key file
+echo 'YOUR_TIG_API_KEY' > ~/.tig_api_key && chmod 600 ~/.tig_api_key
+
+# 3. Push config to InnoPool master (with pool-* slave routing)
+python3 configure_innopool.py
+```
+
+This script reads `~/tig-master/saved_config.json`, rewrites slave routing to `pool-gpu-.*` / `pool-cpu-.*`, sets pool-appropriate batch sizes, validates TIG 0.0.7 `compute_type` values, and pushes the full config to InnoPool's master.
+
+**Environment overrides:**
+
+| Variable | Default | Description |
+|---|---|---|
+| `SLAVE_MODE` | `pool` | `pool` (pool-* routing) or `hybrid` (your own named slaves) |
+| `CPU_BATCH_SIZE` | `64` | Nonces per CPU batch |
+| `GPU_BATCH_SIZE` | `8` | Nonces per GPU batch |
+| `CPU_COMPUTE_TYPE` | `aws_c7a` | Default compute_type for CPU algorithms |
+| `GPU_COMPUTE_TYPE` | `aws_g4dn` | Default compute_type for GPU algorithms |
+| `SAVED_CONFIG` | `~/tig-master/saved_config.json` | Path to exported config |
 
 ---
 
@@ -160,10 +327,12 @@ All endpoints are prefixed with `/api/`.
 
 | Method | Endpoint | Description |
 |---|---|---|
-| GET | `/stats` | Pool overview stats |
-| GET | `/leaderboard` | Top 20 contributors (24h) |
+| GET | `/stats` | Pool overview (workers, benchmarks, slots) |
+| GET | `/leaderboard` | Top contributors (24h) |
 | GET | `/member/{wallet}` | Individual member stats |
+| GET | `/health` | Pool health indicators |
 | POST | `/register` | Register with invite code |
+| POST | `/preflight` | Submit preflight check result |
 
 ### Admin (requires `X-Admin-Secret` header)
 
@@ -172,30 +341,43 @@ All endpoints are prefixed with `/api/`.
 | POST | `/admin/invite` | Create invite codes |
 | POST | `/admin/members` | Add member directly |
 | GET | `/admin/members` | List all members |
-| DELETE | `/admin/members/{wallet}` | Deactivate member |
-| GET | `/admin/coinbase-history` | Distribution history |
+| POST | `/admin/members/{id}/activate` | Re-activate member |
+| POST | `/admin/members/{id}/deactivate` | Deactivate member |
+| GET | `/admin/coinbase-history` | Reward distribution history |
 | GET | `/admin/invites` | List invite codes |
+| GET | `/admin/pool-settings` | View pool configuration |
+| POST | `/admin/pool-settings` | Update pool configuration |
 
 ---
 
-## Architecture
+## Codebase Overview
 
-| File | Purpose |
+| Path | Purpose |
 |---|---|
 | `docker-compose.yml` | Orchestrates all services |
-| `postgres/init.sql` | Combined master + pool schema |
-| `nginx/nginx.conf` | Routes `/`, `/api/`, `/benchmarker/` |
+| `postgres/init.sql` | Combined master + pool database schema |
+| `nginx/nginx.conf` | Routes `/`, `/api/`, `/benchmarker/`, `/static/` |
 | `pool_manager/main.py` | FastAPI server + background loop |
-| `pool_manager/pool/tracker.py` | Contribution snapshots every 60s |
-| `pool_manager/pool/coinbase.py` | Calls TIG `/set-coinbase` when due |
 | `pool_manager/pool/routes.py` | All HTTP endpoints |
-| `pool_website/` | Static HTML pool site |
+| `pool_manager/pool/tracker.py` | Contribution snapshots (every 60s) |
+| `pool_manager/pool/coinbase.py` | Calls TIG `/set-coinbase` when due |
+| `pool_manager/pool/autopilot.py` | Autopilot capacity and workload tuning |
+| `pool_manager/pool/ai_optimizer.py` | AI co-pilot advisor |
+| `pool_manager/pool/scheduler.py` | Optional benchmark pre-seeding |
+| `master/slave_manager.py` | Slave connection and batch assignment |
+| `master/precommit_manager.py` | Precommit selection and submission |
+| `pool_website/` | Static HTML/CSS/JS pool site |
+| `admin.py` | Operator CLI |
+| `configure_innopool.py` | Migrates an existing tig-master config into InnoPool with pool slave routing |
+| `tools/security_audit.py` | Read-only static security audit |
+| `tools/autopilot_sim/` | Autopilot scenario simulation and testing |
+| `docs/` | Operator documentation and AI context |
 
 ---
 
 ## Notes
 
-- The **pool operator** is the on-chain benchmarker. Pool members trust you to call `/set-coinbase` fairly. Your code is open source — they can verify it does exactly that.
-- `/set-coinbase` can only be updated once per `coinbase_update_period` blocks (tracked in `pool_settings`). Check the TIG docs for the current value.
-- Slave names must match the master config regex `pool-.*`. The default config in `init.sql` sets this up automatically.
-- The pool manager reads your `api_key` from the master's `config` table, so you only set it once (via the benchmarker UI).
+- The pool operator is the on-chain benchmarker. Members trust you to call `/set-coinbase` proportionally to their contributions. The code is open source — they can verify it does exactly that.
+- `/set-coinbase` is rate-limited by TIG to once per `coinbase_update_period` blocks. The pool manager tracks this automatically.
+- Fleet labels (the display name shown on the website) are cosmetic only. The pool identifies workers by their fleet token hash, which cannot be changed after registration.
+- The benchmarker UI (port 8081) should **not** be exposed publicly. Nginx restricts it to requests with valid `OPERATOR_USER`/`OPERATOR_PASSWORD` HTTP basic auth.
