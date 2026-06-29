@@ -804,6 +804,18 @@ def _enforce_recommendation_consistency(recommendation: dict, prompt_context: di
         capacity_waiting_count,
         f"Deterministic capacity-waiting benchmark count is {capacity_waiting_count}.",
     )
+    _ensure_evidence_metric(
+        recommendation,
+        "active_cpu_slaves",
+        active_cpu_count,
+        f"Deterministic active CPU slave count is {active_cpu_count}.",
+    )
+    _ensure_evidence_metric(
+        recommendation,
+        "active_gpu_slaves",
+        active_gpu_count,
+        f"Deterministic active GPU slave count is {active_gpu_count}.",
+    )
     if safe_capacity_upscale:
         _ensure_evidence_metric(
             recommendation,
@@ -926,8 +938,34 @@ def _enforce_recommendation_consistency(recommendation: dict, prompt_context: di
 
     if active_cpu_count == 0 and active_gpu_count == 0 and stale_roots == 0 and stale_proofs == 0:
         actions = recommendation.get("recommended_actions") or []
-        if not actions and recommendation.get("decision_category") == "investigate":
+        kept_actions = []
+        blocked_actions = recommendation.setdefault("blocked_actions", [])
+        if not isinstance(blocked_actions, list):
+            blocked_actions = []
+            recommendation["blocked_actions"] = blocked_actions
+        for action in actions:
+            if isinstance(action, dict) and action.get("action_type") in CONFIG_ACTION_TYPES:
+                blocked = dict(action)
+                blocked["reason"] = (
+                    "Rejected idle-pool capacity tuning: zero active workers and zero stale work "
+                    "is not evidence that benchmark caps should be changed."
+                )
+                blocked_actions.append(blocked)
+            else:
+                kept_actions.append(action)
+        recommendation["recommended_actions"] = kept_actions
+        if len(kept_actions) != len(actions):
+            warnings.append({
+                "field": "recommended_actions",
+                "reason": "blocked_idle_pool_config_actions",
+            })
+        if not kept_actions:
             recommendation["decision_category"] = "observe_only"
+            recommendation["summary"] = (
+                "Pool is idle: 0 active CPU slaves, 0 active GPU slaves, and zero stale roots/proofs. "
+                "Pending benchmarks are waiting for workers, so no config change is recommended."
+            )
+            recommendation["requires_human_approval"] = False
             warnings.append({
                 "field": "decision_category",
                 "reason": "normalized_idle_pool_without_stale_work_to_observe_only",

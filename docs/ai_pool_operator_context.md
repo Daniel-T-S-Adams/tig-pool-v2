@@ -290,6 +290,9 @@ Authority model:
   wins.
 - If the evidence is incomplete, the AI should recommend `request_more_data` or
   `observe_only`, not guess.
+- If zero CPU workers and zero GPU workers are active and stale roots/proofs are
+  zero, the pool is idle. Do not recommend capacity downscales merely because
+  pending benchmarks exist with no workers to pick them up.
 
 Current autopilot responsibilities:
 
@@ -646,6 +649,8 @@ The executor must enforce these rules:
   CPU/GPU worker counts and capacity-eligible worker counts used as evidence.
 - If a recommendation affects worker trust, it must cite completed_recent,
   stale_roots, stale_proofs, failed_recent, and preflight_status.
+- If no workers are active and stale roots/proofs are zero, config-changing
+  recommendations should be rejected as idle-pool tuning noise.
 
 ## 13. Evidence The AI Should Use
 
