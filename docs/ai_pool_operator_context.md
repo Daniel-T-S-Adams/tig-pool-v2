@@ -469,6 +469,10 @@ precommit pressure, slow proof submission, and dilute reward efficiency.
 Unassigned roots may belong to stopped/ended historical jobs. Always filter for
 active jobs before concluding GPU work is available.
 
+Pending GPU roots with no assigned roots are not a GPU assignment problem when
+there are zero active GPU workers connected. In that state, classify the pool as
+idle or waiting for workers, not as broken or stranded.
+
 Correct diagnosis:
 
 - If active GPU slaves exist, GPU slots are idle, and active unassigned GPU roots

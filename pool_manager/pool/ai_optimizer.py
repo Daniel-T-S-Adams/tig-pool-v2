@@ -763,6 +763,15 @@ def _enforce_recommendation_consistency(recommendation: dict, prompt_context: di
         item for item in stranded.get("unserved") or []
         if item.get("capacity_profile") == "gpu"
     ]
+    worker_trust = derived.get("worker_trust") or {}
+    active_gpu_count = max(
+        len(derived.get("active_gpu_slaves") or []),
+        int((worker_trust.get("gpu") or {}).get("active") or 0),
+    )
+    active_cpu_count = max(
+        int(derived.get("active_cpu_slave_count") or 0),
+        int((worker_trust.get("cpu") or {}).get("active") or 0),
+    )
     warnings = []
     if recommendation.get("parse_warning"):
         recommendation["summary"] = _deterministic_summary(derived)
@@ -852,7 +861,7 @@ def _enforce_recommendation_consistency(recommendation: dict, prompt_context: di
             "reason": "normalized_stale_track_action",
             "stale_track_count": len(deduped_stale_tracks),
         })
-    if unserved_gpu_stranded:
+    if unserved_gpu_stranded and active_gpu_count > 0:
         actions = recommendation.setdefault("recommended_actions", [])
         actions = [
             action for action in actions
@@ -896,6 +905,12 @@ def _enforce_recommendation_consistency(recommendation: dict, prompt_context: di
                 "field": "recommended_actions",
                 "reason": "removed_false_unserved_gpu_action_after_normalization",
             })
+        elif unserved_gpu_stranded and active_gpu_count == 0:
+            warnings.append({
+                "field": "recommended_actions",
+                "reason": "suppressed_unserved_gpu_action_no_active_gpu_slaves",
+                "unserved_gpu_count": len(unserved_gpu_stranded),
+            })
         queries = recommendation.get("queries_to_run_next") or []
         recommendation["queries_to_run_next"] = [
             query for query in queries
@@ -908,6 +923,15 @@ def _enforce_recommendation_consistency(recommendation: dict, prompt_context: di
                 }
             )
         ]
+
+    if active_cpu_count == 0 and active_gpu_count == 0 and stale_roots == 0 and stale_proofs == 0:
+        actions = recommendation.get("recommended_actions") or []
+        if not actions and recommendation.get("decision_category") == "investigate":
+            recommendation["decision_category"] = "observe_only"
+            warnings.append({
+                "field": "decision_category",
+                "reason": "normalized_idle_pool_without_stale_work_to_observe_only",
+            })
 
     summary = str(recommendation.get("summary") or "")
     if not unserved_gpu_stranded and summary:
