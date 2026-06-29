@@ -327,6 +327,78 @@ code, pre, .mono {
 .feature-card h3 { font-size: 15px; font-weight: 700; margin-bottom: 8px; }
 .feature-card p { font-size: 13px; color: var(--muted2); line-height: 1.6; }
 
+/* ── Pool health dashboard ─────────────────────────────────────────────── */
+.dashboard-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 20px;
+  margin-bottom: 24px;
+}
+.dashboard-header .section-sub { margin-bottom: 6px; }
+.dashboard-intro {
+  color: var(--muted2);
+  max-width: 720px;
+}
+.health-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+  padding: 7px 14px;
+  border-radius: 999px;
+  font-size: 13px;
+  font-weight: 700;
+  border: 1px solid rgba(148,163,184,.18);
+  background: rgba(148,163,184,.08);
+  color: var(--muted2);
+}
+.health-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: currentColor;
+}
+.health-badge.healthy {
+  background: rgba(34,211,165,.10);
+  border-color: rgba(34,211,165,.24);
+  color: var(--green);
+}
+.health-badge.caution {
+  background: rgba(251,146,60,.10);
+  border-color: rgba(251,146,60,.24);
+  color: var(--orange);
+}
+.health-badge.blocked {
+  background: rgba(248,113,113,.10);
+  border-color: rgba(248,113,113,.24);
+  color: var(--red);
+}
+.pool-health-grid { margin-bottom: 20px; }
+.health-panels { align-items: stretch; margin-bottom: 36px; }
+.health-panels .card { min-width: 0; }
+.dashboard-divider { margin: 4px 0 44px; }
+.table-scroll {
+  max-height: 360px;
+  overflow: auto;
+  border: 1px solid rgba(30,41,59,.45);
+  border-radius: 10px;
+}
+.data-table.compact th,
+.data-table.compact td {
+  padding: 9px 10px;
+  white-space: nowrap;
+}
+.data-table.compact td:nth-child(2) {
+  max-width: 220px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+@media (max-width: 700px) {
+  .dashboard-header { flex-direction: column; }
+  .health-badge { align-self: flex-start; }
+}
+
 /* ── Dashboard compact stats ───────────────────────────────────────────── */
 .dash-stats {
   display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px;

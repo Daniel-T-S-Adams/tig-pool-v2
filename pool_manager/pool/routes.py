@@ -401,6 +401,84 @@ def get_pool_stats():
     }
 
 
+@router.get("/health")
+def get_pool_health():
+    """Public, sanitized pool health summary for the dashboard."""
+    report = autopilot.build_report()
+    readiness = report.get("scale_readiness") or {}
+    stale_totals = report.get("stale_totals") or {}
+    active_counts = report.get("active_slave_counts") or {}
+    current_config = report.get("current_config") or {}
+    resource_slots = ((current_config.get("resource_slots") or {}).get("slots") or {})
+    reward_funnel = ((report.get("reward_funnel") or {}).get("summary") or {})
+
+    stale_roots = int(stale_totals.get("roots") or 0)
+    stale_proofs = int(stale_totals.get("proofs") or 0)
+    gate = readiness.get("gate") or "unknown"
+    if stale_roots or stale_proofs:
+        status = "blocked"
+    elif gate == "ready":
+        status = "healthy"
+    elif gate == "blocked":
+        status = "caution"
+    else:
+        status = "caution"
+
+    latest_coinbase = db.fetch_one(
+        """
+        SELECT block_height, submitted_at
+        FROM pool_coinbase_history
+        WHERE success = true
+        ORDER BY submitted_at DESC
+        LIMIT 1
+        """
+    )
+
+    challenges = []
+    for row in report.get("challenges") or []:
+        stale_total = int(row.get("stale_roots") or 0) + int(row.get("stale_proofs") or 0)
+        challenges.append(
+            {
+                "challenge": row.get("challenge") or "",
+                "track": row.get("track") or "",
+                "active_benchmarks": int(row.get("active_benchmarks") or 0),
+                "roots_pending": int(row.get("roots_pending") or 0),
+                "roots_inflight": int(row.get("roots_inflight") or 0),
+                "stale": stale_total,
+            }
+        )
+
+    return {
+        "generated_at_ms": report.get("generated_at_ms"),
+        "status": status,
+        "gate": gate,
+        "posture": readiness.get("posture"),
+        "active_slave_counts": {
+            "cpu": int(active_counts.get("cpu") or 0),
+            "gpu": int(active_counts.get("gpu") or 0),
+        },
+        "current": {
+            "max_concurrent_benchmarks": current_config.get("max_concurrent_benchmarks"),
+            "cpu_slots": int(resource_slots.get("cpu") or 0),
+            "gpu_slots_total": sum(
+                int(resource_slots.get(key, 0) or 0)
+                for key in ("vector_search", "hypergraph", "neuralnet_optimizer")
+            ),
+        },
+        "stale_totals": {
+            "roots": stale_roots,
+            "proofs": stale_proofs,
+        },
+        "reward_funnel": {
+            "safe_to_scale_workload": reward_funnel.get("safe_to_scale_workload"),
+            "proof_conversion_rate": reward_funnel.get("proof_conversion_rate"),
+            "avg_time_to_proof_submit_sec": reward_funnel.get("avg_time_to_proof_submit_sec"),
+        },
+        "latest_coinbase": dict(latest_coinbase) if latest_coinbase else None,
+        "challenges": challenges,
+    }
+
+
 @router.get("/leaderboard")
 def get_leaderboard():
     """Top contributors for the current TIG round, matching coinbase allocation."""

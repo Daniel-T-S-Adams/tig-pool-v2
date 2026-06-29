@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>InnoPool — My Stats</title>
+  <title>InnoPool — Dashboard</title>
   <link rel="icon" type="image/svg+xml" href="/static/favicon.svg" />
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -21,7 +21,7 @@
       <div class="nav-links">
         <a href="/">Home</a>
         <a href="/register.html">Join Pool</a>
-        <a href="/dashboard.html" class="active">My Stats</a>
+        <a href="/dashboard.html" class="active">Dashboard</a>
         <a href="https://operator.innopool.co.uk" target="_blank" rel="noopener">Operator ↗</a>
       </div>
     </div>
@@ -30,6 +30,77 @@
   <div style="padding-top:60px;"></div>
 
   <section class="section" style="padding-top:48px;">
+    <div class="dashboard-header">
+      <div>
+        <p class="section-sub">Updated every 60 seconds</p>
+        <h2 class="section-title">Pool Dashboard</h2>
+        <p class="dashboard-intro">Live public health for InnoPool, plus member lookup for contribution details.</p>
+      </div>
+      <div id="pool-health-badge" class="health-badge caution">
+        <span class="health-dot"></span>
+        <span id="pool-health-text">Loading health</span>
+      </div>
+    </div>
+
+    <div id="pool-health-error" class="alert error hidden"></div>
+
+    <div class="dash-stats pool-health-grid">
+      <div class="dash-tile">
+        <div class="val" id="h-status">—</div>
+        <div class="lbl">Pool Status</div>
+        <div class="tile-sub" id="h-posture">Checking autopilot gate</div>
+      </div>
+      <div class="dash-tile">
+        <div class="val" id="h-workers">—</div>
+        <div class="lbl">Active Workers</div>
+        <div class="tile-sub" id="h-worker-split">CPU/GPU capacity currently seen</div>
+      </div>
+      <div class="dash-tile">
+        <div class="val" id="h-benchmarks">—</div>
+        <div class="lbl">Benchmarks</div>
+        <div class="tile-sub" id="h-slot-summary">Current benchmark limit and slots</div>
+      </div>
+      <div class="dash-tile">
+        <div class="val" id="h-stale">—</div>
+        <div class="lbl">Stale Work</div>
+        <div class="tile-sub">Root/proof assignments over stale age</div>
+      </div>
+    </div>
+
+    <div class="grid-2 health-panels">
+      <div class="card">
+        <h2>Reward Funnel</h2>
+        <table class="info-table">
+          <tr><td>Scale gate</td><td class="val" id="h-gate">—</td></tr>
+          <tr><td>Proof conversion</td><td class="val green" id="h-proof-conversion">—</td></tr>
+          <tr><td>Avg proof submit time</td><td class="val blue" id="h-proof-time">—</td></tr>
+          <tr><td>Latest coinbase update</td><td class="val" id="h-coinbase">—</td></tr>
+        </table>
+      </div>
+      <div class="card">
+        <h2>Challenge Pressure</h2>
+        <div class="table-scroll">
+          <table class="data-table compact">
+            <thead>
+              <tr>
+                <th>Challenge</th>
+                <th>Track</th>
+                <th>Bench</th>
+                <th>Pending</th>
+                <th>Live</th>
+                <th>Stale</th>
+              </tr>
+            </thead>
+            <tbody id="health-challenge-body">
+              <tr><td colspan="6" class="loading">Loading challenge pressure...</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+
+    <hr class="divider dashboard-divider" />
+
     <h2 class="section-title">Member Dashboard</h2>
     <p class="section-sub" style="margin-bottom:24px;">Enter your wallet address to view your contribution stats.</p>
 
@@ -174,6 +245,104 @@
       if (s < 60)  return `${s}s ago`;
       if (s < 3600) return `${Math.floor(s/60)}m ago`;
       return `${Math.floor(s/3600)}h ago`;
+    }
+
+    function healthLabel(status) {
+      if (status === "healthy") return "Healthy";
+      if (status === "blocked") return "Blocked";
+      return "Caution";
+    }
+
+    function healthDescription(status, gate) {
+      if (status === "healthy") return "Ready to scale when capacity is available";
+      if (status === "blocked") return "Needs operator attention before scaling";
+      if (gate === "blocked") return "Recovery gate active; waiting for cleaner windows";
+      return "Running with conservative posture";
+    }
+
+    function fmtPercent(value) {
+      if (value == null) return "—";
+      return (Number(value) * 100).toFixed(1) + "%";
+    }
+
+    function fmtDuration(seconds) {
+      if (seconds == null) return "—";
+      const s = Math.round(Number(seconds));
+      if (s < 60) return `${s}s`;
+      if (s < 3600) return `${Math.round(s / 60)}m`;
+      return `${(s / 3600).toFixed(1)}h`;
+    }
+
+    async function loadPoolHealth() {
+      const errEl = document.getElementById("pool-health-error");
+      try {
+        const resp = await fetch("/api/health");
+        if (!resp.ok) throw new Error("health request failed");
+        const health = await resp.json();
+
+        errEl.classList.add("hidden");
+        renderPoolHealth(health);
+      } catch (_) {
+        errEl.textContent = "Could not load pool health. The pool manager may be restarting.";
+        errEl.classList.remove("hidden");
+        document.getElementById("pool-health-text").textContent = "Health unavailable";
+      }
+    }
+
+    function renderPoolHealth(health) {
+      const status = health.status || "caution";
+      const gate = health.gate || "unknown";
+      const badge = document.getElementById("pool-health-badge");
+      badge.className = `health-badge ${status}`;
+      document.getElementById("pool-health-text").textContent = healthLabel(status);
+      document.getElementById("h-status").textContent = healthLabel(status);
+      document.getElementById("h-posture").textContent = healthDescription(status, gate);
+      document.getElementById("h-gate").textContent = `${gate}${health.posture ? ` · ${health.posture}` : ""}`;
+
+      const active = health.active_slave_counts || {};
+      const activeCpu = Number(active.cpu || 0);
+      const activeGpu = Number(active.gpu || 0);
+      document.getElementById("h-workers").textContent = fmtNum(activeCpu + activeGpu);
+      document.getElementById("h-worker-split").textContent = `${activeCpu} CPU · ${activeGpu} GPU active`;
+
+      const challenges = health.challenges || [];
+      const activeBenchmarks = challenges.reduce((sum, row) => sum + Number(row.active_benchmarks || 0), 0);
+      const current = health.current || {};
+      const maxBenchmarks = current.max_concurrent_benchmarks ?? "—";
+      document.getElementById("h-benchmarks").textContent = `${fmtNum(activeBenchmarks)} / ${maxBenchmarks}`;
+      document.getElementById("h-slot-summary").textContent =
+        `${fmtNum(current.cpu_slots || 0)} CPU slots · ${fmtNum(current.gpu_slots_total || 0)} GPU slots`;
+
+      const stale = health.stale_totals || {};
+      const staleRoots = Number(stale.roots || 0);
+      const staleProofs = Number(stale.proofs || 0);
+      document.getElementById("h-stale").textContent = fmtNum(staleRoots + staleProofs);
+
+      const funnel = health.reward_funnel || {};
+      document.getElementById("h-proof-conversion").textContent = fmtPercent(funnel.proof_conversion_rate);
+      document.getElementById("h-proof-time").textContent = fmtDuration(funnel.avg_time_to_proof_submit_sec);
+
+      const coinbase = health.latest_coinbase;
+      document.getElementById("h-coinbase").textContent = coinbase
+        ? `block ${coinbase.block_height} · ${timeAgo(coinbase.submitted_at)}`
+        : "No updates yet";
+
+      const tbody = document.getElementById("health-challenge-body");
+      if (!challenges.length) {
+        tbody.innerHTML = '<tr><td colspan="6" class="loading">No active challenge pressure</td></tr>';
+        return;
+      }
+
+      tbody.innerHTML = challenges.map((row) => `
+        <tr>
+          <td>${row.challenge || "—"}</td>
+          <td class="mono" title="${row.track || ""}">${row.track || "—"}</td>
+          <td>${fmtNum(row.active_benchmarks || 0)}</td>
+          <td>${fmtNum(row.roots_pending || 0)}</td>
+          <td>${fmtNum(row.roots_inflight || 0)}</td>
+          <td>${fmtNum(row.stale || 0)}</td>
+        </tr>
+      `).join("");
     }
 
     async function doLookup(wallet) {
@@ -447,6 +616,9 @@
       doLookup(saved);
       startAutoRefresh(saved);
     }
+
+    loadPoolHealth();
+    setInterval(loadPoolHealth, REFRESH_MS);
   </script>
 </body>
 </html>
