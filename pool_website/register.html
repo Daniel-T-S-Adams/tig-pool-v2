@@ -232,7 +232,7 @@ git switch main</div>
         <!-- Footer note -->
         <div style="padding:14px 18px;border-left:3px solid var(--green);background:rgba(34,211,165,0.06);border-radius:0 8px 8px 0;font-size:13px;color:var(--muted2);line-height:1.7;">
           Your slave is connected as soon as it can fetch batches, but it only appears in stats after its first completed batch.
-          Visit <a href="/dashboard.html" style="color:var(--green);font-weight:600;">Dashboard</a> to monitor pool health, your contributions, and reward allocation.
+          Visit <a href="/dashboard.html" style="color:var(--cyan);font-weight:600;">Dashboard</a> to monitor pool health, your contributions, and reward allocation.
         </div>
 
       </div>
@@ -242,7 +242,10 @@ git switch main</div>
 
   <footer class="footer">
     <div class="footer-inner">
-      <div class="footer-brand">⛏ InnoPool</div>
+      <div>
+        <div class="footer-brand">△ InnoPool</div>
+        <div class="footer-copy">© 2026 InnoPool. All rights reserved.</div>
+      </div>
       <div class="footer-links">
         <a href="/">Home</a>
         <a href="/dashboard.html">Stats</a>
@@ -300,7 +303,7 @@ git switch main</div>
           document.getElementById("res-summary").textContent =
             `Fleet ${fleet.label} registered. Token generated for CPU/GPU machine installs.`;
           const pillsEl = document.getElementById("slave-pills");
-          pillsEl.innerHTML = `<span style="padding:5px 14px;border-radius:20px;background:rgba(34,211,165,0.12);border:1px solid rgba(34,211,165,0.3);color:#86efac;font-size:13px;font-family:monospace;">${fleet.fleet_id}</span>`;
+          pillsEl.innerHTML = `<span style="padding:5px 14px;border-radius:20px;background:rgba(39,168,255,0.14);border:1px solid rgba(127,247,255,0.32);color:#b6ecff;font-size:13px;font-family:monospace;">${fleet.fleet_id}</span>`;
           const blocks = document.getElementById("fleet-install-blocks");
           blocks.innerHTML = "";
 

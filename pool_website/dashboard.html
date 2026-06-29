@@ -119,8 +119,8 @@
 
       <!-- Status bar -->
       <div style="display:flex; align-items:center; gap:16px; margin-bottom:12px; flex-wrap:wrap;">
-        <div id="d-status-badge" style="display:flex;align-items:center;gap:8px;padding:6px 14px;border-radius:20px;font-size:13px;font-weight:600;background:rgba(16,185,129,0.15);color:#10b981;border:1px solid rgba(16,185,129,0.3);">
-          <span id="d-status-dot" style="width:8px;height:8px;border-radius:50%;background:#10b981;display:inline-block;"></span>
+        <div id="d-status-badge" style="display:flex;align-items:center;gap:8px;padding:6px 14px;border-radius:20px;font-size:13px;font-weight:600;background:rgba(39,168,255,0.14);color:#7ff7ff;border:1px solid rgba(127,247,255,0.3);">
+          <span id="d-status-dot" style="width:8px;height:8px;border-radius:50%;background:#7ff7ff;display:inline-block;box-shadow:0 0 10px rgba(127,247,255,.5);"></span>
           <span id="d-status-text">Active</span>
         </div>
         <div style="font-size:12px;color:var(--muted);">
@@ -227,7 +227,10 @@
 
   <footer class="footer">
     <div class="footer-inner">
-      <div class="footer-brand">△ InnoPool</div>
+      <div>
+        <div class="footer-brand">△ InnoPool</div>
+        <div class="footer-copy">© 2026 InnoPool. All rights reserved.</div>
+      </div>
       <div class="footer-links">
         <a href="/">Home</a>
         <a href="/register.html">Join</a>
@@ -390,16 +393,18 @@
         const dot   = document.getElementById("d-status-dot");
         const txt   = document.getElementById("d-status-text");
         if (isActive) {
-          badge.style.background = "rgba(16,185,129,0.15)";
-          badge.style.color = "#10b981";
-          badge.style.borderColor = "rgba(16,185,129,0.3)";
-          dot.style.background = "#10b981";
+          badge.style.background = "rgba(39,168,255,0.14)";
+          badge.style.color = "#7ff7ff";
+          badge.style.borderColor = "rgba(127,247,255,0.3)";
+          dot.style.background = "#7ff7ff";
+          dot.style.boxShadow = "0 0 10px rgba(127,247,255,.5)";
           txt.textContent = "Active";
         } else {
           badge.style.background = "rgba(239,68,68,0.12)";
           badge.style.color = "#ef4444";
           badge.style.borderColor = "rgba(239,68,68,0.3)";
           dot.style.background = "#ef4444";
+          dot.style.boxShadow = "none";
           txt.textContent = lastMs ? `Inactive — last seen ${timeAgo(lastMs)}` : "No activity yet";
         }
 
