@@ -363,7 +363,7 @@ All endpoints are prefixed with `/api/`.
 | `pool_manager/pool/coinbase.py` | Calls TIG `/set-coinbase` when due |
 | `pool_manager/pool/autopilot.py` | Autopilot capacity and workload tuning |
 | `pool_manager/pool/ai_optimizer.py` | AI co-pilot advisor |
-| `pool_manager/pool/scheduler.py` | Optional benchmark pre-seeding |
+| `pool_manager/pool/scheduler.py` | Lightweight dynamic tuner — adjusts `max_concurrent_benchmarks` based on active slave count (superseded by autopilot) |
 | `master/slave_manager.py` | Slave connection and batch assignment |
 | `master/precommit_manager.py` | Precommit selection and submission |
 | `pool_website/` | Static HTML/CSS/JS pool site |
