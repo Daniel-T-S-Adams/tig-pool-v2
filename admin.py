@@ -164,11 +164,17 @@ def cmd_members(_):
     if not rows:
         print("No members registered yet.")
         return
-    print(f"{'WALLET':<45} {'SLAVE NAME':<30} {'ACTIVE'}")
-    print("-" * 85)
+    print(f"{'WALLET':<45} {'SLAVE NAME':<36} {'TYPE':<4} {'ACTIVE':<6} {'TRUST':<10} {'PREFLIGHT':<18}")
+    print("-" * 125)
     for r in rows:
         active = "yes" if r["active"] else "no"
-        print(f"{r['wallet_address']:<45} {r['slave_name']:<30} {active}")
+        worker_type = r.get("worker_type") or "?"
+        trust = r.get("trust_state") or "probation"
+        preflight = r.get("preflight_status") or "not_reported"
+        print(
+            f"{r['wallet_address']:<45} {r['slave_name']:<36} "
+            f"{worker_type:<4} {active:<6} {trust:<10} {preflight:<18}"
+        )
 
 def cmd_create_fleet(args):
     if len(args) < 2:

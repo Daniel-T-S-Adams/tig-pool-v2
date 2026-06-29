@@ -169,7 +169,11 @@ CREATE TABLE IF NOT EXISTS pool_members (
     worker_type TEXT,
     machine_index TEXT,
     declared_cores INTEGER,
-    declared_gpu_model TEXT
+    declared_gpu_model TEXT,
+    trust_state TEXT NOT NULL DEFAULT 'probation',
+    preflight_status TEXT,
+    preflight_report JSONB,
+    trusted_at BIGINT
 );
 
 CREATE INDEX idx_pool_members_slave_name ON pool_members(slave_name);

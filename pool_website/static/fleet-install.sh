@@ -87,4 +87,6 @@ print()
 print("Next commands:")
 print(data.get("preflight_command") or "")
 print(data.get("start_command") or "")
+print()
+print("If the preflight blocks a low-spec machine and the operator has approved it, rerun preflight with --allow-low-spec.")
 PY

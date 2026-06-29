@@ -74,6 +74,8 @@
           <tr><td>Scale gate</td><td class="val" id="h-gate">—</td></tr>
           <tr><td>Proof conversion</td><td class="val green" id="h-proof-conversion">—</td></tr>
           <tr><td>Avg proof submit time</td><td class="val blue" id="h-proof-time">—</td></tr>
+          <tr><td>Capacity-eligible workers</td><td class="val green" id="h-capacity-workers">—</td></tr>
+          <tr><td>Probation workers</td><td class="val" id="h-probation-workers">—</td></tr>
           <tr><td>Latest coinbase update</td><td class="val" id="h-coinbase">—</td></tr>
           <tr><td>Last refresh</td><td class="val" id="h-last-refresh">—</td></tr>
         </table>
@@ -327,6 +329,13 @@
       const funnel = health.reward_funnel || {};
       document.getElementById("h-proof-conversion").textContent = fmtPercent(funnel.proof_conversion_rate);
       document.getElementById("h-proof-time").textContent = fmtDuration(funnel.avg_time_to_proof_submit_sec);
+      const trust = health.worker_trust || {};
+      const cpuTrust = trust.cpu || {};
+      const gpuTrust = trust.gpu || {};
+      document.getElementById("h-capacity-workers").textContent =
+        `${fmtNum((cpuTrust.capacity_eligible || 0) + (gpuTrust.capacity_eligible || 0))} total`;
+      document.getElementById("h-probation-workers").textContent =
+        `${fmtNum((cpuTrust.probation || 0) + (gpuTrust.probation || 0))} total`;
 
       const coinbase = health.latest_coinbase;
       document.getElementById("h-coinbase").textContent = coinbase
@@ -516,7 +525,7 @@
       visibleSlaves.forEach((slave) => {
         const type = inferSlaveType(slave);
         const row = document.createElement("div");
-        row.style.cssText = "display:grid;grid-template-columns:74px minmax(0,1fr) 78px;gap:10px;align-items:center;padding:7px 0;border-top:1px solid rgba(255,255,255,0.05);font-size:12px;";
+        row.style.cssText = "display:grid;grid-template-columns:74px minmax(0,1fr) 108px 78px;gap:10px;align-items:center;padding:7px 0;border-top:1px solid rgba(255,255,255,0.05);font-size:12px;";
 
         const typeEl = document.createElement("div");
         typeEl.textContent = type.toUpperCase();
@@ -538,6 +547,13 @@
           nameWrap.appendChild(subEl);
         }
         row.appendChild(nameWrap);
+
+        const trustEl = document.createElement("div");
+        const trust = slaveTrustStatus(slave);
+        trustEl.textContent = trust.label;
+        trustEl.title = trust.title;
+        trustEl.style.cssText = `justify-self:end;border-radius:999px;padding:2px 8px;font-size:11px;font-weight:700;background:${trust.bg};color:${trust.color};border:1px solid ${trust.border};`;
+        row.appendChild(trustEl);
 
         const statusEl = document.createElement("div");
         const runtime = slaveRuntimeStatus(slave);
@@ -562,6 +578,35 @@
       } else {
         list.dataset.expanded = "false";
       }
+    }
+
+    function slaveTrustStatus(slave) {
+      if (slave.preflight_status === "low_spec_override") {
+        return {
+          label: "low-spec",
+          title: "Started with low-spec override; may not count for scaling until proven",
+          bg: "rgba(251,146,60,.10)",
+          color: "var(--orange)",
+          border: "rgba(251,146,60,.24)",
+        };
+      }
+      const state = (slave.trust_state || "probation").toLowerCase();
+      if (state === "trusted" || state === "operator") {
+        return {
+          label: "trusted",
+          title: "Eligible to count toward InnoPool capacity scaling",
+          bg: "rgba(34,211,165,.10)",
+          color: "var(--green)",
+          border: "rgba(34,211,165,.20)",
+        };
+      }
+      return {
+        label: "probation",
+        title: "Can receive limited work, but does not expand pool capacity until proven",
+        bg: "rgba(148,163,184,.08)",
+        color: "var(--muted2)",
+        border: "rgba(148,163,184,.16)",
+      };
     }
 
     function slaveRuntimeStatus(slave) {

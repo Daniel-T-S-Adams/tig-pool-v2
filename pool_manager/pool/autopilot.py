@@ -106,6 +106,9 @@ BENCHMARK_MAX_AGE_CLEANUP_ENABLED = os.environ.get(
 BENCHMARK_MAX_AGE_MS = int(
     os.environ.get("AUTOPILOT_BENCHMARK_MAX_AGE_MS", str(90 * 60 * 1000))
 )
+TRUSTED_CPU_COMPLETIONS = int(os.environ.get("AUTOPILOT_TRUSTED_CPU_COMPLETIONS", "10"))
+TRUSTED_GPU_COMPLETIONS = int(os.environ.get("AUTOPILOT_TRUSTED_GPU_COMPLETIONS", "2"))
+TRUSTED_MAX_FAILED_RECENT = int(os.environ.get("AUTOPILOT_TRUSTED_MAX_FAILED_RECENT", "0"))
 
 GPU_CHALLENGES = {"vector_search", "hypergraph", "neuralnet_optimizer"}
 GPU_SLOT_TYPES = ("vector_search", "hypergraph", "neuralnet_optimizer")
@@ -131,6 +134,7 @@ CHALLENGE_NAME_TO_ID = {
 }
 _last_run_ts = 0.0
 _decision_table_ready = False
+_member_hardening_schema_ready = False
 
 
 def _aws_batch_capacity(cfg: dict | None) -> dict:
@@ -235,15 +239,60 @@ def _is_public_member_slave(slave_name: str) -> bool:
     return slave_name.startswith(("pool-cpu-", "pool-gpu-"))
 
 
+def _ensure_member_hardening_schema():
+    global _member_hardening_schema_ready
+    if _member_hardening_schema_ready:
+        return
+    try:
+        db.execute_many(
+            ("ALTER TABLE pool_members ADD COLUMN IF NOT EXISTS trust_state TEXT NOT NULL DEFAULT 'probation'", None),
+            ("ALTER TABLE pool_members ADD COLUMN IF NOT EXISTS preflight_status TEXT", None),
+            ("ALTER TABLE pool_members ADD COLUMN IF NOT EXISTS preflight_report JSONB", None),
+            ("ALTER TABLE pool_members ADD COLUMN IF NOT EXISTS trusted_at BIGINT", None),
+            ("CREATE INDEX IF NOT EXISTS idx_pool_members_trust_state ON pool_members(trust_state)", None),
+        )
+        _member_hardening_schema_ready = True
+    except Exception as exc:
+        logger.warning("member hardening schema check failed: %s", exc)
+
+
 def _counts_for_capacity(slave: dict) -> bool:
     name = slave.get("slave_name") or ""
-    return bool(
-        slave.get("active_now")
-        and (
-            slave.get("registered_active")
-            or not _is_public_member_slave(name)
-        )
-    )
+    if not slave.get("active_now"):
+        return False
+    if not _is_public_member_slave(name):
+        return True
+    if not slave.get("registered_active"):
+        return False
+
+    trust_state = str(slave.get("trust_state") or "probation").lower()
+    if trust_state in {"trusted", "operator"}:
+        return True
+    if trust_state in {"disabled", "quarantined", "blocked"}:
+        return False
+
+    profile = slave.get("profile") or _slave_profile(name)
+    required_completed = TRUSTED_GPU_COMPLETIONS if profile == "gpu" else TRUSTED_CPU_COMPLETIONS
+    completed = int(slave.get("completed_recent") or 0)
+    stale = int(slave.get("stale_roots") or 0) + int(slave.get("stale_proofs") or 0)
+    failed = int(slave.get("failed_recent") or 0)
+    return completed >= required_completed and stale == 0 and failed <= TRUSTED_MAX_FAILED_RECENT
+
+
+def _capacity_reason(slave: dict) -> str:
+    name = slave.get("slave_name") or ""
+    if not slave.get("active_now"):
+        return "inactive"
+    if not _is_public_member_slave(name):
+        return "operator"
+    if not slave.get("registered_active"):
+        return "not_registered_active"
+    trust_state = str(slave.get("trust_state") or "probation").lower()
+    if trust_state in {"trusted", "operator"}:
+        return trust_state
+    if trust_state in {"disabled", "quarantined", "blocked"}:
+        return trust_state
+    return "proven_recent" if _counts_for_capacity(slave) else "probation"
 
 
 def _fetch_master_config() -> tuple[dict, str | None]:
@@ -881,12 +930,19 @@ def _current_config_summary(cfg: dict) -> dict:
 
 
 def _slave_metrics(now_ms: int) -> list[dict]:
+    _ensure_member_hardening_schema()
     cutoff_active = now_ms - ACTIVE_WINDOW_MS
     cutoff_metrics = now_ms - METRIC_WINDOW_MS
     rows = _fetch_all(
         """
         WITH registered AS (
-            SELECT slave_name, wallet_address, active
+            SELECT
+                slave_name,
+                wallet_address,
+                active,
+                trust_state,
+                preflight_status,
+                trusted_at
             FROM pool_members
         ),
         root_stats AS (
@@ -936,6 +992,9 @@ def _slave_metrics(now_ms: int) -> list[dict]:
             r.wallet_address,
             r.slave_name IS NOT NULL AS registered,
             COALESCE(r.active, false) AS registered_active,
+            COALESCE(r.trust_state, 'probation') AS trust_state,
+            r.preflight_status,
+            r.trusted_at,
             COALESCE(rs.assigned_recent, 0) AS assigned_recent,
             COALESCE(rs.completed_recent, 0) AS completed_recent,
             COALESCE(rs.active_unfinished, 0) AS active_unfinished,
@@ -976,6 +1035,8 @@ def _slave_metrics(now_ms: int) -> list[dict]:
         )
         row["profile"] = _slave_profile(row["slave_name"])
         row["active_now"] = last_activity >= cutoff_active or int(row.get("active_unfinished") or 0) > 0
+        row["capacity_eligible"] = _counts_for_capacity(row)
+        row["capacity_reason"] = _capacity_reason(row)
         row["idle_for_min"] = round((now_ms - last_activity) / 60000.0, 1) if last_activity else None
         out.append(row)
     return out

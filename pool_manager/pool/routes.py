@@ -11,6 +11,7 @@ import secrets
 import logging
 import hashlib
 import re
+import json
 from decimal import Decimal
 from fastapi import APIRouter, HTTPException, Header
 from pydantic import BaseModel
@@ -91,8 +92,13 @@ def _ensure_fleet_schema():
         ("ALTER TABLE pool_members ADD COLUMN IF NOT EXISTS machine_index TEXT", None),
         ("ALTER TABLE pool_members ADD COLUMN IF NOT EXISTS declared_cores INTEGER", None),
         ("ALTER TABLE pool_members ADD COLUMN IF NOT EXISTS declared_gpu_model TEXT", None),
+        ("ALTER TABLE pool_members ADD COLUMN IF NOT EXISTS trust_state TEXT NOT NULL DEFAULT 'probation'", None),
+        ("ALTER TABLE pool_members ADD COLUMN IF NOT EXISTS preflight_status TEXT", None),
+        ("ALTER TABLE pool_members ADD COLUMN IF NOT EXISTS preflight_report JSONB", None),
+        ("ALTER TABLE pool_members ADD COLUMN IF NOT EXISTS trusted_at BIGINT", None),
         ("CREATE INDEX IF NOT EXISTS idx_pool_fleets_wallet ON pool_fleets(wallet_address)", None),
         ("CREATE INDEX IF NOT EXISTS idx_pool_members_fleet_id ON pool_members(fleet_id)", None),
+        ("CREATE INDEX IF NOT EXISTS idx_pool_members_trust_state ON pool_members(trust_state)", None),
     )
 
 
@@ -411,6 +417,18 @@ def get_pool_health():
     current_config = report.get("current_config") or {}
     resource_slots = ((current_config.get("resource_slots") or {}).get("slots") or {})
     reward_funnel = ((report.get("reward_funnel") or {}).get("summary") or {})
+    worker_trust = {
+        "cpu": {"capacity_eligible": 0, "probation": 0, "low_spec_override": 0},
+        "gpu": {"capacity_eligible": 0, "probation": 0, "low_spec_override": 0},
+    }
+    for slave in report.get("slaves") or []:
+        profile = slave.get("profile") if slave.get("profile") in ("cpu", "gpu") else "cpu"
+        if slave.get("capacity_eligible"):
+            worker_trust[profile]["capacity_eligible"] += 1
+        elif slave.get("registered_active"):
+            worker_trust[profile]["probation"] += 1
+        if slave.get("preflight_status") == "low_spec_override":
+            worker_trust[profile]["low_spec_override"] += 1
 
     stale_roots = int(stale_totals.get("roots") or 0)
     stale_proofs = int(stale_totals.get("proofs") or 0)
@@ -457,6 +475,7 @@ def get_pool_health():
             "cpu": int(active_counts.get("cpu") or 0),
             "gpu": int(active_counts.get("gpu") or 0),
         },
+        "worker_trust": worker_trust,
         "current": {
             "max_concurrent_benchmarks": current_config.get("max_concurrent_benchmarks"),
             "cpu_slots": int(resource_slots.get("cpu") or 0),
@@ -521,6 +540,7 @@ def get_leaderboard():
 @router.get("/member/{wallet_address}")
 def get_member_stats(wallet_address: str):
     """Stats for a specific pool member."""
+    _ensure_fleet_schema()
     wallet_address = wallet_address.lower()
     members = db.fetch_all(
         "SELECT * FROM pool_members WHERE wallet_address = %s ORDER BY slave_name",
@@ -630,6 +650,8 @@ def get_member_stats(wallet_address: str):
                 "worker_type": r.get("worker_type"),
                 "fleet_id": r.get("fleet_id"),
                 "machine_index": r.get("machine_index"),
+                "trust_state": r.get("trust_state") or "probation",
+                "preflight_status": r.get("preflight_status"),
                 "active_roots": int((slave_activity.get(r["slave_name"]) or {}).get("active_roots") or 0),
                 "active_proofs": int((slave_activity.get(r["slave_name"]) or {}).get("active_proofs") or 0),
                 "last_activity_ms": int((slave_activity.get(r["slave_name"]) or {}).get("last_activity_ms") or 0),
@@ -679,6 +701,7 @@ def register_member(req: RegisterRequest):
     worker_type can be "cpu", "gpu", or "both". Using "both" registers
     two public slave entries (one CPU, one GPU) under a single invite code.
     """
+    _ensure_fleet_schema()
     wallet = req.wallet_address.lower().strip()
     code = req.invite_code.strip()
 
@@ -780,10 +803,10 @@ def register_member(req: RegisterRequest):
         )
     ] + [
         (
-            "INSERT INTO pool_members (wallet_address, slave_name, invite_code, registered_at) VALUES (%s, %s, %s, %s)",
-            (wallet, sname, code, now_ms),
+            "INSERT INTO pool_members (wallet_address, slave_name, invite_code, registered_at, worker_type) VALUES (%s, %s, %s, %s, %s)",
+            (wallet, sname, code, now_ms, t),
         )
-        for sname in slave_names.values()
+        for t, sname in slave_names.items()
     ]
     db.execute_many(*inserts)
 
@@ -863,8 +886,8 @@ EOF
 docker compose -f slave.yml config >/dev/null"""
 
 
-def _build_slave_preflight_command(services: str) -> str:
-    return f"curl -fsSL {_POOL_PUBLIC_URL}/static/preflight.sh | bash -s -- {services}"
+def _build_slave_preflight_command(services: str, worker_type: str) -> str:
+    return f"curl -fsSL {_POOL_PUBLIC_URL}/static/preflight.sh | bash -s -- --worker-type {worker_type} {services}"
 
 
 def _build_slave_start_command(services: str) -> str:
@@ -883,7 +906,7 @@ def _slave_payload(slave_name: str, worker_type: str) -> dict:
         "slave_name": slave_name,
         "slave_config": _build_slave_config(slave_name, num_workers),
         "setup_command": _build_slave_setup_command(slave_name, num_workers, worker_type),
-        "preflight_command": _build_slave_preflight_command(services),
+        "preflight_command": _build_slave_preflight_command(services, worker_type),
         "start_command": _build_slave_start_command(services),
         "services": services,
     }
@@ -949,6 +972,45 @@ def fleet_config(token: str, worker_type: str = "cpu", machine_index: str = "001
     }
 
 
+class PreflightReportRequest(BaseModel):
+    slave_name: str
+    worker_type: str = "cpu"
+    status: str
+    report: dict = {}
+
+
+@router.post("/slave/preflight")
+def record_slave_preflight(req: PreflightReportRequest):
+    """Record a public slave preflight result without granting trust."""
+    _ensure_fleet_schema()
+    slave_name = req.slave_name.strip()
+    if not slave_name.startswith("pool-"):
+        raise HTTPException(status_code=400, detail="Only public pool slaves can report preflight")
+    status = req.status.lower().strip()
+    if status not in {"passed", "low_spec_override", "failed"}:
+        raise HTTPException(status_code=400, detail="Invalid preflight status")
+    row = db.fetch_one(
+        "SELECT 1 FROM pool_members WHERE slave_name = %s",
+        (slave_name,),
+    )
+    if not row:
+        raise HTTPException(status_code=404, detail="Unknown slave")
+    report = dict(req.report or {})
+    report["worker_type"] = req.worker_type.lower().strip()
+    report["reported_at"] = int(time.time() * 1000)
+    db.execute(
+        """
+        UPDATE pool_members
+        SET preflight_status = %s,
+            preflight_report = %s::jsonb,
+            worker_type = COALESCE(NULLIF(worker_type, ''), %s)
+        WHERE slave_name = %s
+        """,
+        (status, json.dumps(report), report["worker_type"], slave_name),
+    )
+    return {"success": True}
+
+
 # ── admin endpoints ────────────────────────────────────────────────────────────
 
 class CreateInviteRequest(BaseModel):
@@ -985,6 +1047,7 @@ class AddMemberDirectRequest(BaseModel):
 def add_member_direct(req: AddMemberDirectRequest, x_admin_secret: str = Header(None)):
     """Add a member directly without an invite code (admin bypass)."""
     _check_admin(x_admin_secret)
+    _ensure_fleet_schema()
     wallet = req.wallet_address.lower().strip()
     worker_type = req.worker_type.lower().strip()
     if worker_type not in ("cpu", "gpu"):
@@ -1000,10 +1063,10 @@ def add_member_direct(req: AddMemberDirectRequest, x_admin_secret: str = Header(
 
     db.execute(
         """
-        INSERT INTO pool_members (wallet_address, slave_name, registered_at, notes)
-        VALUES (%s, %s, %s, %s)
+        INSERT INTO pool_members (wallet_address, slave_name, registered_at, notes, worker_type)
+        VALUES (%s, %s, %s, %s, %s)
         """,
-        (wallet, slave_name, now_ms, req.notes),
+        (wallet, slave_name, now_ms, req.notes, worker_type),
     )
     return {
         "wallet_address": wallet,
@@ -1086,8 +1149,22 @@ def list_fleets(x_admin_secret: str = Header(None)):
 @router.get("/admin/members")
 def list_members(x_admin_secret: str = Header(None)):
     _check_admin(x_admin_secret)
+    _ensure_fleet_schema()
     return db.fetch_all(
-        "SELECT wallet_address, slave_name, registered_at, active, notes FROM pool_members ORDER BY registered_at DESC"
+        """
+        SELECT
+            wallet_address,
+            slave_name,
+            registered_at,
+            active,
+            worker_type,
+            trust_state,
+            preflight_status,
+            trusted_at,
+            notes
+        FROM pool_members
+        ORDER BY registered_at DESC
+        """
     )
 
 
