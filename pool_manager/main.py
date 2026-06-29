@@ -81,4 +81,4 @@ if __name__ == "__main__":
     bg = threading.Thread(target=background_loop, daemon=True)
     bg.start()
     logger.info("Pool Manager starting on port 8080")
-    uvicorn.run(app, host="0.0.0.0", port=8080, log_level="warning")
+    uvicorn.run(app, host="0.0.0.0", port=8080, log_level="warning")  # nosec B104 — container binds all interfaces; nginx controls external exposure

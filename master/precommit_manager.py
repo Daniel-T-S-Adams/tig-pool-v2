@@ -85,7 +85,7 @@ class PrecommitManager:
         # Deep copy so mutations below (stripping unknown keys, filling defaults)
         # don't corrupt the live CONFIG["algo_selection"] — especially batch_size
         # which lives in track_settings but must not be sent to mainnet.
-        selection = copy.deepcopy(random.choices(weighted_eligible, weights=[x["weight"] for x in weighted_eligible])[0])
+        selection = copy.deepcopy(random.choices(weighted_eligible, weights=[x["weight"] for x in weighted_eligible])[0])  # nosec B311 — weighted algorithm selection, not cryptographic
         a_id = selection["algorithm_id"]
         c_id = a_id[:4]
         compute_type = selection.get("compute_type")

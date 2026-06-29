@@ -685,7 +685,7 @@ class SlaveManager:
                     )
                     for b in excess_assigned:
                         batch = b["batch"]
-                        table = "root_batch" if batch["sampled_nonces"] is None else "proofs_batch"
+                        table = "root_batch" if batch["sampled_nonces"] is None else "proofs_batch"  # nosec B608 — two hardcoded table names, no user input
                         updates.append((
                             f"""
                             UPDATE {table}
@@ -758,7 +758,7 @@ class SlaveManager:
                         b["start_time"] = now
                         b["num_attempts"] += 1
                         concurrent_by_bench[bid] = concurrent_by_bench.get(bid, 0) + 1
-                        table = "root_batch" if batch["sampled_nonces"] is None else "proofs_batch"
+                        table = "root_batch" if batch["sampled_nonces"] is None else "proofs_batch"  # nosec B608 — two hardcoded table names, no user input
                         slot_state = "root" if batch["sampled_nonces"] is None else "proof"
                         updates.append((
                             f"""
@@ -849,7 +849,7 @@ class SlaveManager:
                 return {"status": "QUARANTINED"}
 
             if b["num_attempts"] < CONFIG["max_batch_attempts"]:
-                table_name = "root_batch" if b["batch"]["sampled_nonces"] is None else "proofs_batch"
+                table_name = "root_batch" if b["batch"]["sampled_nonces"] is None else "proofs_batch"  # nosec B608 — two hardcoded table names, no user input
                 queries = [
                     (
                         f"""
@@ -888,7 +888,8 @@ class SlaveManager:
                 result = await request.json()
                 merkle_root = MerkleHash.from_str(result["merkle_root"])
                 solution_quality = result["solution_quality"]
-                assert isinstance(solution_quality, list) and all(isinstance(x, int) for x in solution_quality)
+                if not (isinstance(solution_quality, list) and all(isinstance(x, int) for x in solution_quality)):
+                    raise ValueError("solution_quality must be a list of integers")
                 expected_nonces = int(b["batch"]["num_nonces"])
                 if len(solution_quality) != expected_nonces:
                     raise ValueError(
@@ -978,7 +979,7 @@ class SlaveManager:
 
             return {"status": "OK"}
             
-        thread = Thread(target=lambda: uvicorn.run(app, host="0.0.0.0", port=5115, access_log=False))
+        thread = Thread(target=lambda: uvicorn.run(app, host="0.0.0.0", port=5115, access_log=False))  # nosec B104 — container binds all interfaces; nginx controls external exposure
         thread.daemon = True
         thread.start()
 

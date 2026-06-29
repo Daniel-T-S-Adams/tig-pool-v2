@@ -601,7 +601,7 @@ def get_member_stats(wallet_address: str):
     algo_stats = []
     slave_activity = {}
     if slave_list:
-        placeholders = ",".join(["%s"] * len(slave_list))
+        placeholders = ",".join(["%s"] * len(slave_list))  # nosec B608 — generates parameterized %s markers only, no user input interpolated
         algo_stats = db.fetch_all(
             f"""
             SELECT
@@ -1204,7 +1204,7 @@ def _member_where(identifier: str) -> tuple[str, tuple]:
 def activate_member(identifier: str, x_admin_secret: str = Header(None)):
     _check_admin(x_admin_secret)
     where, params = _member_where(identifier)
-    db.execute(f"UPDATE pool_members SET active = true WHERE {where}", params)
+    db.execute(f"UPDATE pool_members SET active = true WHERE {where}", params)  # nosec B608 — where clause is a hardcoded internal fragment from _member_where()
     return {"success": True}
 
 
@@ -1212,7 +1212,7 @@ def activate_member(identifier: str, x_admin_secret: str = Header(None)):
 def deactivate_member_by_identifier(identifier: str, x_admin_secret: str = Header(None)):
     _check_admin(x_admin_secret)
     where, params = _member_where(identifier)
-    db.execute(f"UPDATE pool_members SET active = false WHERE {where}", params)
+    db.execute(f"UPDATE pool_members SET active = false WHERE {where}", params)  # nosec B608 — where clause is a hardcoded internal fragment from _member_where()
     return {"success": True}
 
 

@@ -297,7 +297,7 @@ def _capacity_reason(slave: dict) -> str:
 
 def _fetch_master_config() -> tuple[dict, str | None]:
     try:
-        with urllib.request.urlopen(f"{MASTER_URL}/get-config", timeout=5) as resp:
+        with urllib.request.urlopen(f"{MASTER_URL}/get-config", timeout=5) as resp:  # nosec B310 — MASTER_URL is an internal Docker env var, never user-controlled
             return json.loads(resp.read()), None
     except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as exc:
         return {}, str(exc)
@@ -311,7 +311,7 @@ def _push_config(cfg: dict):
         headers={"Content-Type": "application/json"},
         method="POST",
     )
-    urllib.request.urlopen(req, timeout=5)
+    urllib.request.urlopen(req, timeout=5)  # nosec B310 — MASTER_URL is an internal Docker env var, never user-controlled
 
 
 def _clamp(value: int, lo: int, hi: int) -> int:
