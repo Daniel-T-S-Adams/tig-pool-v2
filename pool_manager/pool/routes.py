@@ -115,6 +115,16 @@ def _wallet_prefix(wallet: str) -> str:
     return wallet.lower().replace("0x", "")[:12]
 
 
+def _infer_worker_type(slave_name: str, worker_type: str | None = None) -> str:
+    explicit = (worker_type or "").lower().strip()
+    if explicit in {"cpu", "gpu"}:
+        return explicit
+    name = slave_name or ""
+    if name.startswith("pool-gpu-"):
+        return "gpu"
+    return "cpu"
+
+
 def _normalise_machine_index(value: str) -> str:
     raw = (value or "").strip().lower()
     raw = re.sub(r"[^a-z0-9-]+", "-", raw).strip("-")
@@ -422,6 +432,8 @@ def get_pool_health():
         "gpu": {"capacity_eligible": 0, "probation": 0, "low_spec_override": 0},
     }
     for slave in report.get("slaves") or []:
+        if not slave.get("active_now"):
+            continue
         profile = slave.get("profile") if slave.get("profile") in ("cpu", "gpu") else "cpu"
         if slave.get("capacity_eligible"):
             worker_trust[profile]["capacity_eligible"] += 1
@@ -647,7 +659,7 @@ def get_member_stats(wallet_address: str):
                 "slave_name": r["slave_name"],
                 "active": r["active"],
                 "registered_at": r["registered_at"],
-                "worker_type": r.get("worker_type"),
+                "worker_type": _infer_worker_type(r["slave_name"], r.get("worker_type")),
                 "fleet_id": r.get("fleet_id"),
                 "machine_index": r.get("machine_index"),
                 "trust_state": r.get("trust_state") or "probation",
@@ -1157,7 +1169,10 @@ def list_members(x_admin_secret: str = Header(None)):
             slave_name,
             registered_at,
             active,
-            worker_type,
+            COALESCE(
+                NULLIF(worker_type, ''),
+                CASE WHEN slave_name LIKE 'pool-gpu-%' THEN 'gpu' ELSE 'cpu' END
+            ) AS worker_type,
             trust_state,
             preflight_status,
             trusted_at,
