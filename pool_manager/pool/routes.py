@@ -421,7 +421,63 @@ def get_pool_stats():
 _earnings_cache: dict = {"data": None, "ts": 0.0}
 _EARNINGS_CACHE_TTL = 300   # 5 minutes for round totals
 _BLOCK_REWARD_CACHE: dict = {"data": None, "ts": 0.0}
-_BLOCK_REWARD_CACHE_TTL = 60  # 1 minute — per-block reward updates every block (~60s)
+_BLOCK_REWARD_CACHE_TTL = 60  # 1 minute — updates every block (~60s)
+
+
+def _fetch_round_emissions(api_url: str, player_id: str, round_num: int):
+    """Fetch benchmarker earnings for one round. Returns (total, benchmarker, shared) in TIG."""
+    try:
+        resp = _requests.get(f"{api_url}/get-round-emissions?round={round_num}", timeout=10)
+        if resp.status_code != 200:
+            return None, None, None
+        opow = resp.json().get("opow") or {}
+        player = opow.get(player_id) or {}
+        total_tig = round(int(player.get("total") or "0") / 1e18, 4)
+        benchmarker_tig = round(sum(int(v) for v in (player.get("coinbase") or {}).values()) / 1e18, 4)
+        shared_tig = round(int(player.get("shared") or "0") / 1e18, 4)
+        return total_tig, benchmarker_tig, shared_tig
+    except Exception as exc:
+        logger.warning(f"Could not fetch round {round_num} emissions: {exc}")
+        return None, None, None
+
+
+def _fetch_block_reward(api_url: str, player_id: str):
+    """Fetch live per-block TIG reward for the pool's player_id."""
+    global _BLOCK_REWARD_CACHE
+    now = time.time()
+    if _BLOCK_REWARD_CACHE["data"] is not None and now - _BLOCK_REWARD_CACHE["ts"] < _BLOCK_REWARD_CACHE_TTL:
+        return _BLOCK_REWARD_CACHE["data"]
+    try:
+        block_resp = _requests.get(f"{api_url}/get-block", timeout=10)
+        if block_resp.status_code != 200:
+            return None
+        block_id = (block_resp.json().get("block") or {}).get("id")
+        if not block_id:
+            return None
+        opow_resp = _requests.get(f"{api_url}/get-opow?block_id={block_id}", timeout=10)
+        if opow_resp.status_code != 200:
+            return None
+        opow_data = opow_resp.json()
+        # Response may be a list of {player_id, block_data} objects or a dict
+        entry = None
+        if isinstance(opow_data, list):
+            entry = next((x for x in opow_data if (x.get("player_id") or "").lower() == player_id), None)
+            block_data = (entry or {}).get("block_data") or {}
+        elif isinstance(opow_data, dict):
+            raw = opow_data.get(player_id) or next(
+                (v for k, v in opow_data.items() if k.lower() == player_id), None
+            )
+            block_data = (raw or {}).get("block_data") or raw or {}
+        else:
+            return None
+        reward_raw = block_data.get("reward") or "0"
+        reward_tig = round(int(reward_raw) / 1e18, 6)
+        _BLOCK_REWARD_CACHE["data"] = reward_tig
+        _BLOCK_REWARD_CACHE["ts"] = now
+        return reward_tig
+    except Exception as exc:
+        logger.warning(f"Could not fetch block reward: {exc}")
+        return None
 
 
 @router.get("/earnings")
@@ -429,21 +485,22 @@ def get_pool_earnings():
     """Pool TIG earnings including live per-block reward rate."""
     global _earnings_cache
     now = time.time()
-    if _earnings_cache["data"] is not None and now - _earnings_cache["ts"] < _EARNINGS_CACHE_TTL:
-        # Still refresh block reward even when round cache is fresh
-        cached = dict(_earnings_cache["data"])
-        cached["block_reward_tig"] = _get_block_reward_tig()
-        return cached
 
     row = db.fetch_one("SELECT config FROM config LIMIT 1")
     if not row or not row["config"]:
         return {"error": "master config not available"}
-
     cfg = row["config"]
     player_id = (cfg.get("player_id") or "").lower()
     api_url = (cfg.get("api_url") or "https://mainnet-api.tig.foundation").rstrip("/")
     if not player_id or player_id.startswith("0x000000"):
         return {"error": "player_id not configured"}
+
+    # Always fetch live block reward (has its own 60s cache)
+    block_reward = _fetch_block_reward(api_url, player_id)
+
+    # Return cached round totals + fresh block reward if cache is still valid
+    if _earnings_cache["data"] is not None and now - _earnings_cache["ts"] < _EARNINGS_CACHE_TTL:
+        return {**_earnings_cache["data"], "block_reward_tig": block_reward}
 
     current_round_str = db.get_setting("current_round_id", None)
     if not current_round_str:
@@ -453,68 +510,13 @@ def get_pool_earnings():
     except (TypeError, ValueError):
         return {"error": "invalid current_round_id in pool settings"}
 
-    def _fetch_round(round_num: int):
-        try:
-            resp = _requests.get(
-                f"{api_url}/get-round-emissions?round={round_num}",
-                timeout=10,
-            )
-            if resp.status_code != 200:
-                return None, None, None
-            data = resp.json()
-            opow = data.get("opow") or {}
-            player = opow.get(player_id) or {}
-            total_tig = round(int(player.get("total") or "0") / 1e18, 4)
-            coinbase_map = player.get("coinbase") or {}
-            benchmarker_tig = round(sum(int(v) for v in coinbase_map.values()) / 1e18, 4)
-            shared_tig = round(int(player.get("shared") or "0") / 1e18, 4)
-            return total_tig, benchmarker_tig, shared_tig
-        except Exception as exc:
-            logger.warning(f"Could not fetch round {round_num} emissions: {exc}")
-            return None, None, None
-
-    def _get_block_reward_tig():
-        global _BLOCK_REWARD_CACHE
-        n = time.time()
-        if _BLOCK_REWARD_CACHE["data"] is not None and n - _BLOCK_REWARD_CACHE["ts"] < _BLOCK_REWARD_CACHE_TTL:
-            return _BLOCK_REWARD_CACHE["data"]
-        try:
-            block_resp = _requests.get(f"{api_url}/get-block", timeout=10)
-            if block_resp.status_code != 200:
-                return None
-            block_id = block_resp.json().get("block", {}).get("id")
-            if not block_id:
-                return None
-            opow_resp = _requests.get(f"{api_url}/get-opow?block_id={block_id}", timeout=10)
-            if opow_resp.status_code != 200:
-                return None
-            opow_data = opow_resp.json()
-            # Response may be a list or dict keyed by player_id
-            if isinstance(opow_data, list):
-                entry = next((x for x in opow_data if (x.get("player_id") or "").lower() == player_id), None)
-            elif isinstance(opow_data, dict):
-                entry = opow_data.get(player_id) or next(
-                    (v for k, v in opow_data.items() if k.lower() == player_id), None
-                )
-            else:
-                entry = None
-            if entry is None:
-                return None
-            block_data = entry.get("block_data") if isinstance(entry, dict) and "block_data" in entry else entry
-            reward_raw = (block_data or {}).get("reward") or "0"
-            reward_tig = round(int(reward_raw) / 1e18, 6)
-            _BLOCK_REWARD_CACHE["data"] = reward_tig
-            _BLOCK_REWARD_CACHE["ts"] = n
-            return reward_tig
-        except Exception as exc:
-            logger.warning(f"Could not fetch block reward: {exc}")
-            return None
-
-    cur_total, cur_benchmarker, cur_shared = _fetch_round(current_round)
+    cur_total, cur_benchmarker, cur_shared = _fetch_round_emissions(api_url, player_id, current_round)
     prev_round = current_round - 1 if current_round > 0 else None
-    prev_total, prev_benchmarker, prev_shared = _fetch_round(prev_round) if prev_round is not None else (None, None, None)
+    prev_total, prev_benchmarker, prev_shared = (
+        _fetch_round_emissions(api_url, player_id, prev_round) if prev_round is not None else (None, None, None)
+    )
 
-    result = {
+    round_data = {
         "current_round": current_round,
         "current_round_tig": cur_total,
         "current_round_benchmarker_tig": cur_benchmarker,
@@ -523,10 +525,9 @@ def get_pool_earnings():
         "prev_round_tig": prev_total,
         "prev_round_benchmarker_tig": prev_benchmarker,
         "prev_round_shared_tig": prev_shared,
-        "block_reward_tig": _get_block_reward_tig(),
     }
-    _earnings_cache = {"data": {k: v for k, v in result.items() if k != "block_reward_tig"}, "ts": now}
-    return result
+    _earnings_cache = {"data": round_data, "ts": now}
+    return {**round_data, "block_reward_tig": block_reward}
 
 
 @router.get("/health")
