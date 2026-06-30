@@ -45,12 +45,20 @@ async function loadEarnings() {
       el("stat-round-tig").textContent = fmtTig(d.current_round_tig) + " TIG";
       if (d.current_round != null)
         el("stat-round-label").textContent = "Round " + d.current_round + " (in progress)";
+      const b = d.current_round_benchmarker_tig, s = d.current_round_shared_tig;
+      if (b != null && s != null)
+        el("stat-round-breakdown").textContent = fmtTig(b) + " benchmarker · " + fmtTig(s) + " delegator";
     }
     if (d.prev_round_tig != null) {
       el("stat-prev-tig").textContent = fmtTig(d.prev_round_tig) + " TIG";
       if (d.prev_round != null)
         el("stat-prev-label").textContent = "Round " + d.prev_round + " (final)";
+      const b = d.prev_round_benchmarker_tig, s = d.prev_round_shared_tig;
+      if (b != null && s != null)
+        el("stat-prev-breakdown").textContent = fmtTig(b) + " benchmarker · " + fmtTig(s) + " delegator";
     }
+    if (d.block_reward_tig != null)
+      el("stat-block-reward").textContent = "+" + d.block_reward_tig.toFixed(4) + " TIG";
   } catch (_) {}
 }
 

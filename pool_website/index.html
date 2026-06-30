@@ -82,14 +82,21 @@
       <div class="stat-sub">Allocation syncs this round</div>
     </div>
     <div class="stat-tile">
-      <div class="stat-label">This Round</div>
+      <div class="stat-label">Earnings This Round</div>
       <div class="stat-value green" id="stat-round-tig">—</div>
-      <div class="stat-sub" id="stat-round-label">TIG earned so far</div>
+      <div class="stat-sub" id="stat-round-label">Round — (in progress)</div>
+      <div class="stat-sub" id="stat-round-breakdown">— benchmarker · — delegator</div>
     </div>
     <div class="stat-tile">
-      <div class="stat-label">Last Round</div>
+      <div class="stat-label">Earned Last Round</div>
       <div class="stat-value" id="stat-prev-tig">—</div>
-      <div class="stat-sub" id="stat-prev-label">TIG earned</div>
+      <div class="stat-sub" id="stat-prev-label">Round — (final)</div>
+      <div class="stat-sub" id="stat-prev-breakdown">— benchmarker · — delegator</div>
+    </div>
+    <div class="stat-tile">
+      <div class="stat-label">Current Block Reward</div>
+      <div class="stat-value green" id="stat-block-reward">—</div>
+      <div class="stat-sub">TIG per block (live)</div>
     </div>
   </div>
 
@@ -221,7 +228,7 @@
     loadEarnings();
     // Refresh every 60 seconds; earnings every 5 min (matches server cache TTL)
     setInterval(() => { loadStats(); loadLeaderboard(); }, 60000);
-    setInterval(() => { loadEarnings(); }, 300000);
+    setInterval(() => { loadEarnings(); }, 60000);
   </script>
 </body>
 </html>
