@@ -12,6 +12,7 @@ import logging
 import hashlib
 import re
 import json
+import requests as _requests
 from decimal import Decimal
 from fastapi import APIRouter, HTTPException, Header
 from pydantic import BaseModel
@@ -415,6 +416,71 @@ def get_pool_stats():
         "total_coinbase_updates": coinbase_count["total"] if coinbase_count else 0,
         "last_distribution": dict(last_distribution) if last_distribution else None,
     }
+
+
+_earnings_cache: dict = {"data": None, "ts": 0.0}
+_EARNINGS_CACHE_TTL = 300  # 5 minutes
+
+
+@router.get("/earnings")
+def get_pool_earnings():
+    """Pool TIG earnings from TIG's public /get-round-emissions API."""
+    global _earnings_cache
+    now = time.time()
+    if _earnings_cache["data"] is not None and now - _earnings_cache["ts"] < _EARNINGS_CACHE_TTL:
+        return _earnings_cache["data"]
+
+    row = db.fetch_one("SELECT config FROM config LIMIT 1")
+    if not row or not row["config"]:
+        return {"error": "master config not available"}
+
+    cfg = row["config"]
+    player_id = (cfg.get("player_id") or "").lower()
+    api_url = (cfg.get("api_url") or "https://mainnet-api.tig.foundation").rstrip("/")
+    if not player_id or player_id.startswith("0x000000"):
+        return {"error": "player_id not configured"}
+
+    current_round_str = db.get_setting("current_round_id", None)
+    if not current_round_str:
+        return {"error": "current round not yet detected"}
+    try:
+        current_round = int(current_round_str)
+    except (TypeError, ValueError):
+        return {"error": "invalid current_round_id in pool settings"}
+
+    def _fetch_round(round_num: int):
+        try:
+            resp = _requests.get(
+                f"{api_url}/get-round-emissions?round={round_num}",
+                timeout=10,
+            )
+            if resp.status_code != 200:
+                return None, None
+            data = resp.json()
+            opow = data.get("opow") or {}
+            player = opow.get(player_id) or {}
+            total_tig = round(int(player.get("total") or "0") / 1e18, 4)
+            coinbase_map = player.get("coinbase") or {}
+            coinbase_tig = round(sum(int(v) for v in coinbase_map.values()) / 1e18, 4)
+            return total_tig, coinbase_tig
+        except Exception as exc:
+            logger.warning(f"Could not fetch round {round_num} emissions: {exc}")
+            return None, None
+
+    current_tig, current_coinbase = _fetch_round(current_round)
+    prev_round = current_round - 1 if current_round > 0 else None
+    prev_tig, prev_coinbase = _fetch_round(prev_round) if prev_round is not None else (None, None)
+
+    result = {
+        "current_round": current_round,
+        "current_round_tig": current_tig,
+        "current_round_coinbase_tig": current_coinbase,
+        "prev_round": prev_round,
+        "prev_round_tig": prev_tig,
+        "prev_round_coinbase_tig": prev_coinbase,
+    }
+    _earnings_cache = {"data": result, "ts": now}
+    return result
 
 
 @router.get("/health")

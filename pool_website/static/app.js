@@ -27,6 +27,33 @@ async function loadStats() {
   } catch (_) {}
 }
 
+function fmtTig(n) {
+  if (n == null) return "—";
+  if (n >= 1000) return (n / 1000).toFixed(2) + "K";
+  return n.toFixed(2);
+}
+
+async function loadEarnings() {
+  const el = (id) => document.getElementById(id);
+  if (!el("stat-round-tig")) return;
+  try {
+    const resp = await fetch("/api/earnings");
+    if (!resp.ok) return;
+    const d = await resp.json();
+    if (d.error) return;
+    if (d.current_round_tig != null) {
+      el("stat-round-tig").textContent = fmtTig(d.current_round_tig) + " TIG";
+      if (d.current_round != null)
+        el("stat-round-label").textContent = "Round " + d.current_round + " (in progress)";
+    }
+    if (d.prev_round_tig != null) {
+      el("stat-prev-tig").textContent = fmtTig(d.prev_round_tig) + " TIG";
+      if (d.prev_round != null)
+        el("stat-prev-label").textContent = "Round " + d.prev_round + " (final)";
+    }
+  } catch (_) {}
+}
+
 async function loadLeaderboard() {
   const tbody = document.getElementById("leaderboard-body");
   if (!tbody) return;

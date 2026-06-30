@@ -81,6 +81,16 @@
       <div class="stat-value" id="stat-updates">—</div>
       <div class="stat-sub">Allocation syncs this round</div>
     </div>
+    <div class="stat-tile">
+      <div class="stat-label">This Round</div>
+      <div class="stat-value green" id="stat-round-tig">—</div>
+      <div class="stat-sub" id="stat-round-label">TIG earned so far</div>
+    </div>
+    <div class="stat-tile">
+      <div class="stat-label">Last Round</div>
+      <div class="stat-value" id="stat-prev-tig">—</div>
+      <div class="stat-sub" id="stat-prev-label">TIG earned</div>
+    </div>
   </div>
 
   <!-- Features -->
@@ -204,12 +214,14 @@
     </div>
   </footer>
 
-  <script src="/static/app.js"></script>
+  <script src="/static/app.js?v=2"></script>
   <script>
     loadStats();
     loadLeaderboard();
-    // Refresh every 60 seconds
+    loadEarnings();
+    // Refresh every 60 seconds; earnings every 5 min (matches server cache TTL)
     setInterval(() => { loadStats(); loadLeaderboard(); }, 60000);
+    setInterval(() => { loadEarnings(); }, 300000);
   </script>
 </body>
 </html>
