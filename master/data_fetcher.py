@@ -1,0 +1,116 @@
+import requests
+import json
+import logging
+import os
+from common.structs import *
+from common.utils import *
+from typing import Dict, Any, Optional
+from concurrent.futures import ThreadPoolExecutor
+from master.client_manager import CONFIG
+
+logger = logging.getLogger(os.path.splitext(os.path.basename(__file__))[0])
+
+def _get(url: str) -> Dict[str, Any]:
+    logger.debug(f"Fetching from {url}")
+    resp = requests.get(url, timeout=10)
+    if resp.status_code == 200:
+        return json.loads(resp.text)
+    else:
+        if resp.headers.get("Content-Type") == "text/plain":
+            err_msg = f"status code {resp.status_code} from {url}: {resp.text}"
+        else:
+            err_msg = f"status code {resp.status_code} from {url}"
+        logger.error(err_msg)
+        raise Exception(err_msg)
+
+
+def _get_safe(url: str) -> Optional[Dict[str, Any]]:
+    """Like _get but catches timeouts/errors and logs a clean warning instead of crashing."""
+    try:
+        return _get(url)
+    except requests.exceptions.ReadTimeout:
+        endpoint = url.split("?")[0].split("/")[-1]
+        logger.warning(f"WARNING - TIG API timeout ({endpoint}) — will retry next cycle")
+        return None
+    except Exception as exc:
+        endpoint = url.split("?")[0].split("/")[-1]
+        logger.warning(f"WARNING - TIG API error ({endpoint}): {exc} — will retry next cycle")
+        return None
+
+
+class DataFetcher:
+    def __init__(self):
+        self.last_fetch = 0
+        self._cache = None
+
+    def run(self) -> dict:
+        config = CONFIG
+        logger.debug("fetching latest block")
+        block_data = _get(f"{config['api_url']}/get-block")
+        block = Block.from_dict(block_data["block"])
+
+        if self._cache is not None and block.id == self._cache["block"].id:
+            logger.debug("no new block data")
+            return self._cache
+
+        logger.info(f"new block @ height {block.details.height}, fetching data")
+        tasks = [
+            f"{config['api_url']}/get-algorithms?block_id={block.id}",
+            f"{config['api_url']}/get-benchmarks?player_id={config['player_id']}&block_id={block.id}",
+            f"{config['api_url']}/get-challenges?block_id={block.id}"
+        ]
+
+        with ThreadPoolExecutor(max_workers=4) as executor:
+            algorithms_data, benchmarks_data, challenges_data = list(executor.map(_get, tasks))
+
+        algorithms = {a["id"]: Code.from_dict(a) for a in algorithms_data["codes"]}
+        binarys = {w["algorithm_id"]: Binary.from_dict(w) for w in algorithms_data["binarys"]}
+
+        precommits = {b["benchmark_id"]: Precommit.from_dict(b) for b in benchmarks_data["precommits"]}
+        benchmarks = {b["id"]: Benchmark.from_dict(b) for b in benchmarks_data["benchmarks"]}
+        proofs = {p["benchmark_id"]: Proof.from_dict(p) for p in benchmarks_data["proofs"]}
+        frauds = {f["benchmark_id"]: Fraud.from_dict(f) for f in benchmarks_data["frauds"]}
+        challenges = {
+            c["id"]: Challenge.from_dict(c)
+            for c in challenges_data["challenges"]
+            if c["state"]["round_active"] <= block.details.round
+        }
+
+        # Fetch difficulty data for each challenge — use _get_safe so a single
+        # API timeout logs a clean warning and falls back to cached data instead
+        # of crashing the master with a full traceback.
+        tracks_urls = [
+            f"{config['api_url']}/get-tracks-data?block_id={block.id}&challenge_id={c_id}"
+            for c_id in challenges
+        ]
+
+        with ThreadPoolExecutor(max_workers=4) as executor:
+            tracks_responses = list(executor.map(_get_safe, tracks_urls))
+
+        if any(r is None for r in tracks_responses):
+            logger.warning("WARNING - TIG API tracks fetch incomplete — using cached data for this cycle")
+            if self._cache is not None:
+                return self._cache
+            # No cache yet: substitute empty track data so we don't crash
+            tracks_responses = [r if r is not None else {"data": {}} for r in tracks_responses]
+
+        tracks_data = {
+            c_id: {
+                track_id: [TrackData.from_dict(x) for x in v]
+                for track_id, v in resp["data"].items()
+            }
+            for c_id, resp in zip(challenges, tracks_responses)
+        }
+
+        self._cache = {
+            "block": block,
+            "algorithms": algorithms,
+            "binarys": binarys,
+            "precommits": precommits,
+            "benchmarks": benchmarks,
+            "proofs": proofs,
+            "frauds": frauds,
+            "challenges": challenges,
+            "tracks_data": tracks_data
+        }
+        return self._cache

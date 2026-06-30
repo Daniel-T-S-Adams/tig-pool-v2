@@ -6,3 +6,4 @@ FROM ghcr.io/tig-foundation/tig-monorepo/benchmarker/master:${TIG_VERSION}
 COPY slave_manager.py /app/master/slave_manager.py
 COPY precommit_manager.py /app/master/precommit_manager.py
 COPY job_manager.py /app/master/job_manager.py
+COPY data_fetcher.py /app/master/data_fetcher.py
