@@ -82,13 +82,13 @@
       <div class="stat-sub">Allocation syncs this round</div>
     </div>
     <div class="stat-tile">
-      <div class="stat-label">Earnings This Round</div>
+      <div class="stat-label">Pool Earnings This Round</div>
       <div class="stat-value green" id="stat-round-tig">—</div>
       <div class="stat-sub" id="stat-round-label">Round — (in progress)</div>
       <div class="stat-sub" id="stat-round-breakdown">— benchmarker · — delegator</div>
     </div>
     <div class="stat-tile">
-      <div class="stat-label">Earned Last Round</div>
+      <div class="stat-label">Pool Earned Last Round</div>
       <div class="stat-value" id="stat-prev-tig">—</div>
       <div class="stat-sub" id="stat-prev-label">Round — (final)</div>
       <div class="stat-sub" id="stat-prev-breakdown">— benchmarker · — delegator</div>
@@ -99,13 +99,19 @@
       <div class="stat-sub">TIG per block (live)</div>
     </div>
   </div>
+  <p style="text-align:center; color:var(--muted); font-size:13px; max-width:720px; margin:12px auto 0;">
+    "Pool Earnings" figures above are the pool's combined total for one round, split across every member's wallet.
+    Your own claim on TIG sweeps all currently unclaimed balance across rounds, so it won't match these totals
+    exactly — use <a href="#earnings-lookup" style="color:var(--blue);">Check My Earnings</a> below for your individual, round-by-round figures.
+  </p>
 
   <!-- Check My Earnings -->
-  <section class="section">
+  <section class="section" id="earnings-lookup">
     <p class="section-sub">Straight from TIG's on-chain record — not an estimate</p>
     <h2 class="section-title">Check My Earnings</h2>
     <div class="card mt">
       <p style="margin-top:0;">Paste your wallet address to see exactly what this pool's coinbase distribution has recorded for you, round by round. This is the same data TIG uses to pay out claims.</p>
+      <p style="color:var(--muted); font-size:13px;">Note: when you claim on TIG, it pays out <em>all</em> of your currently unclaimed balance at once — not strictly one round. So your total claimed amount may span more than one round shown below, and can differ from any single round's figure here.</p>
       <div style="display:flex; gap:10px; flex-wrap:wrap; margin:16px 0;">
         <input id="earnings-wallet-input" type="text" placeholder="0x..." class="mono"
                style="flex:1; min-width:280px; padding:10px 14px; border-radius:8px; border:1px solid var(--border); background:var(--surface2); color:var(--text);" />
@@ -137,7 +143,7 @@
       <div class="feature-card">
         <div class="feature-icon green">🔗</div>
         <h3>On-Chain Allocation</h3>
-        <p>Member shares are set directly on-chain via TIG's <code>/set-coinbase</code> API. Your wallet address receives your allocation when the operator claims at round end — no intermediary holds your tokens.</p>
+        <p>Member shares are set directly on-chain via TIG's <code>/set-coinbase</code> API. Each member's wallet is paid independently — you claim your own share directly from TIG using your own wallet, whenever you like. No intermediary holds your tokens or claims on your behalf.</p>
       </div>
       <div class="feature-card">
         <div class="feature-icon blue">📊</div>
@@ -250,7 +256,7 @@
     </div>
   </footer>
 
-  <script src="/static/app.js?v=4"></script>
+  <script src="/static/app.js?v=5"></script>
   <script>
     loadStats();
     loadLeaderboard();
