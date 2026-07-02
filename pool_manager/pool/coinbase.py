@@ -193,7 +193,16 @@ def maybe_update_coinbase():
             logger.info("Locked previous round final allocation for claim grace window.")
 
     last_block = int(db.get_setting("last_coinbase_block", "0"))
-    update_period = int(db.get_setting("coinbase_update_period", "50"))
+    # TIG enforces a hard minimum of 60 blocks between /set-coinbase calls
+    # (rejects with "Can only update coinbase every 60 blocks" otherwise).
+    # Default here stays a couple of blocks above that floor as a safety margin.
+    update_period = int(db.get_setting("coinbase_update_period", "62"))
+    # Hard floor: never allow a configured value below TIG's actual on-chain
+    # minimum (60 blocks) — that exact misconfiguration (period=50) caused a
+    # multi-day storm of rejected /set-coinbase calls in the ledger (documented
+    # 2026-06-24 through 2026-06-29). Clamp instead of trusting the stored setting.
+    if update_period < 62:
+        update_period = 62
     # Grace period (blocks) after round rollover during which the locked previous-
     # round allocation is kept on-chain so the operator can claim correctly.
     # Default 30 blocks (~30 min).  Configurable via coinbase_claim_grace_blocks.

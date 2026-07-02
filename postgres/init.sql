@@ -257,5 +257,5 @@ CREATE TABLE IF NOT EXISTS pool_settings (
 INSERT INTO pool_settings (key, value) VALUES
     ('last_coinbase_block', '0'),
     ('last_snapshot_ms', '0'),
-    ('coinbase_update_period', '50')  -- update coinbase every 50 blocks (adjust after checking chain config)
+    ('coinbase_update_period', '62')  -- TIG enforces a hard minimum of 60 blocks between /set-coinbase calls; 62 leaves a small safety margin so we never fire early and get rejected
 ON CONFLICT (key) DO NOTHING;
