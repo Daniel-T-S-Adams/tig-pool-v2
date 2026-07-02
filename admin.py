@@ -20,6 +20,7 @@ Usage:
   python3 admin.py coinbase                  # show last 10 coinbase updates
   python3 admin.py coinbase --round 122      # full audit ledger for round 122
   python3 admin.py coinbase --all            # full audit ledger, all rounds
+  python3 admin.py coinbase --failures       # only failed /set-coinbase calls, with error text
   python3 admin.py member-earnings <wallet> [rounds]  # on-chain earnings by round for a wallet
 """
 import json
@@ -311,6 +312,8 @@ def cmd_coinbase(args):
       admin.py coinbase                 last 10 updates (any round)
       admin.py coinbase --round 122     full ledger for round 122, with % breakdown
       admin.py coinbase --all           full ledger, all rounds (up to 1000 rows)
+      admin.py coinbase --failures      only show FAILed updates with the API error
+      admin.py coinbase --breakdown     show % breakdown for every row (not just --round)
     """
     round_arg = None
     limit = 10
@@ -318,21 +321,27 @@ def cmd_coinbase(args):
         i = args.index("--round")
         round_arg = int(args[i + 1])
         limit = 1000
-    if "--all" in args:
+    if "--all" in args or "--failures" in args:
         limit = 1000
+    only_failures = "--failures" in args
+    show_breakdown = round_arg is not None or "--breakdown" in args
 
     path = "/admin/coinbase-history?limit=" + str(limit)
     if round_arg is not None:
         path += f"&round_id={round_arg}"
 
     rows = _get(path)
+    if only_failures:
+        rows = [r for r in rows if not r.get("success")]
     if not rows:
         suffix = f" for round {round_arg}" if round_arg is not None else ""
-        print(f"No coinbase updates yet{suffix}.")
+        print(f"No coinbase updates found{suffix}.")
         return
 
     from datetime import datetime
     header = f"Full coinbase ledger for round {round_arg}" if round_arg is not None else f"Last {len(rows)} coinbase update(s)"
+    if only_failures:
+        header = f"Failed coinbase updates ({len(rows)})"
     print(f"{header} ({len(rows)} entr{'y' if len(rows) == 1 else 'ies'}):\n")
 
     for r in rows:
@@ -343,7 +352,9 @@ def cmd_coinbase(args):
         rid_label = rid if rid is not None else "?"
         n = len(dist) if isinstance(dist, dict) else "?"
         print(f"  [{ok}] round={rid_label}  block={r['block_height']}  members={n}  at={ts}")
-        if round_arg is not None and isinstance(dist, dict):
+        if not r.get("success") and r.get("api_response"):
+            print(f"      error: {r['api_response'][:300]}")
+        if show_breakdown and isinstance(dist, dict):
             for wallet, weight in sorted(dist.items(), key=lambda kv: -kv[1]):
                 print(f"      {wallet}: {weight * 100:.2f}%")
 
