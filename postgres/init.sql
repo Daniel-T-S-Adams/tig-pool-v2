@@ -217,18 +217,25 @@ CREATE TABLE IF NOT EXISTS pool_contributions (
 CREATE INDEX idx_pool_contributions_wallet ON pool_contributions(wallet_address);
 CREATE INDEX idx_pool_contributions_snapshot_end ON pool_contributions(snapshot_end_ms);
 
--- Coinbase distribution history: records every /set-coinbase call made to TIG API
+-- Coinbase distribution history: records every /set-coinbase call made to TIG API.
+-- This table is APPEND-ONLY (insert-only, never updated or deleted) — it is the
+-- permanent, auditable ledger of every coinbase split ever sent to TIG, and must
+-- stay that way. Never add UPDATE/DELETE logic against this table.
 CREATE TABLE IF NOT EXISTS pool_coinbase_history (
     id SERIAL PRIMARY KEY,
     -- The distribution map sent: { wallet_address: weight, ... }
     distribution JSONB NOT NULL,
     -- Block height when submitted
     block_height BIGINT,
+    -- TIG round this distribution applied to (nullable for rows predating this column)
+    round_id BIGINT,
     -- TIG API response
     api_response TEXT,
     success BOOLEAN NOT NULL DEFAULT false,
     submitted_at BIGINT NOT NULL DEFAULT (EXTRACT(EPOCH FROM NOW()) * 1000)::BIGINT
 );
+
+CREATE INDEX IF NOT EXISTS idx_pool_coinbase_history_round ON pool_coinbase_history(round_id);
 
 -- Invite codes for invite-only registration
 CREATE TABLE IF NOT EXISTS pool_invites (

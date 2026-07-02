@@ -181,8 +181,33 @@ def maybe_update_coinbase():
     round_changed = _ensure_current_round_window(current_block, current_round)
     round_label = current_round if current_round is not None else "unknown"
 
+    # At round rollover: snapshot the final allocation so it survives the grace
+    # period even if the contribution query starts returning new-round data first.
+    if round_changed:
+        db.set_setting("round_rollover_block", str(current_block))
+        last_row = db.fetch_one(
+            "SELECT distribution FROM pool_coinbase_history WHERE success = true ORDER BY submitted_at DESC LIMIT 1"
+        )
+        if last_row and last_row.get("distribution"):
+            db.set_setting("prev_round_final_allocation", last_row["distribution"])
+            logger.info("Locked previous round final allocation for claim grace window.")
+
     last_block = int(db.get_setting("last_coinbase_block", "0"))
     update_period = int(db.get_setting("coinbase_update_period", "50"))
+    # Grace period (blocks) after round rollover during which the locked previous-
+    # round allocation is kept on-chain so the operator can claim correctly.
+    # Default 30 blocks (~30 min).  Configurable via coinbase_claim_grace_blocks.
+    claim_grace_blocks = int(db.get_setting("coinbase_claim_grace_blocks", "30"))
+
+    rollover_block_str = db.get_setting("round_rollover_block", None)
+    if rollover_block_str:
+        blocks_since_rollover = current_block - int(rollover_block_str)
+        if blocks_since_rollover < claim_grace_blocks:
+            logger.info(
+                f"Claim grace period active ({blocks_since_rollover}/{claim_grace_blocks} blocks) — "
+                f"preserving previous round allocation."
+            )
+            return
 
     if not round_changed and current_block - last_block < update_period:
         logger.debug(
@@ -280,12 +305,13 @@ def maybe_update_coinbase():
     db.execute(
         """
         INSERT INTO pool_coinbase_history
-            (distribution, block_height, api_response, success)
-        VALUES (%s, %s, %s, %s)
+            (distribution, block_height, round_id, api_response, success)
+        VALUES (%s, %s, %s, %s, %s)
         """,
         (
             __import__("json").dumps(allocation),
             current_block,
+            int(current_round) if current_round is not None else None,
             api_response,
             success,
         ),

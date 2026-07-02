@@ -100,6 +100,35 @@
     </div>
   </div>
 
+  <!-- Check My Earnings -->
+  <section class="section">
+    <p class="section-sub">Straight from TIG's on-chain record — not an estimate</p>
+    <h2 class="section-title">Check My Earnings</h2>
+    <div class="card mt">
+      <p style="margin-top:0;">Paste your wallet address to see exactly what this pool's coinbase distribution has recorded for you, round by round. This is the same data TIG uses to pay out claims.</p>
+      <div style="display:flex; gap:10px; flex-wrap:wrap; margin:16px 0;">
+        <input id="earnings-wallet-input" type="text" placeholder="0x..." class="mono"
+               style="flex:1; min-width:280px; padding:10px 14px; border-radius:8px; border:1px solid var(--border); background:var(--surface2); color:var(--text);" />
+        <button class="btn-primary" onclick="checkMemberEarnings()">Check Earnings</button>
+      </div>
+      <div id="earnings-lookup-status" class="stat-sub"></div>
+      <table class="data-table mt" id="earnings-lookup-table" style="display:none;">
+        <thead>
+          <tr>
+            <th>Round</th>
+            <th>Status</th>
+            <th>Your TIG</th>
+            <th>% of Coinbase</th>
+            <th>Pool Coinbase Total</th>
+          </tr>
+        </thead>
+        <tbody id="earnings-lookup-body"></tbody>
+      </table>
+    </div>
+  </section>
+
+  <hr class="divider" />
+
   <!-- Features -->
   <section class="section">
     <p class="section-sub">Why join this pool?</p>
@@ -221,7 +250,7 @@
     </div>
   </footer>
 
-  <script src="/static/app.js?v=3"></script>
+  <script src="/static/app.js?v=4"></script>
   <script>
     loadStats();
     loadLeaderboard();

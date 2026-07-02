@@ -18,6 +18,9 @@ Usage:
   python3 admin.py ai-decisions [N]          # show recent AI recommendations
   python3 admin.py compute-types [--apply]   # validate/add TIG 0.0.7 compute_type
   python3 admin.py coinbase                  # show last 10 coinbase updates
+  python3 admin.py coinbase --round 122      # full audit ledger for round 122
+  python3 admin.py coinbase --all            # full audit ledger, all rounds
+  python3 admin.py member-earnings <wallet> [rounds]  # on-chain earnings by round for a wallet
 """
 import json
 import os
@@ -302,19 +305,72 @@ def cmd_member_health(args):
                 f"batch={r['batch_idx']} attempts={r['num_attempts']} age_min={r['assigned_min']}"
             )
 
-def cmd_coinbase(_):
-    rows = _get("/admin/coinbase-history")
+def cmd_coinbase(args):
+    """
+    Audit the append-only coinbase distribution ledger.
+      admin.py coinbase                 last 10 updates (any round)
+      admin.py coinbase --round 122     full ledger for round 122, with % breakdown
+      admin.py coinbase --all           full ledger, all rounds (up to 1000 rows)
+    """
+    round_arg = None
+    limit = 10
+    if "--round" in args:
+        i = args.index("--round")
+        round_arg = int(args[i + 1])
+        limit = 1000
+    if "--all" in args:
+        limit = 1000
+
+    path = "/admin/coinbase-history?limit=" + str(limit)
+    if round_arg is not None:
+        path += f"&round_id={round_arg}"
+
+    rows = _get(path)
     if not rows:
-        print("No coinbase updates yet.")
+        suffix = f" for round {round_arg}" if round_arg is not None else ""
+        print(f"No coinbase updates yet{suffix}.")
         return
-    print(f"Last {len(rows)} coinbase update(s):\n")
-    for r in rows[:10]:
-        from datetime import datetime
+
+    from datetime import datetime
+    header = f"Full coinbase ledger for round {round_arg}" if round_arg is not None else f"Last {len(rows)} coinbase update(s)"
+    print(f"{header} ({len(rows)} entr{'y' if len(rows) == 1 else 'ies'}):\n")
+
+    for r in rows:
         ts = datetime.fromtimestamp(r["submitted_at"] / 1000).strftime("%Y-%m-%d %H:%M")
         ok = "OK" if r["success"] else "FAIL"
-        dist = r.get("distribution", {})
+        dist = r.get("distribution") or {}
+        rid = r.get("round_id")
+        rid_label = rid if rid is not None else "?"
         n = len(dist) if isinstance(dist, dict) else "?"
-        print(f"  [{ok}] block={r['block_height']}  members={n}  at={ts}")
+        print(f"  [{ok}] round={rid_label}  block={r['block_height']}  members={n}  at={ts}")
+        if round_arg is not None and isinstance(dist, dict):
+            for wallet, weight in sorted(dist.items(), key=lambda kv: -kv[1]):
+                print(f"      {wallet}: {weight * 100:.2f}%")
+
+def cmd_member_earnings(args):
+    """
+    Look up a member's actual on-chain coinbase earnings, round by round —
+    sourced directly from TIG's /get-round-emissions, not an estimate.
+      admin.py member-earnings <wallet> [rounds]
+    """
+    if not args:
+        sys.exit("Usage: python3 admin.py member-earnings <wallet> [rounds]")
+    wallet = args[0]
+    rounds = int(args[1]) if len(args) > 1 else 8
+    result = _get(f"/admin/member-earnings?wallet={wallet}&rounds={rounds}")
+    if result.get("error"):
+        print(f"Error: {result['error']}")
+        return
+    print(f"Earnings for {result['wallet']} across last {result['rounds_checked']} round(s):\n")
+    print(f"{'ROUND':<8} {'STATUS':<8} {'WALLET TIG':<12} {'% OF COINBASE':<14} {'POOL COINBASE TIG'}")
+    print("-" * 70)
+    for h in result["history"]:
+        status = "final" if h["final"] else "live"
+        print(
+            f"{h['round']:<8} {status:<8} {h['wallet_tig']:<12} "
+            f"{h['wallet_pct_of_coinbase']:<14} {h['pool_coinbase_total_tig']}"
+        )
+    print(f"\nTotal across {result['rounds_checked']} round(s): {result['total_tig_across_rounds']} TIG")
 
 def cmd_autopilot(args):
     report = _get("/admin/autopilot/report")
@@ -548,6 +604,7 @@ COMMANDS = {
     "ai-decisions": cmd_ai_decisions,
     "compute-types": cmd_compute_types,
     "coinbase":  cmd_coinbase,
+    "member-earnings": cmd_member_earnings,
     "new-round": cmd_new_round,
 }
 

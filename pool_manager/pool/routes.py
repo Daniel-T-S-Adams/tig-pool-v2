@@ -480,6 +480,110 @@ def _fetch_block_reward(api_url: str, player_id: str):
         return None
 
 
+_member_round_cache: dict = {}   # (round_num) -> {"ts": float, "player_total_tig": float, "coinbase": dict}
+_MEMBER_ROUND_CACHE_TTL = 60      # only applies to the in-progress round; finalized rounds cache forever
+
+
+def _fetch_round_coinbase_map(api_url: str, player_id: str, round_num: int, is_final: bool):
+    """
+    Fetch the full coinbase distribution map for one round:
+    { recipient_wallet: tig_amount }, plus the pool's total TIG for that round.
+    Finalized rounds are cached indefinitely (the data never changes once final);
+    the current in-progress round is cached briefly since it updates every block.
+    """
+    cached = _member_round_cache.get(round_num)
+    if cached is not None:
+        if is_final or (time.time() - cached["ts"] < _MEMBER_ROUND_CACHE_TTL):
+            return cached["player_total_tig"], cached["coinbase"]
+
+    try:
+        resp = _requests.get(f"{api_url}/get-round-emissions?round={round_num}", timeout=10)
+        if resp.status_code != 200:
+            return None, None
+        opow = resp.json().get("opow") or {}
+        player = opow.get(player_id) or {}
+        total_tig = round(int(player.get("total") or "0") / 1e18, 4)
+        coinbase_raw = player.get("coinbase") or {}
+        coinbase_tig = {addr.lower(): round(int(amt) / 1e18, 6) for addr, amt in coinbase_raw.items()}
+        _member_round_cache[round_num] = {
+            "ts": time.time(),
+            "player_total_tig": total_tig,
+            "coinbase": coinbase_tig,
+        }
+        return total_tig, coinbase_tig
+    except Exception as exc:
+        logger.warning(f"Could not fetch round {round_num} coinbase map: {exc}")
+        return None, None
+
+
+def _member_earnings(wallet: str, rounds: int) -> dict:
+    """
+    Round-by-round breakdown of what one wallet actually earned from this pool's
+    coinbase distributions, straight from TIG's on-chain record — not an estimate.
+    """
+    wallet = (wallet or "").strip().lower()
+    if not wallet.startswith("0x") or len(wallet) < 10:
+        return {"error": "invalid wallet address"}
+
+    row = db.fetch_one("SELECT config FROM config LIMIT 1")
+    if not row or not row["config"]:
+        return {"error": "master config not available"}
+    cfg = row["config"]
+    player_id = (cfg.get("player_id") or "").lower()
+    api_url = (cfg.get("api_url") or "https://mainnet-api.tig.foundation").rstrip("/")
+    if not player_id or player_id.startswith("0x000000"):
+        return {"error": "player_id not configured"}
+
+    current_round_str = db.get_setting("current_round_id", None)
+    if not current_round_str:
+        return {"error": "current round not yet detected"}
+    try:
+        current_round = int(current_round_str)
+    except (TypeError, ValueError):
+        return {"error": "invalid current_round_id in pool settings"}
+
+    rounds = max(1, min(int(rounds or 8), 26))
+    history = []
+    total_wallet_tig = 0.0
+    for round_num in range(current_round, current_round - rounds, -1):
+        if round_num < 0:
+            break
+        is_final = round_num < current_round
+        pool_total_tig, coinbase_map = _fetch_round_coinbase_map(api_url, player_id, round_num, is_final)
+        if coinbase_map is None:
+            continue
+        wallet_tig = coinbase_map.get(wallet, 0.0)
+        pool_coinbase_total = round(sum(coinbase_map.values()), 6) if coinbase_map else 0.0
+        pct = round((wallet_tig / pool_coinbase_total) * 100, 2) if pool_coinbase_total else 0.0
+        total_wallet_tig += wallet_tig
+        history.append(
+            {
+                "round": round_num,
+                "final": is_final,
+                "wallet_tig": round(wallet_tig, 6),
+                "pool_coinbase_total_tig": pool_coinbase_total,
+                "wallet_pct_of_coinbase": pct,
+            }
+        )
+
+    return {
+        "wallet": wallet,
+        "rounds_checked": len(history),
+        "total_tig_across_rounds": round(total_wallet_tig, 6),
+        "history": history,
+    }
+
+
+@router.get("/member-earnings")
+def get_member_earnings(wallet: str, rounds: int = 8):
+    """
+    Public lookup: any member can paste their wallet address to see exactly what
+    they earned from this pool's coinbase distributions, round by round, sourced
+    directly from TIG's /get-round-emissions — the same data used to pay out claims.
+    """
+    return _member_earnings(wallet, rounds)
+
+
 @router.get("/earnings")
 def get_pool_earnings():
     """Pool TIG earnings including live per-block reward rate."""
@@ -1438,17 +1542,50 @@ def slave_health(slave_name: str, x_admin_secret: str = Header(None)):
 
 
 @router.get("/admin/coinbase-history")
-def coinbase_history(x_admin_secret: str = Header(None)):
+def coinbase_history(
+    x_admin_secret: str = Header(None),
+    round_id: int | None = None,
+    limit: int = 50,
+):
+    """
+    Append-only audit ledger of every /set-coinbase call ever made.
+    Pass ?round_id=N to see the full history for one round (for auditing
+    exactly what split was on-chain at every point during that round).
+    """
     _check_admin(x_admin_secret)
-    rows = db.fetch_all(
-        """
-        SELECT id, block_height, distribution, success, api_response, submitted_at
-        FROM pool_coinbase_history
-        ORDER BY submitted_at DESC
-        LIMIT 50
-        """
-    )
+    limit = max(1, min(limit, 1000))
+    if round_id is not None:
+        rows = db.fetch_all(
+            """
+            SELECT id, block_height, round_id, distribution, success, api_response, submitted_at
+            FROM pool_coinbase_history
+            WHERE round_id = %s
+            ORDER BY submitted_at ASC
+            """,
+            (round_id,),
+        )
+    else:
+        rows = db.fetch_all(
+            """
+            SELECT id, block_height, round_id, distribution, success, api_response, submitted_at
+            FROM pool_coinbase_history
+            ORDER BY submitted_at DESC
+            LIMIT %s
+            """,
+            (limit,),
+        )
     return [dict(r) for r in rows]
+
+
+@router.get("/admin/member-earnings")
+def admin_member_earnings(
+    wallet: str,
+    x_admin_secret: str = Header(None),
+    rounds: int = 8,
+):
+    """Admin variant of /member-earnings (no rate limiting) for debugging."""
+    _check_admin(x_admin_secret)
+    return _member_earnings(wallet, rounds)
 
 
 @router.get("/admin/invites")

@@ -62,6 +62,53 @@ async function loadEarnings() {
   } catch (_) {}
 }
 
+async function checkMemberEarnings() {
+  const input = document.getElementById("earnings-wallet-input");
+  const status = document.getElementById("earnings-lookup-status");
+  const table = document.getElementById("earnings-lookup-table");
+  const body = document.getElementById("earnings-lookup-body");
+  if (!input || !status || !table || !body) return;
+
+  const wallet = input.value.trim();
+  if (!wallet.startsWith("0x") || wallet.length < 10) {
+    status.textContent = "Enter a valid wallet address (starts with 0x).";
+    table.style.display = "none";
+    return;
+  }
+
+  status.textContent = "Looking up on-chain earnings…";
+  table.style.display = "none";
+  body.innerHTML = "";
+
+  try {
+    const resp = await fetch("/api/member-earnings?wallet=" + encodeURIComponent(wallet) + "&rounds=12");
+    const d = await resp.json();
+    if (d.error) {
+      status.textContent = "Error: " + d.error;
+      return;
+    }
+    if (!d.history || !d.history.length) {
+      status.textContent = "No coinbase earnings found for this wallet in the last 12 rounds.";
+      return;
+    }
+    status.textContent = "Total across " + d.rounds_checked + " round(s): " + fmtTig(d.total_tig_across_rounds) + " TIG";
+    d.history.forEach((h) => {
+      const tr = document.createElement("tr");
+      tr.innerHTML = `
+        <td>${h.round}</td>
+        <td>${h.final ? "Final" : "In progress"}</td>
+        <td>${fmtTig(h.wallet_tig)}</td>
+        <td>${h.wallet_pct_of_coinbase}%</td>
+        <td>${fmtTig(h.pool_coinbase_total_tig)}</td>
+      `;
+      body.appendChild(tr);
+    });
+    table.style.display = "";
+  } catch (_) {
+    status.textContent = "Could not reach the earnings API. Try again shortly.";
+  }
+}
+
 async function loadLeaderboard() {
   const tbody = document.getElementById("leaderboard-body");
   if (!tbody) return;
