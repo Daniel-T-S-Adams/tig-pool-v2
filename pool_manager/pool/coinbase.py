@@ -202,15 +202,41 @@ def maybe_update_coinbase():
 
     allocation = _compute_allocation()
     if not allocation:
-        operator_wallet = tig_cfg.get("player_id")
-        if not operator_wallet:
-            logger.warning("No contribution data yet and player_id unavailable — skipping coinbase update.")
-            return
-        allocation = {operator_wallet: 1.0}
-        logger.info(
-            "No current-round contribution data yet — clearing stale member split "
-            "by assigning 100% coinbase to operator/player wallet."
+        # At round rollover there is no contribution data for the new round yet.
+        # Do NOT reset to 100% operator — that would wipe the previous round's
+        # carefully calculated split and cause the wrong distribution when the
+        # operator claims the previous round.  Instead, keep the last valid
+        # allocation from the coinbase history so the on-chain split stays intact
+        # until real new-round data arrives.
+        last_row = db.fetch_one(
+            """
+            SELECT distribution FROM pool_coinbase_history
+            WHERE success = true
+            ORDER BY submitted_at DESC
+            LIMIT 1
+            """
         )
+        if last_row and last_row.get("distribution"):
+            try:
+                import json as _json
+                allocation = _json.loads(last_row["distribution"])
+                logger.info(
+                    "No current-round contribution data yet — "
+                    "maintaining last valid allocation from previous round."
+                )
+            except Exception:
+                allocation = None
+
+        if not allocation:
+            operator_wallet = tig_cfg.get("player_id")
+            if not operator_wallet:
+                logger.warning("No contribution data yet and player_id unavailable — skipping coinbase update.")
+                return
+            allocation = {operator_wallet: 1.0}
+            logger.info(
+                "No contribution data and no prior allocation — "
+                "defaulting 100% coinbase to operator wallet."
+            )
 
     logger.info(
         f"Updating /set-coinbase for round {round_label} at block {current_block} "
