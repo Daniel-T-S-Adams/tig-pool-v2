@@ -194,6 +194,19 @@ Important config keys:
 - `time_before_batch_retry`: global retry timeout for assigned batches.
 - `per_challenge_time_before_batch_retry`: optional retry overrides.
 - `track_allowlist`: optional per-challenge allowed track list.
+- `track_algorithm_map`: optional per-challenge `{track_id: algorithm_id}` pin.
+  Algorithm and track are chosen independently on-chain — the algorithm is
+  locked in at precommit time, then the protocol randomly rolls the track
+  afterwards, with no way to know the track in advance. So this cannot make a
+  precommit's algorithm+track pairing land correctly every time; instead, once
+  a precommit is confirmed and its real track_id is known, job_manager only
+  lets compute proceed if that job's algorithm_id matches the pin for that
+  track (any other pairing is created already-stopped, same mechanism as
+  `track_allowlist`). Use this when one algorithm reliably underperforms or
+  hangs on a specific track and a different algorithm should own it instead.
+  Jobs stopped this way are intentional (see `algorithm_pin_blocked` /
+  `intentional_algorithm_pin_stop` in the reward funnel and workload reports)
+  and should not be treated as pool health problems.
 - `max_job_batches`: maximum allowed root batches for a job before it is created
   as stopped.
 
@@ -588,6 +601,7 @@ the executor:
 - `max_batches_per_benchmark`
 - `per_challenge_time_before_batch_retry`
 - `track_allowlist`
+- `track_algorithm_map`
 
 Worker-state advice may recommend these non-config actions, but deterministic
 code or the human operator must decide whether to act:
@@ -842,6 +856,7 @@ Allowed config keys:
 - `max_batches_per_benchmark`
 - `per_challenge_time_before_batch_retry`
 - `track_allowlist`
+- `track_algorithm_map`
 
 Any action with `action_type` not in the allowed list should be treated as
 rejected. Any config change with a key outside the allowed config keys should be

@@ -94,7 +94,20 @@ class JobManager:
             allowed_tracks = track_allowlist.get(c_name)
             blocked_track = bool(allowed_tracks) and track_id not in allowed_tracks
 
-            skip = oversized or blocked_track
+            # Per-track algorithm pinning. Algorithm and track are chosen independently
+            # on-chain (algorithm is locked in at precommit time, track is randomly
+            # rolled by the protocol afterwards) — there is no way to submit a precommit
+            # only once you know its track. So to guarantee "track X is always computed
+            # by algorithm Y" (e.g. because algorithm Z hangs/scores poorly on track X),
+            # we let every algorithm precommit to every track as required, but only ever
+            # spend compute on the (algorithm_id, track_id) pairs we've explicitly pinned.
+            # Precommits that land on a track pinned to a *different* algorithm are
+            # created already-stopped, same as a blocked track above.
+            track_algorithm_map = CONFIG.get("track_algorithm_map", {})
+            pinned_algorithm = (track_algorithm_map.get(c_name) or {}).get(track_id)
+            mismatched_algorithm = bool(pinned_algorithm) and pinned_algorithm != x.settings.algorithm_id
+
+            skip = oversized or blocked_track or mismatched_algorithm
             if oversized:
                 logger.info(
                     f"job {benchmark_id} ({c_name}): {num_batches} batches exceeds "
@@ -104,6 +117,12 @@ class JobManager:
                 logger.info(
                     f"job {benchmark_id} ({c_name}): track '{track_id}' not in allowlist "
                     f"{allowed_tracks}; creating as stopped (won't be benchmarked)"
+                )
+            if mismatched_algorithm:
+                logger.info(
+                    f"job {benchmark_id} ({c_name}): track '{track_id}' is pinned to algorithm "
+                    f"'{pinned_algorithm}', not '{x.settings.algorithm_id}'; creating as stopped "
+                    f"(won't be benchmarked)"
                 )
             atomic_inserts = [
                 (

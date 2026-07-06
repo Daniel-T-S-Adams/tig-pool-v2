@@ -170,6 +170,7 @@ ALLOWED_CONFIG_KEYS = {
     "max_batches_per_benchmark",
     "per_challenge_time_before_batch_retry",
     "track_allowlist",
+    "track_algorithm_map",
 }
 
 

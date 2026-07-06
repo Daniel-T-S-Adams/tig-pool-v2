@@ -1107,6 +1107,7 @@ def _reward_funnel_summary(now_ms: int) -> dict:
     cutoff_metrics = now_ms - METRIC_WINDOW_MS
     cfg, _cfg_error = _fetch_master_config()
     track_allowlist = cfg.get("track_allowlist", {}) if cfg else {}
+    track_algorithm_map = cfg.get("track_algorithm_map", {}) if cfg else {}
     total = _fetch_one(
         """
         WITH job_base AS (
@@ -1292,11 +1293,15 @@ def _reward_funnel_summary(now_ms: int) -> dict:
         stopped_without_roots = int(row.get("stopped_without_roots") or 0)
         allowed_tracks = track_allowlist.get(row.get("challenge"))
         allowlist_blocked = bool(allowed_tracks) and row.get("track") not in allowed_tracks
+        pinned_algorithm = (track_algorithm_map.get(row.get("challenge")) or {}).get(row.get("track"))
+        algorithm_pin_blocked = bool(pinned_algorithm) and pinned_algorithm != row.get("algorithm_id")
+        intentionally_stopped = allowlist_blocked or algorithm_pin_blocked
         row["allowlist_blocked"] = allowlist_blocked
-        row["intentional_stopped_without_roots"] = stopped_without_roots if allowlist_blocked else 0
-        row["unexpected_stopped_without_roots"] = 0 if allowlist_blocked else stopped_without_roots
-        row["unexpected_stopped_without_roots_rate"] = 0.0 if allowlist_blocked else _safe_div(stopped_without_roots, seen)
-        row["unexpected_stopped_rate"] = 0.0 if allowlist_blocked else _safe_div(stopped, seen)
+        row["algorithm_pin_blocked"] = algorithm_pin_blocked
+        row["intentional_stopped_without_roots"] = stopped_without_roots if intentionally_stopped else 0
+        row["unexpected_stopped_without_roots"] = 0 if intentionally_stopped else stopped_without_roots
+        row["unexpected_stopped_without_roots_rate"] = 0.0 if intentionally_stopped else _safe_div(stopped_without_roots, seen)
+        row["unexpected_stopped_rate"] = 0.0 if intentionally_stopped else _safe_div(stopped, seen)
         row["root_ready_rate"] = _safe_div(root_ready, seen)
         row["proof_conversion_rate"] = _safe_div(proof_submitted, proof_required)
         row["stopped_rate"] = _safe_div(stopped, seen)
@@ -1598,6 +1603,7 @@ def _workload_controller_targets(
         intentional_stopped_without_roots = int(funnel.get("intentional_stopped_without_roots") or 0)
         unexpected_stopped_without_roots = int(funnel.get("unexpected_stopped_without_roots") or 0)
         allowlist_blocked = bool(funnel.get("allowlist_blocked"))
+        algorithm_pin_blocked = bool(funnel.get("algorithm_pin_blocked"))
         avg_time_to_proof = funnel.get("avg_time_to_proof_submit_sec")
         p95_root_runtime = funnel.get("p95_root_batch_runtime_sec")
         estimated_root_batches = derived.get("estimated_root_batches")
@@ -1633,6 +1639,9 @@ def _workload_controller_targets(
             if allowlist_blocked:
                 action = "intentional_allowlist_stop"
                 reasons.append("track is outside track_allowlist and was intentionally not benchmarked")
+            elif algorithm_pin_blocked:
+                action = "intentional_algorithm_pin_stop"
+                reasons.append("track is pinned (via track_algorithm_map) to a different algorithm and was intentionally not benchmarked")
             elif unexpected_stopped_without_roots:
                 action = "reduce_or_fix_unrunnable_track"
                 reasons.append("recent jobs stopped before root work; check max_job_batches/allowlist/TIG debt")

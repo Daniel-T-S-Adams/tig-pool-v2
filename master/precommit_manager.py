@@ -104,16 +104,24 @@ class PrecommitManager:
         _allowlist = CONFIG.get("track_allowlist", {})
         _allowed = _allowlist.get(_CHALLENGE_NAMES.get(c_id, ""), None)
 
+        _track_algo_map = CONFIG.get("track_algorithm_map", {}).get(_CHALLENGE_NAMES.get(c_id, ""), {})
+
         # Remove tracks no longer active on mainnet
         for t_id in set(selection["track_settings"]) - set(challenge_config["active_tracks"]):
             selection["track_settings"].pop(t_id)
         # ALL active tracks must be in the precommit (TIG API requirement).
         # Tracks not in the allowlist get {} so master uses min_num_bundles (minimal compute).
         # Tracks in the allowlist keep their configured settings.
+        # Tracks pinned (via track_algorithm_map) to a DIFFERENT algorithm also get {}:
+        # job_manager will stop this job anyway if it lands there, so there's no point
+        # requesting anything beyond the on-chain minimum.
         for t_id in challenge_config["active_tracks"]:
             if t_id not in selection["track_settings"]:
                 selection["track_settings"][t_id] = {}
             if _allowed is not None and t_id not in _allowed:
+                selection["track_settings"][t_id] = {}
+            _pinned = _track_algo_map.get(t_id)
+            if _pinned is not None and _pinned != a_id:
                 selection["track_settings"][t_id] = {}
 
         for t_id in set(challenge_config["active_tracks"]):
