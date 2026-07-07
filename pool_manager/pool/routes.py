@@ -195,6 +195,14 @@ def _fleet_services(worker_type: str) -> str:
     )
 
 
+def _compose_restart_policy_command(services: str, sudo: str = "") -> str:
+    prefix = f"{sudo} " if sudo else ""
+    return (
+        f"{prefix}docker compose -f slave.yml ps -q {services} "
+        f"| xargs -r {prefix}docker update --restart unless-stopped"
+    )
+
+
 def _fleet_linux_install_script(token: str, worker_type: str) -> str:
     services = _fleet_services(worker_type)
     if worker_type == "gpu":
@@ -211,9 +219,13 @@ for service in vector_search hypergraph neuralnet_optimizer; do
   $SUDO docker compose -f slave.yml ps --status running --services | grep -x "$service"
 done
 
-$SUDO docker compose -f slave.yml up -d --force-recreate slave"""
+$SUDO docker compose -f slave.yml up -d --force-recreate slave
+$SUDO docker compose -f slave.yml ps -q slave vector_search hypergraph neuralnet_optimizer | xargs -r $SUDO docker update --restart unless-stopped"""
     else:
-        start_commands = f"$SUDO docker compose -f slave.yml up -d --force-recreate {services}"
+        start_commands = (
+            f"$SUDO docker compose -f slave.yml up -d --force-recreate {services}\n"
+            f"$SUDO docker compose -f slave.yml ps -q {services} | xargs -r $SUDO docker update --restart unless-stopped"
+        )
     return f"""#!/usr/bin/env bash
 set -euxo pipefail
 
@@ -331,6 +343,7 @@ for service in vector_search hypergraph neuralnet_optimizer; do
 done
 
 docker compose -f slave.yml up -d --force-recreate slave
+docker compose -f slave.yml ps -q slave vector_search hypergraph neuralnet_optimizer | xargs -r docker update --restart unless-stopped
 
 docker compose -f slave.yml ps
 docker compose -f slave.yml logs --tail=80 slave
@@ -367,6 +380,7 @@ curl -fsSL "{_POOL_PUBLIC_URL}/static/fleet-install.sh?cachebust=$(date +%s)" | 
   --machine-index "$INSTANCE_ID"
 
 docker compose -f slave.yml up -d --force-recreate {services}
+{_compose_restart_policy_command(services)}
 """
 
 
@@ -1120,7 +1134,10 @@ def _build_slave_preflight_command(services: str, worker_type: str) -> str:
 
 
 def _build_slave_start_command(services: str) -> str:
-    return f"docker compose -f slave.yml up -d --force-recreate {services}"
+    return (
+        f"docker compose -f slave.yml up -d --force-recreate {services}\n"
+        f"{_compose_restart_policy_command(services)}"
+    )
 
 
 def _slave_payload(slave_name: str, worker_type: str) -> dict:
