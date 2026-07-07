@@ -478,13 +478,18 @@ code, pre, .mono {
   color: var(--red);
 }
 .pool-health-grid { margin-bottom: 20px; }
-.health-panels { align-items: stretch; margin-bottom: 36px; }
+.health-panels {
+  align-items: stretch;
+  grid-template-columns: minmax(280px, .8fr) minmax(680px, 1.35fr);
+  margin-bottom: 36px;
+}
 .health-panels .card { min-width: 0; }
+.challenge-pressure-card { min-width: 0; }
 .dashboard-divider { margin: 4px 0 44px; }
 .table-scroll {
   max-height: 360px;
   overflow-y: auto;
-  overflow-x: hidden;
+  overflow-x: auto;
   border: 1px solid var(--border);
   border-radius: 12px;
   background: rgba(2,8,20,.34);
@@ -508,15 +513,27 @@ code, pre, .mono {
 .data-table.compact td:nth-child(2) {
   font-size: 12px;
 }
+.pressure-table {
+  min-width: 720px;
+}
+.pressure-table th:nth-child(1) { width: 27%; }
+.pressure-table th:nth-child(2) { width: 29%; }
+.pressure-table th:nth-child(3) { width: 11%; }
+.pressure-table th:nth-child(4) { width: 13%; }
+.pressure-table th:nth-child(5) { width: 10%; }
+.pressure-table th:nth-child(6) { width: 10%; }
 .data-table.compact th:nth-child(n+3),
 .data-table.compact td:nth-child(n+3) {
   text-align: right;
 }
+@media (max-width: 1050px) {
+  .health-panels { grid-template-columns: 1fr; }
+}
 @media (max-width: 700px) {
   .dashboard-header { flex-direction: column; }
   .health-badge { align-self: flex-start; }
-  .table-scroll { overflow-x: auto; }
   .data-table.compact { min-width: 620px; }
+  .pressure-table { min-width: 720px; }
 }
 
 /* ── Dashboard compact stats ───────────────────────────────────────────── */
