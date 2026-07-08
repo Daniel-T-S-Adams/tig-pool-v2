@@ -11,6 +11,7 @@ import json
 import logging
 import math
 import os
+import re
 import time
 import urllib.error
 import urllib.request
@@ -54,6 +55,11 @@ PRODUCTIVE_IDLE_STALE_ROOT_TOLERANCE = int(
 PRODUCTIVE_IDLE_GPU_SCALE_MIN = int(os.environ.get("AUTOPILOT_PRODUCTIVE_IDLE_GPU_SCALE_MIN", "1"))
 PRODUCTIVE_IDLE_GPU_PER_SLOT = int(os.environ.get("AUTOPILOT_PRODUCTIVE_IDLE_GPU_PER_SLOT", "1"))
 CAP_SCALE_COMPLETIONS_PER_STEP = int(os.environ.get("AUTOPILOT_CAP_SCALE_COMPLETIONS_PER_STEP", "20"))
+ROUTE_CPU_UP_STEP = int(os.environ.get("AUTOPILOT_ROUTE_CPU_UP_STEP", "8"))
+ROUTE_GPU_UP_STEP = int(os.environ.get("AUTOPILOT_ROUTE_GPU_UP_STEP", "1"))
+ROUTE_MIN_SATURATED_FRACTION = float(os.environ.get("AUTOPILOT_ROUTE_MIN_SATURATED_FRACTION", "0.25"))
+ROUTE_GPU_MIN_COMPLETIONS_PER_SLAVE = int(os.environ.get("AUTOPILOT_ROUTE_GPU_MIN_COMPLETIONS_PER_SLAVE", "2"))
+ROUTE_CPU_MIN_COMPLETIONS_PER_SLAVE = int(os.environ.get("AUTOPILOT_ROUTE_CPU_MIN_COMPLETIONS_PER_SLAVE", "2"))
 BUNDLE_TARGET_MIN_ROOT_BATCHES = int(os.environ.get("AUTOPILOT_BUNDLE_TARGET_MIN_ROOT_BATCHES", "8"))
 BUNDLE_TARGET_MAX_ROOT_BATCHES = int(os.environ.get("AUTOPILOT_BUNDLE_TARGET_MAX_ROOT_BATCHES", "192"))
 BUNDLE_TARGET_ROOT_RUNTIME_SEC = int(os.environ.get("AUTOPILOT_BUNDLE_TARGET_ROOT_RUNTIME_SEC", "900"))
@@ -167,6 +173,51 @@ def _aws_batch_capacity(cfg: dict | None) -> dict:
 def _route_is_cpu(slave: dict) -> bool:
     regex = str(slave.get("algorithm_id_regex") or "")
     return any(challenge_id in regex for challenge_id in CPU_CHALLENGE_IDS)
+
+
+def _route_is_gpu(route: dict) -> bool:
+    regex = str(route.get("algorithm_id_regex") or "")
+    return any(challenge_id in regex for challenge_id in GPU_CHALLENGE_ID_TO_SLOT)
+
+
+def _route_profile(route: dict) -> str | None:
+    if _route_is_gpu(route):
+        return "gpu"
+    if _route_is_cpu(route):
+        return "cpu"
+    return None
+
+
+def _route_is_manual_gpu(route: dict) -> bool:
+    """Return True for GPU routes where a static operator cap is intentional.
+
+    Local GPU and C3 dispatcher routes represent special execution models. Do not
+    auto-raise them with generic fleet logic; operators should scale their local
+    worker count / C3 num_workers first.
+    """
+    name_regex = str(route.get("name_regex") or "").lower()
+    return (
+        "pool-gpu-local" in name_regex
+        or "^local" in name_regex
+        or "c3" in name_regex
+        or name_regex.startswith("^pool-gpu-a330c544ec5b-2$")
+    )
+
+
+def _route_matches_slave(route: dict, slave_name: str) -> bool:
+    pattern = str(route.get("name_regex") or "")
+    if not pattern:
+        return False
+    try:
+        return re.match(pattern, slave_name) is not None
+    except re.error:
+        return False
+
+
+def _capacity_eligible(slave: dict) -> bool:
+    if slave.get("capacity_eligible") is not None:
+        return bool(slave.get("capacity_eligible"))
+    return _counts_for_capacity(slave)
 
 
 def _gpu_slot_floor(cfg: dict | None) -> dict[str, int]:
@@ -2152,21 +2203,115 @@ def _target_adaptive_slave_caps(capacity: dict) -> dict:
     return proposed
 
 
-def _target_slave_route_caps(cfg: dict, capacity: dict) -> list[dict]:
+def _route_cap_signals(route: dict, slaves: list[dict], current: int) -> dict:
+    matched = [
+        row
+        for row in (slaves or [])
+        if _route_matches_slave(route, str(row.get("slave_name") or ""))
+    ]
+    eligible = [row for row in matched if _capacity_eligible(row)]
+    stale_roots = sum(int(row.get("stale_roots") or 0) for row in eligible)
+    stale_proofs = sum(int(row.get("stale_proofs") or 0) for row in eligible)
+    completed_recent = sum(int(row.get("completed_recent") or 0) for row in eligible)
+    active_unfinished = sum(int(row.get("active_unfinished") or 0) for row in eligible)
+    active_now = sum(1 for row in eligible if row.get("active_now"))
+    saturated = [
+        row
+        for row in eligible
+        if current > 0 and int(row.get("active_unfinished") or 0) >= current
+    ]
+    adaptive_limited = [
+        row
+        for row in eligible
+        if current > 1
+        and row.get("active_now")
+        and int(row.get("active_unfinished") or 0) < current
+        and int(row.get("completed_recent") or 0) > 0
+    ]
+    runtime_values = [
+        float(row.get("avg_runtime_sec") or 0)
+        for row in eligible
+        if row.get("avg_runtime_sec") is not None
+    ]
+    return {
+        "matched_slaves": len(matched),
+        "eligible_slaves": len(eligible),
+        "active_now": active_now,
+        "active_unfinished": active_unfinished,
+        "completed_recent": completed_recent,
+        "stale_roots": stale_roots,
+        "stale_proofs": stale_proofs,
+        "saturated_slaves": len(saturated),
+        "adaptive_limited_slaves": len(adaptive_limited),
+        "avg_runtime_sec": round(sum(runtime_values) / len(runtime_values), 1) if runtime_values else None,
+        "pressure": round(active_unfinished / max(1, current * max(1, len(eligible))), 3) if current > 0 else 0.0,
+    }
+
+
+def _route_cap_ready(profile: str, current: int, signals: dict) -> tuple[bool, str]:
+    if current <= 0:
+        return False, "missing_current_route_cap"
+    eligible = int(signals.get("eligible_slaves") or 0)
+    if eligible <= 0:
+        return False, "no_capacity_eligible_slaves"
+    if int(signals.get("stale_roots") or 0) > 0 or int(signals.get("stale_proofs") or 0) > 0:
+        return False, "route_has_stale_work"
+    min_saturated = max(1, math.ceil(eligible * ROUTE_MIN_SATURATED_FRACTION))
+    if int(signals.get("saturated_slaves") or 0) < min_saturated:
+        return False, "route_not_saturated"
+    adaptive_limited = int(signals.get("adaptive_limited_slaves") or 0)
+    if adaptive_limited > int(signals.get("saturated_slaves") or 0):
+        return False, "adaptive_caps_are_limiter"
+    completions_per_slave = ROUTE_GPU_MIN_COMPLETIONS_PER_SLAVE if profile == "gpu" else ROUTE_CPU_MIN_COMPLETIONS_PER_SLAVE
+    min_completions = max(1, eligible * completions_per_slave)
+    if int(signals.get("completed_recent") or 0) < min_completions:
+        return False, "low_recent_completions"
+    return True, "route_cap_saturated_with_clean_completions"
+
+
+def _target_slave_route_caps(cfg: dict, capacity: dict, slaves: list[dict] | None = None) -> list[dict]:
     aws_jobs = int(capacity.get("aws_cpu_jobs") or 0)
-    if aws_jobs <= 0:
-        return []
     targets = []
-    for idx, slave in enumerate(cfg.get("slaves") or []):
-        if not _route_is_cpu(slave):
+    for idx, route in enumerate(cfg.get("slaves") or []):
+        profile = _route_profile(route)
+        if profile not in {"cpu", "gpu"}:
             continue
-        current = int(slave.get("max_concurrent_batches") or 0)
-        if current < aws_jobs:
+        current = int(route.get("max_concurrent_batches") or 0)
+        target = current
+        reasons = []
+        signals = _route_cap_signals(route, slaves or [], current)
+
+        if profile == "cpu" and aws_jobs > 0 and current < aws_jobs:
+            target = max(target, aws_jobs)
+            reasons.append("aws_cpu_jobs_floor")
+
+        if profile == "gpu" and _route_is_manual_gpu(route):
+            signals["skipped"] = "manual_gpu_route"
+        else:
+            ready, reason = _route_cap_ready(profile, current, signals)
+            signals["route_cap_ready"] = ready
+            signals["route_cap_reason"] = reason
+            if ready:
+                step = ROUTE_GPU_UP_STEP if profile == "gpu" else ROUTE_CPU_UP_STEP
+                ceiling = MAX_GPU_SLAVE_CAP if profile == "gpu" else MAX_CPU_SLAVE_CAP
+                target = max(target, min(current + max(1, step), ceiling))
+                reasons.append(reason)
+
+        ceiling = MAX_GPU_SLAVE_CAP if profile == "gpu" else MAX_CPU_SLAVE_CAP
+        target = min(target, ceiling)
+        if target > current:
+            step = ROUTE_GPU_UP_STEP if profile == "gpu" else ROUTE_CPU_UP_STEP
+            next_value = _next_value_bounded(current, target, max(1, step), 1)
             targets.append({
                 "index": idx,
-                "name_regex": slave.get("name_regex"),
+                "name_regex": route.get("name_regex"),
+                "algorithm_id_regex": route.get("algorithm_id_regex"),
+                "profile": profile,
                 "current": current,
-                "target": aws_jobs,
+                "target": target,
+                "next": next_value,
+                "reasons": reasons,
+                "signals": signals,
             })
     return targets
 
@@ -2266,7 +2411,7 @@ def _recommendations(
             "apply_now": False,
         })
 
-    route_cap_targets = _target_slave_route_caps(cfg, capacity)
+    route_cap_targets = _target_slave_route_caps(cfg, capacity, slaves)
     if route_cap_targets:
         recommendations.append({
             "key": "slaves.max_concurrent_batches",
@@ -2279,8 +2424,9 @@ def _recommendations(
             ],
             "proposed": route_cap_targets,
             "reason": (
-                "CPU slave route caps clamp adaptive assignment. For AWS Batch, "
-                "CPU routes must allow the configured max_concurrent_cpu_jobs."
+                "Slave route caps clamp adaptive assignment. Autopilot raises them only when "
+                "matching workers are capacity-eligible, route-saturated, recently productive, "
+                "and clean of stale work; AWS CPU routes also honor max_concurrent_cpu_jobs."
             ),
             "signals": capacity,
             "apply_now": False,
@@ -2879,14 +3025,20 @@ def _apply_route_cap_targets(new_cfg: dict, route_rec: dict) -> dict | None:
             continue
         current = int(current_routes[idx].get("max_concurrent_batches") or 0)
         proposed = int(target.get("target") or current)
-        if proposed <= current:
+        next_value = int(target.get("next") or proposed)
+        if proposed <= current or next_value <= current:
             continue
-        current_routes[idx]["max_concurrent_batches"] = proposed
+        next_value = min(next_value, proposed)
+        current_routes[idx]["max_concurrent_batches"] = next_value
         route_changes.append({
             "name_regex": current_routes[idx].get("name_regex"),
+            "algorithm_id_regex": current_routes[idx].get("algorithm_id_regex"),
             "current": current,
             "target": proposed,
-            "next": proposed,
+            "next": next_value,
+            "profile": target.get("profile"),
+            "reasons": target.get("reasons") or [],
+            "signals": target.get("signals") or {},
         })
 
     if not route_changes:
@@ -2971,6 +3123,12 @@ def _plan_config_change(report: dict, cfg: dict, clean_windows: int) -> dict:
     capacity_change_allowed = (
         ((health["healthy"] and funnel_safe) or productive_capacity_scale)
         and posture != "recovery"
+    )
+    route_cap_change_allowed = (
+        health["healthy"]
+        and funnel_safe
+        and posture != "recovery"
+        and clean_windows >= APPLY_MIN_CLEAN_WINDOWS
     )
     if not funnel_safe:
         decision.setdefault("guardrails", {})["reward_funnel"] = {
@@ -3104,15 +3262,6 @@ def _plan_config_change(report: dict, cfg: dict, clean_windows: int) -> dict:
     if workload_safety_guard:
         decision.setdefault("guardrails", {})["workload_controller"] = workload_safety_guard
 
-    if _aws_batch_capacity(cfg).get("enabled"):
-        route_cfg = json.loads(json.dumps(cfg))
-        route_change = _apply_route_cap_targets(route_cfg, route_rec)
-        if route_change:
-            decision["reason"] = "aws_batch_capacity_alignment"
-            decision["changes"] = {"slaves.max_concurrent_batches": route_change}
-            decision["config"] = route_cfg
-            return decision
-
     if not health["healthy"] and not productive_capacity_scale and not safe_per_challenge_scale:
         decision["reason"] = "blocked_by_stale_or_unregistered_work"
         return decision
@@ -3237,10 +3386,19 @@ def _plan_config_change(report: dict, cfg: dict, clean_windows: int) -> dict:
                 "signals": caps_rec.get("signals") or {},
             }
 
-    if route_rec and capacity_change_allowed:
+    if route_rec and route_cap_change_allowed:
         route_change = _apply_route_cap_targets(new_cfg, route_rec)
         if route_change:
             changes["slaves.max_concurrent_batches"] = route_change
+    elif route_rec:
+        decision.setdefault("guardrails", {})["slaves.max_concurrent_batches"] = {
+            "skipped": "route_cap_requires_healthy_funnel_and_clean_windows",
+            "healthy": health["healthy"],
+            "reward_funnel_safe": funnel_safe,
+            "policy_posture": posture,
+            "clean_windows": clean_windows,
+            "required_clean_windows": APPLY_MIN_CLEAN_WINDOWS,
+        }
 
     if not changes:
         workload_canary_change, workload_guard = _next_workload_change(

@@ -176,6 +176,20 @@ def _changed_max(decision: dict) -> tuple[int | None, int | None]:
     )
 
 
+def _changed_route_cap(decision: dict, name_regex: str | None = None) -> tuple[int | None, int | None]:
+    change = (decision.get("changes") or {}).get("slaves.max_concurrent_batches") or {}
+    rows = change.get("changes") or []
+    for row in rows:
+        if name_regex is None or row.get("name_regex") == name_regex:
+            current = row.get("current")
+            next_value = row.get("next")
+            return (
+                int(current) if current is not None else None,
+                int(next_value) if next_value is not None else None,
+            )
+    return None, None
+
+
 def _workload_target(report: dict, algorithm_id: str, track: str) -> dict:
     targets = ((report.get("workload_targets") or {}).get("targets") or [])
     for row in targets:
@@ -250,6 +264,22 @@ def _validate_decision(data: dict, report: dict, decision: dict) -> list[dict]:
         elif isinstance(assertion, dict) and assertion.get("expect_max_step_lte") is not None:
             limit = int(assertion["expect_max_step_lte"])
             current, next_value = _changed_max(decision)
+            ok = next_value is None or current is None or abs(next_value - current) <= limit
+            detail = f"limit={limit} current={current} next={next_value}"
+        elif isinstance(assertion, dict) and assertion.get("expect_route_cap_direction"):
+            spec = assertion["expect_route_cap_direction"]
+            current, next_value = _changed_route_cap(decision, spec.get("name_regex"))
+            actual = _direction(current, next_value)
+            ok = actual == spec["direction"]
+            detail = f"name_regex={spec.get('name_regex')} expected={spec['direction']} actual={actual} current={current} next={next_value}"
+        elif isinstance(assertion, dict) and assertion.get("expect_route_cap_step_lte") is not None:
+            spec = assertion["expect_route_cap_step_lte"]
+            if isinstance(spec, dict):
+                limit = int(spec["limit"])
+                current, next_value = _changed_route_cap(decision, spec.get("name_regex"))
+            else:
+                limit = int(spec)
+                current, next_value = _changed_route_cap(decision)
             ok = next_value is None or current is None or abs(next_value - current) <= limit
             detail = f"limit={limit} current={current} next={next_value}"
         elif isinstance(assertion, dict) and assertion.get("expect_workload_action"):

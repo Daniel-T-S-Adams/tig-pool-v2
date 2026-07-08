@@ -1,13 +1,13 @@
 {
   "name": "single_gpu_restores_focused_slot_in_recovery",
-  "lesson": "If one GPU is active but prior recovery closed all GPU slots, autopilot should restore exactly one focused GPU slot even while unhealthy.",
+  "lesson": "If one GPU is active but the funnel is unhealthy and stranded work exists, autopilot should not restore GPU slots until the normal safety gates clear.",
   "clean_windows": 0,
   "assertions": [
     {
-      "expect_reason": "ready_to_apply"
+      "expect_reason": "blocked_by_stale_or_unregistered_work"
     },
     {
-      "expect_change_key": "resource_slots.slots"
+      "expect_no_change_key": "resource_slots.slots"
     },
     {
       "expect_max_direction": "flat"

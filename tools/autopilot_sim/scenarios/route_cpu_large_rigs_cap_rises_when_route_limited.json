@@ -1,0 +1,159 @@
+{
+  "name": "route_cpu_large_rigs_cap_rises_when_route_limited",
+  "lesson": "Large CPU workers repeatedly saturated at a CPU route cap should get a bounded route-cap increase when the funnel is clean.",
+  "clean_windows": 3,
+  "assertions": [
+    {
+      "expect_reason": "ready_to_apply"
+    },
+    {
+      "expect_change_key": "slaves.max_concurrent_batches"
+    },
+    {
+      "expect_route_cap_direction": {
+        "name_regex": "^pool-cpu-.*$",
+        "direction": "up"
+      }
+    },
+    {
+      "expect_route_cap_step_lte": {
+        "name_regex": "^pool-cpu-.*$",
+        "limit": 8
+      }
+    }
+  ],
+  "config": {
+    "max_concurrent_benchmarks": 96,
+    "resource_slots": {
+      "slots": {
+        "cpu": 96
+      }
+    },
+    "per_challenge_max_benchmarks": {
+      "c001": 24,
+      "c002": 24,
+      "c003": 24,
+      "c007": 24
+    },
+    "adaptive_slave_caps": {
+      "cpu_max_cap": 64,
+      "gpu_max_cap": 8
+    },
+    "slaves": [
+      {
+        "name_regex": "^pool-cpu-.*$",
+        "algorithm_id_regex": "^(c001|c002|c003|c007|c008)_.*",
+        "max_concurrent_batches": 32
+      }
+    ]
+  },
+  "report": {
+    "mode": "read_only",
+    "master_config_error": null,
+    "current_config": {
+      "max_concurrent_benchmarks": 96,
+      "resource_slots": {
+        "slots": {
+          "cpu": 96
+        }
+      },
+      "per_challenge_max_benchmarks": {
+        "c001": 24,
+        "c002": 24,
+        "c003": 24,
+        "c007": 24
+      },
+      "adaptive_slave_caps": {
+        "cpu_max_cap": 64,
+        "gpu_max_cap": 8
+      },
+      "slaves": [
+        {
+          "name_regex": "^pool-cpu-.*$",
+          "algorithm_id_regex": "^(c001|c002|c003|c007|c008)_.*",
+          "max_concurrent_batches": 32
+        }
+      ]
+    },
+    "policy_posture": {
+      "posture": "balanced"
+    },
+    "slaves": [
+      {
+        "slave_name": "pool-cpu-rig-001",
+        "profile": "cpu",
+        "registered": true,
+        "registered_active": true,
+        "active_now": true,
+        "active_unfinished": 32,
+        "stale_roots": 0,
+        "stale_proofs": 0,
+        "completed_recent": 190,
+        "nonces_recent": 3500000
+      },
+      {
+        "slave_name": "pool-cpu-rig-002",
+        "profile": "cpu",
+        "registered": true,
+        "registered_active": true,
+        "active_now": true,
+        "active_unfinished": 32,
+        "stale_roots": 0,
+        "stale_proofs": 0,
+        "completed_recent": 175,
+        "nonces_recent": 3300000
+      },
+      {
+        "slave_name": "pool-cpu-rig-003",
+        "profile": "cpu",
+        "registered": true,
+        "registered_active": true,
+        "active_now": true,
+        "active_unfinished": 32,
+        "stale_roots": 0,
+        "stale_proofs": 0,
+        "completed_recent": 160,
+        "nonces_recent": 3100000
+      },
+      {
+        "slave_name": "pool-cpu-rig-004",
+        "profile": "cpu",
+        "registered": true,
+        "registered_active": true,
+        "active_now": true,
+        "active_unfinished": 30,
+        "stale_roots": 0,
+        "stale_proofs": 0,
+        "completed_recent": 155,
+        "nonces_recent": 3000000
+      }
+    ],
+    "slots": {
+      "summary": []
+    },
+    "challenges": [
+      {
+        "challenge_id": "satisfiability",
+        "compute_type": "cpu",
+        "active_benchmarks": 90,
+        "stale_roots": 0,
+        "stale_proofs": 0
+      }
+    ],
+    "stale_totals": {
+      "roots": 0,
+      "proofs": 0
+    },
+    "stranded_benchmarks": [],
+    "reward_funnel": {
+      "summary": {
+        "safe_to_scale_workload": true,
+        "active_benchmarks": 90,
+        "proof_conversion_rate": 0.96,
+        "stopped_rate": 0.02,
+        "avg_time_to_proof_submit_sec": 620,
+        "issues": []
+      }
+    }
+  }
+}

@@ -1,6 +1,6 @@
 {
   "name": "single_gpu_overprovisioned_slots",
-  "lesson": "One active GPU should not keep benchmark slots open for every GPU challenge; GPU slot budget should follow actual GPU worker capacity.",
+  "lesson": "One active GPU can recommend a lower GPU slot budget, but autopilot should not automatically downscale GPU slots without a dedicated drain path.",
   "clean_windows": 3,
   "assertions": [
     {
@@ -16,7 +16,7 @@
           "hypergraph",
           "neuralnet_optimizer"
         ],
-        "direction": "down"
+        "direction": "flat"
       }
     }
   ],

@@ -1,0 +1,204 @@
+{
+  "name": "route_gpu_fleet_does_not_rise_when_funnel_unsafe",
+  "lesson": "A saturated GPU route must not scale while the reward funnel says workload scaling is unsafe.",
+  "clean_windows": 3,
+  "assertions": [
+    {
+      "expect_no_change_key": "slaves.max_concurrent_batches"
+    },
+    {
+      "expect_route_cap_direction": {
+        "name_regex": "^pool-gpu-(?!local-).*$",
+        "direction": "flat"
+      }
+    }
+  ],
+  "config": {
+    "max_concurrent_benchmarks": 32,
+    "resource_slots": {
+      "slots": {
+        "vector_search": 8,
+        "hypergraph": 8,
+        "neuralnet_optimizer": 8
+      }
+    },
+    "per_challenge_max_benchmarks": {
+      "c004": 8,
+      "c005": 8,
+      "c006": 8
+    },
+    "adaptive_slave_caps": {
+      "cpu_max_cap": 32,
+      "gpu_max_cap": 8
+    },
+    "slaves": [
+      {
+        "name_regex": "^pool-gpu-(?!local-).*$",
+        "algorithm_id_regex": "^(c004|c005|c006)_.*",
+        "max_concurrent_batches": 1
+      }
+    ]
+  },
+  "report": {
+    "mode": "read_only",
+    "master_config_error": null,
+    "current_config": {
+      "max_concurrent_benchmarks": 32,
+      "resource_slots": {
+        "slots": {
+          "vector_search": 8,
+          "hypergraph": 8,
+          "neuralnet_optimizer": 8
+        }
+      },
+      "per_challenge_max_benchmarks": {
+        "c004": 8,
+        "c005": 8,
+        "c006": 8
+      },
+      "adaptive_slave_caps": {
+        "cpu_max_cap": 32,
+        "gpu_max_cap": 8
+      },
+      "slaves": [
+        {
+          "name_regex": "^pool-gpu-(?!local-).*$",
+          "algorithm_id_regex": "^(c004|c005|c006)_.*",
+          "max_concurrent_batches": 1
+        }
+      ]
+    },
+    "policy_posture": {
+      "posture": "balanced"
+    },
+    "slaves": [
+      {
+        "slave_name": "pool-gpu-fleet-001",
+        "profile": "gpu",
+        "registered": true,
+        "registered_active": true,
+        "active_now": true,
+        "active_unfinished": 1,
+        "stale_roots": 0,
+        "stale_proofs": 0,
+        "completed_recent": 8,
+        "nonces_recent": 160000
+      },
+      {
+        "slave_name": "pool-gpu-fleet-002",
+        "profile": "gpu",
+        "registered": true,
+        "registered_active": true,
+        "active_now": true,
+        "active_unfinished": 1,
+        "stale_roots": 0,
+        "stale_proofs": 0,
+        "completed_recent": 7,
+        "nonces_recent": 140000
+      },
+      {
+        "slave_name": "pool-gpu-fleet-003",
+        "profile": "gpu",
+        "registered": true,
+        "registered_active": true,
+        "active_now": true,
+        "active_unfinished": 1,
+        "stale_roots": 0,
+        "stale_proofs": 0,
+        "completed_recent": 6,
+        "nonces_recent": 120000
+      },
+      {
+        "slave_name": "pool-gpu-fleet-004",
+        "profile": "gpu",
+        "registered": true,
+        "registered_active": true,
+        "active_now": true,
+        "active_unfinished": 1,
+        "stale_roots": 0,
+        "stale_proofs": 0,
+        "completed_recent": 6,
+        "nonces_recent": 120000
+      },
+      {
+        "slave_name": "pool-gpu-fleet-005",
+        "profile": "gpu",
+        "registered": true,
+        "registered_active": true,
+        "active_now": true,
+        "active_unfinished": 1,
+        "stale_roots": 0,
+        "stale_proofs": 0,
+        "completed_recent": 5,
+        "nonces_recent": 100000
+      },
+      {
+        "slave_name": "pool-gpu-fleet-006",
+        "profile": "gpu",
+        "registered": true,
+        "registered_active": true,
+        "active_now": true,
+        "active_unfinished": 1,
+        "stale_roots": 0,
+        "stale_proofs": 0,
+        "completed_recent": 5,
+        "nonces_recent": 100000
+      },
+      {
+        "slave_name": "pool-gpu-fleet-007",
+        "profile": "gpu",
+        "registered": true,
+        "registered_active": true,
+        "active_now": true,
+        "active_unfinished": 1,
+        "stale_roots": 0,
+        "stale_proofs": 0,
+        "completed_recent": 4,
+        "nonces_recent": 80000
+      },
+      {
+        "slave_name": "pool-gpu-fleet-008",
+        "profile": "gpu",
+        "registered": true,
+        "registered_active": true,
+        "active_now": true,
+        "active_unfinished": 1,
+        "stale_roots": 0,
+        "stale_proofs": 0,
+        "completed_recent": 4,
+        "nonces_recent": 80000
+      }
+    ],
+    "slots": {
+      "summary": []
+    },
+    "challenges": [
+      {
+        "challenge_id": "hypergraph",
+        "compute_type": "gpu",
+        "active_benchmarks": 24,
+        "stale_roots": 0,
+        "stale_proofs": 0
+      }
+    ],
+    "stale_totals": {
+      "roots": 0,
+      "proofs": 0
+    },
+    "stranded_benchmarks": [],
+    "reward_funnel": {
+      "summary": {
+        "safe_to_scale_workload": false,
+        "active_benchmarks": 24,
+        "proof_conversion_rate": 0.72,
+        "stopped_rate": 0.18,
+        "unexpected_stopped_rate": 0.12,
+        "avg_time_to_proof_submit_sec": 1600,
+        "issues": [
+          "low_proof_conversion",
+          "slow_time_to_proof_submission"
+        ]
+      }
+    }
+  }
+}
