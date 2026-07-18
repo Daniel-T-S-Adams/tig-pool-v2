@@ -1,0 +1,139 @@
+{
+  "name": "workload_root_backlog_drain",
+  "lesson": "Old not-started root backlog should trigger a recovery-safe workload reduction without waiting for clean reward-funnel windows.",
+  "clean_windows": 0,
+  "assertions": [
+    {
+      "expect_reason": "workload_safety_adjustment"
+    },
+    {
+      "expect_workload_action": {
+        "algorithm_id": "c003_knapsack_algo",
+        "track": "difficulty=500",
+        "action": "drain_root_backlog_pressure"
+      }
+    },
+    {
+      "expect_workload_target_direction": {
+        "algorithm_id": "c003_knapsack_algo",
+        "track": "difficulty=500",
+        "field": "num_bundles",
+        "direction": "down"
+      }
+    },
+    {
+      "expect_workload_target_direction": {
+        "algorithm_id": "c003_knapsack_algo",
+        "track": "difficulty=500",
+        "field": "per_challenge_max_benchmarks",
+        "direction": "down"
+      }
+    },
+    {
+      "expect_change_key": "workload_controller"
+    },
+    {
+      "expect_config_track_setting": {
+        "algorithm_id": "c003_knapsack_algo",
+        "track": "difficulty=500",
+        "field": "num_bundles",
+        "value": 3
+      }
+    },
+    {
+      "expect_config_per_challenge_max": {
+        "challenge_id": "c003",
+        "value": 7
+      }
+    }
+  ],
+  "config": {
+    "max_job_batches": 512,
+    "max_concurrent_benchmarks": 52,
+    "resource_slots": {
+      "slots": {
+        "cpu": 50
+      }
+    },
+    "per_challenge_max_benchmarks": {
+      "c003": 8,
+      "c007": 8,
+      "c008": 8
+    },
+    "adaptive_slave_caps": {
+      "cpu_max_cap": 32,
+      "gpu_max_cap": 1
+    },
+    "algo_selection": [
+      {
+        "algorithm_id": "c003_knapsack_algo",
+        "weight": 1,
+        "batch_size": 64,
+        "track_settings": {
+          "difficulty=500": {
+            "batch_size": 64,
+            "num_bundles": 4
+          }
+        }
+      }
+    ],
+    "slaves": []
+  },
+  "report": {
+    "mode": "read_only",
+    "master_config_error": null,
+    "current_config": {
+      "max_concurrent_benchmarks": 52,
+      "slaves": []
+    },
+    "slaves": [],
+    "slots": {
+      "summary": []
+    },
+    "challenges": [],
+    "stale_totals": {
+      "roots": 0,
+      "proofs": 0
+    },
+    "stranded_benchmarks": [],
+    "track_workload": [
+      {
+        "algorithm_id": "c003_knapsack_algo",
+        "track": "difficulty=500",
+        "avg_num_nonces": 4096,
+        "avg_num_batches": 256,
+        "avg_root_runtime_sec": 120,
+        "avg_benchmark_wall_sec": 1200,
+        "roots_pending": 384,
+        "roots_not_started": 320,
+        "old_roots_not_started": 192,
+        "oldest_not_started_root_age_min": 44
+      }
+    ],
+    "reward_funnel": {
+      "summary": {
+        "safe_to_scale_workload": false,
+        "active_benchmarks": 52,
+        "proof_conversion_rate": 0.78,
+        "stopped_rate": 0.08,
+        "avg_time_to_proof_submit_sec": 980,
+        "issues": [
+          "low_proof_conversion"
+        ]
+      },
+      "by_track": [
+        {
+          "algorithm_id": "c003_knapsack_algo",
+          "track": "difficulty=500",
+          "benchmarks_seen": 20,
+          "proof_required_benchmarks": 12,
+          "proof_conversion_rate": 0.9,
+          "stopped_rate": 0.02,
+          "avg_time_to_proof_submit_sec": 850,
+          "p95_root_batch_runtime_sec": 120
+        }
+      ]
+    },
+    "recommendations": []
+  }
+}

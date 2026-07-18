@@ -322,6 +322,12 @@ def _validate_decision(data: dict, report: dict, decision: dict) -> list[dict]:
             actual = algo.get("weight")
             ok = actual == spec["value"]
             detail = f"expected={spec['value']} actual={actual}"
+        elif isinstance(assertion, dict) and assertion.get("expect_config_per_challenge_max"):
+            spec = assertion["expect_config_per_challenge_max"]
+            config = decision.get("config") or {}
+            actual = (config.get("per_challenge_max_benchmarks") or {}).get(spec["challenge_id"])
+            ok = actual == spec["value"]
+            detail = f"challenge_id={spec['challenge_id']} expected={spec['value']} actual={actual}"
         elif isinstance(assertion, dict) and assertion.get("expect_unserved_stranded_fields"):
             spec = assertion["expect_unserved_stranded_fields"]
             health = decision.get("health") or {}

@@ -75,6 +75,10 @@ WORKLOAD_SAFETY_COOLDOWN_MS = int(os.environ.get("AUTOPILOT_WORKLOAD_SAFETY_COOL
 WORKLOAD_CANARY_COOLDOWN_MS = int(os.environ.get("AUTOPILOT_WORKLOAD_CANARY_COOLDOWN_MS", str(METRIC_WINDOW_MS)))
 WORKLOAD_FAST_PROOF_FACTOR = float(os.environ.get("AUTOPILOT_WORKLOAD_FAST_PROOF_FACTOR", "0.50"))
 WORKLOAD_HIGH_PROOF_CONVERSION_RATE = float(os.environ.get("AUTOPILOT_WORKLOAD_HIGH_PROOF_CONVERSION_RATE", "0.95"))
+ROOT_BACKLOG_DRAIN_MIN_NOT_STARTED = int(os.environ.get("AUTOPILOT_ROOT_BACKLOG_DRAIN_MIN_NOT_STARTED", "128"))
+ROOT_BACKLOG_DRAIN_MIN_AGE_MS = int(os.environ.get("AUTOPILOT_ROOT_BACKLOG_DRAIN_MIN_AGE_MS", str(20 * 60 * 1000)))
+ROOT_BACKLOG_DRAIN_MIN_BUNDLES = int(os.environ.get("AUTOPILOT_ROOT_BACKLOG_DRAIN_MIN_BUNDLES", "1"))
+ROOT_BACKLOG_DRAIN_MIN_PER_CHALLENGE = int(os.environ.get("AUTOPILOT_ROOT_BACKLOG_DRAIN_MIN_PER_CHALLENGE", "1"))
 STRANDED_BENCHMARK_MS = int(os.environ.get("AUTOPILOT_STRANDED_BENCHMARK_MS", str(30 * 60 * 1000)))
 STRANDED_DOWNSCALE_STEP = int(os.environ.get("AUTOPILOT_STRANDED_DOWNSCALE_STEP", "2"))
 STRANDED_BUFFER_BENCHMARKS = int(os.environ.get("AUTOPILOT_STRANDED_BUFFER_BENCHMARKS", "2"))
@@ -1437,6 +1441,20 @@ def _track_workload_metrics(now_ms: int) -> list[dict]:
             COUNT(rb.*) FILTER (WHERE rb.ready IS NULL) AS roots_pending,
             COUNT(rb.*) FILTER (
                 WHERE rb.ready IS NULL
+                  AND rb.start_time IS NULL
+            ) AS roots_not_started,
+            COUNT(rb.*) FILTER (
+                WHERE rb.ready IS NULL
+                  AND rb.start_time IS NULL
+                  AND j.start_time < %s
+            ) AS old_roots_not_started,
+            ROUND(MAX(%s - j.start_time) FILTER (
+                WHERE rb.ready IS NULL
+                  AND rb.start_time IS NULL
+                  AND j.start_time IS NOT NULL
+            ) / 60000.0, 1) AS oldest_not_started_root_age_min,
+            COUNT(rb.*) FILTER (
+                WHERE rb.ready IS NULL
                   AND rb.start_time IS NOT NULL
                   AND rb.start_time < %s
             ) AS stale_roots,
@@ -1463,7 +1481,14 @@ def _track_workload_metrics(now_ms: int) -> list[dict]:
         GROUP BY j.challenge, j.settings->>'algorithm_id', j.settings->>'track_id'
         ORDER BY j.challenge, algorithm_id, track
         """,
-        (now_ms - STALE_ROOT_MS, cutoff_metrics, cutoff_metrics, cutoff_metrics),
+        (
+            now_ms - ROOT_BACKLOG_DRAIN_MIN_AGE_MS,
+            now_ms,
+            now_ms - STALE_ROOT_MS,
+            cutoff_metrics,
+            cutoff_metrics,
+            cutoff_metrics,
+        ),
     )
 
 
@@ -1598,6 +1623,14 @@ def _decrease_bundles(current: int) -> int:
     return max(WORKLOAD_MIN_BUNDLES, current - WORKLOAD_MAX_BUNDLE_STEP)
 
 
+def _decrease_backlog_bundles(current: int) -> int:
+    current = int(current or 0)
+    floor = max(1, ROOT_BACKLOG_DRAIN_MIN_BUNDLES)
+    if current <= floor:
+        return current
+    return max(floor, current - WORKLOAD_MAX_BUNDLE_STEP)
+
+
 def _workload_controller_targets(
     cfg: dict,
     track_economics: list[dict],
@@ -1660,6 +1693,12 @@ def _workload_controller_targets(
         estimated_root_batches = derived.get("estimated_root_batches")
         estimated_nonces_per_bundle = derived.get("estimated_nonces_per_bundle")
         confidence = _workload_confidence(funnel, observed)
+        roots_not_started = int(observed.get("roots_not_started") or 0)
+        old_roots_not_started = int(observed.get("old_roots_not_started") or 0)
+        oldest_not_started_root_age_min = observed.get("oldest_not_started_root_age_min")
+        current_per_challenge_cap = int((cfg.get("per_challenge_max_benchmarks") or {}).get(challenge_id, 0) or 0)
+        target_per_challenge_cap = current_per_challenge_cap
+        bundle_floor = WORKLOAD_MIN_BUNDLES
 
         if current_bundles <= 0:
             action = "missing_bundle_config"
@@ -1686,6 +1725,7 @@ def _workload_controller_targets(
                 and avg_time_to_proof is not None
                 and float(avg_time_to_proof) <= FUNNEL_TARGET_PROOF_SUBMIT_SEC * WORKLOAD_FAST_PROOF_FACTOR
             )
+            backlog_pressure = old_roots_not_started >= ROOT_BACKLOG_DRAIN_MIN_NOT_STARTED
 
             if allowlist_blocked:
                 action = "intentional_allowlist_stop"
@@ -1697,6 +1737,16 @@ def _workload_controller_targets(
                 action = "reduce_or_fix_unrunnable_track"
                 reasons.append("recent jobs stopped before root work; check max_job_batches/allowlist/TIG debt")
                 target_bundles = _decrease_bundles(current_bundles)
+            elif backlog_pressure:
+                action = "drain_root_backlog_pressure"
+                reasons.append("old not-started root batches are accumulating faster than workers can drain them")
+                target_bundles = _decrease_backlog_bundles(current_bundles)
+                bundle_floor = max(1, ROOT_BACKLOG_DRAIN_MIN_BUNDLES)
+                if current_per_challenge_cap > ROOT_BACKLOG_DRAIN_MIN_PER_CHALLENGE:
+                    target_per_challenge_cap = max(
+                        ROOT_BACKLOG_DRAIN_MIN_PER_CHALLENGE,
+                        current_per_challenge_cap - 1,
+                    )
             elif proof_unhealthy:
                 action = "reduce_workload_until_proofs_convert"
                 reasons.append("proof conversion is below target")
@@ -1767,11 +1817,13 @@ def _workload_controller_targets(
                 "weight": current_weight,
                 "num_bundles": current_bundles,
                 "effective_batch_size": current_batch_size,
+                "per_challenge_max_benchmarks": current_per_challenge_cap,
             },
             "target": {
                 "weight": target_weight,
                 "num_bundles": target_bundles,
                 "effective_batch_size": target_batch_size,
+                "per_challenge_max_benchmarks": target_per_challenge_cap,
             },
             "observed": {
                 "proof_required_benchmarks": proof_required,
@@ -1785,12 +1837,16 @@ def _workload_controller_targets(
                 "p95_root_batch_runtime_sec": p95_root_runtime,
                 "avg_num_batches": observed.get("avg_num_batches"),
                 "avg_root_runtime_sec": observed.get("avg_root_runtime_sec"),
+                "roots_not_started": roots_not_started,
+                "old_roots_not_started": old_roots_not_started,
+                "oldest_not_started_root_age_min": oldest_not_started_root_age_min,
             },
             "derived": {
                 "estimated_nonces_per_bundle": estimated_nonces_per_bundle,
                 "current_estimated_root_batches": estimated_root_batches,
                 "target_estimated_root_batches": estimated_target_batches,
                 "min_batch_size": min_batch_size,
+                "min_bundle_floor": bundle_floor,
                 "max_job_batches_margin_ok": max_job_batches_margin_ok,
                 "policy_posture": posture,
             },
@@ -2747,6 +2803,7 @@ def _apply_workload_target(new_cfg: dict, target: dict) -> dict | None:
     track = target.get("track")
     if not algorithm_id or not track:
         return None
+    challenge_id = str(algorithm_id).split("_", 1)[0]
     algo = _find_algo_selection(new_cfg, algorithm_id)
     if not algo:
         return None
@@ -2766,6 +2823,8 @@ def _apply_workload_target(new_cfg: dict, target: dict) -> dict | None:
     ):
         current_value = int(current.get(field) or next_settings.get(config_key) or 0)
         target_value = int(desired.get(field) or current_value)
+        if config_key == "num_bundles":
+            floor = max(1, int(derived.get("min_bundle_floor") or floor))
         if config_key == "batch_size":
             floor = max(floor, int(derived.get("min_batch_size") or 0))
         if target_value < current_value:
@@ -2791,6 +2850,21 @@ def _apply_workload_target(new_cfg: dict, target: dict) -> dict | None:
             "target": target_weight,
             "next": target_weight,
         }
+
+    current_per_challenge = int(current.get("per_challenge_max_benchmarks") or 0)
+    target_per_challenge = int(desired.get("per_challenge_max_benchmarks") or current_per_challenge)
+    if current_per_challenge and target_per_challenge < current_per_challenge:
+        target_per_challenge = max(ROOT_BACKLOG_DRAIN_MIN_PER_CHALLENGE, target_per_challenge)
+        next_per = dict(new_cfg.get("per_challenge_max_benchmarks") or {})
+        if int(next_per.get(challenge_id, current_per_challenge) or 0) == current_per_challenge:
+            next_per[challenge_id] = target_per_challenge
+            new_cfg["per_challenge_max_benchmarks"] = next_per
+            changed["per_challenge_max_benchmarks"] = {
+                "challenge_id": challenge_id,
+                "current": current_per_challenge,
+                "target": target_per_challenge,
+                "next": target_per_challenge,
+            }
 
     if not changed:
         return None
@@ -2943,6 +3017,7 @@ def _next_workload_change(
             }, None
 
     safety_actions = {
+        "drain_root_backlog_pressure",
         "reduce_or_fix_unrunnable_track",
         "reduce_workload_until_proofs_convert",
         "reduce_workload_until_stopped_rate_recovers",
@@ -2963,6 +3038,8 @@ def _next_workload_change(
             < int(current.get("effective_batch_size") or 0)
             or int(target.get("weight") or current.get("weight") or 0)
             < int(current.get("weight") or 0)
+            or int(target.get("per_challenge_max_benchmarks") or current.get("per_challenge_max_benchmarks") or 0)
+            < int(current.get("per_challenge_max_benchmarks") or 0)
         )
         if not reduces_work and row.get("action") != "enforce_aws_cpu_batch_size_floor":
             continue
@@ -3130,6 +3207,30 @@ def _plan_config_change(report: dict, cfg: dict, clean_windows: int) -> dict:
         and posture != "recovery"
         and clean_windows >= APPLY_MIN_CLEAN_WINDOWS
     )
+    backlog_drain_targets = [
+        row for row in ((report.get("workload_targets") or {}).get("actionable") or [])
+        if row.get("action") == "drain_root_backlog_pressure"
+    ]
+    if backlog_drain_targets:
+        backlog_cfg = json.loads(json.dumps(cfg))
+        backlog_change, backlog_guard = _next_workload_change(
+            backlog_cfg,
+            report,
+            {"actionable": backlog_drain_targets},
+            health,
+            funnel_safe,
+            policy_posture,
+            clean_windows,
+            allow_canary=False,
+        )
+        if backlog_change:
+            decision["reason"] = "workload_safety_adjustment"
+            decision["changes"] = {"workload_controller": backlog_change}
+            decision["config"] = backlog_cfg
+            return decision
+        if backlog_guard:
+            decision.setdefault("guardrails", {})["workload_backlog_drain"] = backlog_guard
+
     if not funnel_safe:
         decision.setdefault("guardrails", {})["reward_funnel"] = {
             "skipped": "funnel_unhealthy_blocks_workload_scale",
