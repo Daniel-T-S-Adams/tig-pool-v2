@@ -1,0 +1,119 @@
+{
+  "name": "max_concurrent_clamps_below_tig_unresolved_limit",
+  "lesson": "Autopilot must immediately clamp max_concurrent_benchmarks below TIG's upstream unresolved-benchmark rejection threshold, even if a previous capacity recommendation left live config too high.",
+  "clean_windows": 0,
+  "assertions": [
+    {
+      "expect_reason": "clamp_upstream_benchmark_ceiling"
+    },
+    {
+      "expect_change_key": "max_concurrent_benchmarks"
+    },
+    {
+      "expect_max_direction": "down"
+    },
+    {
+      "expect_config_max_concurrent_benchmarks": 90
+    }
+  ],
+  "config": {
+    "max_concurrent_benchmarks": 128,
+    "max_job_batches": 1024,
+    "resource_slots": {
+      "slots": {
+        "cpu": 96,
+        "vector_search": 23,
+        "hypergraph": 2,
+        "neuralnet_optimizer": 5
+      },
+      "enabled": true
+    },
+    "per_challenge_max_benchmarks": {
+      "c001": 11,
+      "c002": 11,
+      "c003": 10,
+      "c004": 12,
+      "c005": 2,
+      "c006": 5,
+      "c007": 11,
+      "c008": 10
+    },
+    "adaptive_slave_caps": {
+      "cpu_max_cap": 94,
+      "gpu_max_cap": 35
+    },
+    "slaves": []
+  },
+  "report": {
+    "mode": "read_only",
+    "master_config_error": null,
+    "current_config": {
+      "max_concurrent_benchmarks": 128,
+      "slaves": []
+    },
+    "slaves": [
+      {
+        "slave_name": "pool-cpu-a330c544ec5b",
+        "profile": "cpu",
+        "registered": true,
+        "registered_active": true,
+        "active_now": true,
+        "active_unfinished": 48,
+        "stale_roots": 0,
+        "stale_proofs": 0,
+        "completed_recent": 80,
+        "nonces_recent": 1000000
+      },
+      {
+        "slave_name": "pool-gpu-a330c544ec5b-2",
+        "profile": "gpu",
+        "registered": true,
+        "registered_active": true,
+        "active_now": true,
+        "active_unfinished": 12,
+        "stale_roots": 0,
+        "stale_proofs": 0,
+        "completed_recent": 20,
+        "nonces_recent": 500000
+      }
+    ],
+    "slots": {
+      "summary": []
+    },
+    "challenges": [],
+    "stale_totals": {
+      "roots": 0,
+      "proofs": 0
+    },
+    "stranded_benchmarks": [],
+    "capacity_model": {
+      "active_cpu": 2,
+      "active_gpu": 1,
+      "aws_cpu_jobs": 32,
+      "productive_idle_cpu": 0,
+      "productive_idle_gpu": 0,
+      "cpu_pressure": 48,
+      "gpu_pressure": 12,
+      "cpu_completed_recent": 80,
+      "gpu_completed_recent": 20,
+      "stale_roots": 0,
+      "stale_proofs": 0
+    },
+    "reward_funnel": {
+      "summary": {
+        "safe_to_scale_workload": false,
+        "active_benchmarks": 95,
+        "proof_conversion_rate": 0.82,
+        "stopped_rate": 0.24,
+        "unexpected_stopped_rate": 0.2,
+        "avg_time_to_proof_submit_sec": 2100,
+        "issues": [
+          "low_proof_conversion",
+          "high_unexpected_stopped_rate",
+          "slow_time_to_proof_submission"
+        ]
+      }
+    },
+    "recommendations": []
+  }
+}

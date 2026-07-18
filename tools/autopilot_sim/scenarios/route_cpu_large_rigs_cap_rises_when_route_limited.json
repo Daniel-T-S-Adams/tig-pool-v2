@@ -23,7 +23,7 @@
     }
   ],
   "config": {
-    "max_concurrent_benchmarks": 96,
+    "max_concurrent_benchmarks": 90,
     "resource_slots": {
       "slots": {
         "cpu": 96
@@ -51,7 +51,7 @@
     "mode": "read_only",
     "master_config_error": null,
     "current_config": {
-      "max_concurrent_benchmarks": 96,
+      "max_concurrent_benchmarks": 90,
       "resource_slots": {
         "slots": {
           "cpu": 96

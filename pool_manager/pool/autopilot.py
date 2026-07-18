@@ -31,6 +31,20 @@ STALE_ROOT_MS = int(os.environ.get("AUTOPILOT_STALE_ROOT_MS", str(45 * 60 * 1000
 STALE_PROOF_MS = int(os.environ.get("AUTOPILOT_STALE_PROOF_MS", str(20 * 60 * 1000)))
 MIN_MAX_BENCHMARKS = int(os.environ.get("AUTOPILOT_MIN_MAX_BENCHMARKS", "3"))
 MAX_MAX_BENCHMARKS = int(os.environ.get("AUTOPILOT_MAX_MAX_BENCHMARKS", "96"))
+TIG_UNRESOLVED_BENCHMARK_LIMIT = int(os.environ.get("AUTOPILOT_TIG_UNRESOLVED_BENCHMARK_LIMIT", "100"))
+TIG_UNRESOLVED_BENCHMARK_HEADROOM = int(os.environ.get("AUTOPILOT_TIG_UNRESOLVED_BENCHMARK_HEADROOM", "10"))
+UPSTREAM_SAFE_MAX_BENCHMARKS = max(
+    MIN_MAX_BENCHMARKS,
+    min(
+        MAX_MAX_BENCHMARKS,
+        int(
+            os.environ.get(
+                "AUTOPILOT_UPSTREAM_SAFE_MAX_BENCHMARKS",
+                str(TIG_UNRESOLVED_BENCHMARK_LIMIT - TIG_UNRESOLVED_BENCHMARK_HEADROOM),
+            )
+        ),
+    ),
+)
 APPLY_MIN_CLEAN_WINDOWS = int(os.environ.get("AUTOPILOT_APPLY_MIN_CLEAN_WINDOWS", "2"))
 MAX_BENCHMARK_STEP = int(os.environ.get("AUTOPILOT_MAX_BENCHMARK_STEP", "2"))
 MAX_BENCHMARK_UP_STEP = int(os.environ.get("AUTOPILOT_MAX_BENCHMARK_UP_STEP", str(MAX_BENCHMARK_STEP)))
@@ -2154,7 +2168,7 @@ def _target_max_concurrent_benchmarks(capacity: dict, proposed_slots: dict) -> i
         else 0
     )
     buffer = BENCHMARK_BUFFER if (active_cpu or active_gpu) else 0
-    return _clamp(cpu_slot_total + gpu_slot_total + buffer, MIN_MAX_BENCHMARKS, MAX_MAX_BENCHMARKS)
+    return _clamp(cpu_slot_total + gpu_slot_total + buffer, MIN_MAX_BENCHMARKS, UPSTREAM_SAFE_MAX_BENCHMARKS)
 
 
 def _capacity_floor_max_concurrent(capacity: dict, proposed_slots: dict | None = None) -> int:
@@ -2169,7 +2183,7 @@ def _capacity_floor_max_concurrent(capacity: dict, proposed_slots: dict | None =
     gpu_floor = max(active_gpu, min(gpu_slots, active_gpu or gpu_slots))
 
     buffer = BENCHMARK_BUFFER if (cpu_floor or gpu_floor) else 0
-    return _clamp(cpu_floor + gpu_floor + buffer, MIN_MAX_BENCHMARKS, MAX_MAX_BENCHMARKS)
+    return _clamp(cpu_floor + gpu_floor + buffer, MIN_MAX_BENCHMARKS, UPSTREAM_SAFE_MAX_BENCHMARKS)
 
 
 def _challenge_ids_by_profile(cfg: dict) -> tuple[list[str], list[str]]:
@@ -3207,6 +3221,27 @@ def _plan_config_change(report: dict, cfg: dict, clean_windows: int) -> dict:
         and posture != "recovery"
         and clean_windows >= APPLY_MIN_CLEAN_WINDOWS
     )
+    current_max_for_upstream = cfg.get("max_concurrent_benchmarks")
+    if current_max_for_upstream is not None:
+        current_max_for_upstream = int(current_max_for_upstream or 0)
+        if current_max_for_upstream > UPSTREAM_SAFE_MAX_BENCHMARKS:
+            new_cfg = json.loads(json.dumps(cfg))
+            new_cfg["max_concurrent_benchmarks"] = UPSTREAM_SAFE_MAX_BENCHMARKS
+            decision["reason"] = "clamp_upstream_benchmark_ceiling"
+            decision["changes"] = {
+                "max_concurrent_benchmarks": {
+                    "current": current_max_for_upstream,
+                    "target": UPSTREAM_SAFE_MAX_BENCHMARKS,
+                    "next": UPSTREAM_SAFE_MAX_BENCHMARKS,
+                    "upstream_unresolved_benchmark_limit": TIG_UNRESOLVED_BENCHMARK_LIMIT,
+                    "headroom": TIG_UNRESOLVED_BENCHMARK_HEADROOM,
+                    "issues": funnel_summary.get("issues", []),
+                    "safe_to_scale_workload": funnel_safe,
+                    "policy_posture": posture,
+                }
+            }
+            decision["config"] = new_cfg
+            return decision
     backlog_drain_targets = [
         row for row in ((report.get("workload_targets") or {}).get("actionable") or [])
         if row.get("action") == "drain_root_backlog_pressure"

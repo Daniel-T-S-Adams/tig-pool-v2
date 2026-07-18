@@ -328,6 +328,12 @@ def _validate_decision(data: dict, report: dict, decision: dict) -> list[dict]:
             actual = (config.get("per_challenge_max_benchmarks") or {}).get(spec["challenge_id"])
             ok = actual == spec["value"]
             detail = f"challenge_id={spec['challenge_id']} expected={spec['value']} actual={actual}"
+        elif isinstance(assertion, dict) and assertion.get("expect_config_max_concurrent_benchmarks") is not None:
+            expected = int(assertion["expect_config_max_concurrent_benchmarks"])
+            config = decision.get("config") or {}
+            actual = config.get("max_concurrent_benchmarks")
+            ok = actual == expected
+            detail = f"expected={expected} actual={actual}"
         elif isinstance(assertion, dict) and assertion.get("expect_unserved_stranded_fields"):
             spec = assertion["expect_unserved_stranded_fields"]
             health = decision.get("health") or {}
