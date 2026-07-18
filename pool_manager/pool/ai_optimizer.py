@@ -434,6 +434,7 @@ def _derived_pool_facts(report: dict) -> dict:
                     "key": key,
                     "changes": cap_changes,
                 })
+
         elif key == "per_challenge_max_benchmarks" and isinstance(current, dict) and isinstance(proposed, dict):
             cap_changes = {
                 challenge_id: {"current": current.get(challenge_id), "proposed": proposed.get(challenge_id)}
@@ -445,6 +446,33 @@ def _derived_pool_facts(report: dict) -> dict:
                     "key": key,
                     "changes": cap_changes,
                 })
+
+    workload_actionable = (report.get("workload_targets") or {}).get("actionable") or []
+    workload_safety_reductions = [
+        {
+            "algorithm_id": row.get("algorithm_id"),
+            "track": row.get("track"),
+            "action": row.get("action"),
+            "current": row.get("current"),
+            "target": row.get("target"),
+            "observed": {
+                "roots_not_started": (row.get("observed") or {}).get("roots_not_started"),
+                "old_roots_not_started": (row.get("observed") or {}).get("old_roots_not_started"),
+                "oldest_not_started_root_age_min": (row.get("observed") or {}).get("oldest_not_started_root_age_min"),
+                "proof_conversion_rate": (row.get("observed") or {}).get("proof_conversion_rate"),
+                "avg_time_to_proof_submit_sec": (row.get("observed") or {}).get("avg_time_to_proof_submit_sec"),
+            },
+            "reasons": row.get("reasons") or [],
+        }
+        for row in workload_actionable
+        if row.get("action") in {
+            "drain_root_backlog_pressure",
+            "reduce_or_fix_unrunnable_track",
+            "reduce_workload_until_proofs_convert",
+            "reduce_workload_until_stopped_rate_recovers",
+            "reduce_tail_time",
+        }
+    ]
 
     stranded_classification = _normalize_gpu_stranded(report.get("stranded_classification") or {})
     stale_roots_tolerated_for_capacity = (
@@ -472,6 +500,11 @@ def _derived_pool_facts(report: dict) -> dict:
         "stale_track_signals": stale_track_signals,
         "autopilot_recommendation_signals": recommendation_signals,
         "safe_capacity_upscale": safe_capacity_upscale,
+        "workload_safety_reductions": workload_safety_reductions[:10],
+        "root_backlog_drain_available": any(
+            row.get("action") == "drain_root_backlog_pressure"
+            for row in workload_safety_reductions
+        ),
         "stale_roots_tolerated_for_capacity_upscale": stale_roots_tolerated_for_capacity,
         "selective_challenge_upscale_allowed": selective_challenge_upscale_allowed,
         "productive_idle_stale_root_tolerance": autopilot.PRODUCTIVE_IDLE_STALE_ROOT_TOLERANCE,
@@ -484,6 +517,7 @@ def _derived_pool_facts(report: dict) -> dict:
             "If stranded_classification.capacity_waiting is non-empty and unserved is empty, describe it as queued behind saturated capacity, not broken.",
             "If safe_capacity_upscale is non-empty and stale_roots_tolerated_for_capacity_upscale is true, do not say autopilot is blocked by stale work.",
             "If selective_challenge_upscale_allowed is true, say autopilot can selectively raise non-stale challenge caps even while stale tracks are investigated.",
+            "If root_backlog_drain_available is true, say deterministic autopilot can reduce the affected track's bundles/challenge cap to drain old not-started root backlog; do not describe the situation as no safe config changes.",
             "Use exact values from derived_pool_facts when summarizing throughput.",
             "Use worker_trust.active and worker_trust.capacity_eligible when discussing scaling readiness.",
             "Do not count registered-but-offline workers as active miners or capacity-eligible workers.",
@@ -639,6 +673,8 @@ def _compact_autopilot_report(report: dict, derived: dict) -> dict:
         "active_cpu_slave_count": derived.get("active_cpu_slave_count"),
         "stale_track_signals": (derived.get("stale_track_signals") or [])[:10],
         "safe_capacity_upscale": derived.get("safe_capacity_upscale"),
+        "workload_safety_reductions": derived.get("workload_safety_reductions"),
+        "root_backlog_drain_available": derived.get("root_backlog_drain_available"),
         "recommendations": recommendations[:30],
     }
 

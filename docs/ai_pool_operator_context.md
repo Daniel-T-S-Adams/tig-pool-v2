@@ -323,8 +323,9 @@ Current autopilot responsibilities:
   sampled proof batches, proof completion, proof submissions, stopped/no-proof
   debt, and time-to-proof-submission.
 - Build read-only `workload_targets` for high-risk settings (`num_bundles`,
-  `batch_size`, and `weight`) from proof conversion, time-to-proof, stopped debt,
-  p95 batch runtime, and `max_job_batches` margin.
+  `batch_size`, `weight`, and targeted challenge-cap drains) from proof
+  conversion, time-to-proof, stopped debt, p95 batch runtime, not-started root
+  backlog pressure, and `max_job_batches` margin.
 - Summarize stale roots/proofs.
 - Summarize challenge pressure.
 - Manage resource slot recommendations.
@@ -332,8 +333,9 @@ Current autopilot responsibilities:
 - Manage safe per-challenge cap increases for GPU challenges.
 - Manage safe upward tuning of adaptive slave cap ceilings when productive
   workers prove they can carry more concurrent batches.
-- Block workload scaling when `reward_funnel.summary.safe_to_scale_workload` is
-  false.
+- Block workload increases when `reward_funnel.summary.safe_to_scale_workload`
+  is false. Recovery-safe workload reductions are still allowed when they reduce
+  risk, including `drain_root_backlog_pressure` for old not-started root queues.
 - Never auto-apply `workload_targets` until they have been validated across
   multiple clean windows and rounds.
 - Clean stale assignments when enabled.
@@ -386,6 +388,11 @@ Autopilot is expected to scale proportionally with fleet size:
   conversion is low, stopped/no-proof debt is high, or time-to-proof-submission
   is slow, do not increase workload merely because workers are idle or roots are
   completing.
+- Unsafe reward funnel does not mean "no deterministic action is possible."
+  If `workload_targets.actionable` includes `drain_root_backlog_pressure`,
+  explain that autopilot may reduce the affected track's `num_bundles` and the
+  affected challenge's `per_challenge_max_benchmarks` to stop adding more root
+  backlog while existing work drains.
 - `workload_targets` are read-only strategy outputs. They show how the controller
   would adjust bundles, batch sizing, or weights when efficient miners join or
   leave, but they must remain recommendation-only until proven stable.
