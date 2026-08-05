@@ -86,6 +86,11 @@ BUNDLE_TARGET_MAX_ROOT_BATCHES = int(os.environ.get("AUTOPILOT_BUNDLE_TARGET_MAX
 BUNDLE_TARGET_ROOT_RUNTIME_SEC = int(os.environ.get("AUTOPILOT_BUNDLE_TARGET_ROOT_RUNTIME_SEC", "900"))
 FUNNEL_TARGET_PROOF_SUBMIT_SEC = int(os.environ.get("AUTOPILOT_FUNNEL_TARGET_PROOF_SUBMIT_SEC", "1200"))
 FUNNEL_MIN_PROOF_CONVERSION_RATE = float(os.environ.get("AUTOPILOT_FUNNEL_MIN_PROOF_CONVERSION_RATE", "0.85"))
+# Near-threshold conversion (e.g. 80-85%) can still be soft-skipped when roots
+# are healthy and CPU is idle — avoids sawtoothing max_concurrent to the drain floor.
+FUNNEL_SOFT_PROOF_CONVERSION_FLOOR = float(
+    os.environ.get("AUTOPILOT_FUNNEL_SOFT_PROOF_CONVERSION_FLOOR", "0.80")
+)
 FUNNEL_MAX_STOPPED_OR_EXPIRED_RATE = float(os.environ.get("AUTOPILOT_FUNNEL_MAX_STOPPED_OR_EXPIRED_RATE", "0.10"))
 FUNNEL_DRAIN_MIN_MAX_BENCHMARKS = int(os.environ.get("AUTOPILOT_FUNNEL_DRAIN_MIN_MAX_BENCHMARKS", "12"))
 WORKLOAD_MIN_BUNDLES = int(os.environ.get("AUTOPILOT_WORKLOAD_MIN_BUNDLES", "4"))
@@ -2534,6 +2539,74 @@ def should_idle_cpu_max_scale(
     return True, "idle_cpu_needs_max_headroom"
 
 
+def reward_funnel_max_drain_decision(
+    *,
+    issues,
+    proof_conversion_rate,
+    root_ready_rate,
+    productive_idle_cpu: int,
+    min_idle: int,
+    min_root_ready_rate: float,
+    min_proof_conversion_rate: float,
+    soft_proof_conversion_floor: float,
+) -> tuple[bool, dict]:
+    """Decide whether unhealthy reward-funnel issues should drain max_concurrent.
+
+    Returns (should_drain, details). Soft latency noise, and near-threshold
+    low_proof_conversion (>= soft floor), can skip drain when roots are healthy
+    and proven CPU workers are idle. Truly hard conversion/stop issues still drain.
+    """
+    hard_drain_issues = {
+        "low_proof_conversion",
+        "high_stopped_or_expired_rate",
+        "high_unexpected_stopped_or_expired_rate",
+        "high_unexpected_stopped_rate",
+        "high_unexpected_stopped_without_roots_rate",
+        "root_phase_not_complete",
+    }
+    soft_drain_issues = {
+        "slow_time_to_proof_submission",
+        "stopped_without_root_work",
+    }
+    active_issues = set(issues or [])
+    hard_hits = active_issues.intersection(hard_drain_issues)
+    soft_hits = active_issues.intersection(soft_drain_issues)
+    conversion = None if proof_conversion_rate is None else float(proof_conversion_rate)
+    floor = float(soft_proof_conversion_floor)
+    target = float(min_proof_conversion_rate)
+    marginal_conversion = (
+        "low_proof_conversion" in hard_hits
+        and conversion is not None
+        and conversion >= floor
+        and conversion < target
+    )
+    if marginal_conversion:
+        hard_hits = hard_hits - {"low_proof_conversion"}
+        soft_hits = soft_hits | {"low_proof_conversion"}
+    root_ready_ok = (
+        root_ready_rate is not None
+        and float(root_ready_rate) >= float(min_root_ready_rate)
+    )
+    idle_ok = int(productive_idle_cpu or 0) >= int(min_idle or 0)
+    has_hard = bool(hard_hits)
+    has_soft = bool(soft_hits)
+    skip_soft = (not has_hard) and has_soft and root_ready_ok and idle_ok
+    should_drain = has_hard or (has_soft and not skip_soft)
+    details = {
+        "has_hard_drain": has_hard,
+        "has_soft_drain": has_soft,
+        "hard_issues": sorted(hard_hits),
+        "soft_issues": sorted(soft_hits),
+        "marginal_low_proof_conversion": marginal_conversion,
+        "skip_soft_drain": skip_soft,
+        "root_ready_ok": root_ready_ok,
+        "idle_ok": idle_ok,
+        "proof_conversion_rate": conversion,
+        "soft_proof_conversion_floor": floor,
+    }
+    return should_drain, details
+
+
 def _challenge_ids_by_profile(cfg: dict) -> tuple[list[str], list[str]]:
     cpu_ids = []
     gpu_ids = []
@@ -3633,40 +3706,22 @@ def _plan_config_change(report: dict, cfg: dict, clean_windows: int) -> dict:
             "unexpected_stopped_without_roots_rate": funnel_summary.get("unexpected_stopped_without_roots_rate"),
             "avg_time_to_proof_submit_sec": funnel_summary.get("avg_time_to_proof_submit_sec"),
         }
-        hard_drain_issues = {
-            "low_proof_conversion",
-            "high_stopped_or_expired_rate",
-            "high_unexpected_stopped_or_expired_rate",
-            "high_unexpected_stopped_rate",
-            "high_unexpected_stopped_without_roots_rate",
-            "root_phase_not_complete",
-        }
-        # Soft latency / cleanup noise should not keep pinning or draining max
-        # while roots are converting and CPU workers are idle.
-        soft_drain_issues = {
-            "slow_time_to_proof_submission",
-            "stopped_without_root_work",
-        }
-        active_issues = set(funnel_summary.get("issues") or [])
-        has_hard_drain = bool(active_issues.intersection(hard_drain_issues))
-        has_soft_drain = bool(active_issues.intersection(soft_drain_issues))
-        root_ready_rate = funnel_summary.get("root_ready_rate")
-        root_ready_ok = (
-            root_ready_rate is not None
-            and float(root_ready_rate) >= ROOT_READY_RATE_MIN_FOR_UPSCALE
-        )
-        skip_soft_drain = (
-            (not has_hard_drain)
-            and has_soft_drain
-            and root_ready_ok
-            and productive_idle_cpu >= IDLE_CPU_MAX_SCALE_MIN
+        # Soft latency / near-threshold conversion should not pin max to the
+        # drain floor while roots are converting and CPU workers are idle.
+        funnel_should_drain, funnel_drain_meta = reward_funnel_max_drain_decision(
+            issues=funnel_summary.get("issues") or [],
+            proof_conversion_rate=funnel_summary.get("proof_conversion_rate"),
+            root_ready_rate=funnel_summary.get("root_ready_rate"),
+            productive_idle_cpu=productive_idle_cpu,
+            min_idle=IDLE_CPU_MAX_SCALE_MIN,
+            min_root_ready_rate=ROOT_READY_RATE_MIN_FOR_UPSCALE,
+            min_proof_conversion_rate=FUNNEL_MIN_PROOF_CONVERSION_RATE,
+            soft_proof_conversion_floor=FUNNEL_SOFT_PROOF_CONVERSION_FLOOR,
         )
         current = int(cfg.get("max_concurrent_benchmarks") or 0)
         capacity_model = report.get("capacity_model") or {}
         drain_floor = _funnel_drain_floor(capacity_model)
-        should_drain = current > drain_floor and (
-            has_hard_drain or (has_soft_drain and not skip_soft_drain)
-        )
+        should_drain = current > drain_floor and funnel_should_drain
         if should_drain:
             next_max = max(drain_floor, current - max(1, MAX_BENCHMARK_DOWN_STEP))
             new_cfg = json.loads(json.dumps(cfg))
@@ -3684,16 +3739,23 @@ def _plan_config_change(report: dict, cfg: dict, clean_windows: int) -> dict:
                     "roots_pending": funnel_summary.get("roots_pending"),
                     "root_ready_rate": funnel_summary.get("root_ready_rate"),
                     "drain_floor": drain_floor,
+                    **funnel_drain_meta,
                 }
             }
             decision["config"] = new_cfg
             return decision
-        if skip_soft_drain:
+        if funnel_drain_meta.get("skip_soft_drain"):
+            skip_reason = (
+                "marginal_proof_conversion_with_healthy_roots_and_idle_cpu"
+                if funnel_drain_meta.get("marginal_low_proof_conversion")
+                else "soft_funnel_issues_with_healthy_roots_and_idle_cpu"
+            )
             decision.setdefault("guardrails", {})["reward_funnel_drain"] = {
-                "skipped": "soft_funnel_issues_with_healthy_roots_and_idle_cpu",
+                "skipped": skip_reason,
                 "issues": funnel_summary.get("issues", []),
-                "root_ready_rate": root_ready_rate,
+                "root_ready_rate": funnel_summary.get("root_ready_rate"),
                 "productive_idle_cpu": productive_idle_cpu,
+                **funnel_drain_meta,
             }
 
     backlog_pressure = _root_backlog_pressure(funnel_summary)
