@@ -74,6 +74,11 @@ IDLE_CPU_MAX_SCALE_ENABLED = os.environ.get(
     "AUTOPILOT_IDLE_CPU_MAX_SCALE_ENABLED", "true"
 ).lower() in ("1", "true", "yes", "on")
 IDLE_CPU_MAX_SCALE_MIN = int(os.environ.get("AUTOPILOT_IDLE_CPU_MAX_SCALE_MIN", "3"))
+# When capacity-eligible workers are all busy, still allow a slow max climb if
+# free CPU slots exist and root/conversion health clears the soft floor.
+IDLE_CPU_MAX_SCALE_MIN_SLOT_IDLE = int(
+    os.environ.get("AUTOPILOT_IDLE_CPU_MAX_SCALE_MIN_SLOT_IDLE", "16")
+)
 IDLE_CPU_MAX_SCALE_UP_STEP = int(os.environ.get("AUTOPILOT_IDLE_CPU_MAX_SCALE_UP_STEP", "2"))
 CAP_SCALE_COMPLETIONS_PER_STEP = int(os.environ.get("AUTOPILOT_CAP_SCALE_COMPLETIONS_PER_STEP", "20"))
 ROUTE_CPU_UP_STEP = int(os.environ.get("AUTOPILOT_ROUTE_CPU_UP_STEP", "8"))
@@ -2497,6 +2502,10 @@ def should_idle_cpu_max_scale(
     enabled: bool,
     productive_idle_cpu: int,
     min_idle: int,
+    slot_idle_cpu: int = 0,
+    min_slot_idle_cpu: int = 0,
+    proof_conversion_rate=None,
+    soft_proof_conversion_floor: float = 0.80,
     root_ready_rate,
     min_root_ready_rate: float,
     roots_pending: int,
@@ -2509,10 +2518,12 @@ def should_idle_cpu_max_scale(
     has_stranded: bool,
     has_unregistered: bool,
 ) -> tuple[bool, str]:
-    """Pure gate: allow a small max_concurrent bump for idle proven CPU workers.
+    """Pure gate: allow a small max_concurrent bump for idle/free CPU capacity.
 
     Used when global funnel_safe is false because of slow GPU proof tails, but
-    root completion is healthy and CPU workers are finishing with nothing to pull.
+    root completion is healthy. Prefer proven idle workers; if those are busy,
+    free CPU slots + soft conversion floor can still justify a slow climb off
+    the drain floor.
     """
     if not enabled:
         return False, "idle_cpu_max_scale_disabled"
@@ -2522,7 +2533,12 @@ def should_idle_cpu_max_scale(
         return False, "unregistered_active_work"
     if int(stale_proofs or 0) > 0:
         return False, "stale_proofs_present"
-    if int(productive_idle_cpu or 0) < int(min_idle or 0):
+    productive_idle_ok = int(productive_idle_cpu or 0) >= int(min_idle or 0)
+    slot_idle_ok = (
+        int(min_slot_idle_cpu or 0) > 0
+        and int(slot_idle_cpu or 0) >= int(min_slot_idle_cpu or 0)
+    )
+    if not productive_idle_ok and not slot_idle_ok:
         return False, "productive_idle_cpu_below_min"
     if int(roots_pending or 0) >= int(max_roots_pending or 0):
         return False, "roots_pending_at_hard_cap"
@@ -2531,12 +2547,20 @@ def should_idle_cpu_max_scale(
             return False, "root_ready_rate_missing"
         if float(root_ready_rate) < float(min_root_ready_rate):
             return False, "root_ready_rate_below_min"
+        # Slot-idle path (no proven idle workers) needs conversion above soft floor.
+        if not productive_idle_ok and slot_idle_ok:
+            if proof_conversion_rate is None:
+                return False, "proof_conversion_missing_for_slot_idle_scale"
+            if float(proof_conversion_rate) < float(soft_proof_conversion_floor):
+                return False, "proof_conversion_below_soft_floor_for_slot_idle_scale"
     if int(proposed_max or 0) <= int(current_max or 0):
         return False, "proposed_max_not_higher"
     # Only bump when the current ceiling is actually binding.
     if int(active_jobs or 0) < max(1, int(current_max or 0) - 1):
         return False, "precommit_capacity_not_saturated"
-    return True, "idle_cpu_needs_max_headroom"
+    if productive_idle_ok:
+        return True, "idle_cpu_needs_max_headroom"
+    return True, "free_cpu_slots_need_max_headroom"
 
 
 def reward_funnel_max_drain_decision(
@@ -2546,6 +2570,8 @@ def reward_funnel_max_drain_decision(
     root_ready_rate,
     productive_idle_cpu: int,
     min_idle: int,
+    slot_idle_cpu: int = 0,
+    min_slot_idle_cpu: int = 0,
     min_root_ready_rate: float,
     min_proof_conversion_rate: float,
     soft_proof_conversion_floor: float,
@@ -2554,7 +2580,7 @@ def reward_funnel_max_drain_decision(
 
     Returns (should_drain, details). Soft latency noise, and near-threshold
     low_proof_conversion (>= soft floor), can skip drain when roots are healthy
-    and proven CPU workers are idle. Truly hard conversion/stop issues still drain.
+    and free/idle CPU capacity exists. Truly hard conversion/stop issues still drain.
     """
     hard_drain_issues = {
         "low_proof_conversion",
@@ -2587,7 +2613,12 @@ def reward_funnel_max_drain_decision(
         root_ready_rate is not None
         and float(root_ready_rate) >= float(min_root_ready_rate)
     )
-    idle_ok = int(productive_idle_cpu or 0) >= int(min_idle or 0)
+    productive_idle_ok = int(productive_idle_cpu or 0) >= int(min_idle or 0)
+    slot_idle_ok = (
+        int(min_slot_idle_cpu or 0) > 0
+        and int(slot_idle_cpu or 0) >= int(min_slot_idle_cpu or 0)
+    )
+    idle_ok = productive_idle_ok or slot_idle_ok
     has_hard = bool(hard_hits)
     has_soft = bool(soft_hits)
     skip_soft = (not has_hard) and has_soft and root_ready_ok and idle_ok
@@ -2601,6 +2632,9 @@ def reward_funnel_max_drain_decision(
         "skip_soft_drain": skip_soft,
         "root_ready_ok": root_ready_ok,
         "idle_ok": idle_ok,
+        "productive_idle_ok": productive_idle_ok,
+        "slot_idle_ok": slot_idle_ok,
+        "slot_idle_cpu": int(slot_idle_cpu or 0),
         "proof_conversion_rate": conversion,
         "soft_proof_conversion_floor": floor,
     }
@@ -3608,6 +3642,8 @@ def _plan_config_change(report: dict, cfg: dict, clean_windows: int) -> dict:
     proposed_slots_for_gate = slots_rec.get("proposed") or {}
     productive_idle_cpu = int(slot_signals.get("productive_idle_cpu") or 0)
     productive_idle_gpu = int(slot_signals.get("productive_idle_gpu") or 0)
+    slot_idle_map = slot_signals.get("slot_idle") or {}
+    slot_idle_cpu = int(slot_idle_map.get("cpu") or slot_idle_map.get(CPU_SLOT_TYPE) or 0)
     stale_roots = int(slot_signals.get("stale_roots") or health.get("stale_roots") or 0)
     stale_proofs = int(slot_signals.get("stale_proofs") or health.get("stale_proofs") or 0)
     productive_idle_cpu_scale = (
@@ -3714,6 +3750,8 @@ def _plan_config_change(report: dict, cfg: dict, clean_windows: int) -> dict:
             root_ready_rate=funnel_summary.get("root_ready_rate"),
             productive_idle_cpu=productive_idle_cpu,
             min_idle=IDLE_CPU_MAX_SCALE_MIN,
+            slot_idle_cpu=slot_idle_cpu,
+            min_slot_idle_cpu=IDLE_CPU_MAX_SCALE_MIN_SLOT_IDLE,
             min_root_ready_rate=ROOT_READY_RATE_MIN_FOR_UPSCALE,
             min_proof_conversion_rate=FUNNEL_MIN_PROOF_CONVERSION_RATE,
             soft_proof_conversion_floor=FUNNEL_SOFT_PROOF_CONVERSION_FLOOR,
@@ -3864,6 +3902,10 @@ def _plan_config_change(report: dict, cfg: dict, clean_windows: int) -> dict:
         enabled=IDLE_CPU_MAX_SCALE_ENABLED,
         productive_idle_cpu=productive_idle_cpu,
         min_idle=IDLE_CPU_MAX_SCALE_MIN,
+        slot_idle_cpu=slot_idle_cpu,
+        min_slot_idle_cpu=IDLE_CPU_MAX_SCALE_MIN_SLOT_IDLE,
+        proof_conversion_rate=funnel_summary.get("proof_conversion_rate"),
+        soft_proof_conversion_floor=FUNNEL_SOFT_PROOF_CONVERSION_FLOOR,
         root_ready_rate=root_ready_rate,
         min_root_ready_rate=ROOT_READY_RATE_MIN_FOR_UPSCALE,
         roots_pending=int(funnel_summary.get("roots_pending") or 0),
@@ -3898,7 +3940,9 @@ def _plan_config_change(report: dict, cfg: dict, clean_windows: int) -> dict:
                     "up_step": up_step,
                     "active_jobs": active_jobs_for_idle,
                     "productive_idle_cpu": productive_idle_cpu,
+                    "slot_idle_cpu": slot_idle_cpu,
                     "root_ready_rate": root_ready_rate,
+                    "proof_conversion_rate": funnel_summary.get("proof_conversion_rate"),
                     "roots_pending": funnel_summary.get("roots_pending"),
                     "policy_posture": posture,
                     "funnel_safe": funnel_safe,
@@ -3913,10 +3957,13 @@ def _plan_config_change(report: dict, cfg: dict, clean_windows: int) -> dict:
             "skipped": idle_cpu_reason,
             "productive_idle_cpu": productive_idle_cpu,
             "min_idle": IDLE_CPU_MAX_SCALE_MIN,
+            "slot_idle_cpu": slot_idle_cpu,
+            "min_slot_idle_cpu": IDLE_CPU_MAX_SCALE_MIN_SLOT_IDLE,
             "current": current_max_for_idle,
             "proposed": proposed_max_for_idle,
             "active_jobs": active_jobs_for_idle,
             "root_ready_rate": root_ready_rate,
+            "proof_conversion_rate": funnel_summary.get("proof_conversion_rate"),
         }
 
     safety_cfg = json.loads(json.dumps(cfg))

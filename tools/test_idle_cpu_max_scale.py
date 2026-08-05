@@ -30,6 +30,10 @@ def main() -> int:
         enabled=True,
         productive_idle_cpu=4,
         min_idle=3,
+        slot_idle_cpu=0,
+        min_slot_idle_cpu=16,
+        proof_conversion_rate=0.84,
+        soft_proof_conversion_floor=0.80,
         root_ready_rate=0.58,
         min_root_ready_rate=0.50,
         roots_pending=59,
@@ -44,7 +48,22 @@ def main() -> int:
     )
     cases = [
         (base, True, "current live-like pool allows bump"),
-        ({**base, "productive_idle_cpu": 2}, False, "below idle min"),
+        ({**base, "productive_idle_cpu": 2}, False, "below idle min and no free slots"),
+        (
+            {**base, "productive_idle_cpu": 0, "slot_idle_cpu": 78},
+            True,
+            "free CPU slots allow bump with soft conversion",
+        ),
+        (
+            {
+                **base,
+                "productive_idle_cpu": 0,
+                "slot_idle_cpu": 78,
+                "proof_conversion_rate": 0.75,
+            },
+            False,
+            "slot-idle path blocked below soft conversion floor",
+        ),
         ({**base, "root_ready_rate": 0.31}, False, "root ready too low"),
         ({**base, "active_jobs": 8}, False, "ceiling not saturated"),
         ({**base, "proposed_max": 12}, False, "no higher proposal"),

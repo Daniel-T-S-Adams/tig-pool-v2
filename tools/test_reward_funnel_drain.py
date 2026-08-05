@@ -44,9 +44,14 @@ def main() -> int:
             "below soft floor still hard-drains",
         ),
         (
-            {**base, "productive_idle_cpu": 1},
+            {**base, "productive_idle_cpu": 1, "slot_idle_cpu": 0, "min_slot_idle_cpu": 16},
             True,
-            "no idle CPU => drain",
+            "no idle CPU or free slots => drain",
+        ),
+        (
+            {**base, "productive_idle_cpu": 0, "slot_idle_cpu": 78, "min_slot_idle_cpu": 16},
+            False,
+            "free CPU slots skip marginal drain",
         ),
         (
             {**base, "root_ready_rate": 0.40},
