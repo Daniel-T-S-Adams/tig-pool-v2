@@ -14,6 +14,7 @@ from master.client_manager import CONFIG
 logger = logging.getLogger(os.path.splitext(os.path.basename(__file__))[0])
 
 CPU_CHALLENGE_IDS = ("c001", "c002", "c003", "c007", "c008")
+GPU_CHALLENGE_IDS = ("c004", "c005", "c006")
 
 
 def _env_bool(name, default="true"):
@@ -61,6 +62,12 @@ def _governor_settings():
             if "idle_cpu_override" in gov
             else _env_bool("PRECOMMIT_GOVERNOR_IDLE_CPU_OVERRIDE", "true")
         ),
+        "idle_cpu_weight_mult": float(
+            gov.get(
+                "idle_cpu_weight_mult",
+                os.environ.get("PRECOMMIT_GOVERNOR_IDLE_CPU_WEIGHT_MULT", "3"),
+            )
+        ),
     }
 
 
@@ -75,6 +82,30 @@ def _cpu_slot_target() -> int:
             int(aws.get("cpu_instances") or 0),
         )
     return max(0, cpu_slots)
+
+
+def _gpu_slot_floor_total() -> int:
+    floor = CONFIG.get("gpu_slot_floor") or {}
+    return max(
+        0,
+        int(floor.get("hypergraph") or 0)
+        + int(floor.get("vector_search") or 0)
+        + int(floor.get("neuralnet_optimizer") or 0),
+    )
+
+
+def _cpu_create_target(cpu_slots: int) -> int:
+    """Bound idle-CPU pressure by the live concurrent budget, not raw slot count.
+
+    resource_slots.cpu can be far above max_concurrent_benchmarks (e.g. 96 vs 13).
+    Using the raw slot count made idle-CPU mode permanent and starved GPU creates.
+    """
+    max_concurrent = int(CONFIG.get("max_concurrent_benchmarks") or 0)
+    gpu_floor = _gpu_slot_floor_total()
+    if max_concurrent > 0:
+        cpu_fair_share = max(1, max_concurrent - max(1, gpu_floor))
+        return max(1, min(cpu_slots, cpu_fair_share))
+    return max(1, cpu_slots)
 
 
 def should_block_precommit_create(
@@ -191,6 +222,13 @@ class PrecommitManager:
                     ) AS cpu_active_jobs,
                     (
                         SELECT COUNT(*)
+                        FROM job j
+                        WHERE j.stopped IS NULL
+                          AND j.end_time IS NULL
+                          AND j.settings->>'challenge_id' IN %s
+                    ) AS gpu_active_jobs,
+                    (
+                        SELECT COUNT(*)
                         FROM root_batch rb
                         JOIN job j ON j.benchmark_id = rb.benchmark_id
                         WHERE rb.ready IS NULL
@@ -211,19 +249,24 @@ class PrecommitManager:
                     cutoff_ms,
                     cutoff_ms,
                     CPU_CHALLENGE_IDS,
+                    GPU_CHALLENGE_IDS,
                     CPU_CHALLENGE_IDS,
                 ),
             ) or {}
             cpu_slots = _cpu_slot_target()
+            cpu_create_target = _cpu_create_target(cpu_slots)
             cpu_active_jobs = int(row.get("cpu_active_jobs") or 0)
+            gpu_active_jobs = int(row.get("gpu_active_jobs") or 0)
             cpu_unassigned_roots = int(row.get("cpu_unassigned_roots") or 0)
-            # Spare CPU slots + no free CPU root batches => workers will idle
-            # unless we create more CPU work.
+            gpu_floor = _gpu_slot_floor_total()
+            # Spare CPU create budget + no free CPU root batches => bias toward
+            # CPU work, but never treat inflated resource_slots.cpu as a reason
+            # to permanently exclude GPU creates.
             idle_cpu_needs_work = (
                 settings.get("idle_cpu_override", True)
                 and cpu_slots > 0
                 and cpu_unassigned_roots == 0
-                and cpu_active_jobs < cpu_slots
+                and cpu_active_jobs < cpu_create_target
             )
             snapshot = {
                 "enabled": True,
@@ -232,7 +275,10 @@ class PrecommitManager:
                 "benchmarks_seen": int(row.get("benchmarks_seen") or 0),
                 "root_ready_benchmarks": int(row.get("root_ready_benchmarks") or 0),
                 "cpu_slots": cpu_slots,
+                "cpu_create_target": cpu_create_target,
                 "cpu_active_jobs": cpu_active_jobs,
+                "gpu_active_jobs": gpu_active_jobs,
+                "gpu_slot_floor": gpu_floor,
                 "cpu_unassigned_roots": cpu_unassigned_roots,
                 "idle_cpu_needs_work": idle_cpu_needs_work,
             }
@@ -263,8 +309,9 @@ class PrecommitManager:
 
         governor = self._governor_snapshot()
         idle_cpu_needs_work = bool(governor.get("idle_cpu_needs_work"))
+        governor_reason = ""
         if governor.get("enabled"):
-            block, reason = should_block_precommit_create(
+            block, governor_reason = should_block_precommit_create(
                 governor.get("roots_pending") or 0,
                 governor.get("benchmarks_seen") or 0,
                 governor.get("root_ready_benchmarks") or 0,
@@ -272,16 +319,17 @@ class PrecommitManager:
                 idle_cpu_needs_work=idle_cpu_needs_work,
             )
             if block:
-                logger.info("precommit governor blocked create: %s", reason)
+                logger.info("precommit governor blocked create: %s", governor_reason)
                 return
-            if reason.startswith("idle_cpu_override:"):
+            if governor_reason.startswith("idle_cpu_override:"):
                 logger.info(
                     "precommit governor allowing create via idle CPU override "
-                    "(cpu_active_jobs=%s/%s, cpu_unassigned_roots=%s): %s",
+                    "(cpu_active_jobs=%s/%s create_target=%s, cpu_unassigned_roots=%s): %s",
                     governor.get("cpu_active_jobs"),
                     governor.get("cpu_slots"),
+                    governor.get("cpu_create_target"),
                     governor.get("cpu_unassigned_roots"),
-                    reason,
+                    governor_reason,
                 )
 
         # Build per-challenge pending counts keyed by challenge_id (e.g. "c004")
@@ -313,9 +361,23 @@ class PrecommitManager:
             logger.debug("All algorithms are at their per-challenge max concurrent benchmarks")
             return
 
-        # Idle CPU override must create CPU work; a GPU create would not feed
-        # idle CPU slaves and would further depress root_ready_rate.
-        if idle_cpu_needs_work:
+        # Idle CPU: bias toward CPU creates, but keep GPU floor filled.
+        # A hard CPU-only filter previously starved GPU when resource_slots.cpu
+        # was much larger than max_concurrent_benchmarks.
+        gpu_floor = int(governor.get("gpu_slot_floor") or _gpu_slot_floor_total())
+        gpu_active_jobs = int(governor.get("gpu_active_jobs") or 0)
+        if gpu_active_jobs <= 0:
+            gpu_active_jobs = sum(
+                int(per_challenge_counts.get(cid, 0) or 0) for cid in GPU_CHALLENGE_IDS
+            )
+        gpu_below_floor = gpu_active_jobs < max(1, gpu_floor)
+        # Hard CPU-only only when the rate-gate bypass itself is active.
+        force_cpu_only = (
+            idle_cpu_needs_work
+            and (not gpu_below_floor)
+            and governor_reason.startswith("idle_cpu_override:")
+        )
+        if force_cpu_only:
             cpu_eligible = [
                 x for x in eligible
                 if x["algorithm_id"][:4] in CPU_CHALLENGE_IDS
@@ -323,16 +385,26 @@ class PrecommitManager:
             if cpu_eligible:
                 eligible = cpu_eligible
             else:
+                force_cpu_only = False
                 logger.info(
-                    "idle CPU needs work but no CPU algorithms are eligible "
-                    "(per-challenge max or weights); skipping create"
+                    "idle CPU override active but no CPU algorithms eligible; "
+                    "allowing normal selection"
                 )
-                return
 
-        weighted_eligible = [
-            x for x in eligible
-            if int(x.get("weight") or 0) > 0
-        ]
+        weighted_eligible = []
+        weights = []
+        idle_mult = float((governor.get("settings") or {}).get("idle_cpu_weight_mult") or 3)
+        for x in eligible:
+            weight = int(x.get("weight") or 0)
+            if weight <= 0:
+                continue
+            if idle_cpu_needs_work and not force_cpu_only and not gpu_below_floor:
+                if x["algorithm_id"][:4] in CPU_CHALLENGE_IDS:
+                    weight = max(1, int(round(weight * idle_mult)))
+            elif gpu_below_floor and x["algorithm_id"][:4] in GPU_CHALLENGE_IDS:
+                weight = max(1, int(round(weight * idle_mult)))
+            weighted_eligible.append(x)
+            weights.append(weight)
         if not weighted_eligible:
             logger.debug(
                 "All eligible algorithms have zero weight: %s",
@@ -340,11 +412,17 @@ class PrecommitManager:
             )
             return
 
-        logger.debug(f"Selecting algorithm from: {[(x['algorithm_id'], x['weight']) for x in weighted_eligible]}")
+        logger.debug(
+            "Selecting algorithm from: %s idle_cpu=%s gpu_below_floor=%s force_cpu_only=%s",
+            list(zip([x["algorithm_id"] for x in weighted_eligible], weights)),
+            idle_cpu_needs_work,
+            gpu_below_floor,
+            force_cpu_only,
+        )
         # Deep copy so mutations below (stripping unknown keys, filling defaults)
         # don't corrupt the live CONFIG["algo_selection"] — especially batch_size
         # which lives in track_settings but must not be sent to mainnet.
-        selection = copy.deepcopy(random.choices(weighted_eligible, weights=[x["weight"] for x in weighted_eligible])[0])  # nosec B311 — weighted algorithm selection, not cryptographic
+        selection = copy.deepcopy(random.choices(weighted_eligible, weights=weights)[0])  # nosec B311 — weighted algorithm selection, not cryptographic
         a_id = selection["algorithm_id"]
         c_id = a_id[:4]
         compute_type = selection.get("compute_type")
