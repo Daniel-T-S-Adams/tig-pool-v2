@@ -16,6 +16,14 @@ from common.utils import *
 from typing import Dict, List, Optional, Set
 from master.sql import get_db_conn
 from master.client_manager import CONFIG
+from master.proof_affinity import (
+    STICKY_ROOTS_ENABLED,
+    ensure_slave_seen_table,
+    fetch_online_slaves,
+    preferred_root_slave,
+    should_skip_root_for_slave,
+    touch_slave_seen,
+)
 
 
 logger = logging.getLogger(os.path.splitext(os.path.basename(__file__))[0])
@@ -124,6 +132,53 @@ class SlaveManager:
         self.batches = []
         self.lock = Lock()
         self._slot_table_ready = False
+        self._slave_seen_ready = False
+
+    def _ensure_slave_seen_table(self):
+        if self._slave_seen_ready:
+            return
+        ensure_slave_seen_table(get_db_conn().execute)
+        self._slave_seen_ready = True
+
+    def _touch_slave_seen(self, slave_name: str, now_ms: int):
+        self._ensure_slave_seen_table()
+        touch_slave_seen(get_db_conn().execute, slave_name, now_ms)
+
+    def _online_slaves(self, now_ms: int) -> Set[str]:
+        self._ensure_slave_seen_table()
+        return fetch_online_slaves(get_db_conn().fetch_all, now_ms)
+
+    def _root_affinity_map(self) -> Dict[str, str]:
+        """benchmark_id -> preferred root slave for sticky assignment."""
+        if not STICKY_ROOTS_ENABLED:
+            return {}
+        rows = get_db_conn().fetch_all(
+            """
+            SELECT
+                benchmark_id,
+                slave,
+                COUNT(*) FILTER (WHERE ready = true) AS ready_n,
+                COUNT(*) FILTER (WHERE ready IS NULL AND slave IS NOT NULL) AS inflight_n
+            FROM root_batch
+            WHERE slave IS NOT NULL
+              AND (ready = true OR ready IS NULL)
+            GROUP BY benchmark_id, slave
+            """
+        ) or []
+        scores: Dict[str, Dict[str, int]] = {}
+        for row in rows:
+            bid = row.get("benchmark_id")
+            slave = row.get("slave")
+            if not bid or not slave:
+                continue
+            # Prefer slaves that already finished roots for this job.
+            score = int(row.get("ready_n") or 0) * 100 + int(row.get("inflight_n") or 0)
+            scores.setdefault(str(bid), {})[str(slave)] = score
+        return {
+            bid: owner
+            for bid, slave_scores in scores.items()
+            if (owner := preferred_root_slave(slave_scores))
+        }
 
     def _is_trusted_slave(self, slave_name: str) -> bool:
         if slave_name in set(CONFIG.get("trusted_slave_names", [])):
@@ -713,6 +768,7 @@ class SlaveManager:
             concurrent = []
             updates = []
             now = time.time() * 1000
+            self._touch_slave_seen(slave_name, int(now))
             slot_types = self._slot_types_for_slave(slave_name)
             slot_benchmark_ids = set()
             starved_slot_benchmarks = {}
@@ -722,6 +778,8 @@ class SlaveManager:
                 self._assign_idle_slots(slot_types, slave["algorithm_id_regex"])
                 slot_benchmark_ids = self._slot_benchmark_ids(slot_types)
                 starved_slot_benchmarks = self._starved_slot_benchmarks(slot_types, int(now))
+            root_affinity = self._root_affinity_map()
+            online_slaves = self._online_slaves(int(now)) if STICKY_ROOTS_ENABLED else set()
 
             with self.lock:
                 route_cap = int(slave["max_concurrent_batches"])
@@ -843,6 +901,12 @@ class SlaveManager:
                         if slot_types and bid not in slot_benchmark_ids:
                             continue
                         if is_proof and not has_artifacts(bid, batch["batch_idx"]):
+                            continue
+                        if (not is_proof) and should_skip_root_for_slave(
+                            slave_name,
+                            root_affinity.get(bid),
+                            online_slaves,
+                        ):
                             continue
                         if (
                             PROOF_PRIORITY_ENABLED

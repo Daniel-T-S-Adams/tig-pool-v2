@@ -1,6 +1,7 @@
 import os
 import json
 import logging
+import time
 import requests
 from common.merkle_tree import MerkleHash, MerkleBranch, MerkleTree
 from common.structs import *
@@ -8,6 +9,14 @@ from common.utils import *
 from typing import Dict, List, Optional, Set
 from master.sql import get_db_conn
 from master.client_manager import CONFIG
+from master.proof_affinity import (
+    PRE_SUBMIT_OWNER_ONLINE_MS,
+    STRANDED_PROOF_STOP_ENABLED,
+    STRANDED_PROOF_STOP_MS,
+    ensure_slave_seen_table,
+    fetch_online_slaves,
+    offline_owners,
+)
 import math
 
 logger = logging.getLogger(os.path.splitext(os.path.basename(__file__))[0])
@@ -298,6 +307,163 @@ class JobManager:
         )
         
                 
+    def _invalidate_roots_for_offline_owners(self, benchmark_id: str, offline: List[str]) -> int:
+        """Clear ready roots owned by dark slaves so live slaves can redo them."""
+        if not offline:
+            return 0
+        rows = get_db_conn().fetch_all(
+            """
+            SELECT batch_idx, slave
+            FROM root_batch
+            WHERE benchmark_id = %s
+              AND ready = true
+              AND slave IN %s
+            """,
+            (benchmark_id, tuple(offline)),
+        ) or []
+        if not rows:
+            return 0
+        queries = []
+        for row in rows:
+            queries.extend([
+                (
+                    """
+                    UPDATE root_batch
+                    SET ready = NULL,
+                        slave = NULL,
+                        start_time = NULL,
+                        end_time = NULL,
+                        num_attempts = 0
+                    WHERE benchmark_id = %s
+                      AND batch_idx = %s
+                      AND ready = true
+                    """,
+                    (benchmark_id, row["batch_idx"]),
+                ),
+                (
+                    """
+                    UPDATE batch_data
+                    SET merkle_root = NULL,
+                        solution_quality = NULL,
+                        average_quality = NULL
+                    WHERE benchmark_id = %s
+                      AND batch_idx = %s
+                    """,
+                    (benchmark_id, row["batch_idx"]),
+                ),
+            ])
+        get_db_conn().execute_many(*queries)
+        logger.warning(
+            f"job {benchmark_id}: invalidated {len(rows)} root batch(es) owned by "
+            f"offline slave(s) {sorted(set(r['slave'] for r in rows))} before merkle submit"
+        )
+        return len(rows)
+
+    def _root_owners_online(self, benchmark_id: str, now_ms: int) -> bool:
+        """False if any ready-root owner has not heartbeated recently."""
+        ensure_slave_seen_table(get_db_conn().execute)
+        owners = get_db_conn().fetch_all(
+            """
+            SELECT DISTINCT slave
+            FROM root_batch
+            WHERE benchmark_id = %s
+              AND ready = true
+              AND slave IS NOT NULL
+            """,
+            (benchmark_id,),
+        ) or []
+        owner_names = [r["slave"] for r in owners if r.get("slave")]
+        if not owner_names:
+            return True
+        online = fetch_online_slaves(
+            get_db_conn().fetch_all,
+            now_ms,
+            PRE_SUBMIT_OWNER_ONLINE_MS,
+        )
+        dark = offline_owners(owner_names, online)
+        if not dark:
+            return True
+        self._invalidate_roots_for_offline_owners(benchmark_id, dark)
+        return False
+
+    def _stop_stranded_proof_jobs(self, now_ms: int):
+        """Stop jobs whose remaining proofs are stuck on offline artifact owners."""
+        if not STRANDED_PROOF_STOP_ENABLED:
+            return
+        ensure_slave_seen_table(get_db_conn().execute)
+        online = fetch_online_slaves(get_db_conn().fetch_all, now_ms)
+        cutoff = now_ms - STRANDED_PROOF_STOP_MS
+        rows = get_db_conn().fetch_all(
+            """
+            SELECT
+                p.benchmark_id,
+                p.batch_idx,
+                r.slave AS root_slave,
+                p.slave AS proof_slave,
+                COALESCE(j.benchmark_submit_time, j.start_time) AS stuck_since
+            FROM proofs_batch p
+            JOIN root_batch r
+              ON r.benchmark_id = p.benchmark_id
+             AND r.batch_idx = p.batch_idx
+             AND r.ready = true
+            JOIN job j ON j.benchmark_id = p.benchmark_id
+            WHERE p.ready IS NULL
+              AND j.stopped IS NULL
+              AND j.end_time IS NULL
+              AND j.merkle_root_ready = true
+              AND COALESCE(j.benchmark_submit_time, j.start_time) IS NOT NULL
+              AND COALESCE(j.benchmark_submit_time, j.start_time) < %s
+            """,
+            (cutoff,),
+        ) or []
+        to_stop = []
+        for row in rows:
+            owner = row.get("root_slave")
+            if not owner or owner in online:
+                continue
+            proof_slave = row.get("proof_slave")
+            # Unassigned, or assigned to a slave that is also dark (usually the owner).
+            if proof_slave and proof_slave in online:
+                continue
+            to_stop.append(row)
+        if not to_stop:
+            return
+        by_job: Dict[str, list] = {}
+        for row in to_stop:
+            by_job.setdefault(str(row["benchmark_id"]), []).append(row)
+        queries = []
+        for benchmark_id, items in by_job.items():
+            owners = sorted({str(i["root_slave"]) for i in items})
+            logger.warning(
+                f"job {benchmark_id}: stopping — stranded proof batch(es) "
+                f"{[i['batch_idx'] for i in items]} owned by offline slave(s) {owners}"
+            )
+            queries.append((
+                """
+                UPDATE job
+                SET stopped = true,
+                    end_time = (EXTRACT(EPOCH FROM NOW()) * 1000)::BIGINT
+                WHERE benchmark_id = %s
+                  AND stopped IS NULL
+                  AND end_time IS NULL
+                """,
+                (benchmark_id,),
+            ))
+            # Mark unfinished proofs/roots closed so slots and metrics settle.
+            queries.append((
+                """
+                UPDATE proofs_batch
+                SET ready = false,
+                    slave = NULL,
+                    end_time = (EXTRACT(EPOCH FROM NOW()) * 1000)::BIGINT
+                WHERE benchmark_id = %s
+                  AND ready IS NULL
+                """,
+                (benchmark_id,),
+            ))
+        if queries:
+            get_db_conn().execute_many(*queries)
+
     def run(self):
         now = int(time.time() * 1000)
 
@@ -341,6 +507,10 @@ class JobManager:
                     f"job {benchmark_id}: skipping merkle root assembly "
                     f"(null batch merkle_root/solution_quality)"
                 )
+                continue
+            # Do not submit merkle while any root owner is dark — invalidate those
+            # roots so a live slave can redo them and proofs stay completable.
+            if not self._root_owners_online(benchmark_id, now):
                 continue
             solution_quality = [x for y in row['solution_quality'] for x in y]
             if not solution_quality:
@@ -504,3 +674,5 @@ class JobManager:
                     (benchmark_id,)
                 )
             ])
+
+        self._stop_stranded_proof_jobs(now)
