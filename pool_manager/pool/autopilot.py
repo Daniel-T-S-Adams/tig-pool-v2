@@ -154,6 +154,15 @@ BENCHMARK_MAX_AGE_CLEANUP_ENABLED = os.environ.get(
 BENCHMARK_MAX_AGE_MS = int(
     os.environ.get("AUTOPILOT_BENCHMARK_MAX_AGE_MS", str(90 * 60 * 1000))
 )
+# Pending root/proof rows on stopped/ended jobs inflate backlog metrics and can
+# keep governors in permanent drain. Close them out in apply mode.
+ZOMBIE_PENDING_CLEANUP_ENABLED = os.environ.get(
+    "AUTOPILOT_ZOMBIE_PENDING_CLEANUP_ENABLED",
+    "true",
+).lower() in ("1", "true", "yes", "on")
+ZOMBIE_PENDING_CLEANUP_MAX_ROWS = int(
+    os.environ.get("AUTOPILOT_ZOMBIE_PENDING_CLEANUP_MAX_ROWS", "5000")
+)
 TRUSTED_CPU_COMPLETIONS = int(os.environ.get("AUTOPILOT_TRUSTED_CPU_COMPLETIONS", "10"))
 TRUSTED_GPU_COMPLETIONS = int(os.environ.get("AUTOPILOT_TRUSTED_GPU_COMPLETIONS", "2"))
 TRUSTED_MAX_FAILED_RECENT = int(os.environ.get("AUTOPILOT_TRUSTED_MAX_FAILED_RECENT", "0"))
@@ -525,6 +534,7 @@ def _cleanup_stale_assignments(cfg: dict, now_ms: int) -> dict:
         "enabled": STALE_CLEANUP_ENABLED,
         "precommit_expiry_enabled": PRECOMMIT_EXPIRY_CLEANUP_ENABLED,
         "benchmark_max_age_enabled": max_age_cleanup["enabled"],
+        "zombie_pending_cleanup_enabled": ZOMBIE_PENDING_CLEANUP_ENABLED,
         "released_roots": [],
         "released_orphan_roots": [],
         "released_proofs": [],
@@ -532,6 +542,8 @@ def _cleanup_stale_assignments(cfg: dict, now_ms: int) -> dict:
         "expiry_released_proofs": [],
         "stopped_precommits": [],
         "stopped_old_benchmarks": [],
+        "closed_zombie_roots": 0,
+        "closed_zombie_proofs": 0,
         "thresholds_ms": {
             "stale_root_cleanup": STALE_ROOT_CLEANUP_MIN_AGE_MS,
             "stale_proof_cleanup": STALE_PROOF_CLEANUP_MIN_AGE_MS,
@@ -545,7 +557,12 @@ def _cleanup_stale_assignments(cfg: dict, now_ms: int) -> dict:
     if AUTOPILOT_MODE != "apply":
         result["skipped"] = "report_only"
         return result
-    if not STALE_CLEANUP_ENABLED and not PRECOMMIT_EXPIRY_CLEANUP_ENABLED and not max_age_cleanup["enabled"]:
+    if (
+        not STALE_CLEANUP_ENABLED
+        and not PRECOMMIT_EXPIRY_CLEANUP_ENABLED
+        and not max_age_cleanup["enabled"]
+        and not ZOMBIE_PENDING_CLEANUP_ENABLED
+    ):
         result["skipped"] = "disabled"
         return result
     if not cfg:
@@ -892,22 +909,24 @@ def _cleanup_stale_assignments(cfg: dict, now_ms: int) -> dict:
                 UPDATE root_batch
                 SET slave = NULL,
                     start_time = NULL,
-                    end_time = NULL
+                    end_time = COALESCE(end_time, %s),
+                    ready = false
                 WHERE benchmark_id = %s
                   AND ready IS NULL
                 """,
-                (row["benchmark_id"],),
+                (now_ms, row["benchmark_id"]),
             ),
             (
                 """
                 UPDATE proofs_batch
                 SET slave = NULL,
                     start_time = NULL,
-                    end_time = NULL
+                    end_time = COALESCE(end_time, %s),
+                    ready = false
                 WHERE benchmark_id = %s
                   AND ready IS NULL
                 """,
-                (row["benchmark_id"],),
+                (now_ms, row["benchmark_id"]),
             ),
             (
                 """
@@ -956,22 +975,24 @@ def _cleanup_stale_assignments(cfg: dict, now_ms: int) -> dict:
                 UPDATE root_batch
                 SET slave = NULL,
                     start_time = NULL,
-                    end_time = NULL
+                    end_time = COALESCE(end_time, %s),
+                    ready = false
                 WHERE benchmark_id = %s
                   AND ready IS NULL
                 """,
-                (row["benchmark_id"],),
+                (now_ms, row["benchmark_id"]),
             ),
             (
                 """
                 UPDATE proofs_batch
                 SET slave = NULL,
                     start_time = NULL,
-                    end_time = NULL
+                    end_time = COALESCE(end_time, %s),
+                    ready = false
                 WHERE benchmark_id = %s
                   AND ready IS NULL
                 """,
-                (row["benchmark_id"],),
+                (now_ms, row["benchmark_id"]),
             ),
             (
                 """
@@ -1001,6 +1022,63 @@ def _cleanup_stale_assignments(cfg: dict, now_ms: int) -> dict:
             "proofs_pending": int(row.get("proofs_pending") or 0),
             "reason": "benchmark_max_age_exceeded",
         })
+
+    if ZOMBIE_PENDING_CLEANUP_ENABLED:
+        zombie_roots = _fetch_all(
+            """
+            SELECT rb.benchmark_id, rb.batch_idx
+            FROM root_batch rb
+            JOIN job j ON j.benchmark_id = rb.benchmark_id
+            WHERE rb.ready IS NULL
+              AND (j.stopped IS TRUE OR j.end_time IS NOT NULL)
+            ORDER BY rb.benchmark_id, rb.batch_idx
+            LIMIT %s
+            """,
+            (ZOMBIE_PENDING_CLEANUP_MAX_ROWS,),
+        )
+        for row in zombie_roots:
+            queries.append((
+                """
+                UPDATE root_batch
+                SET slave = NULL,
+                    start_time = NULL,
+                    end_time = COALESCE(end_time, %s),
+                    ready = false
+                WHERE benchmark_id = %s
+                  AND batch_idx = %s
+                  AND ready IS NULL
+                """,
+                (now_ms, row["benchmark_id"], row["batch_idx"]),
+            ))
+        result["closed_zombie_roots"] = len(zombie_roots)
+
+        zombie_proofs = _fetch_all(
+            """
+            SELECT pb.benchmark_id, pb.batch_idx
+            FROM proofs_batch pb
+            JOIN job j ON j.benchmark_id = pb.benchmark_id
+            WHERE pb.ready IS NULL
+              AND (j.stopped IS TRUE OR j.end_time IS NOT NULL)
+            ORDER BY pb.benchmark_id, pb.batch_idx
+            LIMIT %s
+            """,
+            (ZOMBIE_PENDING_CLEANUP_MAX_ROWS,),
+        )
+        for row in zombie_proofs:
+            queries.append((
+                """
+                UPDATE proofs_batch
+                SET slave = NULL,
+                    start_time = NULL,
+                    end_time = COALESCE(end_time, %s),
+                    ready = false
+                WHERE benchmark_id = %s
+                  AND batch_idx = %s
+                  AND ready IS NULL
+                """,
+                (now_ms, row["benchmark_id"], row["batch_idx"]),
+            ))
+        result["closed_zombie_proofs"] = len(zombie_proofs)
 
     if queries:
         db.execute_many(*queries)
@@ -1262,11 +1340,18 @@ def _reward_funnel_summary(now_ms: int) -> dict:
             COALESCE(SUM(jb.num_batches), 0) AS root_batches_expected,
             COALESCE(SUM(ra.root_batches), 0) AS root_batches_seen,
             COALESCE(SUM(ra.roots_ready), 0) AS roots_ready,
-            COALESCE(SUM(ra.roots_pending), 0) AS roots_pending,
+            COALESCE(SUM(ra.roots_pending) FILTER (
+                WHERE jb.stopped IS NULL AND jb.end_time IS NULL
+            ), 0) AS roots_pending,
+            COALESCE(SUM(ra.roots_pending) FILTER (
+                WHERE jb.stopped IS TRUE OR jb.end_time IS NOT NULL
+            ), 0) AS roots_pending_on_dead_jobs,
             COALESCE(SUM(ra.roots_failed), 0) AS roots_failed,
             COALESCE(SUM(pa.proof_batches), 0) AS proof_batches_seen,
             COALESCE(SUM(pa.proofs_ready), 0) AS proofs_ready,
-            COALESCE(SUM(pa.proofs_pending), 0) AS proofs_pending,
+            COALESCE(SUM(pa.proofs_pending) FILTER (
+                WHERE jb.stopped IS NULL AND jb.end_time IS NULL
+            ), 0) AS proofs_pending,
             COALESCE(SUM(pa.proofs_failed), 0) AS proofs_failed,
             ROUND(AVG(ra.all_roots_ready_at - jb.start_time) FILTER (
                 WHERE ra.all_roots_ready_at IS NOT NULL AND jb.start_time IS NOT NULL
@@ -1350,9 +1435,16 @@ def _reward_funnel_summary(now_ms: int) -> dict:
             ROUND(AVG(jb.num_batches)::numeric, 1) AS avg_num_batches,
             ROUND(AVG(jb.batch_size)::numeric, 1) AS avg_batch_size,
             COALESCE(SUM(ra.roots_ready), 0) AS roots_ready,
-            COALESCE(SUM(ra.roots_pending), 0) AS roots_pending,
+            COALESCE(SUM(ra.roots_pending) FILTER (
+                WHERE jb.stopped IS NULL AND jb.end_time IS NULL
+            ), 0) AS roots_pending,
+            COALESCE(SUM(ra.roots_pending) FILTER (
+                WHERE jb.stopped IS TRUE OR jb.end_time IS NOT NULL
+            ), 0) AS roots_pending_on_dead_jobs,
             COALESCE(SUM(pa.proofs_ready), 0) AS proofs_ready,
-            COALESCE(SUM(pa.proofs_pending), 0) AS proofs_pending,
+            COALESCE(SUM(pa.proofs_pending) FILTER (
+                WHERE jb.stopped IS NULL AND jb.end_time IS NULL
+            ), 0) AS proofs_pending,
             ROUND(AVG(ra.all_roots_ready_at - jb.start_time) FILTER (
                 WHERE ra.all_roots_ready_at IS NOT NULL AND jb.start_time IS NOT NULL
             ) / 1000.0, 1) AS avg_root_phase_sec,
@@ -1474,31 +1566,59 @@ def _track_workload_metrics(now_ms: int) -> list[dict]:
             ROUND(AVG(j.num_nonces)::numeric, 1) AS avg_num_nonces,
             ROUND(AVG(j.num_batches)::numeric, 1) AS avg_num_batches,
             ROUND(AVG(j.batch_size)::numeric, 1) AS avg_batch_size,
-            COUNT(rb.*) AS root_batches_seen,
-            COUNT(rb.*) FILTER (WHERE rb.ready = true) AS roots_ready,
-            COUNT(rb.*) FILTER (WHERE rb.ready IS NULL) AS roots_pending,
+            COUNT(rb.*) FILTER (
+                WHERE j.stopped IS NULL AND j.end_time IS NULL
+            ) AS root_batches_seen,
+            COUNT(rb.*) FILTER (
+                WHERE rb.ready = true
+                  AND j.stopped IS NULL
+                  AND j.end_time IS NULL
+            ) AS roots_ready,
+            COUNT(rb.*) FILTER (
+                WHERE rb.ready IS NULL
+                  AND j.stopped IS NULL
+                  AND j.end_time IS NULL
+            ) AS roots_pending,
             COUNT(rb.*) FILTER (
                 WHERE rb.ready IS NULL
                   AND rb.start_time IS NULL
+                  AND j.stopped IS NULL
+                  AND j.end_time IS NULL
             ) AS roots_not_started,
             COUNT(rb.*) FILTER (
                 WHERE rb.ready IS NULL
                   AND rb.start_time IS NULL
+                  AND j.stopped IS NULL
+                  AND j.end_time IS NULL
                   AND j.start_time < %s
             ) AS old_roots_not_started,
             ROUND(MAX(%s - j.start_time) FILTER (
                 WHERE rb.ready IS NULL
                   AND rb.start_time IS NULL
+                  AND j.stopped IS NULL
+                  AND j.end_time IS NULL
                   AND j.start_time IS NOT NULL
             ) / 60000.0, 1) AS oldest_not_started_root_age_min,
             COUNT(rb.*) FILTER (
                 WHERE rb.ready IS NULL
                   AND rb.start_time IS NOT NULL
                   AND rb.start_time < %s
+                  AND j.stopped IS NULL
+                  AND j.end_time IS NULL
             ) AS stale_roots,
-            COUNT(pb.*) AS proof_batches_seen,
-            COUNT(pb.*) FILTER (WHERE pb.ready = true) AS proofs_ready,
-            COUNT(pb.*) FILTER (WHERE pb.ready IS NULL) AS proofs_pending,
+            COUNT(pb.*) FILTER (
+                WHERE j.stopped IS NULL AND j.end_time IS NULL
+            ) AS proof_batches_seen,
+            COUNT(pb.*) FILTER (
+                WHERE pb.ready = true
+                  AND j.stopped IS NULL
+                  AND j.end_time IS NULL
+            ) AS proofs_ready,
+            COUNT(pb.*) FILTER (
+                WHERE pb.ready IS NULL
+                  AND j.stopped IS NULL
+                  AND j.end_time IS NULL
+            ) AS proofs_pending,
             ROUND(AVG(rb.end_time - rb.start_time) FILTER (
                 WHERE rb.ready = true
                   AND rb.end_time >= %s

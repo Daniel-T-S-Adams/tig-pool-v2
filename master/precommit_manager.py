@@ -124,6 +124,7 @@ class PrecommitManager:
                         JOIN job j ON j.benchmark_id = rb.benchmark_id
                         WHERE rb.ready IS NULL
                           AND j.stopped IS NULL
+                          AND j.end_time IS NULL
                           AND j.merkle_root_ready IS NULL
                     ) AS roots_pending,
                     (
