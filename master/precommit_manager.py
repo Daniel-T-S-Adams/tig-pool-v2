@@ -23,12 +23,62 @@ def _env_bool(name, default="true"):
 
 def _governor_settings():
     gov = CONFIG.get("precommit_governor") or {}
+    # Legacy combined ceiling — kept as the default upper bound for each profile.
+    legacy_max = int(
+        gov.get(
+            "max_roots_pending",
+            os.environ.get("PRECOMMIT_GOVERNOR_MAX_ROOTS_PENDING", "1024"),
+        )
+    )
     return {
         "enabled": bool(gov["enabled"]) if "enabled" in gov else _env_bool("PRECOMMIT_GOVERNOR_ENABLED", "true"),
-        "max_roots_pending": int(
+        "max_roots_pending": legacy_max,
+        "min_cpu_roots_pending": int(
             gov.get(
-                "max_roots_pending",
-                os.environ.get("PRECOMMIT_GOVERNOR_MAX_ROOTS_PENDING", "256"),
+                "min_cpu_roots_pending",
+                os.environ.get("PRECOMMIT_GOVERNOR_MIN_CPU_ROOTS_PENDING", "128"),
+            )
+        ),
+        "max_cpu_roots_pending": int(
+            gov.get(
+                "max_cpu_roots_pending",
+                os.environ.get("PRECOMMIT_GOVERNOR_MAX_CPU_ROOTS_PENDING", str(legacy_max)),
+            )
+        ),
+        "min_gpu_roots_pending": int(
+            gov.get(
+                "min_gpu_roots_pending",
+                os.environ.get("PRECOMMIT_GOVERNOR_MIN_GPU_ROOTS_PENDING", "64"),
+            )
+        ),
+        "max_gpu_roots_pending": int(
+            gov.get(
+                "max_gpu_roots_pending",
+                os.environ.get("PRECOMMIT_GOVERNOR_MAX_GPU_ROOTS_PENDING", str(min(legacy_max, 512))),
+            )
+        ),
+        "cpu_roots_per_job_budget": int(
+            gov.get(
+                "cpu_roots_per_job_budget",
+                os.environ.get("PRECOMMIT_GOVERNOR_CPU_ROOTS_PER_JOB", "24"),
+            )
+        ),
+        "gpu_roots_per_job_budget": int(
+            gov.get(
+                "gpu_roots_per_job_budget",
+                os.environ.get("PRECOMMIT_GOVERNOR_GPU_ROOTS_PER_JOB", "48"),
+            )
+        ),
+        "max_cpu_unassigned_roots": int(
+            gov.get(
+                "max_cpu_unassigned_roots",
+                os.environ.get("PRECOMMIT_GOVERNOR_MAX_CPU_UNASSIGNED_ROOTS", "64"),
+            )
+        ),
+        "max_gpu_unassigned_roots": int(
+            gov.get(
+                "max_gpu_unassigned_roots",
+                os.environ.get("PRECOMMIT_GOVERNOR_MAX_GPU_UNASSIGNED_ROOTS", "32"),
             )
         ),
         "min_root_ready_rate": float(
@@ -71,6 +121,80 @@ def _governor_settings():
     }
 
 
+def _clamp_int(value: int, lo: int, hi: int) -> int:
+    return max(int(lo), min(int(hi), int(value)))
+
+
+def compute_profile_root_caps(
+    settings: dict | None,
+    cpu_create_target: int,
+    gpu_slots_total: int,
+) -> dict:
+    """Adaptive per-profile pending-root ceilings from live create capacity."""
+    settings = settings or _governor_settings()
+    cpu_target = max(1, int(cpu_create_target or 1))
+    gpu_slots = max(1, int(gpu_slots_total or 1))
+    cpu_cap = _clamp_int(
+        cpu_target * max(1, int(settings.get("cpu_roots_per_job_budget") or 24)),
+        int(settings.get("min_cpu_roots_pending") or 128),
+        int(settings.get("max_cpu_roots_pending") or 1024),
+    )
+    gpu_cap = _clamp_int(
+        gpu_slots * max(1, int(settings.get("gpu_roots_per_job_budget") or 48)),
+        int(settings.get("min_gpu_roots_pending") or 64),
+        int(settings.get("max_gpu_roots_pending") or 512),
+    )
+    return {
+        "cpu_pending_cap": cpu_cap,
+        "gpu_pending_cap": gpu_cap,
+        "cpu_unassigned_cap": max(1, int(settings.get("max_cpu_unassigned_roots") or 64)),
+        "gpu_unassigned_cap": max(1, int(settings.get("max_gpu_unassigned_roots") or 32)),
+    }
+
+
+def profile_root_backlog_blocks(
+    cpu_roots_pending: int,
+    gpu_roots_pending: int,
+    cpu_unassigned_roots: int,
+    gpu_unassigned_roots: int,
+    caps: dict,
+) -> dict:
+    """Which challenge profiles must not receive new precommits right now."""
+    cpu_pending = int(cpu_roots_pending or 0)
+    gpu_pending = int(gpu_roots_pending or 0)
+    cpu_unassigned = int(cpu_unassigned_roots or 0)
+    gpu_unassigned = int(gpu_unassigned_roots or 0)
+    cpu_pending_cap = int(caps.get("cpu_pending_cap") or 0)
+    gpu_pending_cap = int(caps.get("gpu_pending_cap") or 0)
+    cpu_unassigned_cap = int(caps.get("cpu_unassigned_cap") or 0)
+    gpu_unassigned_cap = int(caps.get("gpu_unassigned_cap") or 0)
+
+    cpu_reasons = []
+    gpu_reasons = []
+    if cpu_unassigned_cap and cpu_unassigned >= cpu_unassigned_cap:
+        cpu_reasons.append(
+            f"cpu unassigned roots {cpu_unassigned} >= {cpu_unassigned_cap}"
+        )
+    if cpu_pending_cap and cpu_pending >= cpu_pending_cap:
+        cpu_reasons.append(
+            f"cpu root backlog {cpu_pending} >= adaptive cap {cpu_pending_cap}"
+        )
+    if gpu_unassigned_cap and gpu_unassigned >= gpu_unassigned_cap:
+        gpu_reasons.append(
+            f"gpu unassigned roots {gpu_unassigned} >= {gpu_unassigned_cap}"
+        )
+    if gpu_pending_cap and gpu_pending >= gpu_pending_cap:
+        gpu_reasons.append(
+            f"gpu root backlog {gpu_pending} >= adaptive cap {gpu_pending_cap}"
+        )
+    return {
+        "cpu": bool(cpu_reasons),
+        "gpu": bool(gpu_reasons),
+        "cpu_reasons": cpu_reasons,
+        "gpu_reasons": gpu_reasons,
+    }
+
+
 def _cpu_slot_target() -> int:
     slots = ((CONFIG.get("resource_slots") or {}).get("slots") or {})
     cpu_slots = int(slots.get("cpu") or 0)
@@ -94,6 +218,15 @@ def _gpu_slot_floor_total() -> int:
     )
 
 
+def _gpu_slot_total() -> int:
+    slots = ((CONFIG.get("resource_slots") or {}).get("slots") or {})
+    total = sum(
+        int(slots.get(k) or 0)
+        for k in ("hypergraph", "vector_search", "neuralnet_optimizer")
+    )
+    return max(total, _gpu_slot_floor_total())
+
+
 def _cpu_create_target(cpu_slots: int) -> int:
     """Bound idle-CPU pressure by the live concurrent budget, not raw slot count.
 
@@ -115,26 +248,25 @@ def should_block_precommit_create(
     settings=None,
     idle_cpu_needs_work=False,
 ):
-    """Pure create-gate used by PrecommitManager and unit tests.
+    """Soft create-gate used by PrecommitManager and unit tests.
 
-    Hard backlog cap always wins. Low root_ready_rate normally blocks creates,
-    but idle CPU with no unassigned CPU roots may override that soft gate so
-    spare CPU workers are not left empty.
+    Per-profile pending/unassigned caps are enforced separately via
+    profile_root_backlog_blocks (filter eligible algos). This function only
+    applies the soft root_ready_rate drain. Idle CPU with no unassigned CPU
+    roots may override that soft gate so spare CPU workers are not left empty.
+
+    Legacy max_roots_pending is retained in settings for adaptive ceiling
+    defaults only; it is not a global hard create-block anymore.
     """
     settings = settings or _governor_settings()
     if not settings.get("enabled", True):
         return False, ""
-    max_roots_pending = int(settings.get("max_roots_pending") or 256)
     min_root_ready_rate = float(settings.get("min_root_ready_rate") or 0.50)
     min_samples = int(settings.get("min_samples") or 5)
     roots_pending = int(roots_pending or 0)
     benchmarks_seen = int(benchmarks_seen or 0)
     root_ready_benchmarks = int(root_ready_benchmarks or 0)
 
-    if roots_pending >= max_roots_pending:
-        return True, (
-            f"root backlog {roots_pending} >= max_roots_pending {max_roots_pending}"
-        )
     if roots_pending > 0 and benchmarks_seen >= min_samples:
         root_ready_rate = root_ready_benchmarks / max(1, benchmarks_seen)
         if root_ready_rate < min_root_ready_rate:
@@ -192,6 +324,26 @@ class PrecommitManager:
                           AND j.end_time IS NULL
                           AND j.merkle_root_ready IS NULL
                     ) AS roots_pending,
+                    (
+                        SELECT COUNT(*)
+                        FROM root_batch rb
+                        JOIN job j ON j.benchmark_id = rb.benchmark_id
+                        WHERE rb.ready IS NULL
+                          AND j.stopped IS NULL
+                          AND j.end_time IS NULL
+                          AND j.merkle_root_ready IS NULL
+                          AND j.settings->>'challenge_id' IN %s
+                    ) AS cpu_roots_pending,
+                    (
+                        SELECT COUNT(*)
+                        FROM root_batch rb
+                        JOIN job j ON j.benchmark_id = rb.benchmark_id
+                        WHERE rb.ready IS NULL
+                          AND j.stopped IS NULL
+                          AND j.end_time IS NULL
+                          AND j.merkle_root_ready IS NULL
+                          AND j.settings->>'challenge_id' IN %s
+                    ) AS gpu_roots_pending,
                     (
                         SELECT COUNT(*)
                         FROM job j
@@ -254,9 +406,22 @@ class PrecommitManager:
                           AND j.end_time IS NULL
                           AND j.merkle_root_ready IS NULL
                           AND j.settings->>'challenge_id' IN %s
-                    ) AS cpu_unassigned_roots
+                    ) AS cpu_unassigned_roots,
+                    (
+                        SELECT COUNT(*)
+                        FROM root_batch rb
+                        JOIN job j ON j.benchmark_id = rb.benchmark_id
+                        WHERE rb.ready IS NULL
+                          AND rb.slave IS NULL
+                          AND j.stopped IS NULL
+                          AND j.end_time IS NULL
+                          AND j.merkle_root_ready IS NULL
+                          AND j.settings->>'challenge_id' IN %s
+                    ) AS gpu_unassigned_roots
                 """,
                 (
+                    CPU_CHALLENGE_IDS,
+                    GPU_CHALLENGE_IDS,
                     cutoff_ms,
                     cutoff_ms,
                     cutoff_ms,
@@ -270,16 +435,31 @@ class PrecommitManager:
                     CPU_CHALLENGE_IDS,
                     GPU_CHALLENGE_IDS,
                     CPU_CHALLENGE_IDS,
+                    GPU_CHALLENGE_IDS,
                 ),
             ) or {}
             cpu_slots = _cpu_slot_target()
             cpu_create_target = _cpu_create_target(cpu_slots)
+            gpu_slots_total = _gpu_slot_total()
             cpu_active_jobs = int(row.get("cpu_active_jobs") or 0)
             cpu_jobs_needing_roots = int(row.get("cpu_jobs_needing_roots") or 0)
             cpu_jobs_in_proof_phase = int(row.get("cpu_jobs_in_proof_phase") or 0)
             gpu_active_jobs = int(row.get("gpu_active_jobs") or 0)
+            cpu_roots_pending = int(row.get("cpu_roots_pending") or 0)
+            gpu_roots_pending = int(row.get("gpu_roots_pending") or 0)
             cpu_unassigned_roots = int(row.get("cpu_unassigned_roots") or 0)
+            gpu_unassigned_roots = int(row.get("gpu_unassigned_roots") or 0)
             gpu_floor = _gpu_slot_floor_total()
+            profile_caps = compute_profile_root_caps(
+                settings, cpu_create_target, gpu_slots_total
+            )
+            profile_blocks = profile_root_backlog_blocks(
+                cpu_roots_pending,
+                gpu_roots_pending,
+                cpu_unassigned_roots,
+                gpu_unassigned_roots,
+                profile_caps,
+            )
             # Spare CPU create budget + no free CPU root batches => bias toward
             # CPU work. Count only jobs that still need roots — proof-phase jobs
             # (roots done, proofs slow/stalled) must not starve idle CPU workers.
@@ -288,21 +468,28 @@ class PrecommitManager:
                 and cpu_slots > 0
                 and cpu_unassigned_roots == 0
                 and cpu_jobs_needing_roots < cpu_create_target
+                and not profile_blocks.get("cpu")
             )
             snapshot = {
                 "enabled": True,
                 "settings": settings,
                 "roots_pending": int(row.get("roots_pending") or 0),
+                "cpu_roots_pending": cpu_roots_pending,
+                "gpu_roots_pending": gpu_roots_pending,
                 "benchmarks_seen": int(row.get("benchmarks_seen") or 0),
                 "root_ready_benchmarks": int(row.get("root_ready_benchmarks") or 0),
                 "cpu_slots": cpu_slots,
                 "cpu_create_target": cpu_create_target,
+                "gpu_slots_total": gpu_slots_total,
                 "cpu_active_jobs": cpu_active_jobs,
                 "cpu_jobs_needing_roots": cpu_jobs_needing_roots,
                 "cpu_jobs_in_proof_phase": cpu_jobs_in_proof_phase,
                 "gpu_active_jobs": gpu_active_jobs,
                 "gpu_slot_floor": gpu_floor,
                 "cpu_unassigned_roots": cpu_unassigned_roots,
+                "gpu_unassigned_roots": gpu_unassigned_roots,
+                "profile_caps": profile_caps,
+                "profile_blocks": profile_blocks,
                 "idle_cpu_needs_work": idle_cpu_needs_work,
             }
         except Exception as exc:
@@ -333,6 +520,7 @@ class PrecommitManager:
         governor = self._governor_snapshot()
         idle_cpu_needs_work = bool(governor.get("idle_cpu_needs_work"))
         governor_reason = ""
+        profile_blocks = governor.get("profile_blocks") or {"cpu": False, "gpu": False}
         if governor.get("enabled"):
             block, governor_reason = should_block_precommit_create(
                 governor.get("roots_pending") or 0,
@@ -356,6 +544,25 @@ class PrecommitManager:
                     governor.get("cpu_jobs_in_proof_phase"),
                     governor.get("cpu_unassigned_roots"),
                     governor_reason,
+                )
+            caps = governor.get("profile_caps") or {}
+            if profile_blocks.get("cpu") or profile_blocks.get("gpu"):
+                logger.info(
+                    "precommit governor profile backlog "
+                    "(cpu_pending=%s/%s unassigned=%s/%s block=%s reasons=%s; "
+                    "gpu_pending=%s/%s unassigned=%s/%s block=%s reasons=%s)",
+                    governor.get("cpu_roots_pending"),
+                    caps.get("cpu_pending_cap"),
+                    governor.get("cpu_unassigned_roots"),
+                    caps.get("cpu_unassigned_cap"),
+                    profile_blocks.get("cpu"),
+                    profile_blocks.get("cpu_reasons"),
+                    governor.get("gpu_roots_pending"),
+                    caps.get("gpu_pending_cap"),
+                    governor.get("gpu_unassigned_roots"),
+                    caps.get("gpu_unassigned_cap"),
+                    profile_blocks.get("gpu"),
+                    profile_blocks.get("gpu_reasons"),
                 )
 
         # Build per-challenge pending counts keyed by challenge_id (e.g. "c004")
@@ -387,6 +594,27 @@ class PrecommitManager:
             logger.debug("All algorithms are at their per-challenge max concurrent benchmarks")
             return
 
+        # Profile backlog: block only the saturated profile so fat GPU/CPU root
+        # piles cannot freeze creates for the other profile.
+        if profile_blocks.get("cpu") or profile_blocks.get("gpu"):
+            filtered = []
+            for x in eligible:
+                cid = x["algorithm_id"][:4]
+                if cid in CPU_CHALLENGE_IDS and profile_blocks.get("cpu"):
+                    continue
+                if cid in GPU_CHALLENGE_IDS and profile_blocks.get("gpu"):
+                    continue
+                filtered.append(x)
+            if not filtered:
+                logger.info(
+                    "precommit governor: both profiles blocked by root backlog "
+                    "(cpu=%s gpu=%s)",
+                    profile_blocks.get("cpu_reasons"),
+                    profile_blocks.get("gpu_reasons"),
+                )
+                return
+            eligible = filtered
+
         # Idle CPU: bias toward CPU creates, but keep GPU floor filled.
         # A hard CPU-only filter previously starved GPU when resource_slots.cpu
         # was much larger than max_concurrent_benchmarks.
@@ -402,6 +630,7 @@ class PrecommitManager:
             idle_cpu_needs_work
             and (not gpu_below_floor)
             and governor_reason.startswith("idle_cpu_override:")
+            and not profile_blocks.get("cpu")
         )
         if force_cpu_only:
             cpu_eligible = [

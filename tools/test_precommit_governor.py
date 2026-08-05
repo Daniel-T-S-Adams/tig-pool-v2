@@ -8,25 +8,33 @@ import pathlib
 import sys
 
 
-def _load_should_block():
+def _load_fns(*names: str):
     path = pathlib.Path(__file__).resolve().parents[1] / "master" / "precommit_manager.py"
     source = path.read_text(encoding="utf-8")
     module = ast.parse(source)
-    fn = None
+    keep = []
     for node in module.body:
-        if isinstance(node, ast.FunctionDef) and node.name == "should_block_precommit_create":
-            fn = node
-            break
-    if fn is None:
-        raise RuntimeError("should_block_precommit_create not found")
-    code = ast.Module(body=[fn], type_ignores=[])
+        if isinstance(node, ast.FunctionDef) and node.name in names:
+            keep.append(node)
+    if len(keep) != len(names):
+        found = {n.name for n in keep}
+        raise RuntimeError(f"missing functions: {set(names) - found}")
     ns = {}
-    exec(compile(code, str(path), "exec"), ns, ns)
-    return ns["should_block_precommit_create"]
+    exec(compile(ast.Module(body=keep, type_ignores=[]), str(path), "exec"), ns, ns)
+    return ns
 
 
 def main() -> int:
-    should_block = _load_should_block()
+    ns = _load_fns(
+        "_clamp_int",
+        "compute_profile_root_caps",
+        "profile_root_backlog_blocks",
+        "should_block_precommit_create",
+    )
+    should_block = ns["should_block_precommit_create"]
+    compute_caps = ns["compute_profile_root_caps"]
+    profile_blocks = ns["profile_root_backlog_blocks"]
+
     settings = {
         "enabled": True,
         "max_roots_pending": 256,
@@ -36,7 +44,7 @@ def main() -> int:
     }
     cases = [
         ((100, 20, 18), False, "healthy modest backlog"),
-        ((256, 20, 18), True, "roots pending at threshold"),
+        ((256, 20, 18), False, "combined pending no longer hard-blocks"),
         ((40, 20, 5), True, "low root ready rate with pending"),
         ((0, 20, 0), False, "no pending roots"),
         ((40, 3, 0), False, "below min samples"),
@@ -66,10 +74,13 @@ def main() -> int:
     if not ok:
         failed += 1
 
-    # Hard backlog still wins even with idle CPU.
-    blocked, _reason = should_block(256, 20, 6, settings, True)
-    ok = blocked is True
-    print(f"{'pass' if ok else 'FAIL'}: hard roots_pending cap beats idle CPU override")
+    # Soft-only: large combined pending must not beat idle CPU override.
+    blocked, reason = should_block(256, 20, 6, settings, True)
+    ok = blocked is False and reason.startswith("idle_cpu_override:")
+    print(
+        f"{'pass' if ok else 'FAIL'}: large combined pending does not hard-block "
+        f"(idle override) blocked={blocked} reason={reason!r}"
+    )
     if not ok:
         failed += 1
 
@@ -85,6 +96,69 @@ def main() -> int:
     print(f"{'pass' if ok else 'FAIL'}: disabled governor allows create")
     if not ok:
         failed += 1
+
+    # Adaptive caps from create capacity.
+    cap_settings = {
+        "cpu_roots_per_job_budget": 24,
+        "gpu_roots_per_job_budget": 48,
+        "min_cpu_roots_pending": 128,
+        "max_cpu_roots_pending": 1024,
+        "min_gpu_roots_pending": 64,
+        "max_gpu_roots_pending": 512,
+        "max_cpu_unassigned_roots": 64,
+        "max_gpu_unassigned_roots": 32,
+    }
+    caps = compute_caps(cap_settings, cpu_create_target=10, gpu_slots_total=9)
+    ok = caps["cpu_pending_cap"] == 240 and caps["gpu_pending_cap"] == 432
+    print(
+        f"{'pass' if ok else 'FAIL'}: adaptive caps cpu={caps['cpu_pending_cap']} "
+        f"gpu={caps['gpu_pending_cap']}"
+    )
+    if not ok:
+        failed += 1
+
+    caps_min = compute_caps(cap_settings, cpu_create_target=1, gpu_slots_total=1)
+    ok = caps_min["cpu_pending_cap"] == 128 and caps_min["gpu_pending_cap"] == 64
+    print(
+        f"{'pass' if ok else 'FAIL'}: adaptive caps respect profile mins "
+        f"cpu={caps_min['cpu_pending_cap']} gpu={caps_min['gpu_pending_cap']}"
+    )
+    if not ok:
+        failed += 1
+
+    # GPU backlog must not block CPU creates (and vice versa).
+    blocks = profile_blocks(
+        cpu_roots_pending=50,
+        gpu_roots_pending=500,
+        cpu_unassigned_roots=0,
+        gpu_unassigned_roots=0,
+        caps={"cpu_pending_cap": 240, "gpu_pending_cap": 432,
+              "cpu_unassigned_cap": 64, "gpu_unassigned_cap": 32},
+    )
+    ok = (not blocks["cpu"]) and blocks["gpu"]
+    print(
+        f"{'pass' if ok else 'FAIL'}: gpu pending block does not freeze cpu "
+        f"blocks={blocks}"
+    )
+    if not ok:
+        failed += 1
+
+    blocks = profile_blocks(
+        cpu_roots_pending=10,
+        gpu_roots_pending=10,
+        cpu_unassigned_roots=80,
+        gpu_unassigned_roots=0,
+        caps={"cpu_pending_cap": 240, "gpu_pending_cap": 432,
+              "cpu_unassigned_cap": 64, "gpu_unassigned_cap": 32},
+    )
+    ok = blocks["cpu"] and (not blocks["gpu"])
+    print(
+        f"{'pass' if ok else 'FAIL'}: cpu unassigned block does not freeze gpu "
+        f"blocks={blocks}"
+    )
+    if not ok:
+        failed += 1
+
     return 2 if failed else 0
 
 
