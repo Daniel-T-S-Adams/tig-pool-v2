@@ -19,8 +19,6 @@ def _load_should_block():
             break
     if fn is None:
         raise RuntimeError("should_block_precommit_create not found")
-    # Also need helpers referenced? Function is self-contained aside from settings default.
-    # Replace settings-or path by requiring explicit settings in tests.
     code = ast.Module(body=[fn], type_ignores=[])
     ns = {}
     exec(compile(code, str(path), "exec"), ns, ns)
@@ -34,6 +32,7 @@ def main() -> int:
         "max_roots_pending": 256,
         "min_root_ready_rate": 0.5,
         "min_samples": 5,
+        "idle_cpu_override": True,
     }
     cases = [
         ((100, 20, 18), False, "healthy modest backlog"),
@@ -50,11 +49,36 @@ def main() -> int:
         print(f"{status}: {label} args={args} blocked={blocked} reason={reason!r}")
         if not ok:
             failed += 1
+
+    blocked, reason = should_block(73, 20, 6, settings, True)
+    ok = blocked is False and reason.startswith("idle_cpu_override:")
+    print(
+        f"{'pass' if ok else 'FAIL'}: idle CPU overrides low root_ready_rate "
+        f"blocked={blocked} reason={reason!r}"
+    )
+    if not ok:
+        failed += 1
+
+    no_override = dict(settings, idle_cpu_override=False)
+    blocked, _reason = should_block(73, 20, 6, no_override, True)
+    ok = blocked is True
+    print(f"{'pass' if ok else 'FAIL'}: idle CPU override disabled still blocks")
+    if not ok:
+        failed += 1
+
+    # Hard backlog still wins even with idle CPU.
+    blocked, _reason = should_block(256, 20, 6, settings, True)
+    ok = blocked is True
+    print(f"{'pass' if ok else 'FAIL'}: hard roots_pending cap beats idle CPU override")
+    if not ok:
+        failed += 1
+
     disabled = {
         "enabled": False,
         "max_roots_pending": 1,
         "min_root_ready_rate": 0.99,
         "min_samples": 1,
+        "idle_cpu_override": True,
     }
     blocked, _reason = should_block(999, 100, 0, disabled)
     ok = blocked is False

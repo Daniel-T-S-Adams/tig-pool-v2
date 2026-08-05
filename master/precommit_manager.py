@@ -13,6 +13,8 @@ from master.client_manager import CONFIG
 
 logger = logging.getLogger(os.path.splitext(os.path.basename(__file__))[0])
 
+CPU_CHALLENGE_IDS = ("c001", "c002", "c003", "c007", "c008")
+
 
 def _env_bool(name, default="true"):
     return os.environ.get(name, default).lower() in ("1", "true", "yes", "on")
@@ -52,7 +54,27 @@ def _governor_settings():
                 os.environ.get("PRECOMMIT_GOVERNOR_CACHE_MS", "15000"),
             )
         ),
+        # When CPU has spare slot capacity but no free root batches to assign,
+        # do not let a low global root_ready_rate idle the CPU fleet.
+        "idle_cpu_override": (
+            bool(gov["idle_cpu_override"])
+            if "idle_cpu_override" in gov
+            else _env_bool("PRECOMMIT_GOVERNOR_IDLE_CPU_OVERRIDE", "true")
+        ),
     }
+
+
+def _cpu_slot_target() -> int:
+    slots = ((CONFIG.get("resource_slots") or {}).get("slots") or {})
+    cpu_slots = int(slots.get("cpu") or 0)
+    aws = CONFIG.get("aws_batch_capacity") or {}
+    if aws.get("enabled"):
+        cpu_slots = max(
+            cpu_slots,
+            int(aws.get("max_concurrent_cpu_jobs") or 0),
+            int(aws.get("cpu_instances") or 0),
+        )
+    return max(0, cpu_slots)
 
 
 def should_block_precommit_create(
@@ -60,8 +82,14 @@ def should_block_precommit_create(
     benchmarks_seen,
     root_ready_benchmarks,
     settings=None,
+    idle_cpu_needs_work=False,
 ):
-    """Pure create-gate used by PrecommitManager and unit tests."""
+    """Pure create-gate used by PrecommitManager and unit tests.
+
+    Hard backlog cap always wins. Low root_ready_rate normally blocks creates,
+    but idle CPU with no unassigned CPU roots may override that soft gate so
+    spare CPU workers are not left empty.
+    """
     settings = settings or _governor_settings()
     if not settings.get("enabled", True):
         return False, ""
@@ -79,6 +107,12 @@ def should_block_precommit_create(
     if roots_pending > 0 and benchmarks_seen >= min_samples:
         root_ready_rate = root_ready_benchmarks / max(1, benchmarks_seen)
         if root_ready_rate < min_root_ready_rate:
+            if idle_cpu_needs_work and settings.get("idle_cpu_override", True):
+                return False, (
+                    f"idle_cpu_override: root_ready_rate {root_ready_rate:.3f} "
+                    f"< {min_root_ready_rate:.3f} but CPU has spare capacity "
+                    f"and no unassigned CPU roots"
+                )
             return True, (
                 f"root_ready_rate {root_ready_rate:.3f} < {min_root_ready_rate:.3f} "
                 f"with roots_pending={roots_pending}"
@@ -104,7 +138,7 @@ class PrecommitManager:
     def _governor_snapshot(self) -> dict:
         settings = _governor_settings()
         if not settings.get("enabled", True):
-            return {"enabled": False}
+            return {"enabled": False, "idle_cpu_needs_work": False}
         now_ms = int(time.time() * 1000)
         cache_ms = max(0, int(settings.get("cache_ms") or 0))
         if (
@@ -147,7 +181,25 @@ class PrecommitManager:
                             OR j.end_time IS NULL
                         )
                           AND j.merkle_root_ready = true
-                    ) AS root_ready_benchmarks
+                    ) AS root_ready_benchmarks,
+                    (
+                        SELECT COUNT(*)
+                        FROM job j
+                        WHERE j.stopped IS NULL
+                          AND j.end_time IS NULL
+                          AND j.settings->>'challenge_id' IN %s
+                    ) AS cpu_active_jobs,
+                    (
+                        SELECT COUNT(*)
+                        FROM root_batch rb
+                        JOIN job j ON j.benchmark_id = rb.benchmark_id
+                        WHERE rb.ready IS NULL
+                          AND rb.slave IS NULL
+                          AND j.stopped IS NULL
+                          AND j.end_time IS NULL
+                          AND j.merkle_root_ready IS NULL
+                          AND j.settings->>'challenge_id' IN %s
+                    ) AS cpu_unassigned_roots
                 """,
                 (
                     cutoff_ms,
@@ -158,19 +210,36 @@ class PrecommitManager:
                     cutoff_ms,
                     cutoff_ms,
                     cutoff_ms,
+                    CPU_CHALLENGE_IDS,
+                    CPU_CHALLENGE_IDS,
                 ),
             ) or {}
+            cpu_slots = _cpu_slot_target()
+            cpu_active_jobs = int(row.get("cpu_active_jobs") or 0)
+            cpu_unassigned_roots = int(row.get("cpu_unassigned_roots") or 0)
+            # Spare CPU slots + no free CPU root batches => workers will idle
+            # unless we create more CPU work.
+            idle_cpu_needs_work = (
+                settings.get("idle_cpu_override", True)
+                and cpu_slots > 0
+                and cpu_unassigned_roots == 0
+                and cpu_active_jobs < cpu_slots
+            )
             snapshot = {
                 "enabled": True,
                 "settings": settings,
                 "roots_pending": int(row.get("roots_pending") or 0),
                 "benchmarks_seen": int(row.get("benchmarks_seen") or 0),
                 "root_ready_benchmarks": int(row.get("root_ready_benchmarks") or 0),
+                "cpu_slots": cpu_slots,
+                "cpu_active_jobs": cpu_active_jobs,
+                "cpu_unassigned_roots": cpu_unassigned_roots,
+                "idle_cpu_needs_work": idle_cpu_needs_work,
             }
         except Exception as exc:
             # Fail open: a transient DB blip must not freeze precommit creation.
             logger.warning("precommit governor query failed; allowing create: %s", exc)
-            snapshot = {"enabled": False, "error": str(exc)}
+            snapshot = {"enabled": False, "idle_cpu_needs_work": False, "error": str(exc)}
         self._governor_cache = snapshot
         self._governor_cache_until_ms = now_ms + cache_ms
         return snapshot
@@ -193,16 +262,27 @@ class PrecommitManager:
             return
 
         governor = self._governor_snapshot()
+        idle_cpu_needs_work = bool(governor.get("idle_cpu_needs_work"))
         if governor.get("enabled"):
             block, reason = should_block_precommit_create(
                 governor.get("roots_pending") or 0,
                 governor.get("benchmarks_seen") or 0,
                 governor.get("root_ready_benchmarks") or 0,
                 governor.get("settings"),
+                idle_cpu_needs_work=idle_cpu_needs_work,
             )
             if block:
                 logger.info("precommit governor blocked create: %s", reason)
                 return
+            if reason.startswith("idle_cpu_override:"):
+                logger.info(
+                    "precommit governor allowing create via idle CPU override "
+                    "(cpu_active_jobs=%s/%s, cpu_unassigned_roots=%s): %s",
+                    governor.get("cpu_active_jobs"),
+                    governor.get("cpu_slots"),
+                    governor.get("cpu_unassigned_roots"),
+                    reason,
+                )
 
         # Build per-challenge pending counts keyed by challenge_id (e.g. "c004")
         per_challenge_counts = {}
@@ -232,6 +312,22 @@ class PrecommitManager:
         if not eligible:
             logger.debug("All algorithms are at their per-challenge max concurrent benchmarks")
             return
+
+        # Idle CPU override must create CPU work; a GPU create would not feed
+        # idle CPU slaves and would further depress root_ready_rate.
+        if idle_cpu_needs_work:
+            cpu_eligible = [
+                x for x in eligible
+                if x["algorithm_id"][:4] in CPU_CHALLENGE_IDS
+            ]
+            if cpu_eligible:
+                eligible = cpu_eligible
+            else:
+                logger.info(
+                    "idle CPU needs work but no CPU algorithms are eligible "
+                    "(per-challenge max or weights); skipping create"
+                )
+                return
 
         weighted_eligible = [
             x for x in eligible
