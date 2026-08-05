@@ -68,6 +68,13 @@ PRODUCTIVE_IDLE_STALE_ROOT_TOLERANCE = int(
 )
 PRODUCTIVE_IDLE_GPU_SCALE_MIN = int(os.environ.get("AUTOPILOT_PRODUCTIVE_IDLE_GPU_SCALE_MIN", "1"))
 PRODUCTIVE_IDLE_GPU_PER_SLOT = int(os.environ.get("AUTOPILOT_PRODUCTIVE_IDLE_GPU_PER_SLOT", "1"))
+# Small max_concurrent step-ups for idle proven CPU workers even when the global
+# reward funnel is still "unsafe" due to slow GPU proof tails / recovery posture.
+IDLE_CPU_MAX_SCALE_ENABLED = os.environ.get(
+    "AUTOPILOT_IDLE_CPU_MAX_SCALE_ENABLED", "true"
+).lower() in ("1", "true", "yes", "on")
+IDLE_CPU_MAX_SCALE_MIN = int(os.environ.get("AUTOPILOT_IDLE_CPU_MAX_SCALE_MIN", "3"))
+IDLE_CPU_MAX_SCALE_UP_STEP = int(os.environ.get("AUTOPILOT_IDLE_CPU_MAX_SCALE_UP_STEP", "2"))
 CAP_SCALE_COMPLETIONS_PER_STEP = int(os.environ.get("AUTOPILOT_CAP_SCALE_COMPLETIONS_PER_STEP", "20"))
 ROUTE_CPU_UP_STEP = int(os.environ.get("AUTOPILOT_ROUTE_CPU_UP_STEP", "8"))
 ROUTE_GPU_UP_STEP = int(os.environ.get("AUTOPILOT_ROUTE_GPU_UP_STEP", "1"))
@@ -2480,6 +2487,53 @@ def _root_backlog_pressure(funnel_summary: dict | None) -> dict | None:
     }
 
 
+def should_idle_cpu_max_scale(
+    *,
+    enabled: bool,
+    productive_idle_cpu: int,
+    min_idle: int,
+    root_ready_rate,
+    min_root_ready_rate: float,
+    roots_pending: int,
+    max_roots_pending: int,
+    benchmarks_seen: int,
+    current_max: int,
+    proposed_max: int,
+    active_jobs: int,
+    stale_proofs: int,
+    has_stranded: bool,
+    has_unregistered: bool,
+) -> tuple[bool, str]:
+    """Pure gate: allow a small max_concurrent bump for idle proven CPU workers.
+
+    Used when global funnel_safe is false because of slow GPU proof tails, but
+    root completion is healthy and CPU workers are finishing with nothing to pull.
+    """
+    if not enabled:
+        return False, "idle_cpu_max_scale_disabled"
+    if has_stranded:
+        return False, "stranded_benchmarks_present"
+    if has_unregistered:
+        return False, "unregistered_active_work"
+    if int(stale_proofs or 0) > 0:
+        return False, "stale_proofs_present"
+    if int(productive_idle_cpu or 0) < int(min_idle or 0):
+        return False, "productive_idle_cpu_below_min"
+    if int(roots_pending or 0) >= int(max_roots_pending or 0):
+        return False, "roots_pending_at_hard_cap"
+    if int(benchmarks_seen or 0) >= 5:
+        if root_ready_rate is None:
+            return False, "root_ready_rate_missing"
+        if float(root_ready_rate) < float(min_root_ready_rate):
+            return False, "root_ready_rate_below_min"
+    if int(proposed_max or 0) <= int(current_max or 0):
+        return False, "proposed_max_not_higher"
+    # Only bump when the current ceiling is actually binding.
+    if int(active_jobs or 0) < max(1, int(current_max or 0) - 1):
+        return False, "precommit_capacity_not_saturated"
+    return True, "idle_cpu_needs_max_headroom"
+
+
 def _challenge_ids_by_profile(cfg: dict) -> tuple[list[str], list[str]]:
     cpu_ids = []
     gpu_ids = []
@@ -3579,8 +3633,7 @@ def _plan_config_change(report: dict, cfg: dict, clean_windows: int) -> dict:
             "unexpected_stopped_without_roots_rate": funnel_summary.get("unexpected_stopped_without_roots_rate"),
             "avg_time_to_proof_submit_sec": funnel_summary.get("avg_time_to_proof_submit_sec"),
         }
-        drain_issues = {
-            "slow_time_to_proof_submission",
+        hard_drain_issues = {
             "low_proof_conversion",
             "high_stopped_or_expired_rate",
             "high_unexpected_stopped_or_expired_rate",
@@ -3588,11 +3641,33 @@ def _plan_config_change(report: dict, cfg: dict, clean_windows: int) -> dict:
             "high_unexpected_stopped_without_roots_rate",
             "root_phase_not_complete",
         }
+        # Soft latency / cleanup noise should not keep pinning or draining max
+        # while roots are converting and CPU workers are idle.
+        soft_drain_issues = {
+            "slow_time_to_proof_submission",
+            "stopped_without_root_work",
+        }
         active_issues = set(funnel_summary.get("issues") or [])
+        has_hard_drain = bool(active_issues.intersection(hard_drain_issues))
+        has_soft_drain = bool(active_issues.intersection(soft_drain_issues))
+        root_ready_rate = funnel_summary.get("root_ready_rate")
+        root_ready_ok = (
+            root_ready_rate is not None
+            and float(root_ready_rate) >= ROOT_READY_RATE_MIN_FOR_UPSCALE
+        )
+        skip_soft_drain = (
+            (not has_hard_drain)
+            and has_soft_drain
+            and root_ready_ok
+            and productive_idle_cpu >= IDLE_CPU_MAX_SCALE_MIN
+        )
         current = int(cfg.get("max_concurrent_benchmarks") or 0)
         capacity_model = report.get("capacity_model") or {}
         drain_floor = _funnel_drain_floor(capacity_model)
-        if current > drain_floor and active_issues.intersection(drain_issues):
+        should_drain = current > drain_floor and (
+            has_hard_drain or (has_soft_drain and not skip_soft_drain)
+        )
+        if should_drain:
             next_max = max(drain_floor, current - max(1, MAX_BENCHMARK_DOWN_STEP))
             new_cfg = json.loads(json.dumps(cfg))
             new_cfg["max_concurrent_benchmarks"] = next_max
@@ -3613,6 +3688,13 @@ def _plan_config_change(report: dict, cfg: dict, clean_windows: int) -> dict:
             }
             decision["config"] = new_cfg
             return decision
+        if skip_soft_drain:
+            decision.setdefault("guardrails", {})["reward_funnel_drain"] = {
+                "skipped": "soft_funnel_issues_with_healthy_roots_and_idle_cpu",
+                "issues": funnel_summary.get("issues", []),
+                "root_ready_rate": root_ready_rate,
+                "productive_idle_cpu": productive_idle_cpu,
+            }
 
     backlog_pressure = _root_backlog_pressure(funnel_summary)
     if backlog_pressure:
@@ -3707,6 +3789,73 @@ def _plan_config_change(report: dict, cfg: dict, clean_windows: int) -> dict:
         decision["changes"] = {"workload_controller": canary_rollback}
         decision["config"] = rollback_cfg
         return decision
+
+    # Prefer feeding idle proven CPU over another GPU tail trim when root-ready
+    # is healthy. Otherwise workload_safety_adjustment monopolizes every cycle
+    # while max_concurrent stays pinned in recovery.
+    max_rec_for_idle = recommendations.get("max_concurrent_benchmarks") or {}
+    current_max_for_idle = int(cfg.get("max_concurrent_benchmarks") or 0)
+    proposed_max_for_idle = int(max_rec_for_idle.get("proposed") or current_max_for_idle)
+    active_jobs_for_idle = _active_unfinished_jobs()
+    root_ready_rate = funnel_summary.get("root_ready_rate")
+    allow_idle_cpu_max, idle_cpu_reason = should_idle_cpu_max_scale(
+        enabled=IDLE_CPU_MAX_SCALE_ENABLED,
+        productive_idle_cpu=productive_idle_cpu,
+        min_idle=IDLE_CPU_MAX_SCALE_MIN,
+        root_ready_rate=root_ready_rate,
+        min_root_ready_rate=ROOT_READY_RATE_MIN_FOR_UPSCALE,
+        roots_pending=int(funnel_summary.get("roots_pending") or 0),
+        max_roots_pending=ROOT_PENDING_MAX_CONCURRENT_DRAIN,
+        benchmarks_seen=int(funnel_summary.get("benchmarks_seen") or 0),
+        current_max=current_max_for_idle,
+        proposed_max=proposed_max_for_idle,
+        active_jobs=active_jobs_for_idle,
+        stale_proofs=stale_proofs,
+        has_stranded=bool(health.get("unserved_stranded_benchmarks")),
+        has_unregistered=bool(health.get("active_unregistered")),
+    )
+    if allow_idle_cpu_max:
+        up_step = max(1, min(IDLE_CPU_MAX_SCALE_UP_STEP, SURGE_MAX_BENCHMARK_UP_STEP if posture == "recovery" else IDLE_CPU_MAX_SCALE_UP_STEP))
+        if (proposed_max_for_idle - current_max_for_idle) >= SURGE_TARGET_GAP:
+            up_step = min(up_step, SURGE_MAX_BENCHMARK_UP_STEP)
+        next_max = _next_value_bounded(
+            current_max_for_idle,
+            proposed_max_for_idle,
+            up_step,
+            MAX_BENCHMARK_DOWN_STEP,
+        )
+        if next_max > current_max_for_idle:
+            new_cfg = json.loads(json.dumps(cfg))
+            new_cfg["max_concurrent_benchmarks"] = next_max
+            decision["reason"] = "idle_cpu_max_concurrent_scale"
+            decision["changes"] = {
+                "max_concurrent_benchmarks": {
+                    "current": current_max_for_idle,
+                    "target": proposed_max_for_idle,
+                    "next": next_max,
+                    "up_step": up_step,
+                    "active_jobs": active_jobs_for_idle,
+                    "productive_idle_cpu": productive_idle_cpu,
+                    "root_ready_rate": root_ready_rate,
+                    "roots_pending": funnel_summary.get("roots_pending"),
+                    "policy_posture": posture,
+                    "funnel_safe": funnel_safe,
+                    "gate_reason": idle_cpu_reason,
+                    "signals": max_rec_for_idle.get("signals") or {},
+                }
+            }
+            decision["config"] = new_cfg
+            return decision
+    else:
+        decision.setdefault("guardrails", {})["idle_cpu_max_concurrent_scale"] = {
+            "skipped": idle_cpu_reason,
+            "productive_idle_cpu": productive_idle_cpu,
+            "min_idle": IDLE_CPU_MAX_SCALE_MIN,
+            "current": current_max_for_idle,
+            "proposed": proposed_max_for_idle,
+            "active_jobs": active_jobs_for_idle,
+            "root_ready_rate": root_ready_rate,
+        }
 
     safety_cfg = json.loads(json.dumps(cfg))
     workload_safety_change, workload_safety_guard = _next_workload_change(
