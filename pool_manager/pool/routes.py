@@ -236,7 +236,10 @@ else
 fi
 
 $SUDO apt-get update
-$SUDO apt-get install -y curl git ca-certificates python3 docker.io docker-compose-v2
+$SUDO apt-get install -y curl git ca-certificates python3
+$SUDO apt-get remove -y docker.io docker-doc docker-compose docker-compose-v2 podman-docker containerd runc || true
+curl -fsSL https://get.docker.com | $SUDO sh
+$SUDO apt-get install -y docker-compose-plugin
 $SUDO systemctl enable --now docker
 
 if [ ! -d "$HOME/tig-monorepo" ]; then
@@ -269,7 +272,10 @@ FLEET_TOKEN="{token}"
 export DEBIAN_FRONTEND=noninteractive
 
 apt-get update
-apt-get install -y curl git ca-certificates gnupg python3 docker.io docker-compose-v2
+apt-get install -y curl git ca-certificates gnupg python3
+apt-get remove -y docker.io docker-doc docker-compose docker-compose-v2 podman-docker containerd runc || true
+curl -fsSL https://get.docker.com | sh
+apt-get install -y docker-compose-plugin
 
 systemctl enable --now docker
 
@@ -355,7 +361,10 @@ set -euxo pipefail
 exec > >(tee -a /var/log/innopool-userdata.log) 2>&1
 
 apt-get update
-apt-get install -y curl git ca-certificates python3 docker.io docker-compose-v2
+apt-get install -y curl git ca-certificates python3
+apt-get remove -y docker.io docker-doc docker-compose docker-compose-v2 podman-docker containerd runc || true
+curl -fsSL https://get.docker.com | sh
+apt-get install -y docker-compose-plugin
 
 systemctl enable --now docker
 
