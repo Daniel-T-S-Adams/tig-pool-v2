@@ -105,6 +105,18 @@ ROOT_READY_RATE_MIN_FOR_UPSCALE = float(
 # proof conversion can prove out before another surge of precommits.
 SURGE_TARGET_GAP = int(os.environ.get("AUTOPILOT_SURGE_TARGET_GAP", "16"))
 SURGE_MAX_BENCHMARK_UP_STEP = int(os.environ.get("AUTOPILOT_SURGE_MAX_BENCHMARK_UP_STEP", "1"))
+# Match max_concurrent to recent finishes so creates scale with compute that is
+# actually converting, instead of only slot-sum capacity.
+COMPLETION_MATCH_ENABLED = os.environ.get("AUTOPILOT_COMPLETION_MATCH_ENABLED", "true").lower() in (
+    "1",
+    "true",
+    "yes",
+    "on",
+)
+COMPLETION_MATCH_MIN_SAMPLES = int(os.environ.get("AUTOPILOT_COMPLETION_MATCH_MIN_SAMPLES", "5"))
+COMPLETION_MATCH_BUFFER = int(os.environ.get("AUTOPILOT_COMPLETION_MATCH_BUFFER", "8"))
+COMPLETION_INFLIGHT_MULT = float(os.environ.get("AUTOPILOT_COMPLETION_INFLIGHT_MULT", "2.0"))
+COMPLETION_WARMUP_HEADROOM = int(os.environ.get("AUTOPILOT_COMPLETION_WARMUP_HEADROOM", "8"))
 STRANDED_BENCHMARK_MS = int(os.environ.get("AUTOPILOT_STRANDED_BENCHMARK_MS", str(30 * 60 * 1000)))
 STRANDED_DOWNSCALE_STEP = int(os.environ.get("AUTOPILOT_STRANDED_DOWNSCALE_STEP", "2"))
 STRANDED_BUFFER_BENCHMARKS = int(os.environ.get("AUTOPILOT_STRANDED_BUFFER_BENCHMARKS", "2"))
@@ -2170,7 +2182,7 @@ def _target_resource_slots(capacity: dict) -> dict:
     return proposed
 
 
-def _target_max_concurrent_benchmarks(capacity: dict, proposed_slots: dict) -> int:
+def _slot_capacity_max_concurrent(capacity: dict, proposed_slots: dict) -> int:
     active_gpu = capacity["active_gpu"] > 0
     active_cpu = capacity["active_cpu"] > 0 or int(capacity.get("aws_cpu_jobs") or 0) > 0
     cpu_slot_total = int(proposed_slots.get(CPU_SLOT_TYPE, 0) or 0) if active_cpu else 0
@@ -2181,6 +2193,112 @@ def _target_max_concurrent_benchmarks(capacity: dict, proposed_slots: dict) -> i
     )
     buffer = BENCHMARK_BUFFER if (active_cpu or active_gpu) else 0
     return _clamp(cpu_slot_total + gpu_slot_total + buffer, MIN_MAX_BENCHMARKS, UPSTREAM_SAFE_MAX_BENCHMARKS)
+
+
+def _live_worker_floor_max_concurrent(capacity: dict) -> int:
+    """Minimum concurrent room for currently online compute (not configured slots).
+
+    Using configured slots as a floor would make completion-matching a no-op
+    whenever resource_slots were already oversized.
+    """
+    aws_cpu_jobs = int(capacity.get("aws_cpu_jobs") or 0)
+    active_cpu = int(capacity.get("active_cpu") or 0)
+    active_gpu = int(capacity.get("active_gpu") or 0)
+    cpu_pressure = int(capacity.get("cpu_pressure") or 0)
+    gpu_pressure = int(capacity.get("gpu_pressure") or 0)
+    # Prefer observed in-flight work / AWS batch jobs over raw slave counts so a
+    # single multi-machine CPU slave still opens enough precommits to stay busy.
+    cpu_floor = max(aws_cpu_jobs, min(cpu_pressure, aws_cpu_jobs or cpu_pressure), active_cpu)
+    gpu_floor = max(active_gpu, min(gpu_pressure, active_gpu or gpu_pressure))
+    buffer = BENCHMARK_BUFFER if (cpu_floor or gpu_floor) else 0
+    return _clamp(cpu_floor + gpu_floor + buffer, MIN_MAX_BENCHMARKS, UPSTREAM_SAFE_MAX_BENCHMARKS)
+
+
+def _completion_matched_max_concurrent(
+    capacity: dict,
+    proposed_slots: dict,
+    reward_funnel: dict | None = None,
+) -> tuple[int, dict]:
+    """Target concurrent precommits from live capacity + recent finish quality.
+
+    Scales up as compute joins (live floor / slot capacity rise) but caps the
+    open-precommit budget when finishes/conversion lag so workers stay on
+    finishable work instead of an ever-growing root backlog.
+    """
+    slot_target = _slot_capacity_max_concurrent(capacity, proposed_slots)
+    live_floor = min(slot_target, _live_worker_floor_max_concurrent(capacity))
+    funnel = (reward_funnel or {}).get("summary") or {}
+    seen = int(funnel.get("benchmarks_seen") or 0)
+    root_ready = int(funnel.get("root_ready_benchmarks") or 0)
+    proof_submitted = int(funnel.get("proof_submitted_confirmed") or 0)
+    finished = max(proof_submitted, root_ready)
+    conversion = funnel.get("proof_conversion_rate")
+    root_ready_rate = funnel.get("root_ready_rate")
+    funnel_safe = bool(funnel.get("safe_to_scale_workload", True))
+    backlog = _root_backlog_pressure(funnel)
+    finish_based = _clamp(
+        int(round(finished * COMPLETION_INFLIGHT_MULT)) + COMPLETION_MATCH_BUFFER,
+        MIN_MAX_BENCHMARKS,
+        UPSTREAM_SAFE_MAX_BENCHMARKS,
+    )
+    quality = 1.0
+    if conversion is not None:
+        quality = min(quality, max(0.25, float(conversion)))
+    if root_ready_rate is not None:
+        quality = min(quality, max(0.25, float(root_ready_rate)))
+
+    signals = {
+        "slot_target": slot_target,
+        "live_floor": live_floor,
+        "benchmarks_seen": seen,
+        "root_ready_benchmarks": root_ready,
+        "proof_submitted_confirmed": proof_submitted,
+        "finished": finished,
+        "finish_based": finish_based,
+        "quality": round(quality, 4),
+        "funnel_safe": funnel_safe,
+        "backlog_reasons": (backlog or {}).get("reasons") or [],
+        "completion_match_enabled": COMPLETION_MATCH_ENABLED,
+    }
+
+    if not COMPLETION_MATCH_ENABLED:
+        signals["mode"] = "slot_capacity_only"
+        return slot_target, signals
+
+    if seen < COMPLETION_MATCH_MIN_SAMPLES:
+        target = max(live_floor, min(slot_target, live_floor + COMPLETION_WARMUP_HEADROOM))
+        signals["mode"] = "warmup_live_floor"
+    elif backlog or not funnel_safe:
+        target = max(live_floor, min(slot_target, finish_based))
+        signals["mode"] = "finish_matched_constrained"
+    else:
+        high_quality = (
+            (conversion is None or float(conversion) >= WORKLOAD_HIGH_PROOF_CONVERSION_RATE)
+            and (
+                root_ready_rate is None
+                or float(root_ready_rate) >= ROOT_READY_RATE_MIN_FOR_UPSCALE
+            )
+        )
+        if high_quality and finish_based >= max(live_floor, max(1, slot_target // 2)):
+            target = slot_target
+            signals["mode"] = "healthy_slot_capacity"
+        else:
+            blended = live_floor + int(round((slot_target - live_floor) * quality))
+            target = max(live_floor, min(slot_target, max(finish_based, blended)))
+            signals["mode"] = "healthy_ramping" if high_quality else "quality_blended"
+
+    target = _clamp(target, MIN_MAX_BENCHMARKS, UPSTREAM_SAFE_MAX_BENCHMARKS)
+    signals["target"] = target
+    return target, signals
+
+
+def _target_max_concurrent_benchmarks(
+    capacity: dict,
+    proposed_slots: dict,
+    reward_funnel: dict | None = None,
+) -> int:
+    target, _signals = _completion_matched_max_concurrent(capacity, proposed_slots, reward_funnel)
+    return target
 
 
 def _capacity_floor_max_concurrent(capacity: dict, proposed_slots: dict | None = None) -> int:
@@ -2501,15 +2619,24 @@ def _recommendations(
                 "apply_now": False,
             })
 
-    proposed_max = _target_max_concurrent_benchmarks(capacity, proposed_slots)
+    proposed_max, completion_match = _completion_matched_max_concurrent(
+        capacity, proposed_slots, reward_funnel
+    )
     current_max = cfg.get("max_concurrent_benchmarks")
-    if current_max is not None and proposed_max != int(current_max):
+    if current_max is not None:
         recommendations.append({
             "key": "max_concurrent_benchmarks",
             "current": current_max,
             "proposed": proposed_max,
-            "reason": "Concurrent benchmark target reserves room for active CPU slots, GPU slots, and a small precommit buffer.",
-            "signals": capacity,
+            "reason": (
+                "Concurrent benchmark target scales with live worker/slot capacity, then "
+                "completion-matches to recent root/proof finishes and conversion quality "
+                "so precommit creation tracks finishable work."
+            ),
+            "signals": {
+                **capacity,
+                "completion_match": completion_match,
+            },
             "apply_now": False,
         })
 
@@ -3675,7 +3802,7 @@ def _scale_readiness_summary(
     current_slots = ((cfg.get("resource_slots") or {}).get("slots") or {}) if cfg else {}
     current_max = cfg.get("max_concurrent_benchmarks") if cfg else None
     target_max = (
-        _target_max_concurrent_benchmarks(capacity, target_slots)
+        _target_max_concurrent_benchmarks(capacity, target_slots, reward_funnel)
         if capacity and target_slots
         else None
     )
@@ -3931,7 +4058,7 @@ def build_report() -> dict:
             "gpu_slot_floor": capacity.get("gpu_slot_floor") if capacity else {},
             "resource_slots": target_slots,
             "max_concurrent_benchmarks": (
-                _target_max_concurrent_benchmarks(capacity, target_slots)
+                _target_max_concurrent_benchmarks(capacity, target_slots, reward_funnel)
                 if capacity
                 else None
             ),

@@ -176,6 +176,13 @@ def _changed_max(decision: dict) -> tuple[int | None, int | None]:
     )
 
 
+def _recommendation_max_concurrent(report: dict) -> int | None:
+    for row in report.get("recommendations") or []:
+        if row.get("key") == "max_concurrent_benchmarks" and row.get("proposed") is not None:
+            return int(row["proposed"])
+    return None
+
+
 def _changed_route_cap(decision: dict, name_regex: str | None = None) -> tuple[int | None, int | None]:
     change = (decision.get("changes") or {}).get("slaves.max_concurrent_batches") or {}
     rows = change.get("changes") or []
@@ -334,6 +341,16 @@ def _validate_decision(data: dict, report: dict, decision: dict) -> list[dict]:
             actual = config.get("max_concurrent_benchmarks")
             ok = actual == expected
             detail = f"expected={expected} actual={actual}"
+        elif isinstance(assertion, dict) and assertion.get("expect_recommendation_max_concurrent_lte") is not None:
+            limit = int(assertion["expect_recommendation_max_concurrent_lte"])
+            proposed = _recommendation_max_concurrent(report)
+            ok = proposed is not None and proposed <= limit
+            detail = f"limit={limit} proposed={proposed}"
+        elif isinstance(assertion, dict) and assertion.get("expect_recommendation_max_concurrent_gte") is not None:
+            limit = int(assertion["expect_recommendation_max_concurrent_gte"])
+            proposed = _recommendation_max_concurrent(report)
+            ok = proposed is not None and proposed >= limit
+            detail = f"limit={limit} proposed={proposed}"
         elif isinstance(assertion, dict) and assertion.get("expect_unserved_stranded_fields"):
             spec = assertion["expect_unserved_stranded_fields"]
             health = decision.get("health") or {}

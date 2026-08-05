@@ -2,15 +2,89 @@ import copy
 import os
 import logging
 import random
+import time
 from dataclasses import dataclass
 from master.submissions_manager import SubmitPrecommitRequest
 from common.structs import *
 from common.utils import FromDict
-from typing import Dict, List, Optional, Set
+from typing import Dict, List, Optional, Set, Tuple
 from master.sql import get_db_conn
 from master.client_manager import CONFIG
 
 logger = logging.getLogger(os.path.splitext(os.path.basename(__file__))[0])
+
+
+def _env_bool(name, default="true"):
+    return os.environ.get(name, default).lower() in ("1", "true", "yes", "on")
+
+
+def _governor_settings():
+    gov = CONFIG.get("precommit_governor") or {}
+    return {
+        "enabled": bool(gov["enabled"]) if "enabled" in gov else _env_bool("PRECOMMIT_GOVERNOR_ENABLED", "true"),
+        "max_roots_pending": int(
+            gov.get(
+                "max_roots_pending",
+                os.environ.get("PRECOMMIT_GOVERNOR_MAX_ROOTS_PENDING", "256"),
+            )
+        ),
+        "min_root_ready_rate": float(
+            gov.get(
+                "min_root_ready_rate",
+                os.environ.get("PRECOMMIT_GOVERNOR_MIN_ROOT_READY_RATE", "0.50"),
+            )
+        ),
+        "min_samples": int(
+            gov.get(
+                "min_samples",
+                os.environ.get("PRECOMMIT_GOVERNOR_MIN_SAMPLES", "5"),
+            )
+        ),
+        "window_ms": int(
+            gov.get(
+                "window_ms",
+                os.environ.get("PRECOMMIT_GOVERNOR_WINDOW_MS", str(30 * 60 * 1000)),
+            )
+        ),
+        "cache_ms": int(
+            gov.get(
+                "cache_ms",
+                os.environ.get("PRECOMMIT_GOVERNOR_CACHE_MS", "15000"),
+            )
+        ),
+    }
+
+
+def should_block_precommit_create(
+    roots_pending,
+    benchmarks_seen,
+    root_ready_benchmarks,
+    settings=None,
+):
+    """Pure create-gate used by PrecommitManager and unit tests."""
+    settings = settings or _governor_settings()
+    if not settings.get("enabled", True):
+        return False, ""
+    max_roots_pending = int(settings.get("max_roots_pending") or 256)
+    min_root_ready_rate = float(settings.get("min_root_ready_rate") or 0.50)
+    min_samples = int(settings.get("min_samples") or 5)
+    roots_pending = int(roots_pending or 0)
+    benchmarks_seen = int(benchmarks_seen or 0)
+    root_ready_benchmarks = int(root_ready_benchmarks or 0)
+
+    if roots_pending >= max_roots_pending:
+        return True, (
+            f"root backlog {roots_pending} >= max_roots_pending {max_roots_pending}"
+        )
+    if roots_pending > 0 and benchmarks_seen >= min_samples:
+        root_ready_rate = root_ready_benchmarks / max(1, benchmarks_seen)
+        if root_ready_rate < min_root_ready_rate:
+            return True, (
+                f"root_ready_rate {root_ready_rate:.3f} < {min_root_ready_rate:.3f} "
+                f"with roots_pending={roots_pending}"
+            )
+    return False, ""
+
 
 class PrecommitManager:
     def __init__(self):
@@ -18,12 +92,87 @@ class PrecommitManager:
         self.num_precommits_submitted = 0
         self.algorithm_name_2_id = {}
         self.challenge_name_2_id = {}
+        self._governor_cache = None
+        self._governor_cache_until_ms = 0
 
     def on_new_block(self, block: Block, **kwargs):
         self.last_block_id = block.id
         self.num_precommits_submitted = 0
         self.per_challenge_precommits_submitted = {}
         self.challenge_configs = block.config["challenges"]
+
+    def _governor_snapshot(self) -> dict:
+        settings = _governor_settings()
+        if not settings.get("enabled", True):
+            return {"enabled": False}
+        now_ms = int(time.time() * 1000)
+        cache_ms = max(0, int(settings.get("cache_ms") or 0))
+        if (
+            self._governor_cache is not None
+            and cache_ms > 0
+            and now_ms < self._governor_cache_until_ms
+        ):
+            return self._governor_cache
+        try:
+            cutoff_ms = now_ms - int(settings.get("window_ms") or (30 * 60 * 1000))
+            row = get_db_conn().fetch_one(
+                """
+                SELECT
+                    (
+                        SELECT COUNT(*)
+                        FROM root_batch rb
+                        JOIN job j ON j.benchmark_id = rb.benchmark_id
+                        WHERE rb.ready IS NULL
+                          AND j.stopped IS NULL
+                          AND j.merkle_root_ready IS NULL
+                    ) AS roots_pending,
+                    (
+                        SELECT COUNT(*)
+                        FROM job j
+                        WHERE j.start_time >= %s
+                           OR j.benchmark_submit_time >= %s
+                           OR j.proof_submit_time >= %s
+                           OR j.end_time >= %s
+                           OR j.end_time IS NULL
+                    ) AS benchmarks_seen,
+                    (
+                        SELECT COUNT(*)
+                        FROM job j
+                        WHERE (
+                            j.start_time >= %s
+                            OR j.benchmark_submit_time >= %s
+                            OR j.proof_submit_time >= %s
+                            OR j.end_time >= %s
+                            OR j.end_time IS NULL
+                        )
+                          AND j.merkle_root_ready = true
+                    ) AS root_ready_benchmarks
+                """,
+                (
+                    cutoff_ms,
+                    cutoff_ms,
+                    cutoff_ms,
+                    cutoff_ms,
+                    cutoff_ms,
+                    cutoff_ms,
+                    cutoff_ms,
+                    cutoff_ms,
+                ),
+            ) or {}
+            snapshot = {
+                "enabled": True,
+                "settings": settings,
+                "roots_pending": int(row.get("roots_pending") or 0),
+                "benchmarks_seen": int(row.get("benchmarks_seen") or 0),
+                "root_ready_benchmarks": int(row.get("root_ready_benchmarks") or 0),
+            }
+        except Exception as exc:
+            # Fail open: a transient DB blip must not freeze precommit creation.
+            logger.warning("precommit governor query failed; allowing create: %s", exc)
+            snapshot = {"enabled": False, "error": str(exc)}
+        self._governor_cache = snapshot
+        self._governor_cache_until_ms = now_ms + cache_ms
+        return snapshot
 
     def run(self) -> SubmitPrecommitRequest:
         num_pending_jobs = get_db_conn().fetch_one(
@@ -41,6 +190,19 @@ class PrecommitManager:
         if  num_pending_benchmarks >= CONFIG["max_concurrent_benchmarks"]:
             logger.debug(f"number of pending benchmarks has reached max of {CONFIG['max_concurrent_benchmarks']}")
             return
+
+        governor = self._governor_snapshot()
+        if governor.get("enabled"):
+            block, reason = should_block_precommit_create(
+                governor.get("roots_pending") or 0,
+                governor.get("benchmarks_seen") or 0,
+                governor.get("root_ready_benchmarks") or 0,
+                governor.get("settings"),
+            )
+            if block:
+                logger.info("precommit governor blocked create: %s", reason)
+                return
+
         # Build per-challenge pending counts keyed by challenge_id (e.g. "c004")
         per_challenge_counts = {}
         rows = get_db_conn().fetch_all(

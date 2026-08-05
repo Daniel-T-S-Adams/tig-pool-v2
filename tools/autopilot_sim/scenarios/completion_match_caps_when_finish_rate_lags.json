@@ -1,0 +1,100 @@
+{
+  "name": "completion_match_caps_when_finish_rate_lags",
+  "lesson": "Large configured slot capacity must not recommend a near-ceiling max_concurrent when recent finishes and root-ready quality are weak; the completion match should keep the target closer to finishable work.",
+  "clean_windows": 4,
+  "assertions": [
+    {
+      "expect_recommendation_max_concurrent_lte": 45
+    },
+    {
+      "expect_no_change_key": "max_concurrent_benchmarks"
+    }
+  ],
+  "config": {
+    "max_concurrent_benchmarks": 48,
+    "aws_batch_capacity": {
+      "max_concurrent_cpu_jobs": 8
+    },
+    "resource_slots": {
+      "slots": {
+        "cpu": 64,
+        "vector_search": 0,
+        "hypergraph": 0,
+        "neuralnet_optimizer": 0
+      },
+      "enabled": true
+    },
+    "per_challenge_max_benchmarks": {
+      "c001": 16,
+      "c002": 16,
+      "c004": 8,
+      "c005": 4,
+      "c006": 4
+    },
+    "adaptive_slave_caps": {
+      "cpu_max_cap": 32,
+      "gpu_max_cap": 12
+    },
+    "algo_selection": [
+      {
+        "algorithm_id": "c001_sat",
+        "compute_type": "CPU",
+        "weight": 1,
+        "track_settings": {}
+      }
+    ],
+    "slaves": []
+  },
+  "report": {
+    "mode": "read_only",
+    "master_config_error": null,
+    "slaves": [
+      {
+        "slave_name": "pool-cpu-finish-lag",
+        "profile": "cpu",
+        "registered": true,
+        "registered_active": true,
+        "active_now": true,
+        "active_unfinished": 12,
+        "stale_roots": 0,
+        "stale_proofs": 0,
+        "completed_recent": 30,
+        "nonces_recent": 500000
+      }
+    ],
+    "slots": {
+      "summary": [
+        { "slot_type": "cpu", "state": "busy", "count": 48 }
+      ]
+    },
+    "challenges": [
+      {
+        "challenge_id": "c001",
+        "compute_type": "cpu",
+        "active_benchmarks": 12,
+        "stale_roots": 0,
+        "stale_proofs": 0
+      }
+    ],
+    "stale_totals": {
+      "roots": 0,
+      "proofs": 0
+    },
+    "stranded_benchmarks": [],
+    "reward_funnel": {
+      "summary": {
+        "safe_to_scale_workload": true,
+        "active_benchmarks": 12,
+        "benchmarks_seen": 60,
+        "root_ready_benchmarks": 12,
+        "proof_submitted_confirmed": 10,
+        "roots_pending": 0,
+        "root_ready_rate": 0.35,
+        "proof_conversion_rate": 0.7,
+        "stopped_rate": 0.08,
+        "avg_time_to_proof_submit_sec": 1100,
+        "issues": []
+      }
+    }
+  }
+}
