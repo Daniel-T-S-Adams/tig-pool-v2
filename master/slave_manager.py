@@ -20,6 +20,68 @@ from master.client_manager import CONFIG
 
 logger = logging.getLogger(os.path.splitext(os.path.basename(__file__))[0])
 
+# When a slave still owes proof work (local root artifacts), keep root pressure
+# low so proofs are not starved behind a pile of new root batches.
+PROOF_PRIORITY_ENABLED = os.environ.get("SLAVE_PROOF_PRIORITY_ENABLED", "true").lower() in (
+    "1",
+    "true",
+    "yes",
+    "on",
+)
+PROOF_PRIORITY_MAX_ROOTS = max(
+    0, int(os.environ.get("SLAVE_PROOF_PRIORITY_MAX_ROOTS", "2"))
+)
+
+
+def _is_proof_batch_row(row: dict) -> bool:
+    batch = row.get("batch") or {}
+    return batch.get("sampled_nonces") is not None
+
+
+def select_kept_assigned_batches(
+    assigned: list,
+    max_concurrent: int,
+    *,
+    proof_priority: bool,
+    max_roots_while_proofs: int,
+) -> tuple[list, list]:
+    """Prefer keeping proof batches when over capacity / proof-priority mode.
+
+    Returns (kept, excess).
+    """
+    if max_concurrent < 0:
+        max_concurrent = 0
+    proofs = [b for b in assigned if _is_proof_batch_row(b)]
+    roots = [b for b in assigned if not _is_proof_batch_row(b)]
+    has_proofs = bool(proofs)
+    kept_proofs = proofs[:max_concurrent]
+    room = max(0, max_concurrent - len(kept_proofs))
+    if proof_priority and has_proofs:
+        root_budget = min(room, max(0, int(max_roots_while_proofs)))
+    else:
+        root_budget = room
+    kept_roots = roots[:root_budget]
+    kept = kept_proofs + kept_roots
+    kept_ids = {
+        (
+            b["batch"]["benchmark_id"],
+            b["batch"]["batch_idx"],
+            "proof" if _is_proof_batch_row(b) else "root",
+        )
+        for b in kept
+    }
+    excess = [
+        b
+        for b in assigned
+        if (
+            b["batch"]["benchmark_id"],
+            b["batch"]["batch_idx"],
+            "proof" if _is_proof_batch_row(b) else "root",
+        )
+        not in kept_ids
+    ]
+    return kept, excess
+
 
 def _batch_retry_time(algorithm_id: str) -> int:
     """Return the retry timeout (ms) for a given algorithm_id.
@@ -676,12 +738,40 @@ class SlaveManager:
                     b for b in self.batches
                     if b["slave"] == slave_name and b["end_time"] is None
                 ]
-                kept_assigned = assigned[:max_concurrent]
-                excess_assigned = assigned[max_concurrent:]
+                assigned_proofs = [b for b in assigned if _is_proof_batch_row(b)]
+                artifact_cache = {}
+
+                def has_artifacts(bid: str, batch_idx: int) -> bool:
+                    key = (bid, int(batch_idx))
+                    if key not in artifact_cache:
+                        artifact_cache[key] = self._slave_has_root_artifacts(
+                            slave_name, bid, int(batch_idx)
+                        )
+                    return artifact_cache[key]
+
+                # Unfinished proofs this slave can actually build (local artifacts).
+                own_proof_work = []
+                if PROOF_PRIORITY_ENABLED:
+                    for b in self.batches:
+                        batch = b["batch"]
+                        if batch.get("sampled_nonces") is None or b["end_time"] is not None:
+                            continue
+                        if b["slave"] not in (None, slave_name):
+                            continue
+                        if has_artifacts(batch["benchmark_id"], batch["batch_idx"]):
+                            own_proof_work.append(b)
+                has_proof_work = bool(assigned_proofs or own_proof_work)
+                kept_assigned, excess_assigned = select_kept_assigned_batches(
+                    assigned,
+                    max_concurrent,
+                    proof_priority=PROOF_PRIORITY_ENABLED and has_proof_work,
+                    max_roots_while_proofs=PROOF_PRIORITY_MAX_ROOTS,
+                )
                 if excess_assigned:
                     logger.info(
                         f"releasing {len(excess_assigned)} excess batches from {slave_name} "
-                        f"(adaptive cap={max_concurrent})"
+                        f"(adaptive cap={max_concurrent}"
+                        f"{', proof_priority_root_cap=' + str(PROOF_PRIORITY_MAX_ROOTS) if (PROOF_PRIORITY_ENABLED and has_proof_work) else ''})"
                     )
                     for b in excess_assigned:
                         batch = b["batch"]
@@ -707,30 +797,41 @@ class SlaveManager:
 
                 concurrent = [b["batch"] for b in kept_assigned]
                 concurrent_by_bench = {}
+                concurrent_roots = sum(
+                    1 for batch in concurrent if batch.get("sampled_nonces") is None
+                )
                 for b in kept_assigned:
                     bid = b["batch"]["benchmark_id"]
                     concurrent_by_bench[bid] = concurrent_by_bench.get(bid, 0) + 1
 
-                ordered_batches = self.batches
-                if starved_slot_benchmarks:
-                    ordered_batches = [
-                        b for _, b in sorted(
-                            enumerate(self.batches),
-                            key=lambda item: (
-                                0 if (
-                                    item[1]["batch"]["sampled_nonces"] is None
-                                    and item[1]["batch"]["benchmark_id"] in starved_slot_benchmarks
-                                ) else 1,
-                                -starved_slot_benchmarks.get(item[1]["batch"]["benchmark_id"], 0),
-                                item[0],
-                            ),
-                        )
-                    ]
+                # Own proofs first, then other proofs, then starved roots, then rest.
+                def _batch_priority(item):
+                    idx, row = item
+                    batch = row["batch"]
+                    is_proof = batch.get("sampled_nonces") is not None
+                    own_proof = is_proof and has_artifacts(
+                        batch["benchmark_id"], batch["batch_idx"]
+                    )
+                    starved_root = (
+                        (not is_proof)
+                        and batch["benchmark_id"] in starved_slot_benchmarks
+                    )
+                    return (
+                        0 if own_proof else 1 if is_proof else 2 if starved_root else 3,
+                        -starved_slot_benchmarks.get(batch["benchmark_id"], 0),
+                        idx,
+                    )
+
+                ordered_batches = [
+                    b for _, b in sorted(enumerate(self.batches), key=_batch_priority)
+                ]
 
                 def assign_pass(respect_cap):
+                    nonlocal concurrent_roots
                     for b in ordered_batches:
                         batch = b["batch"]
                         bid = batch["benchmark_id"]
+                        is_proof = batch.get("sampled_nonces") is not None
                         if len(concurrent) >= max_concurrent:
                             break
                         if (
@@ -741,9 +842,13 @@ class SlaveManager:
                             continue
                         if slot_types and bid not in slot_benchmark_ids:
                             continue
+                        if is_proof and not has_artifacts(bid, batch["batch_idx"]):
+                            continue
                         if (
-                            batch["sampled_nonces"] is not None
-                            and not self._slave_has_root_artifacts(slave_name, bid, batch["batch_idx"])
+                            PROOF_PRIORITY_ENABLED
+                            and has_proof_work
+                            and (not is_proof)
+                            and concurrent_roots >= PROOF_PRIORITY_MAX_ROOTS
                         ):
                             continue
                         if not (
@@ -758,8 +863,8 @@ class SlaveManager:
                         b["start_time"] = now
                         b["num_attempts"] += 1
                         concurrent_by_bench[bid] = concurrent_by_bench.get(bid, 0) + 1
-                        table = "root_batch" if batch["sampled_nonces"] is None else "proofs_batch"  # nosec B608 — two hardcoded table names, no user input
-                        slot_state = "root" if batch["sampled_nonces"] is None else "proof"
+                        table = "root_batch" if not is_proof else "proofs_batch"  # nosec B608 — two hardcoded table names, no user input
+                        slot_state = "proof" if is_proof else "root"
                         updates.append((
                             f"""
                             UPDATE {table}
@@ -782,12 +887,21 @@ class SlaveManager:
                                 (now, slot_state, batch["benchmark_id"])
                             ))
                         concurrent.append(batch)
+                        if not is_proof:
+                            concurrent_roots += 1
 
                 # Pass 1: spread across benchmarks (respect per-benchmark cap) so all
                 # challenges advance together. Pass 2: if slots remain because few
                 # benchmarks are active, fill them ignoring the cap (use full capacity).
                 assign_pass(respect_cap=True)
                 assign_pass(respect_cap=False)
+                if PROOF_PRIORITY_ENABLED and has_proof_work:
+                    logger.info(
+                        f"proof_priority slave={slave_name} proofs_assigned="
+                        f"{sum(1 for batch in concurrent if batch.get('sampled_nonces') is not None)} "
+                        f"roots_assigned={concurrent_roots} "
+                        f"root_cap={PROOF_PRIORITY_MAX_ROOTS} own_proof_work={len(own_proof_work)}"
+                    )
                 assigned_starved = [
                     batch["id"]
                     for batch in concurrent
