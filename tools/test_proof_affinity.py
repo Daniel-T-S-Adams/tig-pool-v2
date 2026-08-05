@@ -39,7 +39,7 @@ def main() -> int:
     cases.append(
         (
             should_skip_root_for_slave("pool-cpu-b", "pool-cpu-a", online) is True,
-            "skip non-owner while owner online",
+            "skip non-owner while owner online under cap",
         )
     )
     cases.append(
@@ -52,6 +52,30 @@ def main() -> int:
         (
             should_skip_root_for_slave("pool-cpu-b", "pool-cpu-a", {"pool-cpu-b"}) is False,
             "allow takeover when owner dark",
+        )
+    )
+    cases.append(
+        (
+            should_skip_root_for_slave(
+                "pool-cpu-b",
+                "pool-cpu-a",
+                online,
+                preferred_at_cap=True,
+            )
+            is False,
+            "allow overflow when owner online but at adaptive cap",
+        )
+    )
+    cases.append(
+        (
+            should_skip_root_for_slave(
+                "pool-cpu-b",
+                "pool-cpu-a",
+                online,
+                preferred_at_cap=False,
+            )
+            is True,
+            "still sticky when owner online under cap",
         )
     )
     cases.append(

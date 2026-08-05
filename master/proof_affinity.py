@@ -61,11 +61,15 @@ def should_skip_root_for_slave(
     online_slaves: Set[str],
     *,
     sticky_enabled: bool = STICKY_ROOTS_ENABLED,
+    preferred_at_cap: bool = False,
 ) -> bool:
     """True when this polling slave must not take a root for a sticky job.
 
-    If the preferred owner is online, only that owner may take more roots.
-    If the preferred owner is dark, other live slaves may take over.
+    If the preferred owner is online and under capacity, only that owner may
+    take more roots. If the preferred owner is dark, other live slaves may
+    take over. If the preferred owner is online but already at its adaptive
+    concurrent cap, other live slaves may overflow so newcomers are not
+    starved behind warehoused unassigned roots.
     """
     if not sticky_enabled:
         return False
@@ -73,7 +77,11 @@ def should_skip_root_for_slave(
         return False
     if preferred_slave == slave_name:
         return False
-    return preferred_slave in (online_slaves or set())
+    if preferred_slave not in (online_slaves or set()):
+        return False
+    if preferred_at_cap:
+        return False
+    return True
 
 
 def ensure_slave_seen_table(execute: Callable) -> None:

@@ -553,6 +553,23 @@ class SlaveManager:
             (state, benchmark_id)
         )
 
+    def _route_cap_for_slave(self, slave_name: str) -> int:
+        """Configured max_concurrent_batches for the slave route matching name."""
+        matched = next(
+            (
+                row
+                for row in (CONFIG.get("slaves") or [])
+                if re.match(row.get("name_regex") or r"$^", slave_name)
+            ),
+            None,
+        )
+        if not matched:
+            return 0
+        try:
+            return max(0, int(matched.get("max_concurrent_batches") or 0))
+        except (TypeError, ValueError):
+            return 0
+
     def _adaptive_max_concurrent(self, slave_name: str, route_cap: int) -> int:
         """Return a measured per-slave cap, bounded by the route cap.
 
@@ -780,6 +797,24 @@ class SlaveManager:
                 starved_slot_benchmarks = self._starved_slot_benchmarks(slot_types, int(now))
             root_affinity = self._root_affinity_map()
             online_slaves = self._online_slaves(int(now)) if STICKY_ROOTS_ENABLED else set()
+            # Sticky overflow: preferred owners already at adaptive cap should not
+            # warehouse unassigned roots forever. Snapshot outside the lock so
+            # adaptive-cap DB lookups do not hold assignment.
+            active_by_slave: Dict[str, int] = {}
+            for row in self.batches:
+                owner = row.get("slave")
+                if owner and row.get("end_time") is None:
+                    active_by_slave[str(owner)] = active_by_slave.get(str(owner), 0) + 1
+            preferred_at_cap: Set[str] = set()
+            for preferred in set(root_affinity.values()):
+                if not preferred or preferred not in online_slaves:
+                    continue
+                pref_route = self._route_cap_for_slave(preferred)
+                if pref_route <= 0:
+                    continue
+                pref_cap = self._adaptive_max_concurrent(preferred, pref_route)
+                if pref_cap > 0 and int(active_by_slave.get(preferred) or 0) >= pref_cap:
+                    preferred_at_cap.add(preferred)
 
             with self.lock:
                 route_cap = int(slave["max_concurrent_batches"])
@@ -902,10 +937,14 @@ class SlaveManager:
                             continue
                         if is_proof and not has_artifacts(bid, batch["batch_idx"]):
                             continue
+                        preferred = root_affinity.get(bid)
                         if (not is_proof) and should_skip_root_for_slave(
                             slave_name,
-                            root_affinity.get(bid),
+                            preferred,
                             online_slaves,
+                            preferred_at_cap=bool(
+                                preferred and preferred in preferred_at_cap
+                            ),
                         ):
                             continue
                         if (
