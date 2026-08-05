@@ -302,6 +302,8 @@ class JobManager:
         now = int(time.time() * 1000)
 
         # Find jobs where all root_batchs are ready
+        # NOTE: COUNT(A.ready) only checks non-NULL; ready=false (abandon/stop)
+        # must NOT count as complete. Require every batch ready=true.
         rows = get_db_conn().fetch_all(
             """
             WITH ready AS (
@@ -310,9 +312,10 @@ class JobManager:
                 INNER JOIN job B
                     ON B.merkle_root_ready IS NULL
                     AND B.stopped IS NULL
+                    AND B.end_time IS NULL
                     AND A.benchmark_id = B.benchmark_id
                 GROUP BY A.benchmark_id
-                HAVING COUNT(*) = COUNT(A.ready)
+                HAVING BOOL_AND(A.ready IS TRUE)
             )
             SELECT 
                 A.benchmark_id, 
@@ -328,7 +331,24 @@ class JobManager:
         # Calculate merkle roots for completed jobs
         for row in rows:
             benchmark_id = row['benchmark_id']
+            if (
+                row['batch_merkle_roots'] is None
+                or row['solution_quality'] is None
+                or any(x is None for x in row['batch_merkle_roots'])
+                or any(x is None for x in row['solution_quality'])
+            ):
+                logger.warning(
+                    f"job {benchmark_id}: skipping merkle root assembly "
+                    f"(null batch merkle_root/solution_quality)"
+                )
+                continue
             solution_quality = [x for y in row['solution_quality'] for x in y]
+            if not solution_quality:
+                logger.warning(
+                    f"job {benchmark_id}: skipping merkle root assembly "
+                    f"(empty solution_quality)"
+                )
+                continue
             average_quality = sum(solution_quality) // len(solution_quality)
 
             batch_merkle_roots = [MerkleHash.from_str(root) for root in row['batch_merkle_roots']]
@@ -370,6 +390,9 @@ class JobManager:
             ])
             
         # Find jobs where all proofs_batchs are ready
+        # Same ready=false trap as roots: abandon/stop/zombie cleanup marks
+        # unfinished proofs ready=false with null merkle_proofs. Also skip
+        # stopped/ended jobs (proof CTE previously lacked that filter).
         rows = get_db_conn().fetch_all(
             """
             WITH ready AS (
@@ -378,9 +401,11 @@ class JobManager:
                 INNER JOIN job B
                     ON B.merkle_root_ready
                     AND B.merkle_proofs_ready IS NULL
+                    AND B.stopped IS NULL
+                    AND B.end_time IS NULL
                     AND A.benchmark_id = B.benchmark_id
                 GROUP BY A.benchmark_id
-                HAVING COUNT(*) = COUNT(A.ready)
+                HAVING BOOL_AND(A.ready IS TRUE)
             )
             SELECT 
                 A.benchmark_id, 
@@ -404,9 +429,16 @@ class JobManager:
 
         for row in rows:
             benchmark_id = row["benchmark_id"]
+            raw_batch_proofs = row["batch_merkle_proofs"]
+            if raw_batch_proofs is None or any(y is None for y in raw_batch_proofs):
+                logger.warning(
+                    f"job {benchmark_id}: skipping proof assembly "
+                    f"(null batch merkle_proofs)"
+                )
+                continue
             batch_merkle_proofs = [
                 MerkleProof.from_dict(x) 
-                for y in row["batch_merkle_proofs"] 
+                for y in raw_batch_proofs 
                 for x in y
             ]
 
@@ -420,6 +452,12 @@ class JobManager:
             )
 
             batch_merkle_roots = batch_merkle_roots["batch_merkle_roots"]
+            if batch_merkle_roots is None or any(r is None for r in batch_merkle_roots):
+                logger.warning(
+                    f"job {benchmark_id}: skipping proof assembly "
+                    f"(null batch merkle_roots)"
+                )
+                continue
             
             logger.info(f"job {benchmark_id}: (proof ready)")
             
