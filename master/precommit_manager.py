@@ -225,6 +225,23 @@ class PrecommitManager:
                         FROM job j
                         WHERE j.stopped IS NULL
                           AND j.end_time IS NULL
+                          AND j.merkle_root_ready IS NULL
+                          AND j.settings->>'challenge_id' IN %s
+                    ) AS cpu_jobs_needing_roots,
+                    (
+                        SELECT COUNT(*)
+                        FROM job j
+                        WHERE j.stopped IS NULL
+                          AND j.end_time IS NULL
+                          AND j.merkle_root_ready = true
+                          AND j.merkle_proofs_ready IS NULL
+                          AND j.settings->>'challenge_id' IN %s
+                    ) AS cpu_jobs_in_proof_phase,
+                    (
+                        SELECT COUNT(*)
+                        FROM job j
+                        WHERE j.stopped IS NULL
+                          AND j.end_time IS NULL
                           AND j.settings->>'challenge_id' IN %s
                     ) AS gpu_active_jobs,
                     (
@@ -249,6 +266,8 @@ class PrecommitManager:
                     cutoff_ms,
                     cutoff_ms,
                     CPU_CHALLENGE_IDS,
+                    CPU_CHALLENGE_IDS,
+                    CPU_CHALLENGE_IDS,
                     GPU_CHALLENGE_IDS,
                     CPU_CHALLENGE_IDS,
                 ),
@@ -256,17 +275,19 @@ class PrecommitManager:
             cpu_slots = _cpu_slot_target()
             cpu_create_target = _cpu_create_target(cpu_slots)
             cpu_active_jobs = int(row.get("cpu_active_jobs") or 0)
+            cpu_jobs_needing_roots = int(row.get("cpu_jobs_needing_roots") or 0)
+            cpu_jobs_in_proof_phase = int(row.get("cpu_jobs_in_proof_phase") or 0)
             gpu_active_jobs = int(row.get("gpu_active_jobs") or 0)
             cpu_unassigned_roots = int(row.get("cpu_unassigned_roots") or 0)
             gpu_floor = _gpu_slot_floor_total()
             # Spare CPU create budget + no free CPU root batches => bias toward
-            # CPU work, but never treat inflated resource_slots.cpu as a reason
-            # to permanently exclude GPU creates.
+            # CPU work. Count only jobs that still need roots — proof-phase jobs
+            # (roots done, proofs slow/stalled) must not starve idle CPU workers.
             idle_cpu_needs_work = (
                 settings.get("idle_cpu_override", True)
                 and cpu_slots > 0
                 and cpu_unassigned_roots == 0
-                and cpu_active_jobs < cpu_create_target
+                and cpu_jobs_needing_roots < cpu_create_target
             )
             snapshot = {
                 "enabled": True,
@@ -277,6 +298,8 @@ class PrecommitManager:
                 "cpu_slots": cpu_slots,
                 "cpu_create_target": cpu_create_target,
                 "cpu_active_jobs": cpu_active_jobs,
+                "cpu_jobs_needing_roots": cpu_jobs_needing_roots,
+                "cpu_jobs_in_proof_phase": cpu_jobs_in_proof_phase,
                 "gpu_active_jobs": gpu_active_jobs,
                 "gpu_slot_floor": gpu_floor,
                 "cpu_unassigned_roots": cpu_unassigned_roots,
@@ -324,10 +347,13 @@ class PrecommitManager:
             if governor_reason.startswith("idle_cpu_override:"):
                 logger.info(
                     "precommit governor allowing create via idle CPU override "
-                    "(cpu_active_jobs=%s/%s create_target=%s, cpu_unassigned_roots=%s): %s",
-                    governor.get("cpu_active_jobs"),
+                    "(cpu_jobs_needing_roots=%s/%s create_target=%s, "
+                    "cpu_active_jobs=%s proof_phase=%s, cpu_unassigned_roots=%s): %s",
+                    governor.get("cpu_jobs_needing_roots"),
                     governor.get("cpu_slots"),
                     governor.get("cpu_create_target"),
+                    governor.get("cpu_active_jobs"),
+                    governor.get("cpu_jobs_in_proof_phase"),
                     governor.get("cpu_unassigned_roots"),
                     governor_reason,
                 )
