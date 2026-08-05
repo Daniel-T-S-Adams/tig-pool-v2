@@ -76,6 +76,30 @@ def main() -> int:
             False,
             "soft-only with healthy roots/idle skips",
         ),
+        (
+            {
+                **base,
+                "issues": ["slow_time_to_proof_submission"],
+                "proof_conversion_rate": 0.9231,
+                "productive_idle_cpu": 0,
+                "slot_idle_cpu": 0,
+                "min_slot_idle_cpu": 16,
+            },
+            False,
+            "soft latency + healthy conversion never drains (even when busy)",
+        ),
+        (
+            {
+                **base,
+                "issues": ["slow_time_to_proof_submission"],
+                "proof_conversion_rate": 0.80,
+                "productive_idle_cpu": 0,
+                "slot_idle_cpu": 0,
+                "min_slot_idle_cpu": 16,
+            },
+            True,
+            "soft latency + weak conversion still drains when busy",
+        ),
     ]
     failed = 0
     for kwargs, expect_drain, label in cases:

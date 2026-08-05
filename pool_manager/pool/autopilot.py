@@ -2581,6 +2581,11 @@ def reward_funnel_max_drain_decision(
     Returns (should_drain, details). Soft latency noise, and near-threshold
     low_proof_conversion (>= soft floor), can skip drain when roots are healthy
     and free/idle CPU capacity exists. Truly hard conversion/stop issues still drain.
+
+    Special case: soft-only slow_time_to_proof_submission with healthy proof
+    conversion (>= min_proof_conversion_rate) never drains max_concurrent — it
+    should only block upscale via funnel_safe / recovery posture. Busy CPU fleets
+    were sawtoothing max down to the drain floor on long GPU/JS proof tails.
     """
     hard_drain_issues = {
         "low_proof_conversion",
@@ -2621,7 +2626,18 @@ def reward_funnel_max_drain_decision(
     idle_ok = productive_idle_ok or slot_idle_ok
     has_hard = bool(hard_hits)
     has_soft = bool(soft_hits)
-    skip_soft = (not has_hard) and has_soft and root_ready_ok and idle_ok
+    conversion_ok = conversion is not None and conversion >= target
+    # Soft latency alone must not yank max while conversion is healthy — even
+    # when the fleet is busy (no idle skip). Upscale remains gated elsewhere.
+    soft_latency_only = (
+        (not has_hard)
+        and has_soft
+        and soft_hits <= {"slow_time_to_proof_submission"}
+    )
+    skip_soft_latency = soft_latency_only and conversion_ok
+    skip_soft = (not has_hard) and has_soft and (
+        skip_soft_latency or (root_ready_ok and idle_ok)
+    )
     should_drain = has_hard or (has_soft and not skip_soft)
     details = {
         "has_hard_drain": has_hard,
@@ -2630,6 +2646,7 @@ def reward_funnel_max_drain_decision(
         "soft_issues": sorted(soft_hits),
         "marginal_low_proof_conversion": marginal_conversion,
         "skip_soft_drain": skip_soft,
+        "skip_soft_latency_healthy_conversion": skip_soft_latency,
         "root_ready_ok": root_ready_ok,
         "idle_ok": idle_ok,
         "productive_idle_ok": productive_idle_ok,
@@ -2637,6 +2654,7 @@ def reward_funnel_max_drain_decision(
         "slot_idle_cpu": int(slot_idle_cpu or 0),
         "proof_conversion_rate": conversion,
         "soft_proof_conversion_floor": floor,
+        "conversion_ok": conversion_ok,
     }
     return should_drain, details
 
