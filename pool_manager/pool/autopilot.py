@@ -93,6 +93,18 @@ ROOT_BACKLOG_DRAIN_MIN_NOT_STARTED = int(os.environ.get("AUTOPILOT_ROOT_BACKLOG_
 ROOT_BACKLOG_DRAIN_MIN_AGE_MS = int(os.environ.get("AUTOPILOT_ROOT_BACKLOG_DRAIN_MIN_AGE_MS", str(20 * 60 * 1000)))
 ROOT_BACKLOG_DRAIN_MIN_BUNDLES = int(os.environ.get("AUTOPILOT_ROOT_BACKLOG_DRAIN_MIN_BUNDLES", "1"))
 ROOT_BACKLOG_DRAIN_MIN_PER_CHALLENGE = int(os.environ.get("AUTOPILOT_ROOT_BACKLOG_DRAIN_MIN_PER_CHALLENGE", "1"))
+# Drain/hold max_concurrent when too many roots sit unfinished. Capacity-model
+# upscales must not keep flooding precommits while the root phase is stuck.
+ROOT_PENDING_MAX_CONCURRENT_DRAIN = int(
+    os.environ.get("AUTOPILOT_ROOT_PENDING_MAX_CONCURRENT_DRAIN", "256")
+)
+ROOT_READY_RATE_MIN_FOR_UPSCALE = float(
+    os.environ.get("AUTOPILOT_ROOT_READY_RATE_MIN_FOR_UPSCALE", "0.50")
+)
+# When recommended max_concurrent jumps far above live config, climb slowly so
+# proof conversion can prove out before another surge of precommits.
+SURGE_TARGET_GAP = int(os.environ.get("AUTOPILOT_SURGE_TARGET_GAP", "16"))
+SURGE_MAX_BENCHMARK_UP_STEP = int(os.environ.get("AUTOPILOT_SURGE_MAX_BENCHMARK_UP_STEP", "1"))
 STRANDED_BENCHMARK_MS = int(os.environ.get("AUTOPILOT_STRANDED_BENCHMARK_MS", str(30 * 60 * 1000)))
 STRANDED_DOWNSCALE_STEP = int(os.environ.get("AUTOPILOT_STRANDED_DOWNSCALE_STEP", "2"))
 STRANDED_BUFFER_BENCHMARKS = int(os.environ.get("AUTOPILOT_STRANDED_BUFFER_BENCHMARKS", "2"))
@@ -2186,6 +2198,50 @@ def _capacity_floor_max_concurrent(capacity: dict, proposed_slots: dict | None =
     return _clamp(cpu_floor + gpu_floor + buffer, MIN_MAX_BENCHMARKS, UPSTREAM_SAFE_MAX_BENCHMARKS)
 
 
+def _funnel_drain_floor(capacity_model: dict | None = None) -> int:
+    """Soft floor while draining unhealthy/flooded precommit capacity.
+
+    Do not pin to the full CPU capacity floor — that is what left live pools
+    stuck near the upstream ceiling while the reward funnel was already failing.
+    Keep a small GPU reserve so focused GPU work is not starved during CPU drain.
+    """
+    floor = max(MIN_MAX_BENCHMARKS, FUNNEL_DRAIN_MIN_MAX_BENCHMARKS)
+    active_gpu = int((capacity_model or {}).get("active_gpu") or 0)
+    if active_gpu > 0:
+        floor = max(floor, min(active_gpu + BENCHMARK_BUFFER, UPSTREAM_SAFE_MAX_BENCHMARKS))
+    return floor
+
+
+def _root_backlog_pressure(funnel_summary: dict | None) -> dict | None:
+    """Detect root-phase backlog that should block or reverse max_concurrent upscales."""
+    funnel_summary = funnel_summary or {}
+    if funnel_summary.get("roots_pending") is None and funnel_summary.get("root_ready_rate") is None:
+        return None
+    roots_pending = int(funnel_summary.get("roots_pending") or 0)
+    root_ready_rate = funnel_summary.get("root_ready_rate")
+    seen = int(funnel_summary.get("benchmarks_seen") or 0)
+    reasons = []
+    if roots_pending >= ROOT_PENDING_MAX_CONCURRENT_DRAIN:
+        reasons.append("roots_pending_above_drain_threshold")
+    if (
+        roots_pending > 0
+        and seen >= 5
+        and root_ready_rate is not None
+        and float(root_ready_rate) < ROOT_READY_RATE_MIN_FOR_UPSCALE
+    ):
+        reasons.append("low_root_ready_rate_with_pending_roots")
+    if not reasons:
+        return None
+    return {
+        "roots_pending": roots_pending,
+        "root_ready_rate": root_ready_rate,
+        "benchmarks_seen": seen,
+        "reasons": reasons,
+        "threshold": ROOT_PENDING_MAX_CONCURRENT_DRAIN,
+        "min_root_ready_rate": ROOT_READY_RATE_MIN_FOR_UPSCALE,
+    }
+
+
 def _challenge_ids_by_profile(cfg: dict) -> tuple[list[str], list[str]]:
     cpu_ids = []
     gpu_ids = []
@@ -3283,16 +3339,12 @@ def _plan_config_change(report: dict, cfg: dict, clean_windows: int) -> dict:
             "high_unexpected_stopped_or_expired_rate",
             "high_unexpected_stopped_rate",
             "high_unexpected_stopped_without_roots_rate",
+            "root_phase_not_complete",
         }
         active_issues = set(funnel_summary.get("issues") or [])
         current = int(cfg.get("max_concurrent_benchmarks") or 0)
         capacity_model = report.get("capacity_model") or {}
-        target_slots = _target_resource_slots(capacity_model) if capacity_model else {}
-        drain_floor = max(
-            MIN_MAX_BENCHMARKS,
-            FUNNEL_DRAIN_MIN_MAX_BENCHMARKS,
-            _capacity_floor_max_concurrent(capacity_model, target_slots) if capacity_model else 0,
-        )
+        drain_floor = _funnel_drain_floor(capacity_model)
         if current > drain_floor and active_issues.intersection(drain_issues):
             next_max = max(drain_floor, current - max(1, MAX_BENCHMARK_DOWN_STEP))
             new_cfg = json.loads(json.dumps(cfg))
@@ -3307,11 +3359,41 @@ def _plan_config_change(report: dict, cfg: dict, clean_windows: int) -> dict:
                     "unexpected_stopped_rate": funnel_summary.get("unexpected_stopped_rate"),
                     "unexpected_stopped_without_roots_rate": funnel_summary.get("unexpected_stopped_without_roots_rate"),
                     "avg_time_to_proof_submit_sec": funnel_summary.get("avg_time_to_proof_submit_sec"),
+                    "roots_pending": funnel_summary.get("roots_pending"),
+                    "root_ready_rate": funnel_summary.get("root_ready_rate"),
                     "drain_floor": drain_floor,
                 }
             }
             decision["config"] = new_cfg
             return decision
+
+    backlog_pressure = _root_backlog_pressure(funnel_summary)
+    if backlog_pressure:
+        current = int(cfg.get("max_concurrent_benchmarks") or 0)
+        capacity_model = report.get("capacity_model") or {}
+        drain_floor = _funnel_drain_floor(capacity_model)
+        if current > drain_floor:
+            next_max = max(drain_floor, current - max(1, MAX_BENCHMARK_DOWN_STEP))
+            new_cfg = json.loads(json.dumps(cfg))
+            new_cfg["max_concurrent_benchmarks"] = next_max
+            decision["reason"] = "drain_root_backlog_max_concurrent"
+            decision["changes"] = {
+                "max_concurrent_benchmarks": {
+                    "current": current,
+                    "next": next_max,
+                    "drain_floor": drain_floor,
+                    **backlog_pressure,
+                }
+            }
+            decision["config"] = new_cfg
+            return decision
+        decision.setdefault("guardrails", {})["root_backlog_max_concurrent"] = {
+            **backlog_pressure,
+            "current": current,
+            "drain_floor": drain_floor,
+            "skipped": "already_at_or_below_drain_floor",
+        }
+
     if health.get("unserved_stranded_benchmarks"):
         current = int(cfg.get("max_concurrent_benchmarks") or 0)
         active_jobs = _active_unfinished_jobs()
@@ -3459,22 +3541,40 @@ def _plan_config_change(report: dict, cfg: dict, clean_windows: int) -> dict:
                 "active_jobs": active_jobs,
                 "signals": max_rec.get("signals") or {},
             }
-        else:
-            max_up_step = 1 if posture == "conservative" else MAX_BENCHMARK_UP_STEP
-            next_max = _next_value_bounded(current, target, max_up_step, MAX_BENCHMARK_DOWN_STEP)
-            if next_max != current:
-                new_cfg["max_concurrent_benchmarks"] = next_max
-                changes["max_concurrent_benchmarks"] = {
+        elif target > current:
+            upscale_backlog = _root_backlog_pressure(funnel_summary)
+            if upscale_backlog:
+                decision.setdefault("guardrails", {})["max_concurrent_benchmarks"] = {
+                    "skipped": "upscale_blocked_by_root_backlog",
                     "current": current,
                     "target": target,
-                    "next": next_max,
                     "active_jobs": active_jobs,
-                    "capacity_floor": capacity_floor,
-                    "gpu_capacity_needs_room": gpu_needs_room,
-                    "productive_capacity_scale": productive_capacity_scale,
-                    "policy_posture": posture,
+                    **upscale_backlog,
                     "signals": max_rec.get("signals") or {},
                 }
+            else:
+                max_up_step = 1 if posture == "conservative" else MAX_BENCHMARK_UP_STEP
+                surge_limited = False
+                if (target - current) >= SURGE_TARGET_GAP:
+                    surge_limited = max_up_step > SURGE_MAX_BENCHMARK_UP_STEP
+                    max_up_step = min(max_up_step, SURGE_MAX_BENCHMARK_UP_STEP)
+                next_max = _next_value_bounded(current, target, max_up_step, MAX_BENCHMARK_DOWN_STEP)
+                if next_max != current:
+                    new_cfg["max_concurrent_benchmarks"] = next_max
+                    changes["max_concurrent_benchmarks"] = {
+                        "current": current,
+                        "target": target,
+                        "next": next_max,
+                        "active_jobs": active_jobs,
+                        "capacity_floor": capacity_floor,
+                        "gpu_capacity_needs_room": gpu_needs_room,
+                        "productive_capacity_scale": productive_capacity_scale,
+                        "policy_posture": posture,
+                        "up_step": max_up_step,
+                        "surge_limited": surge_limited,
+                        "surge_target_gap": SURGE_TARGET_GAP,
+                        "signals": max_rec.get("signals") or {},
+                    }
 
     current_per = new_cfg.get("per_challenge_max_benchmarks") or {}
     if per_rec and current_per and (capacity_change_allowed or safe_per_challenge_scale):

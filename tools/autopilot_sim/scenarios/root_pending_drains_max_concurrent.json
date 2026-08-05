@@ -1,0 +1,107 @@
+{
+  "name": "root_pending_drains_max_concurrent",
+  "lesson": "A large unfinished root backlog must drain max_concurrent_benchmarks even when the funnel has not yet tripped full proof-conversion failure, so new precommits stop piling on stranded root work.",
+  "clean_windows": 4,
+  "assertions": [
+    {
+      "expect_reason": "drain_root_backlog_max_concurrent"
+    },
+    {
+      "expect_change_key": "max_concurrent_benchmarks"
+    },
+    {
+      "expect_max_direction": "down"
+    }
+  ],
+  "config": {
+    "max_concurrent_benchmarks": 90,
+    "resource_slots": {
+      "slots": {
+        "cpu": 64,
+        "vector_search": 12,
+        "hypergraph": 2,
+        "neuralnet_optimizer": 4
+      },
+      "enabled": true
+    },
+    "per_challenge_max_benchmarks": {
+      "c001": 16,
+      "c002": 16,
+      "c004": 8,
+      "c005": 2,
+      "c006": 4
+    },
+    "adaptive_slave_caps": {
+      "cpu_max_cap": 32,
+      "gpu_max_cap": 12
+    },
+    "slaves": []
+  },
+  "report": {
+    "mode": "read_only",
+    "master_config_error": null,
+    "current_config": {
+      "max_concurrent_benchmarks": 90,
+      "slaves": []
+    },
+    "slaves": [
+      {
+        "slave_name": "pool-cpu-backlog",
+        "profile": "cpu",
+        "registered": true,
+        "registered_active": true,
+        "active_now": true,
+        "active_unfinished": 70,
+        "stale_roots": 0,
+        "stale_proofs": 0,
+        "completed_recent": 40,
+        "nonces_recent": 800000
+      }
+    ],
+    "slots": {
+      "summary": []
+    },
+    "challenges": [],
+    "stale_totals": {
+      "roots": 0,
+      "proofs": 0
+    },
+    "stranded_benchmarks": [],
+    "capacity_model": {
+      "active_cpu": 18,
+      "active_gpu": 1,
+      "aws_cpu_jobs": 32,
+      "productive_idle_cpu": 0,
+      "productive_idle_gpu": 0,
+      "cpu_pressure": 70,
+      "gpu_pressure": 8,
+      "cpu_completed_recent": 40,
+      "gpu_completed_recent": 8,
+      "stale_roots": 0,
+      "stale_proofs": 0
+    },
+    "reward_funnel": {
+      "summary": {
+        "safe_to_scale_workload": true,
+        "active_benchmarks": 78,
+        "benchmarks_seen": 120,
+        "roots_pending": 1300,
+        "root_ready_rate": 0.35,
+        "proof_conversion_rate": 0.9,
+        "stopped_rate": 0.05,
+        "unexpected_stopped_rate": 0.02,
+        "avg_time_to_proof_submit_sec": 900,
+        "issues": []
+      }
+    },
+    "recommendations": [
+      {
+        "key": "max_concurrent_benchmarks",
+        "proposed": 90,
+        "signals": {
+          "slot_capacity": 90
+        }
+      }
+    ]
+  }
+}

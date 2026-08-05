@@ -13,7 +13,7 @@
       "expect_max_direction": "up"
     },
     {
-      "expect_max_step_lte": 2
+      "expect_max_step_lte": 1
     }
   ],
   "config": {
