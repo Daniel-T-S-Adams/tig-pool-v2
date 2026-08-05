@@ -10,6 +10,7 @@ from common.utils import FromDict
 from typing import Dict, List, Optional, Set, Tuple
 from master.sql import get_db_conn
 from master.client_manager import CONFIG
+from master.proof_affinity import SLAVE_ONLINE_MS, ensure_slave_seen_table
 
 logger = logging.getLogger(os.path.splitext(os.path.basename(__file__))[0])
 
@@ -311,6 +312,7 @@ class PrecommitManager:
         ):
             return self._governor_cache
         try:
+            ensure_slave_seen_table(get_db_conn().execute)
             cutoff_ms = now_ms - int(settings.get("window_ms") or (30 * 60 * 1000))
             row = get_db_conn().fetch_one(
                 """
@@ -417,7 +419,50 @@ class PrecommitManager:
                           AND j.end_time IS NULL
                           AND j.merkle_root_ready IS NULL
                           AND j.settings->>'challenge_id' IN %s
-                    ) AS gpu_unassigned_roots
+                    ) AS gpu_unassigned_roots,
+                    (
+                        -- Claimable = unassigned and not reserved for an online
+                        -- sticky owner. Sticky-warehoused roots must not freeze
+                        -- CPU creates for idle newcomers.
+                        SELECT COUNT(*)
+                        FROM root_batch rb
+                        JOIN job j ON j.benchmark_id = rb.benchmark_id
+                        WHERE rb.ready IS NULL
+                          AND rb.slave IS NULL
+                          AND j.stopped IS NULL
+                          AND j.end_time IS NULL
+                          AND j.merkle_root_ready IS NULL
+                          AND j.settings->>'challenge_id' IN %s
+                          AND NOT EXISTS (
+                            SELECT 1
+                            FROM root_batch rb2
+                            JOIN slave_seen ss ON ss.slave_name = rb2.slave
+                            WHERE rb2.benchmark_id = rb.benchmark_id
+                              AND rb2.slave IS NOT NULL
+                              AND (rb2.ready = true OR rb2.ready IS NULL)
+                              AND ss.last_seen >= %s
+                          )
+                    ) AS cpu_unassigned_claimable,
+                    (
+                        SELECT COUNT(*)
+                        FROM root_batch rb
+                        JOIN job j ON j.benchmark_id = rb.benchmark_id
+                        WHERE rb.ready IS NULL
+                          AND rb.slave IS NULL
+                          AND j.stopped IS NULL
+                          AND j.end_time IS NULL
+                          AND j.merkle_root_ready IS NULL
+                          AND j.settings->>'challenge_id' IN %s
+                          AND NOT EXISTS (
+                            SELECT 1
+                            FROM root_batch rb2
+                            JOIN slave_seen ss ON ss.slave_name = rb2.slave
+                            WHERE rb2.benchmark_id = rb.benchmark_id
+                              AND rb2.slave IS NOT NULL
+                              AND (rb2.ready = true OR rb2.ready IS NULL)
+                              AND ss.last_seen >= %s
+                          )
+                    ) AS gpu_unassigned_claimable
                 """,
                 (
                     CPU_CHALLENGE_IDS,
@@ -436,6 +481,10 @@ class PrecommitManager:
                     GPU_CHALLENGE_IDS,
                     CPU_CHALLENGE_IDS,
                     GPU_CHALLENGE_IDS,
+                    CPU_CHALLENGE_IDS,
+                    now_ms - int(SLAVE_ONLINE_MS),
+                    GPU_CHALLENGE_IDS,
+                    now_ms - int(SLAVE_ONLINE_MS),
                 ),
             ) or {}
             cpu_slots = _cpu_slot_target()
@@ -449,6 +498,8 @@ class PrecommitManager:
             gpu_roots_pending = int(row.get("gpu_roots_pending") or 0)
             cpu_unassigned_roots = int(row.get("cpu_unassigned_roots") or 0)
             gpu_unassigned_roots = int(row.get("gpu_unassigned_roots") or 0)
+            cpu_unassigned_claimable = int(row.get("cpu_unassigned_claimable") or 0)
+            gpu_unassigned_claimable = int(row.get("gpu_unassigned_claimable") or 0)
             gpu_floor = _gpu_slot_floor_total()
             profile_caps = compute_profile_root_caps(
                 settings, cpu_create_target, gpu_slots_total
@@ -456,17 +507,16 @@ class PrecommitManager:
             profile_blocks = profile_root_backlog_blocks(
                 cpu_roots_pending,
                 gpu_roots_pending,
-                cpu_unassigned_roots,
-                gpu_unassigned_roots,
+                cpu_unassigned_claimable,
+                gpu_unassigned_claimable,
                 profile_caps,
             )
-            # Spare CPU create budget + no free CPU root batches => bias toward
-            # CPU work. Count only jobs that still need roots — proof-phase jobs
-            # (roots done, proofs slow/stalled) must not starve idle CPU workers.
+            # Spare CPU create budget + no claimable CPU root batches => bias
+            # toward CPU work. Sticky-reserved unassigned roots do not count.
             idle_cpu_needs_work = (
                 settings.get("idle_cpu_override", True)
                 and cpu_slots > 0
-                and cpu_unassigned_roots == 0
+                and cpu_unassigned_claimable == 0
                 and cpu_jobs_needing_roots < cpu_create_target
                 and not profile_blocks.get("cpu")
             )
@@ -488,6 +538,8 @@ class PrecommitManager:
                 "gpu_slot_floor": gpu_floor,
                 "cpu_unassigned_roots": cpu_unassigned_roots,
                 "gpu_unassigned_roots": gpu_unassigned_roots,
+                "cpu_unassigned_claimable": cpu_unassigned_claimable,
+                "gpu_unassigned_claimable": gpu_unassigned_claimable,
                 "profile_caps": profile_caps,
                 "profile_blocks": profile_blocks,
                 "idle_cpu_needs_work": idle_cpu_needs_work,
@@ -549,18 +601,22 @@ class PrecommitManager:
             if profile_blocks.get("cpu") or profile_blocks.get("gpu"):
                 logger.info(
                     "precommit governor profile backlog "
-                    "(cpu_pending=%s/%s unassigned=%s/%s block=%s reasons=%s; "
-                    "gpu_pending=%s/%s unassigned=%s/%s block=%s reasons=%s)",
+                    "(cpu_pending=%s/%s claimable_unassigned=%s/%s raw_unassigned=%s "
+                    "block=%s reasons=%s; "
+                    "gpu_pending=%s/%s claimable_unassigned=%s/%s raw_unassigned=%s "
+                    "block=%s reasons=%s)",
                     governor.get("cpu_roots_pending"),
                     caps.get("cpu_pending_cap"),
-                    governor.get("cpu_unassigned_roots"),
+                    governor.get("cpu_unassigned_claimable"),
                     caps.get("cpu_unassigned_cap"),
+                    governor.get("cpu_unassigned_roots"),
                     profile_blocks.get("cpu"),
                     profile_blocks.get("cpu_reasons"),
                     governor.get("gpu_roots_pending"),
                     caps.get("gpu_pending_cap"),
-                    governor.get("gpu_unassigned_roots"),
+                    governor.get("gpu_unassigned_claimable"),
                     caps.get("gpu_unassigned_cap"),
+                    governor.get("gpu_unassigned_roots"),
                     profile_blocks.get("gpu"),
                     profile_blocks.get("gpu_reasons"),
                 )
