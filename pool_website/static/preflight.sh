@@ -6,7 +6,8 @@ BASE_URL="${INNOPOOL_URL:-https://www.innopool.co.uk}"
 MIN_CPU_THREADS="${INNOPOOL_MIN_CPU_THREADS:-24}"
 MIN_RAM_GB="${INNOPOOL_MIN_RAM_GB:-32}"
 MIN_DISK_GB="${INNOPOOL_MIN_DISK_GB:-100}"
-MIN_GPU_VRAM_GB="${INNOPOOL_MIN_GPU_VRAM_GB:-16}"
+# Optional only. Default 0 = no VRAM floor (any working NVIDIA GPU is accepted).
+MIN_GPU_VRAM_GB="${INNOPOOL_MIN_GPU_VRAM_GB:-0}"
 services=()
 warnings=()
 worker_type="cpu"
@@ -130,12 +131,17 @@ if [ "${worker_type}" = "gpu" ]; then
     if [ "${gpu_count}" -lt 1 ]; then
       fail_or_warn "GPU workers require at least one visible NVIDIA GPU."
     fi
-    min_vram_mb=$((MIN_GPU_VRAM_GB * 1024))
+    # Print GPU inventory for the report; VRAM is informational unless an
+    # operator explicitly sets INNOPOOL_MIN_GPU_VRAM_GB > 0.
     while IFS=, read -r gpu_name vram_mb; do
       gpu_name="$(echo "${gpu_name}" | xargs)"
       vram_mb="$(echo "${vram_mb}" | xargs)"
-      if [ -n "${vram_mb}" ] && [ "${vram_mb}" -lt "${min_vram_mb}" ]; then
-        fail_or_warn "GPU ${gpu_name} has ${vram_mb} MiB VRAM; recommended minimum is ${MIN_GPU_VRAM_GB} GB."
+      echo "  gpu: ${gpu_name} (${vram_mb:-?} MiB)"
+      if [ "${MIN_GPU_VRAM_GB}" -gt 0 ] && [ -n "${vram_mb}" ]; then
+        min_vram_mb=$((MIN_GPU_VRAM_GB * 1024))
+        if [ "${vram_mb}" -lt "${min_vram_mb}" ]; then
+          fail_or_warn "GPU ${gpu_name} has ${vram_mb} MiB VRAM; configured minimum is ${MIN_GPU_VRAM_GB} GB."
+        fi
       fi
     done < <(nvidia-smi --query-gpu=name,memory.total --format=csv,noheader,nounits 2>/dev/null || true)
     echo "  gpu count: ${gpu_count}"

@@ -440,7 +440,9 @@ Public worker preflight requirements:
 - CPU workers should have at least 24 logical threads.
 - CPU workers should have around 32 GB RAM and 100 GB free disk.
 - GPU workers need a working NVIDIA driver and visible `nvidia-smi`.
-- GPU workers should have 16 GB or more VRAM and around 100 GB free disk.
+- There is no default VRAM floor; any working NVIDIA GPU is accepted. Operators
+  may optionally set `INNOPOOL_MIN_GPU_VRAM_GB` if they want a custom check.
+- GPU workers should have around 100 GB free disk (same disk floor as CPU).
 - Low-spec workers can run only with an explicit low-spec override and may be
   disabled if they harm pool health.
 
