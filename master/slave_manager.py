@@ -133,6 +133,13 @@ class SlaveManager:
         self.lock = Lock()
         self._slot_table_ready = False
         self._slave_seen_ready = False
+        # Short TTL cache so sticky-overflow preferred-cap checks do not spam
+        # adaptive-cap DEBUG logs / DB queries on every get-batches poll.
+        self._adaptive_cap_cache: Dict[str, tuple[int, int]] = {}
+        self._adaptive_cap_cache_ms = max(
+            1_000,
+            int(os.environ.get("SLAVE_ADAPTIVE_CAP_CACHE_MS", "15000")),
+        )
 
     def _ensure_slave_seen_table(self):
         if self._slave_seen_ready:
@@ -570,13 +577,32 @@ class SlaveManager:
         except (TypeError, ValueError):
             return 0
 
-    def _adaptive_max_concurrent(self, slave_name: str, route_cap: int) -> int:
+    def _adaptive_max_concurrent(
+        self,
+        slave_name: str,
+        route_cap: int,
+        *,
+        log: bool = True,
+        use_cache: bool = True,
+    ) -> int:
         """Return a measured per-slave cap, bounded by the route cap.
 
         New public miners start with a small cap. As they complete batches in
         the recent window, they earn more in-flight work. Trusted/operator
         slaves keep the route cap so local AWS/C3 tuning remains explicit.
+
+        Sticky-overflow preferred-owner checks should pass log=False so every
+        get-batches poll does not multiply adaptive-cap DEBUG spam.
         """
+        now_ms = int(time.time() * 1000)
+        cache_key = f"{slave_name}:{int(route_cap)}"
+        if use_cache:
+            cached = self._adaptive_cap_cache.get(cache_key)
+            if cached is not None:
+                cached_cap, cached_until = cached
+                if now_ms < cached_until:
+                    return int(cached_cap)
+
         cfg = CONFIG.get("adaptive_slave_caps", {})
         if not cfg or cfg.get("enabled") is False:
             return route_cap
@@ -593,7 +619,6 @@ class SlaveManager:
         window_ms = int(cfg.get("window_ms", 30 * 60 * 1000))
         target_buffer_ms = int(cfg.get("target_buffer_ms", 10 * 60 * 1000))
         warmup_completed = int(cfg.get("warmup_completed_batches", 3))
-        now_ms = int(time.time() * 1000)
         since_ms = now_ms - window_ms
 
         stats = get_db_conn().fetch_one(
@@ -638,10 +663,16 @@ class SlaveManager:
             cap = min_cap
 
         cap = max(1, min(max_cap, cap))
-        logger.debug(
-            f"adaptive cap for {slave_name}: cap={cap}, route_cap={route_cap}, "
-            f"completed_recent={completed}, active={active}, avg_runtime_ms={avg_runtime_ms:.0f}"
-        )
+        if use_cache:
+            self._adaptive_cap_cache[cache_key] = (
+                cap,
+                now_ms + self._adaptive_cap_cache_ms,
+            )
+        if log:
+            logger.debug(
+                f"adaptive cap for {slave_name}: cap={cap}, route_cap={route_cap}, "
+                f"completed_recent={completed}, active={active}, avg_runtime_ms={avg_runtime_ms:.0f}"
+            )
         return cap
 
     def _slave_has_root_artifacts(self, slave_name: str, benchmark_id: str, batch_idx: int) -> bool:
@@ -812,7 +843,9 @@ class SlaveManager:
                 pref_route = self._route_cap_for_slave(preferred)
                 if pref_route <= 0:
                     continue
-                pref_cap = self._adaptive_max_concurrent(preferred, pref_route)
+                pref_cap = self._adaptive_max_concurrent(
+                    preferred, pref_route, log=False, use_cache=True
+                )
                 if pref_cap > 0 and int(active_by_slave.get(preferred) or 0) >= pref_cap:
                     preferred_at_cap.add(preferred)
 
