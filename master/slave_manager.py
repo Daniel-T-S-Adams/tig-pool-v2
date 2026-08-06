@@ -120,6 +120,46 @@ def _batch_retry_time(algorithm_id: str) -> int:
     return overrides.get(challenge_id, CONFIG["time_before_batch_retry"])
 
 
+# Challenge retry stays long so slow-but-alive workers are not stolen mid-job.
+# Dark reclaim separately frees root batches when the assignee stops heartbeating.
+DARK_OWNER_RECLAIM_MS = max(
+    0, int(os.environ.get("SLAVE_DARK_OWNER_RECLAIM_MS", str(3 * 60 * 1000)))
+)
+
+
+def batch_owner_stealable(
+    *,
+    now_ms: int,
+    slave: Optional[str],
+    start_time: Optional[int],
+    algorithm_id: str,
+    online_slaves: Set[str],
+    is_proof: bool,
+    dark_reclaim_ms: int = DARK_OWNER_RECLAIM_MS,
+    retry_ms: Optional[int] = None,
+) -> bool:
+    """True when an assigned batch may be given to another polling slave.
+
+    Proofs are never dark-stolen (local artifacts). Roots may be reclaimed
+    from a dark owner after dark_reclaim_ms even if challenge retry is hours.
+    """
+    if slave is None or start_time is None:
+        return True
+    age = int(now_ms) - int(start_time)
+    effective_retry = (
+        int(retry_ms)
+        if retry_ms is not None
+        else _batch_retry_time(algorithm_id)
+    )
+    if age > effective_retry:
+        return True
+    if is_proof or dark_reclaim_ms <= 0:
+        return False
+    if slave in (online_slaves or set()):
+        return False
+    return age > int(dark_reclaim_ms)
+
+
 INFRASTRUCTURE_ERROR_PATTERNS = [
     "cannot open shared object file",
     "no such file or directory",
@@ -918,7 +958,8 @@ class SlaveManager:
                 slot_benchmark_ids = self._slot_benchmark_ids(slot_types)
                 starved_slot_benchmarks = self._starved_slot_benchmarks(slot_types, int(now))
             root_affinity = self._root_affinity_map()
-            online_slaves = self._online_slaves(int(now)) if STICKY_ROOTS_ENABLED else set()
+            # Always load heartbeats: sticky affinity + dark-owner root reclaim.
+            online_slaves = self._online_slaves(int(now))
             # Optional sticky overflow (off by default): only when explicitly enabled.
             preferred_at_cap: Set[str] = set()
             if STICKY_OVERFLOW_AT_CAP and STICKY_ROOTS_ENABLED:
@@ -1103,10 +1144,13 @@ class SlaveManager:
                             and concurrent_roots >= root_cap_while_proofs
                         ):
                             continue
-                        if not (
-                            b["slave"] is None or
-                            b["start_time"] is None or
-                            (now - b["start_time"]) > _batch_retry_time(batch["settings"]["algorithm_id"])
+                        if not batch_owner_stealable(
+                            now_ms=int(now),
+                            slave=b.get("slave"),
+                            start_time=b.get("start_time"),
+                            algorithm_id=batch["settings"]["algorithm_id"],
+                            online_slaves=online_slaves,
+                            is_proof=is_proof,
                         ):
                             continue
                         if respect_cap and concurrent_by_bench.get(bid, 0) >= per_bench_cap:
