@@ -28,8 +28,8 @@ from master.proof_affinity import (
 
 logger = logging.getLogger(os.path.splitext(os.path.basename(__file__))[0])
 
-# When a slave still owes proof work (local root artifacts), keep root pressure
-# low so proofs are not starved behind a pile of new root batches.
+# Sticky lifecycle: while a slave owes proofs (local artifacts), take no new
+# roots so proof/root work do not fight on the same box. Default 0 = proof-only.
 PROOF_PRIORITY_ENABLED = os.environ.get("SLAVE_PROOF_PRIORITY_ENABLED", "true").lower() in (
     "1",
     "true",
@@ -37,7 +37,14 @@ PROOF_PRIORITY_ENABLED = os.environ.get("SLAVE_PROOF_PRIORITY_ENABLED", "true").
     "on",
 )
 PROOF_PRIORITY_MAX_ROOTS = max(
-    0, int(os.environ.get("SLAVE_PROOF_PRIORITY_MAX_ROOTS", "2"))
+    0, int(os.environ.get("SLAVE_PROOF_PRIORITY_MAX_ROOTS", "0"))
+)
+# Cap-overflow splits jobs across machines and fights sticky proofs. Off by default.
+STICKY_OVERFLOW_AT_CAP = os.environ.get("SLAVE_STICKY_OVERFLOW_AT_CAP", "false").lower() in (
+    "1",
+    "true",
+    "yes",
+    "on",
 )
 
 
@@ -61,10 +68,10 @@ def select_kept_assigned_batches(
         max_concurrent = 0
     proofs = [b for b in assigned if _is_proof_batch_row(b)]
     roots = [b for b in assigned if not _is_proof_batch_row(b)]
-    has_proofs = bool(proofs)
     kept_proofs = proofs[:max_concurrent]
     room = max(0, max_concurrent - len(kept_proofs))
-    if proof_priority and has_proofs:
+    # Apply even with no proof batches yet (awaiting sampling / merkle ready).
+    if proof_priority:
         root_budget = min(room, max(0, int(max_roots_while_proofs)))
     else:
         root_budget = room
@@ -675,6 +682,33 @@ class SlaveManager:
             )
         return cap
 
+    def _slave_awaiting_proofs(self, slave_name: str) -> bool:
+        """True when this slave rooted a job that is in proof phase but not done.
+
+        Covers the gap after roots finish / merkle_root_ready before proof
+        batches appear, and while proof batches are still outstanding.
+        """
+        row = get_db_conn().fetch_one(
+            """
+            SELECT 1 AS ok
+            FROM job j
+            WHERE j.stopped IS NULL
+              AND j.end_time IS NULL
+              AND j.merkle_root_ready = true
+              AND j.merkle_proofs_ready IS NULL
+              AND EXISTS (
+                SELECT 1
+                FROM root_batch r
+                WHERE r.benchmark_id = j.benchmark_id
+                  AND r.slave = %s
+                  AND r.ready = true
+              )
+            LIMIT 1
+            """,
+            (slave_name,),
+        )
+        return bool(row)
+
     def _slave_has_root_artifacts(self, slave_name: str, benchmark_id: str, batch_idx: int) -> bool:
         """Proofs must be built by the slave that produced that exact root batch.
 
@@ -828,26 +862,25 @@ class SlaveManager:
                 starved_slot_benchmarks = self._starved_slot_benchmarks(slot_types, int(now))
             root_affinity = self._root_affinity_map()
             online_slaves = self._online_slaves(int(now)) if STICKY_ROOTS_ENABLED else set()
-            # Sticky overflow: preferred owners already at adaptive cap should not
-            # warehouse unassigned roots forever. Snapshot outside the lock so
-            # adaptive-cap DB lookups do not hold assignment.
-            active_by_slave: Dict[str, int] = {}
-            for row in self.batches:
-                owner = row.get("slave")
-                if owner and row.get("end_time") is None:
-                    active_by_slave[str(owner)] = active_by_slave.get(str(owner), 0) + 1
+            # Optional sticky overflow (off by default): only when explicitly enabled.
             preferred_at_cap: Set[str] = set()
-            for preferred in set(root_affinity.values()):
-                if not preferred or preferred not in online_slaves:
-                    continue
-                pref_route = self._route_cap_for_slave(preferred)
-                if pref_route <= 0:
-                    continue
-                pref_cap = self._adaptive_max_concurrent(
-                    preferred, pref_route, log=False, use_cache=True
-                )
-                if pref_cap > 0 and int(active_by_slave.get(preferred) or 0) >= pref_cap:
-                    preferred_at_cap.add(preferred)
+            if STICKY_OVERFLOW_AT_CAP and STICKY_ROOTS_ENABLED:
+                active_by_slave: Dict[str, int] = {}
+                for row in self.batches:
+                    owner = row.get("slave")
+                    if owner and row.get("end_time") is None:
+                        active_by_slave[str(owner)] = active_by_slave.get(str(owner), 0) + 1
+                for preferred in set(root_affinity.values()):
+                    if not preferred or preferred not in online_slaves:
+                        continue
+                    pref_route = self._route_cap_for_slave(preferred)
+                    if pref_route <= 0:
+                        continue
+                    pref_cap = self._adaptive_max_concurrent(
+                        preferred, pref_route, log=False, use_cache=True
+                    )
+                    if pref_cap > 0 and int(active_by_slave.get(preferred) or 0) >= pref_cap:
+                        preferred_at_cap.add(preferred)
 
             with self.lock:
                 route_cap = int(slave["max_concurrent_batches"])
@@ -886,7 +919,13 @@ class SlaveManager:
                             continue
                         if has_artifacts(batch["benchmark_id"], batch["batch_idx"]):
                             own_proof_work.append(b)
-                has_proof_work = bool(assigned_proofs or own_proof_work)
+                awaiting_proofs = (
+                    PROOF_PRIORITY_ENABLED and self._slave_awaiting_proofs(slave_name)
+                )
+                has_proof_work = bool(assigned_proofs or own_proof_work or awaiting_proofs)
+                root_cap_while_proofs = (
+                    PROOF_PRIORITY_MAX_ROOTS if has_proof_work else max_concurrent
+                )
                 kept_assigned, excess_assigned = select_kept_assigned_batches(
                     assigned,
                     max_concurrent,
@@ -897,7 +936,8 @@ class SlaveManager:
                     logger.info(
                         f"releasing {len(excess_assigned)} excess batches from {slave_name} "
                         f"(adaptive cap={max_concurrent}"
-                        f"{', proof_priority_root_cap=' + str(PROOF_PRIORITY_MAX_ROOTS) if (PROOF_PRIORITY_ENABLED and has_proof_work) else ''})"
+                        f"{', proof_only_root_cap=' + str(PROOF_PRIORITY_MAX_ROOTS) if (PROOF_PRIORITY_ENABLED and has_proof_work) else ''}"
+                        f"{', awaiting_proofs=1' if awaiting_proofs else ''})"
                     )
                     for b in excess_assigned:
                         batch = b["batch"]
@@ -984,7 +1024,7 @@ class SlaveManager:
                             PROOF_PRIORITY_ENABLED
                             and has_proof_work
                             and (not is_proof)
-                            and concurrent_roots >= PROOF_PRIORITY_MAX_ROOTS
+                            and concurrent_roots >= root_cap_while_proofs
                         ):
                             continue
                         if not (
@@ -1033,10 +1073,11 @@ class SlaveManager:
                 assign_pass(respect_cap=False)
                 if PROOF_PRIORITY_ENABLED and has_proof_work:
                     logger.info(
-                        f"proof_priority slave={slave_name} proofs_assigned="
+                        f"proof_only slave={slave_name} proofs_assigned="
                         f"{sum(1 for batch in concurrent if batch.get('sampled_nonces') is not None)} "
                         f"roots_assigned={concurrent_roots} "
-                        f"root_cap={PROOF_PRIORITY_MAX_ROOTS} own_proof_work={len(own_proof_work)}"
+                        f"root_cap={PROOF_PRIORITY_MAX_ROOTS} own_proof_work={len(own_proof_work)} "
+                        f"awaiting_proofs={int(awaiting_proofs)}"
                     )
                 assigned_starved = [
                     batch["id"]

@@ -65,11 +65,11 @@ def should_skip_root_for_slave(
 ) -> bool:
     """True when this polling slave must not take a root for a sticky job.
 
-    If the preferred owner is online and under capacity, only that owner may
-    take more roots. If the preferred owner is dark, other live slaves may
-    take over. If the preferred owner is online but already at its adaptive
-    concurrent cap, other live slaves may overflow so newcomers are not
-    starved behind warehoused unassigned roots.
+    If the preferred owner is online, only that owner may take more roots.
+    If the preferred owner is dark, other live slaves may take over.
+    preferred_at_cap overflow is optional (master sets it only when
+    SLAVE_STICKY_OVERFLOW_AT_CAP is enabled); default sticky lifecycle keeps
+    roots on one machine through proofs.
     """
     if not sticky_enabled:
         return False

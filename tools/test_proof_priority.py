@@ -63,9 +63,41 @@ def main() -> int:
         (len(excess) == 1, f"one excess root got {len(excess)}"),
         (excess[0]["batch"]["sampled_nonces"] is None, "excess should be a root"),
     ]
-    # Without proof priority, fill capacity with first N in list order after
-    # still preferring proofs first in helper (proofs listed after roots in input,
-    # but helper splits). With proof_priority false and max 3:
+    # Sticky lifecycle default: proof-only (0 roots) while proofs owed.
+    kept0, excess0 = fn(
+        assigned,
+        4,
+        proof_priority=True,
+        max_roots_while_proofs=0,
+    )
+    cases.append(
+        (
+            sum(1 for b in kept0 if b["batch"]["sampled_nonces"] is not None) == 2,
+            "proof-only keeps both proofs",
+        )
+    )
+    cases.append(
+        (
+            sum(1 for b in kept0 if b["batch"]["sampled_nonces"] is None) == 0,
+            "proof-only keeps zero roots",
+        )
+    )
+    cases.append((len(excess0) == 3, f"proof-only excess 3 roots got {len(excess0)}"))
+
+    # Awaiting-proofs gap: no proof batches yet, still apply root cap.
+    roots_only = [_row("a", 0, False), _row("a", 1, False), _row("a", 2, False)]
+    kept_gap, excess_gap = fn(
+        roots_only,
+        3,
+        proof_priority=True,
+        max_roots_while_proofs=0,
+    )
+    cases.append((len(kept_gap) == 0, f"awaiting gap keeps 0 got {len(kept_gap)}"))
+    cases.append(
+        (len(excess_gap) == 3, f"awaiting gap releases all roots got {len(excess_gap)}")
+    )
+
+    # Without proof priority, fill capacity preferring proofs first.
     kept2, excess2 = fn(assigned, 3, proof_priority=False, max_roots_while_proofs=2)
     cases.append((len(kept2) == 3, f"no-priority kept 3 got {len(kept2)}"))
     cases.append(
