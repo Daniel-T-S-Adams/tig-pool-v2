@@ -393,9 +393,16 @@ def precommit_hardness_weight_mult(
     strong_online: int,
     hard_open_roots: int,
     hard_open_per_strong: float,
+    inventory_known: bool = True,
 ) -> float:
-    """Down-weight hard-track creates when strong census is saturated."""
+    """Down-weight hard-track creates when strong census is saturated.
+
+    Fail open (mult=1.0) when the fleet has no measured/declared core inventory:
+    strong_online=0 then means "unknown", not "zero strong CPUs".
+    """
     if float(hardness) < float(hard_hardness):
+        return 1.0
+    if not inventory_known:
         return 1.0
     strong = max(0, int(strong_online))
     if strong <= 0:
@@ -781,18 +788,29 @@ class CapabilityScheduler:
 
         online_ms = int(os.environ.get("SLAVE_ONLINE_MS", str(120000)))
         strong_online = 0
+        online_cpu = 0
+        online_with_core_info = 0
         for row in census_rows:
             last_seen = row.get("last_seen")
             if last_seen is None or int(now_ms) - int(last_seen) > online_ms:
                 continue
+            online_cpu += 1
             report = _parse_report(row.get("preflight_report"))
             threads = report.get("threads")
             ram_gb = report.get("ram_gb")
+            declared = row.get("declared_cores")
+            has_core_info = (
+                (threads is not None and int(threads) > 0)
+                or (declared is not None and int(declared) > 0)
+            )
+            if has_core_info:
+                online_with_core_info += 1
+            else:
+                # Unknown hardware cannot count toward the strong census.
+                continue
             tier = hardware_tier(
                 threads=int(threads) if threads is not None else None,
-                declared_cores=int(row["declared_cores"])
-                if row.get("declared_cores") is not None
-                else None,
+                declared_cores=int(declared) if declared is not None else None,
                 ram_gb=int(ram_gb) if ram_gb is not None else None,
                 preflight_status=row.get("preflight_status"),
                 ceilings=settings["tier_core_ceilings"],
@@ -817,8 +835,23 @@ class CapabilityScheduler:
                 )
                 or []
             )
+            cpu_challenges = {
+                "satisfiability",
+                "vehicle_routing",
+                "knapsack",
+                "job_scheduling",
+                "energy_arbitrage",
+                "c001",
+                "c002",
+                "c003",
+                "c007",
+                "c008",
+            }
             for row in open_rows:
-                key = (row.get("challenge") or "", row.get("track_id") or "")
+                challenge = row.get("challenge") or ""
+                if challenge not in cpu_challenges:
+                    continue
+                key = (challenge, row.get("track_id") or "")
                 h = track_hardness.get(key)
                 if h is None:
                     h = heuristic_track_hardness(key[0], key[1])
@@ -827,12 +860,16 @@ class CapabilityScheduler:
         except Exception as exc:
             logger.debug("hard open roots query failed: %s", exc)
 
+        inventory_known = online_with_core_info > 0
         self._cache = {
             "track_hardness": track_hardness,
             "slave_track_ema": slave_track_ema,
             "track_median": track_median,
             "strong_online": strong_online,
             "hard_open_roots": hard_open_roots,
+            "online_cpu": online_cpu,
+            "online_with_core_info": online_with_core_info,
+            "inventory_known": inventory_known,
             "settings": settings,
         }
         self._cache_until_ms = now_ms + max(1000, settings["cache_ms"])

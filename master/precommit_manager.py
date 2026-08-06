@@ -774,30 +774,47 @@ class PrecommitManager:
             elif gpu_below_floor and x["algorithm_id"][:4] in GPU_CHALLENGE_IDS:
                 weight = max(1, int(round(weight * idle_mult)))
             if cap_settings.get("enabled"):
-                try:
-                    hardness = CAPABILITY_SCHEDULER.max_algo_track_hardness(x)
-                except Exception:
-                    hardness = heuristic_track_hardness(x["algorithm_id"][:4], None)
-                mult = precommit_hardness_weight_mult(
-                    hardness=hardness,
-                    hard_hardness=cap_settings["hard_hardness"],
-                    strong_online=int((cap_views or {}).get("strong_online") or 0),
-                    hard_open_roots=int((cap_views or {}).get("hard_open_roots") or 0),
-                    hard_open_per_strong=cap_settings["hard_open_per_strong"],
-                )
-                if mult < 1.0:
-                    logger.info(
-                        "capability throttle algo=%s hardness=%.2f mult=%.2f "
-                        "strong_online=%s hard_open=%s",
-                        x.get("algorithm_id"),
-                        hardness,
-                        mult,
-                        (cap_views or {}).get("strong_online"),
-                        (cap_views or {}).get("hard_open_roots"),
+                cid = x["algorithm_id"][:4]
+                # GPU creates are governed by GPU slots/floor, not CPU L/XL census.
+                if cid in GPU_CHALLENGE_IDS:
+                    pass
+                else:
+                    try:
+                        hardness = CAPABILITY_SCHEDULER.max_algo_track_hardness(x)
+                    except Exception:
+                        hardness = heuristic_track_hardness(cid, None)
+                    inventory_known = bool((cap_views or {}).get("inventory_known"))
+                    mult = precommit_hardness_weight_mult(
+                        hardness=hardness,
+                        hard_hardness=cap_settings["hard_hardness"],
+                        strong_online=int((cap_views or {}).get("strong_online") or 0),
+                        hard_open_roots=int((cap_views or {}).get("hard_open_roots") or 0),
+                        hard_open_per_strong=cap_settings["hard_open_per_strong"],
+                        inventory_known=inventory_known,
                     )
-                weight = max(1, int(round(weight * mult))) if mult > 0 else 0
-                if weight <= 0:
-                    continue
+                    if not inventory_known:
+                        logger.info(
+                            "capability throttle fail-open algo=%s "
+                            "(no measured/declared cores on online CPUs; "
+                            "online_cpu=%s core_info=%s)",
+                            x.get("algorithm_id"),
+                            (cap_views or {}).get("online_cpu"),
+                            (cap_views or {}).get("online_with_core_info"),
+                        )
+                    elif mult < 1.0:
+                        logger.info(
+                            "capability throttle algo=%s hardness=%.2f mult=%.2f "
+                            "strong_online=%s hard_open=%s inventory_known=%s",
+                            x.get("algorithm_id"),
+                            hardness,
+                            mult,
+                            (cap_views or {}).get("strong_online"),
+                            (cap_views or {}).get("hard_open_roots"),
+                            inventory_known,
+                        )
+                    weight = max(1, int(round(weight * mult))) if mult > 0 else 0
+                    if weight <= 0:
+                        continue
             weighted_eligible.append(x)
             weights.append(weight)
         if not weighted_eligible:

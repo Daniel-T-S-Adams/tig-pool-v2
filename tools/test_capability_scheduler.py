@@ -159,6 +159,7 @@ def main() -> int:
         strong_online=10,
         hard_open_roots=40,
         hard_open_per_strong=8,
+        inventory_known=True,
     )
     mult_sat = precommit_hardness_weight_mult(
         hardness=0.9,
@@ -166,9 +167,28 @@ def main() -> int:
         strong_online=2,
         hard_open_roots=80,
         hard_open_per_strong=8,
+        inventory_known=True,
+    )
+    mult_unknown = precommit_hardness_weight_mult(
+        hardness=0.9,
+        hard_hardness=0.65,
+        strong_online=0,
+        hard_open_roots=80,
+        hard_open_per_strong=8,
+        inventory_known=False,
+    )
+    mult_zero_strong = precommit_hardness_weight_mult(
+        hardness=0.9,
+        hard_hardness=0.65,
+        strong_online=0,
+        hard_open_roots=80,
+        hard_open_per_strong=8,
+        inventory_known=True,
     )
     cases.append((mult_ok == 1.0, f"under capacity weight 1 got {mult_ok}"))
     cases.append((mult_sat < 0.5, f"over capacity down-weight got {mult_sat}"))
+    cases.append((mult_unknown == 1.0, f"fail-open unknown inventory got {mult_unknown}"))
+    cases.append((mult_zero_strong == 0.15, f"known empty strong census got {mult_zero_strong}"))
 
     ok, reason = algo_is_schedulable(
         "c001_a098",
