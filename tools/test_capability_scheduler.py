@@ -54,6 +54,18 @@ def main() -> int:
         )
     )
     cases.append((hardware_tier() == TIER_M, "unknown → default M"))
+    import os as _os
+    _saved = {
+        k: _os.environ.pop(k)
+        for k in list(_os.environ)
+        if k.startswith("CAPABILITY_SCHEDULER_")
+    }
+    try:
+        settings = ns["capability_settings"]({})
+    finally:
+        _os.environ.update(_saved)
+    cases.append((settings["hard_min_tier"] == TIER_M, "default hard_min_tier is M"))
+    cases.append((settings["strong_tier_min"] == TIER_M, "default strong_tier_min is M"))
 
     sat_hard = heuristic_track_hardness("satisfiability", "n_vars=100000,ratio=4200")
     sat_easy = heuristic_track_hardness("satisfiability", "n_vars=5000,ratio=4267")

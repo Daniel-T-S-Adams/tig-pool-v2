@@ -26,6 +26,8 @@ TIER_FROM_NAME = {v: k for k, v in TIER_NAMES.items()}
 
 # Default core thresholds: tier is the first bucket whose ceiling the cores are under.
 # <32 → S, <64 → M, <96 → L, else XL.
+# InnoPool PICA fleet is homogeneous 32-thread (Ryzen 9 7950X/9950X) → tier M.
+# hard_min_tier / strong_tier_min therefore default to M, not L/XL.
 DEFAULT_TIER_CORE_CEILINGS = (32, 64, 96)
 
 _TRACK_INT_RE = re.compile(
@@ -83,7 +85,7 @@ def capability_settings(config: Optional[Mapping[str, Any]] = None) -> dict:
         "hard_min_tier": int(
             cfg.get(
                 "hard_min_tier",
-                os.environ.get("CAPABILITY_SCHEDULER_HARD_MIN_TIER", str(TIER_L)),
+                os.environ.get("CAPABILITY_SCHEDULER_HARD_MIN_TIER", str(TIER_M)),
             )
         ),
         "age_out_ms": int(
@@ -132,7 +134,7 @@ def capability_settings(config: Optional[Mapping[str, Any]] = None) -> dict:
         "strong_tier_min": int(
             cfg.get(
                 "strong_tier_min",
-                os.environ.get("CAPABILITY_SCHEDULER_STRONG_TIER_MIN", str(TIER_L)),
+                os.environ.get("CAPABILITY_SCHEDULER_STRONG_TIER_MIN", str(TIER_M)),
             )
         ),
         "hard_open_per_strong": float(
