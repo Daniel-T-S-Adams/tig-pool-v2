@@ -59,23 +59,33 @@ def select_kept_assigned_batches(
     *,
     proof_priority: bool,
     max_roots_while_proofs: int,
+    always_keep_root_benchmarks: Optional[Set[str]] = None,
 ) -> tuple[list, list]:
     """Prefer keeping proof batches when over capacity / proof-priority mode.
+
+    Roots for always_keep_root_benchmarks (jobs this slave must finish) are
+    kept ahead of the proof-only root budget so sticky leftovers are not
+    released while the owner is proving something else.
 
     Returns (kept, excess).
     """
     if max_concurrent < 0:
         max_concurrent = 0
+    keep_bids = always_keep_root_benchmarks or set()
     proofs = [b for b in assigned if _is_proof_batch_row(b)]
     roots = [b for b in assigned if not _is_proof_batch_row(b)]
+    finish_roots = [b for b in roots if b["batch"]["benchmark_id"] in keep_bids]
+    other_roots = [b for b in roots if b["batch"]["benchmark_id"] not in keep_bids]
     kept_proofs = proofs[:max_concurrent]
     room = max(0, max_concurrent - len(kept_proofs))
+    kept_finish = finish_roots[:room]
+    room_after_finish = max(0, room - len(kept_finish))
     # Apply even with no proof batches yet (awaiting sampling / merkle ready).
     if proof_priority:
-        root_budget = min(room, max(0, int(max_roots_while_proofs)))
+        root_budget = min(room_after_finish, max(0, int(max_roots_while_proofs)))
     else:
-        root_budget = room
-    kept_roots = roots[:root_budget]
+        root_budget = room_after_finish
+    kept_roots = kept_finish + other_roots[:root_budget]
     kept = kept_proofs + kept_roots
     kept_ids = {
         (
@@ -682,6 +692,34 @@ class SlaveManager:
             )
         return cap
 
+    def _slave_finish_root_benchmarks(self, slave_name: str) -> Set[str]:
+        """Jobs this slave should still root even while proof-only.
+
+        If the slave already completed some roots on a job that still has
+        unfinished root batches, it must be allowed to finish them — otherwise
+        sticky + proof-only strands the leftover unassigned batches forever.
+        """
+        rows = get_db_conn().fetch_all(
+            """
+            SELECT DISTINCT r.benchmark_id
+            FROM root_batch r
+            INNER JOIN job j ON j.benchmark_id = r.benchmark_id
+            WHERE j.stopped IS NULL
+              AND j.end_time IS NULL
+              AND j.merkle_root_ready IS NULL
+              AND r.slave = %s
+              AND r.ready = true
+              AND EXISTS (
+                SELECT 1
+                FROM root_batch u
+                WHERE u.benchmark_id = r.benchmark_id
+                  AND u.ready IS NULL
+              )
+            """,
+            (slave_name,),
+        )
+        return {str(r["benchmark_id"]) for r in (rows or []) if r.get("benchmark_id")}
+
     def _slave_awaiting_proofs(self, slave_name: str) -> bool:
         """True when this slave still owes proof work (or sampling not done yet).
 
@@ -942,6 +980,23 @@ class SlaveManager:
                     PROOF_PRIORITY_ENABLED and self._slave_awaiting_proofs(slave_name)
                 )
                 has_proof_work = bool(assigned_proofs or own_proof_work or awaiting_proofs)
+                finish_root_bids = (
+                    self._slave_finish_root_benchmarks(slave_name)
+                    if PROOF_PRIORITY_ENABLED
+                    else set()
+                )
+                # Preferred owner of jobs that still have unfinished roots in the
+                # pending list — same sticky-finish exception without a DB roundtrip.
+                if PROOF_PRIORITY_ENABLED and STICKY_ROOTS_ENABLED:
+                    pending_unfinished_roots = {
+                        b["batch"]["benchmark_id"]
+                        for b in self.batches
+                        if b.get("end_time") is None
+                        and (b.get("batch") or {}).get("sampled_nonces") is None
+                    }
+                    for bid, preferred in root_affinity.items():
+                        if preferred == slave_name and bid in pending_unfinished_roots:
+                            finish_root_bids.add(bid)
                 root_cap_while_proofs = (
                     PROOF_PRIORITY_MAX_ROOTS if has_proof_work else max_concurrent
                 )
@@ -950,6 +1005,7 @@ class SlaveManager:
                     max_concurrent,
                     proof_priority=PROOF_PRIORITY_ENABLED and has_proof_work,
                     max_roots_while_proofs=PROOF_PRIORITY_MAX_ROOTS,
+                    always_keep_root_benchmarks=finish_root_bids,
                 )
                 if excess_assigned:
                     logger.info(
@@ -1043,6 +1099,7 @@ class SlaveManager:
                             PROOF_PRIORITY_ENABLED
                             and has_proof_work
                             and (not is_proof)
+                            and bid not in finish_root_bids
                             and concurrent_roots >= root_cap_while_proofs
                         ):
                             continue
@@ -1096,7 +1153,8 @@ class SlaveManager:
                         f"{sum(1 for batch in concurrent if batch.get('sampled_nonces') is not None)} "
                         f"roots_assigned={concurrent_roots} "
                         f"root_cap={PROOF_PRIORITY_MAX_ROOTS} own_proof_work={len(own_proof_work)} "
-                        f"awaiting_proofs={int(awaiting_proofs)}"
+                        f"awaiting_proofs={int(awaiting_proofs)} "
+                        f"finish_root_jobs={len(finish_root_bids)}"
                     )
                 assigned_starved = [
                     batch["id"]

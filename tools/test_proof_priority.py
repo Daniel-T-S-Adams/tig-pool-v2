@@ -97,6 +97,28 @@ def main() -> int:
         (len(excess_gap) == 3, f"awaiting gap releases all roots got {len(excess_gap)}")
     )
 
+    # Finish-own-job exception: keep sticky leftover roots while proof-only.
+    kept_fin, excess_fin = fn(
+        assigned,
+        4,
+        proof_priority=True,
+        max_roots_while_proofs=0,
+        always_keep_root_benchmarks={"a"},
+    )
+    cases.append(
+        (
+            sum(1 for b in kept_fin if b["batch"]["sampled_nonces"] is not None) == 2,
+            "finish-keep still keeps proofs",
+        )
+    )
+    cases.append(
+        (
+            sum(1 for b in kept_fin if b["batch"]["benchmark_id"] == "a") == 2,
+            "finish-keep retains own-job roots within room",
+        )
+    )
+    cases.append((len(excess_fin) == 1, f"finish-keep excess 1 got {len(excess_fin)}"))
+
     # Without proof priority, fill capacity preferring proofs first.
     kept2, excess2 = fn(assigned, 3, proof_priority=False, max_roots_while_proofs=2)
     cases.append((len(kept2) == 3, f"no-priority kept 3 got {len(kept2)}"))
