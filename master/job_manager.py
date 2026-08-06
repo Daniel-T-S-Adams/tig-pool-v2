@@ -21,6 +21,56 @@ import math
 
 logger = logging.getLogger(os.path.splitext(os.path.basename(__file__))[0])
 
+# Free root batches from dark / stuck assignees so healthy CPUs can finish jobs.
+STUCK_SLAVE_SHED_ENABLED = os.environ.get("SLAVE_STUCK_SHED_ENABLED", "true").lower() in (
+    "1",
+    "true",
+    "yes",
+    "on",
+)
+STUCK_SLAVE_SHED_MIN_INFLIGHT = max(
+    1, int(os.environ.get("SLAVE_STUCK_SHED_MIN_INFLIGHT", "4"))
+)
+STUCK_SLAVE_SHED_MIN_AGE_MS = max(
+    60_000, int(os.environ.get("SLAVE_STUCK_SHED_MIN_AGE_MS", str(20 * 60 * 1000)))
+)
+STUCK_SLAVE_SHED_WINDOW_MS = max(
+    60_000, int(os.environ.get("SLAVE_STUCK_SHED_WINDOW_MS", str(30 * 60 * 1000)))
+)
+STUCK_SLAVE_SHED_MAX_COMPLETES = max(
+    0, int(os.environ.get("SLAVE_STUCK_SHED_MAX_COMPLETES", "0"))
+)
+DARK_ROOT_SHED_MS = max(
+    0, int(os.environ.get("SLAVE_DARK_OWNER_RECLAIM_MS", str(3 * 60 * 1000)))
+)
+
+
+def should_shed_slave_roots(
+    *,
+    inflight: int,
+    oldest_age_ms: int,
+    completes_in_window: int,
+    owner_online: bool,
+    min_inflight: int = STUCK_SLAVE_SHED_MIN_INFLIGHT,
+    min_age_ms: int = STUCK_SLAVE_SHED_MIN_AGE_MS,
+    max_completes: int = STUCK_SLAVE_SHED_MAX_COMPLETES,
+    dark_reclaim_ms: int = DARK_ROOT_SHED_MS,
+) -> Optional[str]:
+    """Return shed reason, or None if the assignee should keep its roots."""
+    if inflight <= 0:
+        return None
+    if not owner_online:
+        if dark_reclaim_ms > 0 and oldest_age_ms > dark_reclaim_ms:
+            return "dark_owner"
+        return None
+    if (
+        inflight >= min_inflight
+        and oldest_age_ms >= min_age_ms
+        and completes_in_window <= max_completes
+    ):
+        return "stuck_no_progress"
+    return None
+
 class JobManager:
     def on_new_block(
         self,
@@ -386,6 +436,84 @@ class JobManager:
         self._invalidate_roots_for_offline_owners(benchmark_id, dark)
         return False
 
+    def _shed_stuck_root_owners(self, now_ms: int):
+        """Unassign unfinished roots from dark or no-progress sticky owners.
+
+        Does not touch proofs (local artifacts). Lets healthy CPUs reclaim root
+        work that would otherwise age past create-cap / reward funnel limits.
+        """
+        if not STUCK_SLAVE_SHED_ENABLED:
+            return
+        ensure_slave_seen_table(get_db_conn().execute)
+        online = fetch_online_slaves(get_db_conn().fetch_all, now_ms)
+        since_ms = now_ms - STUCK_SLAVE_SHED_WINDOW_MS
+        rows = get_db_conn().fetch_all(
+            """
+            SELECT
+                r.slave AS slave_name,
+                COUNT(*) FILTER (
+                    WHERE r.ready IS NULL
+                      AND r.end_time IS NULL
+                      AND r.start_time IS NOT NULL
+                ) AS inflight,
+                COALESCE(
+                    MAX(
+                        CASE
+                            WHEN r.ready IS NULL
+                             AND r.end_time IS NULL
+                             AND r.start_time IS NOT NULL
+                            THEN %s - r.start_time
+                            ELSE NULL
+                        END
+                    ),
+                    0
+                ) AS oldest_age_ms,
+                COUNT(*) FILTER (
+                    WHERE r.ready = true
+                      AND r.end_time IS NOT NULL
+                      AND r.end_time >= %s
+                ) AS completes_in_window
+            FROM root_batch r
+            WHERE r.slave IS NOT NULL
+            GROUP BY r.slave
+            """,
+            (now_ms, since_ms),
+        ) or []
+        to_shed = []
+        for row in rows:
+            slave = str(row.get("slave_name") or "")
+            if not slave:
+                continue
+            reason = should_shed_slave_roots(
+                inflight=int(row.get("inflight") or 0),
+                oldest_age_ms=int(row.get("oldest_age_ms") or 0),
+                completes_in_window=int(row.get("completes_in_window") or 0),
+                owner_online=slave in online,
+            )
+            if reason:
+                to_shed.append((slave, reason, int(row.get("inflight") or 0)))
+        if not to_shed:
+            return
+        queries = []
+        for slave, reason, inflight in to_shed:
+            logger.warning(
+                f"shedding {inflight} unfinished root batch(es) from {slave} "
+                f"(reason={reason})"
+            )
+            queries.append((
+                """
+                UPDATE root_batch
+                SET slave = NULL,
+                    start_time = NULL,
+                    end_time = NULL
+                WHERE slave = %s
+                  AND ready IS NULL
+                """,
+                (slave,),
+            ))
+        if queries:
+            get_db_conn().execute_many(*queries)
+
     def _stop_stranded_proof_jobs(self, now_ms: int):
         """Stop jobs whose remaining proofs are stuck on offline artifact owners."""
         if not STRANDED_PROOF_STOP_ENABLED:
@@ -675,4 +803,5 @@ class JobManager:
                 )
             ])
 
+        self._shed_stuck_root_owners(now)
         self._stop_stranded_proof_jobs(now)

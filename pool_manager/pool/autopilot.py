@@ -183,6 +183,15 @@ ZOMBIE_PENDING_CLEANUP_MAX_ROWS = int(
 TRUSTED_CPU_COMPLETIONS = int(os.environ.get("AUTOPILOT_TRUSTED_CPU_COMPLETIONS", "10"))
 TRUSTED_GPU_COMPLETIONS = int(os.environ.get("AUTOPILOT_TRUSTED_GPU_COMPLETIONS", "2"))
 TRUSTED_MAX_FAILED_RECENT = int(os.environ.get("AUTOPILOT_TRUSTED_MAX_FAILED_RECENT", "0"))
+# Live workers with some finishes still count toward capacity even below the
+# full "trusted" completion bar — otherwise one slow VRPTW batch (stale) made
+# almost the entire public CPU fleet disappear from active_cpu.
+CAPACITY_LIVE_MIN_COMPLETIONS = int(
+    os.environ.get("AUTOPILOT_CAPACITY_LIVE_MIN_COMPLETIONS", "3")
+)
+CAPACITY_STUCK_MIN_INFLIGHT = int(
+    os.environ.get("AUTOPILOT_CAPACITY_STUCK_MIN_INFLIGHT", "4")
+)
 
 GPU_CHALLENGES = {"vector_search", "hypergraph", "neuralnet_optimizer"}
 GPU_SLOT_TYPES = ("vector_search", "hypergraph", "neuralnet_optimizer")
@@ -395,7 +404,25 @@ def _counts_for_capacity(slave: dict) -> bool:
     completed = int(slave.get("completed_recent") or 0)
     stale = int(slave.get("stale_roots") or 0) + int(slave.get("stale_proofs") or 0)
     failed = int(slave.get("failed_recent") or 0)
-    return completed >= required_completed and stale == 0 and failed <= TRUSTED_MAX_FAILED_RECENT
+    active_unfinished = int(slave.get("active_unfinished") or 0)
+    # Holding old work with zero finishes — do not scale creates on this box.
+    if (
+        completed == 0
+        and stale >= 1
+        and active_unfinished >= CAPACITY_STUCK_MIN_INFLIGHT
+    ):
+        return False
+    if failed > TRUSTED_MAX_FAILED_RECENT:
+        return False
+    # Full trusted bar (no longer requires stale == 0 — one long batch was
+    # zeroing out ~20 CPUs from the capacity model).
+    if completed >= required_completed:
+        return True
+    # Actively working public CPUs with some recent finishes still count.
+    live_min = min(CAPACITY_LIVE_MIN_COMPLETIONS, required_completed)
+    if active_unfinished > 0 and completed >= live_min:
+        return True
+    return False
 
 
 def _capacity_reason(slave: dict) -> str:
@@ -3143,7 +3170,7 @@ def _health_summary(report: dict) -> dict:
         "live_by_profile": live_by_profile,
         "slot_capacity": slot_capacity,
         "healthy": (
-            stale_roots == 0
+            stale_roots <= PRODUCTIVE_IDLE_STALE_ROOT_TOLERANCE
             and stale_proofs == 0
             and not active_unregistered
             and not unserved_stranded
