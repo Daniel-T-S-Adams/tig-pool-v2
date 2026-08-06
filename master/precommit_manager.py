@@ -11,6 +11,13 @@ from typing import Dict, List, Optional, Set, Tuple
 from master.sql import get_db_conn
 from master.client_manager import CONFIG
 from master.proof_affinity import SLAVE_ONLINE_MS, ensure_slave_seen_table
+from master.capability_scheduler import (
+    SCHEDULER as CAPABILITY_SCHEDULER,
+    algo_is_schedulable,
+    capability_settings,
+    heuristic_track_hardness,
+    precommit_hardness_weight_mult,
+)
 
 logger = logging.getLogger(os.path.splitext(os.path.basename(__file__))[0])
 
@@ -298,6 +305,19 @@ class PrecommitManager:
         self.num_precommits_submitted = 0
         self.per_challenge_precommits_submitted = {}
         self.challenge_configs = block.config["challenges"]
+        self._algorithms = kwargs.get("algorithms")
+        self._binarys = kwargs.get("binarys")
+        self._tracks_data = kwargs.get("tracks_data")
+        self._block_round = getattr(getattr(block, "details", None), "round", None)
+        try:
+            CAPABILITY_SCHEDULER.set_tig_context(
+                tracks_data=self._tracks_data,
+                algorithms=self._algorithms,
+                binarys=self._binarys,
+                block_round=self._block_round,
+            )
+        except Exception:
+            pass
 
     def _governor_snapshot(self) -> dict:
         settings = _governor_settings()
@@ -646,6 +666,28 @@ class PrecommitManager:
                 + self.per_challenge_precommits_submitted.get(x["algorithm_id"][:4], 0)
             ) < per_challenge_max[x["algorithm_id"][:4]]
         ]
+        # TIG hygiene: skip banned / not-yet-active / failed-binary algorithms.
+        algorithms = getattr(self, "_algorithms", None)
+        binarys = getattr(self, "_binarys", None)
+        block_round = getattr(self, "_block_round", None)
+        if algorithms is not None or binarys is not None:
+            kept = []
+            for x in eligible:
+                ok, reason = algo_is_schedulable(
+                    x["algorithm_id"],
+                    algorithms=algorithms,
+                    binarys=binarys,
+                    block_round=block_round,
+                )
+                if ok:
+                    kept.append(x)
+                else:
+                    logger.info(
+                        "skipping algorithm %s for precommit: %s",
+                        x.get("algorithm_id"),
+                        reason,
+                    )
+            eligible = kept
         if not eligible:
             logger.debug("All algorithms are at their per-challenge max concurrent benchmarks")
             return
@@ -705,6 +747,23 @@ class PrecommitManager:
         weighted_eligible = []
         weights = []
         idle_mult = float((governor.get("settings") or {}).get("idle_cpu_weight_mult") or 3)
+        cap_settings = capability_settings(CONFIG)
+        cap_views = {}
+        if cap_settings.get("enabled"):
+            try:
+                CAPABILITY_SCHEDULER.set_tig_context(
+                    tracks_data=getattr(self, "_tracks_data", None),
+                    algorithms=getattr(self, "_algorithms", None),
+                    binarys=getattr(self, "_binarys", None),
+                    block_round=getattr(self, "_block_round", None),
+                )
+                cap_views = CAPABILITY_SCHEDULER.refresh_runtime_views(
+                    fetch_all=get_db_conn().fetch_all,
+                    execute=get_db_conn().execute,
+                    config=CONFIG,
+                )
+            except Exception as exc:
+                logger.debug("capability views for precommit failed: %s", exc)
         for x in eligible:
             weight = int(x.get("weight") or 0)
             if weight <= 0:
@@ -714,6 +773,31 @@ class PrecommitManager:
                     weight = max(1, int(round(weight * idle_mult)))
             elif gpu_below_floor and x["algorithm_id"][:4] in GPU_CHALLENGE_IDS:
                 weight = max(1, int(round(weight * idle_mult)))
+            if cap_settings.get("enabled"):
+                try:
+                    hardness = CAPABILITY_SCHEDULER.max_algo_track_hardness(x)
+                except Exception:
+                    hardness = heuristic_track_hardness(x["algorithm_id"][:4], None)
+                mult = precommit_hardness_weight_mult(
+                    hardness=hardness,
+                    hard_hardness=cap_settings["hard_hardness"],
+                    strong_online=int((cap_views or {}).get("strong_online") or 0),
+                    hard_open_roots=int((cap_views or {}).get("hard_open_roots") or 0),
+                    hard_open_per_strong=cap_settings["hard_open_per_strong"],
+                )
+                if mult < 1.0:
+                    logger.info(
+                        "capability throttle algo=%s hardness=%.2f mult=%.2f "
+                        "strong_online=%s hard_open=%s",
+                        x.get("algorithm_id"),
+                        hardness,
+                        mult,
+                        (cap_views or {}).get("strong_online"),
+                        (cap_views or {}).get("hard_open_roots"),
+                    )
+                weight = max(1, int(round(weight * mult))) if mult > 0 else 0
+                if weight <= 0:
+                    continue
             weighted_eligible.append(x)
             weights.append(weight)
         if not weighted_eligible:

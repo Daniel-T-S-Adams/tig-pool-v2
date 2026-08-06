@@ -16,7 +16,15 @@ from common.utils import *
 from typing import Dict, List, Optional, Set
 from master.sql import get_db_conn
 from master.client_manager import CONFIG
+from master.capability_scheduler import (
+    SCHEDULER as CAPABILITY_SCHEDULER,
+    assign_rank_tuple,
+    capability_settings,
+    should_skip_hard_for_weak,
+    update_slave_track_ema,
+)
 from master.proof_affinity import (
+
     STICKY_ROOTS_ENABLED,
     ensure_slave_seen_table,
     fetch_online_slaves,
@@ -39,8 +47,11 @@ PROOF_PRIORITY_ENABLED = os.environ.get("SLAVE_PROOF_PRIORITY_ENABLED", "true").
 PROOF_PRIORITY_MAX_ROOTS = max(
     0, int(os.environ.get("SLAVE_PROOF_PRIORITY_MAX_ROOTS", "0"))
 )
-# Cap-overflow splits jobs across machines and fights sticky proofs. Off by default.
-STICKY_OVERFLOW_AT_CAP = os.environ.get("SLAVE_STICKY_OVERFLOW_AT_CAP", "false").lower() in (
+# When the sticky preferred owner is online but already at its adaptive cap,
+# allow other live CPUs to take unassigned roots. Without this, pending root
+# batches sit locked to a full owner while the rest of the fleet idles.
+# (Proofs still require local artifacts — only roots overflow.)
+STICKY_OVERFLOW_AT_CAP = os.environ.get("SLAVE_STICKY_OVERFLOW_AT_CAP", "true").lower() in (
     "1",
     "true",
     "yes",
@@ -678,30 +689,67 @@ class SlaveManager:
         warmup_completed = int(cfg.get("warmup_completed_batches", 3))
         since_ms = now_ms - window_ms
 
-        stats = get_db_conn().fetch_one(
-            """
-            WITH recent_roots AS (
+        per_family = capability_settings(CONFIG).get("per_family_adaptive_caps", True)
+        if per_family:
+            stats = get_db_conn().fetch_one(
+                """
+                WITH recent_roots AS (
+                    SELECT
+                        R.start_time,
+                        R.end_time,
+                        R.ready,
+                        J.challenge,
+                        LEAST(J.batch_size, J.num_nonces - R.batch_idx * J.batch_size) AS nonces,
+                        (R.end_time - R.start_time) AS runtime_ms
+                    FROM root_batch R
+                    JOIN job J ON J.benchmark_id = R.benchmark_id
+                    WHERE R.slave = %s
+                      AND R.start_time IS NOT NULL
+                      AND R.start_time >= %s
+                ),
+                per_challenge AS (
+                    SELECT
+                        challenge,
+                        AVG(runtime_ms) FILTER (
+                            WHERE ready = true AND end_time IS NOT NULL AND start_time IS NOT NULL
+                        ) AS avg_runtime_ms
+                    FROM recent_roots
+                    GROUP BY challenge
+                )
                 SELECT
-                    R.start_time,
-                    R.end_time,
-                    R.ready,
-                    LEAST(J.batch_size, J.num_nonces - R.batch_idx * J.batch_size) AS nonces
-                FROM root_batch R
-                JOIN job J ON J.benchmark_id = R.benchmark_id
-                WHERE R.slave = %s
-                  AND R.start_time IS NOT NULL
-                  AND R.start_time >= %s
-            )
-            SELECT
-                COUNT(*) AS assigned_recent,
-                COUNT(*) FILTER (WHERE ready = true) AS completed_recent,
-                COUNT(*) FILTER (WHERE ready IS NULL) AS active_unfinished,
-                COALESCE(SUM(nonces) FILTER (WHERE ready = true), 0) AS completed_nonces,
-                AVG(end_time - start_time) FILTER (WHERE ready = true AND end_time IS NOT NULL) AS avg_runtime_ms
-            FROM recent_roots
-            """,
-            (slave_name, since_ms)
-        ) or {}
+                    (SELECT COUNT(*) FROM recent_roots) AS assigned_recent,
+                    (SELECT COUNT(*) FROM recent_roots WHERE ready = true) AS completed_recent,
+                    (SELECT COUNT(*) FROM recent_roots WHERE ready IS NULL) AS active_unfinished,
+                    (SELECT COALESCE(SUM(nonces), 0) FROM recent_roots WHERE ready = true) AS completed_nonces,
+                    (SELECT MAX(avg_runtime_ms) FROM per_challenge) AS avg_runtime_ms
+                """,
+                (slave_name, since_ms)
+            ) or {}
+        else:
+            stats = get_db_conn().fetch_one(
+                """
+                WITH recent_roots AS (
+                    SELECT
+                        R.start_time,
+                        R.end_time,
+                        R.ready,
+                        LEAST(J.batch_size, J.num_nonces - R.batch_idx * J.batch_size) AS nonces
+                    FROM root_batch R
+                    JOIN job J ON J.benchmark_id = R.benchmark_id
+                    WHERE R.slave = %s
+                      AND R.start_time IS NOT NULL
+                      AND R.start_time >= %s
+                )
+                SELECT
+                    COUNT(*) AS assigned_recent,
+                    COUNT(*) FILTER (WHERE ready = true) AS completed_recent,
+                    COUNT(*) FILTER (WHERE ready IS NULL) AS active_unfinished,
+                    COALESCE(SUM(nonces) FILTER (WHERE ready = true), 0) AS completed_nonces,
+                    AVG(end_time - start_time) FILTER (WHERE ready = true AND end_time IS NOT NULL) AS avg_runtime_ms
+                FROM recent_roots
+                """,
+                (slave_name, since_ms)
+            ) or {}
 
         completed = int(stats.get("completed_recent") or 0)
         active = int(stats.get("active_unfinished") or 0)
@@ -1086,7 +1134,81 @@ class SlaveManager:
                     bid = b["batch"]["benchmark_id"]
                     concurrent_by_bench[bid] = concurrent_by_bench.get(bid, 0) + 1
 
-                # Own proofs first, then other proofs, then starved roots, then rest.
+                # Capability views: tier + track hardness + slave×track speed.
+                cap_settings = capability_settings(CONFIG)
+                cap_enabled = bool(cap_settings.get("enabled"))
+                cap_views = {}
+                slave_tier = CAPABILITY_SCHEDULER.settings(CONFIG)["default_tier"]
+                job_meta = {}
+                if cap_enabled:
+                    try:
+                        cap_views = CAPABILITY_SCHEDULER.refresh_runtime_views(
+                            fetch_all=get_db_conn().fetch_all,
+                            execute=get_db_conn().execute,
+                            config=CONFIG,
+                            now_ms=int(now),
+                        )
+                        slave_tier = CAPABILITY_SCHEDULER.slave_tier(
+                            slave_name,
+                            fetch_one=get_db_conn().fetch_one,
+                            config=CONFIG,
+                            now_ms=int(now),
+                        )
+                        meta_rows = get_db_conn().fetch_all(
+                            """
+                            SELECT
+                                J.benchmark_id,
+                                J.challenge,
+                                COALESCE(J.settings->>'track_id', '') AS track_id,
+                                J.start_time,
+                                COUNT(*) FILTER (WHERE R.ready = true) AS roots_ready
+                            FROM job J
+                            LEFT JOIN root_batch R ON R.benchmark_id = J.benchmark_id
+                            WHERE J.stopped IS NULL
+                              AND J.end_time IS NULL
+                            GROUP BY J.benchmark_id, J.challenge, J.settings, J.start_time
+                            """
+                        ) or []
+                        for row in meta_rows:
+                            job_meta[str(row["benchmark_id"])] = row
+                    except Exception as exc:
+                        logger.warning(
+                            "capability scheduler refresh failed; using FIFO assign: %s",
+                            exc,
+                        )
+                        cap_enabled = False
+
+                def _batch_meta(batch):
+                    bid = batch["benchmark_id"]
+                    meta = job_meta.get(bid) or {}
+                    challenge = batch.get("challenge") or meta.get("challenge") or ""
+                    settings = batch.get("settings") or {}
+                    track_id = settings.get("track_id") or meta.get("track_id") or ""
+                    hardness = (
+                        CAPABILITY_SCHEDULER.track_hardness(
+                            challenge, track_id, views=cap_views
+                        )
+                        if cap_enabled
+                        else 0.0
+                    )
+                    speed = (
+                        CAPABILITY_SCHEDULER.slave_speed_ratio(
+                            slave_name, challenge, track_id, views=cap_views
+                        )
+                        if cap_enabled
+                        else 1.0
+                    )
+                    start_time = meta.get("start_time")
+                    job_age_ms = (
+                        int(now) - int(start_time)
+                        if start_time is not None
+                        else 0
+                    )
+                    roots_ready = int(meta.get("roots_ready") or 0)
+                    return challenge, track_id, hardness, speed, job_age_ms, roots_ready
+
+                # Own proofs first, then other proofs, then starved roots, then
+                # capability-ranked roots (hard→strong fit).
                 def _batch_priority(item):
                     idx, row = item
                     batch = row["batch"]
@@ -1098,15 +1220,65 @@ class SlaveManager:
                         (not is_proof)
                         and batch["benchmark_id"] in starved_slot_benchmarks
                     )
-                    return (
-                        0 if own_proof else 1 if is_proof else 2 if starved_root else 3,
-                        -starved_slot_benchmarks.get(batch["benchmark_id"], 0),
-                        idx,
+                    if not cap_enabled or is_proof or starved_root:
+                        return (
+                            0 if own_proof else 1 if is_proof else 2 if starved_root else 3,
+                            -starved_slot_benchmarks.get(batch["benchmark_id"], 0),
+                            idx,
+                        )
+                    _, _, hardness, speed, job_age_ms, roots_ready = _batch_meta(batch)
+                    return assign_rank_tuple(
+                        is_proof=False,
+                        own_proof=False,
+                        starved_root=False,
+                        starved_boost=starved_slot_benchmarks.get(batch["benchmark_id"], 0),
+                        original_idx=idx,
+                        slave_tier=slave_tier,
+                        hardness=hardness,
+                        slave_speed_ratio=speed,
+                        job_age_ms=job_age_ms,
+                        roots_ready=roots_ready,
+                        hard_hardness=cap_settings["hard_hardness"],
+                        hard_min_tier=cap_settings["hard_min_tier"],
                     )
 
                 ordered_batches = [
                     b for _, b in sorted(enumerate(self.batches), key=_batch_priority)
                 ]
+
+                def _has_easier_claimable(min_hardness: float) -> bool:
+                    if not cap_enabled:
+                        return False
+                    for row in ordered_batches:
+                        batch = row["batch"]
+                        if batch.get("sampled_nonces") is not None:
+                            continue
+                        if row.get("end_time") is not None:
+                            continue
+                        if row.get("slave") not in (None,):
+                            continue
+                        bid = batch["benchmark_id"]
+                        if slot_types and bid not in slot_benchmark_ids:
+                            continue
+                        if not re.match(
+                            slave["algorithm_id_regex"],
+                            batch["settings"]["algorithm_id"],
+                        ):
+                            continue
+                        preferred = root_affinity.get(bid)
+                        if should_skip_root_for_slave(
+                            slave_name,
+                            preferred,
+                            online_slaves,
+                            preferred_at_cap=bool(
+                                preferred and preferred in preferred_at_cap
+                            ),
+                        ):
+                            continue
+                        _, _, hardness, _, job_age_ms, _ = _batch_meta(batch)
+                        if hardness < min_hardness or job_age_ms >= cap_settings["age_out_ms"]:
+                            return True
+                    return False
 
                 def assign_pass(respect_cap):
                     nonlocal concurrent_roots
@@ -1136,6 +1308,20 @@ class SlaveManager:
                             ),
                         ):
                             continue
+                        if cap_enabled and (not is_proof):
+                            _, _, hardness, _, job_age_ms, _ = _batch_meta(batch)
+                            if should_skip_hard_for_weak(
+                                slave_tier=slave_tier,
+                                hardness=hardness,
+                                hard_hardness=cap_settings["hard_hardness"],
+                                hard_min_tier=cap_settings["hard_min_tier"],
+                                has_easier_claimable=_has_easier_claimable(
+                                    cap_settings["hard_hardness"]
+                                ),
+                                job_age_ms=job_age_ms,
+                                age_out_ms=cap_settings["age_out_ms"],
+                            ):
+                                continue
                         if (
                             PROOF_PRIORITY_ENABLED
                             and has_proof_work
@@ -1314,6 +1500,32 @@ class SlaveManager:
             # Update roots table with merkle root and solution quality
             benchmark_id, batch_idx = batch_id.split("_")
             batch_idx = int(batch_idx)
+
+            # Capability EMA: learn slave×track runtime for affinity ranking.
+            try:
+                settings_obj = b["batch"].get("settings") or {}
+                challenge = b["batch"].get("challenge") or ""
+                track_id = settings_obj.get("track_id") or ""
+                start_ms = b.get("start_time")
+                end_ms = int(time.time() * 1000)
+                if start_ms is not None:
+                    runtime_ms = max(1.0, float(end_ms) - float(start_ms))
+                    nonces = float(b["batch"].get("num_nonces") or 0)
+                    mpn = runtime_ms / nonces if nonces > 0 else None
+                    update_slave_track_ema(
+                        execute=get_db_conn().execute,
+                        fetch_one=get_db_conn().fetch_one,
+                        slave_name=slave_name,
+                        challenge=challenge,
+                        track_id=track_id,
+                        runtime_ms=runtime_ms,
+                        ms_per_nonce=mpn,
+                        now_ms=end_ms,
+                        alpha=capability_settings(CONFIG).get("ema_alpha", 0.3),
+                    )
+            except Exception as exc:
+                logger.debug("slave_track_ema update failed: %s", exc)
+
             queries = [
                 (
                     """

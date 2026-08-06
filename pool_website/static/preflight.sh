@@ -4,7 +4,8 @@ set -euo pipefail
 ALLOW_LOW_SPEC="${INNOPOOL_ALLOW_LOW_SPEC:-0}"
 BASE_URL="${INNOPOOL_URL:-https://www.innopool.co.uk}"
 MIN_CPU_THREADS="${INNOPOOL_MIN_CPU_THREADS:-24}"
-MIN_RAM_GB="${INNOPOOL_MIN_RAM_GB:-32}"
+# 28 GB so nominal 32 GB boxes (MemTotal often ~30 GB) are not false low-spec.
+MIN_RAM_GB="${INNOPOOL_MIN_RAM_GB:-28}"
 MIN_DISK_GB="${INNOPOOL_MIN_DISK_GB:-100}"
 # Optional only. Default 0 = no VRAM floor (any working NVIDIA GPU is accepted).
 MIN_GPU_VRAM_GB="${INNOPOOL_MIN_GPU_VRAM_GB:-0}"
@@ -123,6 +124,10 @@ if [ "${disk_gb}" -lt "${MIN_DISK_GB}" ]; then
   fail_or_warn "Workers require at least ${MIN_DISK_GB} GB free disk; detected ${disk_gb} GB."
 fi
 
+gpu_count=0
+gpu_name_first=""
+gpu_vram_mb_max=0
+gpu_names_csv=""
 if [ "${worker_type}" = "gpu" ]; then
   if ! command -v nvidia-smi >/dev/null 2>&1; then
     fail_or_warn "GPU workers require nvidia-smi and a working NVIDIA driver."
@@ -137,6 +142,17 @@ if [ "${worker_type}" = "gpu" ]; then
       gpu_name="$(echo "${gpu_name}" | xargs)"
       vram_mb="$(echo "${vram_mb}" | xargs)"
       echo "  gpu: ${gpu_name} (${vram_mb:-?} MiB)"
+      if [ -z "${gpu_name_first}" ]; then
+        gpu_name_first="${gpu_name}"
+      fi
+      if [ -n "${gpu_names_csv}" ]; then
+        gpu_names_csv="${gpu_names_csv}; ${gpu_name}"
+      else
+        gpu_names_csv="${gpu_name}"
+      fi
+      if [ -n "${vram_mb}" ] && [ "${vram_mb}" -gt "${gpu_vram_mb_max}" ] 2>/dev/null; then
+        gpu_vram_mb_max="${vram_mb}"
+      fi
       if [ "${MIN_GPU_VRAM_GB}" -gt 0 ] && [ -n "${vram_mb}" ]; then
         min_vram_mb=$((MIN_GPU_VRAM_GB * 1024))
         if [ "${vram_mb}" -lt "${min_vram_mb}" ]; then
@@ -187,6 +203,10 @@ if command -v python3 >/dev/null 2>&1; then
   PREFLIGHT_THREADS="${threads}" \
   PREFLIGHT_RAM_GB="${ram_gb}" \
   PREFLIGHT_DISK_GB="${disk_gb}" \
+  PREFLIGHT_GPU_COUNT="${gpu_count}" \
+  PREFLIGHT_GPU_NAME="${gpu_name_first}" \
+  PREFLIGHT_GPU_NAMES="${gpu_names_csv}" \
+  PREFLIGHT_GPU_VRAM_MB="${gpu_vram_mb_max}" \
   PREFLIGHT_SLAVE_NAME="${SLAVE_NAME}" \
   python3 - <<'PY' || true
 import json
@@ -202,6 +222,10 @@ payload = {
         "threads": int(os.environ["PREFLIGHT_THREADS"]),
         "ram_gb": int(os.environ["PREFLIGHT_RAM_GB"]),
         "disk_gb": int(os.environ["PREFLIGHT_DISK_GB"]),
+        "gpu_count": int(os.environ.get("PREFLIGHT_GPU_COUNT") or 0),
+        "gpu_name": os.environ.get("PREFLIGHT_GPU_NAME") or "",
+        "gpu_names": os.environ.get("PREFLIGHT_GPU_NAMES") or "",
+        "gpu_vram_mb": int(os.environ.get("PREFLIGHT_GPU_VRAM_MB") or 0),
         "warnings": [line for line in os.environ.get("WARNINGS_TEXT", "").splitlines() if line],
     },
 }

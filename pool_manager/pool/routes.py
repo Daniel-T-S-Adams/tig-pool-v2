@@ -1253,15 +1253,17 @@ def record_slave_preflight(req: PreflightReportRequest):
     report = dict(req.report or {})
     report["worker_type"] = req.worker_type.lower().strip()
     report["reported_at"] = int(time.time() * 1000)
+    gpu_name = (report.get("gpu_name") or "").strip() or None
     db.execute(
         """
         UPDATE pool_members
         SET preflight_status = %s,
             preflight_report = %s::jsonb,
-            worker_type = COALESCE(NULLIF(worker_type, ''), %s)
+            worker_type = COALESCE(NULLIF(worker_type, ''), %s),
+            declared_gpu_model = COALESCE(%s, declared_gpu_model)
         WHERE slave_name = %s
         """,
-        (status, json.dumps(report), report["worker_type"], slave_name),
+        (status, json.dumps(report), report["worker_type"], gpu_name, slave_name),
     )
     return {"success": True}
 
