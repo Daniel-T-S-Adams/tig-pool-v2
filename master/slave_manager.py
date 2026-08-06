@@ -683,10 +683,12 @@ class SlaveManager:
         return cap
 
     def _slave_awaiting_proofs(self, slave_name: str) -> bool:
-        """True when this slave rooted a job that is in proof phase but not done.
+        """True when this slave still owes proof work (or sampling not done yet).
 
-        Covers the gap after roots finish / merkle_root_ready before proof
-        batches appear, and while proof batches are still outstanding.
+        Covers the gap after merkle_root_ready before proofs_batch rows exist.
+        Once sampling exists, only lock if this slave has unfinished proof
+        batches on roots it produced — do not idle-lock split contributors
+        whose batches were not sampled while others finish proofs.
         """
         row = get_db_conn().fetch_one(
             """
@@ -703,9 +705,26 @@ class SlaveManager:
                   AND r.slave = %s
                   AND r.ready = true
               )
+              AND (
+                NOT EXISTS (
+                  SELECT 1
+                  FROM proofs_batch p
+                  WHERE p.benchmark_id = j.benchmark_id
+                )
+                OR EXISTS (
+                  SELECT 1
+                  FROM proofs_batch p
+                  INNER JOIN root_batch r
+                    ON r.benchmark_id = p.benchmark_id
+                   AND r.batch_idx = p.batch_idx
+                  WHERE p.benchmark_id = j.benchmark_id
+                    AND p.ready IS NULL
+                    AND r.slave = %s
+                )
+              )
             LIMIT 1
             """,
-            (slave_name,),
+            (slave_name, slave_name),
         )
         return bool(row)
 
