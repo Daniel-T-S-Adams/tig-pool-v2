@@ -47,12 +47,12 @@ PROOF_PRIORITY_ENABLED = os.environ.get("SLAVE_PROOF_PRIORITY_ENABLED", "true").
 PROOF_PRIORITY_MAX_ROOTS = max(
     0, int(os.environ.get("SLAVE_PROOF_PRIORITY_MAX_ROOTS", "0"))
 )
-# Sampling gap (roots ready, proofs_batch not created yet) must not proof-only
-# lock a slave forever — otherwise the whole fleet idles while 100+ unassigned
-# roots sit sticky-locked to preferred owners. After this window, the slave can
-# take other root work again; real open proofs_batch rows still lock.
+# Sampling-gap proof-only lock is OFF by default (0). When proofs_batch rows do
+# not exist yet, zeroing root_cap fleet-wide left 200+ unassigned roots stranded
+# while every CPU logged awaiting_proofs=1 / own_proof_work=0. Only real open
+# proofs_batch rows should proof-only lock. Set >0 only as an emergency brake.
 SAMPLING_GAP_LOCK_MS = max(
-    0, int(os.environ.get("SLAVE_SAMPLING_GAP_LOCK_MS", str(5 * 60 * 1000)))
+    0, int(os.environ.get("SLAVE_SAMPLING_GAP_LOCK_MS", "0"))
 )
 # When the sticky preferred owner is online but already at its adaptive cap,
 # allow other live CPUs to take unassigned roots. Without this, pending root
@@ -816,16 +816,15 @@ class SlaveManager:
         return {str(r["benchmark_id"]) for r in (rows or []) if r.get("benchmark_id")}
 
     def _slave_awaiting_proofs(self, slave_name: str, now_ms: Optional[int] = None) -> bool:
-        """True when this slave still owes proof work (or a fresh sampling gap).
+        """True when this slave still owes unfinished proofs_batch work.
 
-        Covers the gap after merkle_root_ready before proofs_batch rows exist,
-        but only for SAMPLING_GAP_LOCK_MS after this slave's latest ready root.
-        Once that window passes, the slave is free to take other roots so idle
-        machines are not fleet-wide proof-only locked. Open proofs_batch rows
-        for roots this slave produced still lock until those proofs finish.
+        Optional SAMPLING_GAP_LOCK_MS>0 also locks during the pre-sample gap after
+        this slave's latest ready root. Default is 0 (disabled): that gap must not
+        set root_cap=0 or sticky-unassigned roots stay stranded on idle CPUs.
         """
         now_ms = int(now_ms if now_ms is not None else time.time() * 1000)
-        gap_cutoff = now_ms - int(SAMPLING_GAP_LOCK_MS)
+        gap_ms = int(SAMPLING_GAP_LOCK_MS)
+        gap_cutoff = now_ms - gap_ms if gap_ms > 0 else None
         row = get_db_conn().fetch_one(
             """
             SELECT 1 AS ok
@@ -843,7 +842,8 @@ class SlaveManager:
               )
               AND (
                 (
-                  NOT EXISTS (
+                  %s
+                  AND NOT EXISTS (
                     SELECT 1
                     FROM proofs_batch p
                     WHERE p.benchmark_id = j.benchmark_id
@@ -871,7 +871,13 @@ class SlaveManager:
               )
             LIMIT 1
             """,
-            (slave_name, slave_name, gap_cutoff, slave_name),
+            (
+                slave_name,
+                bool(gap_ms > 0),
+                slave_name,
+                int(gap_cutoff if gap_cutoff is not None else 0),
+                slave_name,
+            ),
         )
         return bool(row)
 
@@ -1050,9 +1056,8 @@ class SlaveManager:
                     if pref_cap > 0 and int(active_by_slave.get(preferred) or 0) >= pref_cap:
                         preferred_at_cap.add(preferred)
                         continue
-                    # Preferred owner is proof-locked / in sampling gap → they will
-                    # not take new roots. Let other live CPUs claim unassigned roots
-                    # on that job instead of leaving idle machines empty.
+                    # Preferred owner has open proof work → root_cap=0 for them.
+                    # Let other live CPUs claim unassigned roots on that job.
                     if PROOF_PRIORITY_ENABLED:
                         if preferred not in awaiting_cache:
                             awaiting_cache[preferred] = self._slave_awaiting_proofs(
@@ -1101,7 +1106,10 @@ class SlaveManager:
                 awaiting_proofs = (
                     PROOF_PRIORITY_ENABLED and self._slave_awaiting_proofs(slave_name, int(now))
                 )
-                has_proof_work = bool(assigned_proofs or own_proof_work or awaiting_proofs)
+                # root_cap=0 only when this slave can actually run proof batches now.
+                # awaiting_proofs alone (esp. sampling gap) was idling CPUs with
+                # "no batches available" while hundreds of root batches were pending.
+                has_proof_work = bool(assigned_proofs or own_proof_work)
                 finish_root_bids = (
                     self._slave_finish_root_benchmarks(slave_name)
                     if PROOF_PRIORITY_ENABLED
