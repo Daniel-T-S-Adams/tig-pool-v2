@@ -378,8 +378,15 @@ def assign_rank_tuple(
     first_owner = 0.0
     if roots_ready == 0 and hardness >= hard_hardness:
         first_owner = float(slave_tier) - float(hard_min_tier)
+    # Prefer L/XL for hard roots even when concurrent cap stays 1 (public XL util).
+    xl_boost = 0.0
+    if float(hardness) >= float(hard_hardness):
+        if int(slave_tier) >= TIER_XL:
+            xl_boost = 1.5
+        elif int(slave_tier) >= TIER_L:
+            xl_boost = 0.75
     age_boost = min(2.0, float(job_age_ms) / float(60 * 60 * 1000))
-    score = fit * 2.0 + speed + first_owner + age_boost + hardness * 0.25
+    score = fit * 2.0 + speed + first_owner + xl_boost + age_boost + hardness * 0.25
     return (
         bucket,
         -int(starved_boost),
@@ -629,12 +636,16 @@ class CapabilityScheduler:
         fetch_one,
         config: Optional[Mapping[str, Any]] = None,
         now_ms: Optional[int] = None,
+        live_cores: Optional[int] = None,
+        live_ram_gb: Optional[int] = None,
+        skip_cache: bool = False,
     ) -> int:
         settings = self.settings(config)
         now_ms = int(now_ms if now_ms is not None else time.time() * 1000)
-        cached = self._tier_cache.get(slave_name)
-        if cached and now_ms < cached[1]:
-            return cached[0]
+        if not skip_cache and live_cores is None and live_ram_gb is None:
+            cached = self._tier_cache.get(slave_name)
+            if cached and now_ms < cached[1]:
+                return cached[0]
         row = None
         try:
             row = fetch_one(
@@ -657,6 +668,11 @@ class CapabilityScheduler:
             report = _parse_report(row.get("preflight_report"))
             threads = report.get("threads")
             ram_gb = report.get("ram_gb")
+        # Live get-batches telemetry overrides stale preflight when present.
+        if live_cores is not None and int(live_cores) > 0:
+            threads = int(live_cores)
+        if live_ram_gb is not None and int(live_ram_gb) > 0:
+            ram_gb = int(live_ram_gb)
         tier = hardware_tier(
             threads=int(threads) if threads is not None else None,
             declared_cores=int(declared) if declared is not None else None,

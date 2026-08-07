@@ -1,11 +1,16 @@
 # Enriched Slave Telemetry (Phase C)
 
-Ship only after Phase A/B metrics plateau. Stock slaves must keep working.
+Stock slaves must keep working when fields are omitted (graceful degrade to
+concurrent CPU cap = fleet default, usually 1).
+
+See also [docs/public_cpu_member_capacity.md](../docs/public_cpu_member_capacity.md).
 
 ## Goal
 
 Give the master live capacity signals that static preflight + completion EMA
 cannot provide: true worker count, instantaneous load, free RAM, GPU util.
+Public L/XL CPUs may **earn** concurrent=2 only when telemetry shows
+`cores/num_workers >= 2` and healthy load — never from core count alone.
 
 ## Protocol (backward compatible)
 
@@ -36,11 +41,15 @@ Identity remains `User-Agent: <slave_name>`.
 
 ## Master behavior
 
-1. Parse optional telemetry on each poll; ignore invalid values.
+Implemented in `master/cpu_tier_caps.py` + `slave_manager._adaptive_max_concurrent`:
+
+1. Parse optional telemetry on each `/get-batches` poll; ignore invalid values.
 2. Refresh `HardwareTier` with live `cores`/`ram_gb` when present (override stale preflight).
-3. Soft load-shed: if `load_1m > cores * 1.5` or `free_ram_gb < 4`, temporarily
-   treat the slave as one tier lower and/or reduce adaptive cap by 1.
-4. Prefer `num_workers` when computing runtime_cap in adaptive caps.
+3. Soft load-shed: if `load_1m > cores * 1.25` or `free_ram_gb < 4`, force CPU
+   concurrent cap to 1 for `CPU_LOAD_SHED_COOLDOWN_MS` (default 10m).
+4. L/XL earnable concurrent ceiling (default 2) only when
+   `CPU_CONCURRENT_REQUIRES_TELEMETRY=true` (default) **and** headroom evidence
+   exists; S/M always stay at 1.
 5. Never reject stock slaves that omit telemetry.
 
 ## Custom slave changes

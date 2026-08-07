@@ -23,6 +23,12 @@ from master.capability_scheduler import (
     should_skip_hard_for_weak,
     update_slave_track_ema,
 )
+from master.cpu_tier_caps import (
+    cpu_tier_cap_settings,
+    effective_cpu_adaptive_max_cap,
+    parse_slave_telemetry,
+    telemetry_requires_load_shed,
+)
 from master.proof_affinity import (
 
     STICKY_ROOTS_ENABLED,
@@ -222,6 +228,9 @@ class SlaveManager:
             1_000,
             int(os.environ.get("SLAVE_ADAPTIVE_CAP_CACHE_MS", "15000")),
         )
+        # Optional get-batches telemetry (Phase C) + load-shed cooldown per slave.
+        self._slave_telemetry: Dict[str, dict] = {}
+        self._cpu_load_shed_until: Dict[str, int] = {}
 
     def _ensure_slave_seen_table(self):
         if self._slave_seen_ready:
@@ -659,6 +668,30 @@ class SlaveManager:
         except (TypeError, ValueError):
             return 0
 
+    def _remember_slave_telemetry(self, slave_name: str, telemetry: dict, now_ms: int) -> None:
+        """Store optional get-batches telemetry and arm CPU load-shed cooldown."""
+        if not telemetry:
+            return
+        self._slave_telemetry[slave_name] = dict(telemetry)
+        tier_settings = cpu_tier_cap_settings(CONFIG)
+        if not tier_settings.get("live_telemetry_enabled", True):
+            return
+        if _slave_profile(slave_name) != "cpu":
+            return
+        if telemetry_requires_load_shed(telemetry, tier_settings):
+            until = now_ms + int(tier_settings.get("load_shed_cooldown_ms") or 0)
+            prev = int(self._cpu_load_shed_until.get(slave_name) or 0)
+            if until > prev:
+                self._cpu_load_shed_until[slave_name] = until
+                logger.info(
+                    "cpu load-shed armed slave=%s cores=%s load_1m=%s free_ram_gb=%s until_in_ms=%s",
+                    slave_name,
+                    telemetry.get("cores"),
+                    telemetry.get("load_1m"),
+                    telemetry.get("free_ram_gb"),
+                    int(tier_settings.get("load_shed_cooldown_ms") or 0),
+                )
+
     def _adaptive_max_concurrent(
         self,
         slave_name: str,
@@ -672,6 +705,10 @@ class SlaveManager:
         New public miners start with a small cap. As they complete batches in
         the recent window, they earn more in-flight work. Trusted/operator
         slaves keep the route cap so local AWS/C3 tuning remains explicit.
+
+        Public CPU members: fleet cpu_max_cap stays the default (usually 1).
+        L/XL may earn a higher concurrent ceiling only with live telemetry
+        headroom (see master.cpu_tier_caps); core count alone never raises it.
 
         Sticky-overflow preferred-owner checks should pass log=False so every
         get-batches poll does not multiply adaptive-cap DEBUG spam.
@@ -697,6 +734,34 @@ class SlaveManager:
         min_cap = int(cfg.get(f"{profile}_min_cap", cfg.get("min_cap", default_min)))
         max_cap = int(cfg.get(f"{profile}_max_cap", cfg.get("max_cap", default_max)))
         max_cap = min(route_cap, max(min_cap, max_cap))
+
+        telemetry = self._slave_telemetry.get(slave_name) or {}
+        if profile == "cpu":
+            tier_settings = cpu_tier_cap_settings(CONFIG)
+            load_shed_active = now_ms < int(self._cpu_load_shed_until.get(slave_name) or 0)
+            try:
+                slave_tier = CAPABILITY_SCHEDULER.slave_tier(
+                    slave_name,
+                    fetch_one=get_db_conn().fetch_one,
+                    config=CONFIG,
+                    now_ms=now_ms,
+                    live_cores=telemetry.get("cores"),
+                    live_ram_gb=telemetry.get("ram_gb"),
+                    skip_cache=bool(telemetry.get("cores")),
+                )
+            except Exception:
+                slave_tier = capability_settings(CONFIG).get("default_tier", 1)
+            max_cap = effective_cpu_adaptive_max_cap(
+                route_cap=route_cap,
+                fleet_cpu_max_cap=int(cfg.get("cpu_max_cap", cfg.get("max_cap", 1))),
+                tier=int(slave_tier),
+                telemetry=telemetry,
+                settings=tier_settings,
+                load_shed_active=load_shed_active,
+            )
+            max_cap = max(min_cap, max_cap) if max_cap >= min_cap else max_cap
+            # Never let min_cap pull a telemetry-locked CPU above its ceiling.
+            min_cap = min(min_cap, max_cap) if max_cap > 0 else min_cap
 
         window_ms = int(cfg.get("window_ms", 30 * 60 * 1000))
         target_buffer_ms = int(cfg.get("target_buffer_ms", 10 * 60 * 1000))
@@ -775,13 +840,26 @@ class SlaveManager:
             # Keep roughly target_buffer_ms worth of work in flight. The
             # throughput estimate lets multi-worker machines earn more slots,
             # while runtime keeps very fast single batches from being underfed.
+            # Prefer reported num_workers when present (Phase C telemetry).
+            workers = None
+            try:
+                workers = int((telemetry or {}).get("num_workers") or 0) or None
+            except (TypeError, ValueError):
+                workers = None
             throughput_cap = math.ceil(completed * target_buffer_ms / window_ms)
             runtime_cap = math.ceil(target_buffer_ms / avg_runtime_ms)
+            if workers and workers > 0:
+                # More workers → higher single-batch burn; do not invent extra
+                # concurrent slots from worker count alone (that overloads).
+                runtime_cap = max(1, runtime_cap)
             cap = max(min_cap, throughput_cap, runtime_cap)
         else:
             cap = min_cap
 
-        cap = max(1, min(max_cap, cap))
+        if max_cap <= 0:
+            cap = 0
+        else:
+            cap = max(1, min(max_cap, cap))
         if use_cache:
             self._adaptive_cap_cache[cache_key] = (
                 cap,
@@ -1031,6 +1109,17 @@ class SlaveManager:
             concurrent = []
             updates = []
             now = time.time() * 1000
+            # Optional Phase C telemetry (query params and/or X-InnoPool-* headers).
+            # Stock slaves that omit fields keep concurrent CPU cap at the fleet default.
+            try:
+                telemetry = parse_slave_telemetry(
+                    query_params=dict(request.query_params),
+                    headers=request.headers,
+                )
+            except Exception:
+                telemetry = {}
+            if telemetry:
+                self._remember_slave_telemetry(slave_name, telemetry, int(now))
             self._touch_slave_seen(slave_name, int(now))
             slot_types = self._slot_types_for_slave(slave_name)
             slot_benchmark_ids = set()
@@ -1247,11 +1336,15 @@ class SlaveManager:
                             config=CONFIG,
                             now_ms=int(now),
                         )
+                        live_telem = self._slave_telemetry.get(slave_name) or {}
                         slave_tier = CAPABILITY_SCHEDULER.slave_tier(
                             slave_name,
                             fetch_one=get_db_conn().fetch_one,
                             config=CONFIG,
                             now_ms=int(now),
+                            live_cores=live_telem.get("cores"),
+                            live_ram_gb=live_telem.get("ram_gb"),
+                            skip_cache=bool(live_telem.get("cores")),
                         )
                         meta_rows = get_db_conn().fetch_all(
                             """
