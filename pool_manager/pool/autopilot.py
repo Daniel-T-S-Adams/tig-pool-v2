@@ -110,8 +110,9 @@ ROOT_BACKLOG_DRAIN_MIN_NOT_STARTED = int(os.environ.get("AUTOPILOT_ROOT_BACKLOG_
 ROOT_BACKLOG_DRAIN_MIN_AGE_MS = int(os.environ.get("AUTOPILOT_ROOT_BACKLOG_DRAIN_MIN_AGE_MS", str(20 * 60 * 1000)))
 ROOT_BACKLOG_DRAIN_MIN_BUNDLES = int(os.environ.get("AUTOPILOT_ROOT_BACKLOG_DRAIN_MIN_BUNDLES", "1"))
 ROOT_BACKLOG_DRAIN_MIN_PER_CHALLENGE = int(os.environ.get("AUTOPILOT_ROOT_BACKLOG_DRAIN_MIN_PER_CHALLENGE", "1"))
-# Drain/hold max_concurrent when too many roots sit unfinished. Capacity-model
-# upscales must not keep flooding precommits while the root phase is stuck.
+# Drain/hold global max_concurrent when too many *GPU* roots sit unfinished.
+# CPU backlog (knapsack/energy/etc.) must not yank max_concurrent — that is
+# handled by per-challenge workload drain + the master's precommit governor.
 ROOT_PENDING_MAX_CONCURRENT_DRAIN = int(
     os.environ.get("AUTOPILOT_ROOT_PENDING_MAX_CONCURRENT_DRAIN", "256")
 )
@@ -1388,6 +1389,21 @@ def _reward_funnel_summary(now_ms: int) -> dict:
                 WHERE jb.stopped IS NULL AND jb.end_time IS NULL
             ), 0) AS roots_pending,
             COALESCE(SUM(ra.roots_pending) FILTER (
+                WHERE jb.stopped IS NULL AND jb.end_time IS NULL
+                  AND jb.challenge IN (
+                      'satisfiability', 'vehicle_routing', 'knapsack',
+                      'job_scheduling', 'energy_arbitrage',
+                      'c001', 'c002', 'c003', 'c007', 'c008'
+                  )
+            ), 0) AS cpu_roots_pending,
+            COALESCE(SUM(ra.roots_pending) FILTER (
+                WHERE jb.stopped IS NULL AND jb.end_time IS NULL
+                  AND jb.challenge IN (
+                      'vector_search', 'hypergraph', 'neuralnet_optimizer',
+                      'c004', 'c005', 'c006'
+                  )
+            ), 0) AS gpu_roots_pending,
+            COALESCE(SUM(ra.roots_pending) FILTER (
                 WHERE jb.stopped IS TRUE OR jb.end_time IS NOT NULL
             ), 0) AS roots_pending_on_dead_jobs,
             COALESCE(SUM(ra.roots_failed), 0) AS roots_failed,
@@ -1549,6 +1565,8 @@ def _reward_funnel_summary(now_ms: int) -> dict:
     unexpected_stopped_without_roots = max(0, stopped_without_roots - intentional_stopped_without_roots)
     unexpected_stopped = max(0, stopped - intentional_stopped_without_roots)
     roots_pending = int(float(total.get("roots_pending") or 0))
+    cpu_roots_pending = int(float(total.get("cpu_roots_pending") or 0))
+    gpu_roots_pending = int(float(total.get("gpu_roots_pending") or 0))
     avg_time_to_proof = total.get("avg_time_to_proof_submit_sec")
     proof_conversion = _safe_div(proof_submitted, proof_required)
     proof_attempt_rate = _safe_div(proof_attempted, proof_required)
@@ -1580,6 +1598,9 @@ def _reward_funnel_summary(now_ms: int) -> dict:
         },
         "summary": {
             **total,
+            "roots_pending": roots_pending,
+            "cpu_roots_pending": cpu_roots_pending,
+            "gpu_roots_pending": gpu_roots_pending,
             "root_ready_rate": _safe_div(root_ready, seen),
             "proof_conversion_rate": proof_conversion,
             "proof_submit_attempt_rate": proof_attempt_rate,
@@ -2494,28 +2515,64 @@ def _funnel_drain_floor(capacity_model: dict | None = None) -> int:
     return floor
 
 
-def _root_backlog_pressure(funnel_summary: dict | None) -> dict | None:
-    """Detect root-phase backlog that should block or reverse max_concurrent upscales."""
+def _profile_roots_pending(funnel_summary: dict | None) -> tuple[int, int, int]:
+    """Return (total, cpu, gpu) pending roots for active jobs.
+
+    When the funnel summary includes cpu/gpu splits, use them so CPU backlog
+    (knapsack/energy) cannot drive global max_concurrent drain. Legacy summaries
+    without splits fall back to treating total pending as GPU-affecting.
+    """
     funnel_summary = funnel_summary or {}
-    if funnel_summary.get("roots_pending") is None and funnel_summary.get("root_ready_rate") is None:
-        return None
     roots_pending = int(funnel_summary.get("roots_pending") or 0)
+    has_split = (
+        funnel_summary.get("gpu_roots_pending") is not None
+        or funnel_summary.get("cpu_roots_pending") is not None
+    )
+    if has_split:
+        cpu_roots_pending = int(funnel_summary.get("cpu_roots_pending") or 0)
+        gpu_roots_pending = int(funnel_summary.get("gpu_roots_pending") or 0)
+    else:
+        # Legacy summaries: unknown mix — keep prior total-based safety for both
+        # GPU max_concurrent drain and idle-CPU hard-cap gates.
+        cpu_roots_pending = roots_pending
+        gpu_roots_pending = roots_pending
+    return roots_pending, cpu_roots_pending, gpu_roots_pending
+
+
+def _root_backlog_pressure(funnel_summary: dict | None) -> dict | None:
+    """Detect GPU root backlog that should block or reverse max_concurrent upscales.
+
+    CPU-only pending roots do not trigger this pressure — those are drained via
+    per-challenge workload actions and the master's precommit governor.
+    """
+    funnel_summary = funnel_summary or {}
+    if (
+        funnel_summary.get("roots_pending") is None
+        and funnel_summary.get("gpu_roots_pending") is None
+        and funnel_summary.get("root_ready_rate") is None
+    ):
+        return None
+    roots_pending, cpu_roots_pending, gpu_roots_pending = _profile_roots_pending(
+        funnel_summary
+    )
     root_ready_rate = funnel_summary.get("root_ready_rate")
     seen = int(funnel_summary.get("benchmarks_seen") or 0)
     reasons = []
-    if roots_pending >= ROOT_PENDING_MAX_CONCURRENT_DRAIN:
-        reasons.append("roots_pending_above_drain_threshold")
+    if gpu_roots_pending >= ROOT_PENDING_MAX_CONCURRENT_DRAIN:
+        reasons.append("gpu_roots_pending_above_drain_threshold")
     if (
-        roots_pending > 0
+        gpu_roots_pending > 0
         and seen >= 5
         and root_ready_rate is not None
         and float(root_ready_rate) < ROOT_READY_RATE_MIN_FOR_UPSCALE
     ):
-        reasons.append("low_root_ready_rate_with_pending_roots")
+        reasons.append("low_root_ready_rate_with_pending_gpu_roots")
     if not reasons:
         return None
     return {
         "roots_pending": roots_pending,
+        "cpu_roots_pending": cpu_roots_pending,
+        "gpu_roots_pending": gpu_roots_pending,
         "root_ready_rate": root_ready_rate,
         "benchmarks_seen": seen,
         "reasons": reasons,
@@ -3992,6 +4049,9 @@ def _plan_config_change(report: dict, cfg: dict, clean_windows: int) -> dict:
     proposed_max_for_idle = int(max_rec_for_idle.get("proposed") or current_max_for_idle)
     active_jobs_for_idle = _active_unfinished_jobs()
     root_ready_rate = funnel_summary.get("root_ready_rate")
+    _roots_pending_total, cpu_roots_pending_for_idle, _gpu_roots_pending = (
+        _profile_roots_pending(funnel_summary)
+    )
     allow_idle_cpu_max, idle_cpu_reason = should_idle_cpu_max_scale(
         enabled=IDLE_CPU_MAX_SCALE_ENABLED,
         productive_idle_cpu=productive_idle_cpu,
@@ -4002,7 +4062,8 @@ def _plan_config_change(report: dict, cfg: dict, clean_windows: int) -> dict:
         soft_proof_conversion_floor=FUNNEL_SOFT_PROOF_CONVERSION_FLOOR,
         root_ready_rate=root_ready_rate,
         min_root_ready_rate=ROOT_READY_RATE_MIN_FOR_UPSCALE,
-        roots_pending=int(funnel_summary.get("roots_pending") or 0),
+        # Hard-cap idle-CPU max_concurrent climbs on CPU root backlog only.
+        roots_pending=cpu_roots_pending_for_idle,
         max_roots_pending=ROOT_PENDING_MAX_CONCURRENT_DRAIN,
         benchmarks_seen=int(funnel_summary.get("benchmarks_seen") or 0),
         current_max=current_max_for_idle,
@@ -4037,7 +4098,9 @@ def _plan_config_change(report: dict, cfg: dict, clean_windows: int) -> dict:
                     "slot_idle_cpu": slot_idle_cpu,
                     "root_ready_rate": root_ready_rate,
                     "proof_conversion_rate": funnel_summary.get("proof_conversion_rate"),
-                    "roots_pending": funnel_summary.get("roots_pending"),
+                    "roots_pending": _roots_pending_total,
+                    "cpu_roots_pending": cpu_roots_pending_for_idle,
+                    "gpu_roots_pending": _gpu_roots_pending,
                     "policy_posture": posture,
                     "funnel_safe": funnel_safe,
                     "gate_reason": idle_cpu_reason,
@@ -4053,6 +4116,8 @@ def _plan_config_change(report: dict, cfg: dict, clean_windows: int) -> dict:
             "min_idle": IDLE_CPU_MAX_SCALE_MIN,
             "slot_idle_cpu": slot_idle_cpu,
             "min_slot_idle_cpu": IDLE_CPU_MAX_SCALE_MIN_SLOT_IDLE,
+            "cpu_roots_pending": cpu_roots_pending_for_idle,
+            "gpu_roots_pending": _gpu_roots_pending,
             "current": current_max_for_idle,
             "proposed": proposed_max_for_idle,
             "active_jobs": active_jobs_for_idle,
