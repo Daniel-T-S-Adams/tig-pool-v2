@@ -57,8 +57,12 @@ async function loadEarnings() {
       if (b != null && s != null)
         el("stat-prev-breakdown").textContent = fmtTig(b) + " benchmarker · " + fmtTig(s) + " delegator";
     }
-    if (d.block_reward_tig != null)
-      el("stat-block-reward").textContent = "+" + d.block_reward_tig.toFixed(4) + " TIG";
+    if (d.block_reward_tig != null) {
+      const r = Number(d.block_reward_tig);
+      // ~0.01 shows as 0.01; keep 4dp only for genuinely tiny rates.
+      const txt = r >= 0.005 ? r.toFixed(2) : r.toFixed(4);
+      el("stat-block-reward").textContent = "+" + txt + " TIG";
+    }
   } catch (_) {}
 }
 

@@ -481,7 +481,10 @@ def _fetch_block_reward(api_url: str, player_id: str):
         if opow_resp.status_code != 200:
             return None
         opow_data = opow_resp.json()
-        # Response may be a list of {player_id, block_data} objects or a dict
+        # Current API: {"opow": [{"player_id", "block_data"}, ...], ...}
+        # Older shapes: bare list, or dict keyed by player_id.
+        if isinstance(opow_data, dict) and "opow" in opow_data:
+            opow_data = opow_data.get("opow")
         entry = None
         if isinstance(opow_data, list):
             entry = next((x for x in opow_data if (x.get("player_id") or "").lower() == player_id), None)
