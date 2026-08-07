@@ -56,6 +56,35 @@ MAX_CPU_SLOTS = int(os.environ.get("AUTOPILOT_MAX_CPU_SLOTS", "64"))
 MAX_GPU_SLOTS_PER_TYPE = int(os.environ.get("AUTOPILOT_MAX_GPU_SLOTS_PER_TYPE", "6"))
 MAX_CPU_CHALLENGE_BENCHMARKS = int(os.environ.get("AUTOPILOT_MAX_CPU_CHALLENGE_BENCHMARKS", "16"))
 MAX_GPU_CHALLENGE_BENCHMARKS = int(os.environ.get("AUTOPILOT_MAX_GPU_CHALLENGE_BENCHMARKS", "12"))
+# Optional per-challenge ceilings. Unset keys fall back to the CPU/GPU family max.
+# Example: AUTOPILOT_MAX_CHALLENGE_BENCHMARKS_C005=1 keeps hypergraph at 1 while
+# AUTOPILOT_MAX_CHALLENGE_BENCHMARKS_C006=3 allows more neuralnet jobs.
+_CHALLENGE_MAX_BENCHMARK_ENV = {
+    "c001": "AUTOPILOT_MAX_CHALLENGE_BENCHMARKS_C001",
+    "c002": "AUTOPILOT_MAX_CHALLENGE_BENCHMARKS_C002",
+    "c003": "AUTOPILOT_MAX_CHALLENGE_BENCHMARKS_C003",
+    "c004": "AUTOPILOT_MAX_CHALLENGE_BENCHMARKS_C004",
+    "c005": "AUTOPILOT_MAX_CHALLENGE_BENCHMARKS_C005",
+    "c006": "AUTOPILOT_MAX_CHALLENGE_BENCHMARKS_C006",
+    "c007": "AUTOPILOT_MAX_CHALLENGE_BENCHMARKS_C007",
+    "c008": "AUTOPILOT_MAX_CHALLENGE_BENCHMARKS_C008",
+}
+_GPU_CHALLENGE_IDS = frozenset({"c004", "c005", "c006"})
+
+
+def _max_challenge_benchmarks(challenge_id: str) -> int:
+    """Autopilot ceiling for one challenge's per_challenge_max_benchmarks entry."""
+    cid = str(challenge_id or "").split("_", 1)[0]
+    env_name = _CHALLENGE_MAX_BENCHMARK_ENV.get(cid)
+    if env_name:
+        raw = os.environ.get(env_name)
+        if raw is not None and str(raw).strip() != "":
+            return max(1, int(raw))
+    if cid in _GPU_CHALLENGE_IDS:
+        return max(1, int(MAX_GPU_CHALLENGE_BENCHMARKS))
+    return max(1, int(MAX_CPU_CHALLENGE_BENCHMARKS))
+
+
 MAX_CPU_SLAVE_CAP = int(os.environ.get("AUTOPILOT_MAX_CPU_SLAVE_CAP", "256"))
 MAX_GPU_SLAVE_CAP = int(os.environ.get("AUTOPILOT_MAX_GPU_SLAVE_CAP", "24"))
 MIN_CPU_SLAVE_CAP = int(os.environ.get("AUTOPILOT_MIN_CPU_SLAVE_CAP", "4"))
@@ -2776,7 +2805,7 @@ def _target_per_challenge_caps(cfg: dict, capacity: dict, proposed_slots: dict) 
             current = int(current_per.get(challenge_id, 1) or 1)
             proposed[challenge_id] = min(
                 max(current, per_cpu_target),
-                MAX_CPU_CHALLENGE_BENCHMARKS,
+                _max_challenge_benchmarks(challenge_id),
             )
     if capacity["active_gpu"]:
         current_c004 = int(current_per.get("c004", 1) or 1)
@@ -2788,19 +2817,19 @@ def _target_per_challenge_caps(cfg: dict, capacity: dict, proposed_slots: dict) 
                 max(current_c004, int(slot_floor.get("vector_search", 0) or 0), int(proposed_slots.get("vector_search", 0) or 0))
                 if not (stale_blocking and "c004" in stale_challenge_ids)
                 else current_c004,
-                MAX_GPU_CHALLENGE_BENCHMARKS,
+                _max_challenge_benchmarks("c004"),
             ),
             "c005": min(
                 max(current_c005, int(slot_floor.get("hypergraph", 0) or 0), int(proposed_slots.get("hypergraph", 0) or 0))
                 if not (stale_blocking and "c005" in stale_challenge_ids)
                 else current_c005,
-                MAX_GPU_CHALLENGE_BENCHMARKS,
+                _max_challenge_benchmarks("c005"),
             ),
             "c006": min(
                 max(current_c006, int(slot_floor.get("neuralnet_optimizer", 0) or 0), int(proposed_slots.get("neuralnet_optimizer", 0) or 0))
                 if not (stale_blocking and "c006" in stale_challenge_ids)
                 else current_c006,
-                MAX_GPU_CHALLENGE_BENCHMARKS,
+                _max_challenge_benchmarks("c006"),
             ),
         })
     else:
@@ -4248,19 +4277,47 @@ def _plan_config_change(report: dict, cfg: dict, clean_windows: int) -> dict:
         for key, proposed_value in proposed_per.items():
             current = int(current_per.get(key, 0) or 0)
             target = int(current if proposed_value is None else proposed_value)
-            if key in {"c004", "c005", "c006"} and target < current:
-                target = current
-            if target > current:
+            # Clamp to per-challenge env ceiling (may lower GPU caps that were
+            # previously ratcheted above the new operator max).
+            target = min(target, _max_challenge_benchmarks(key))
+            if target != current:
                 next_value = _next_value_bounded(current, target, 1, 1)
-                next_per[key] = next_value
-                per_changes[key] = {
-                    "current": current,
-                    "target": target,
-                    "next": next_value,
-                }
+                if next_value != current:
+                    next_per[key] = next_value
+                    per_changes[key] = {
+                        "current": current,
+                        "target": target,
+                        "next": next_value,
+                    }
         if per_changes:
             new_cfg["per_challenge_max_benchmarks"] = next_per
             changes["per_challenge_max_benchmarks"] = per_changes
+
+    # Always enforce per-challenge env ceilings, even when upscales are gated.
+    current_per_ceiling = new_cfg.get("per_challenge_max_benchmarks") or {}
+    if current_per_ceiling:
+        next_per_ceiling = dict(current_per_ceiling)
+        ceiling_changes = {}
+        for key, value in current_per_ceiling.items():
+            current = int(value or 0)
+            if current <= 0:
+                continue
+            ceiling = _max_challenge_benchmarks(str(key))
+            if current > ceiling:
+                next_value = _next_value_bounded(current, ceiling, 1, 1)
+                next_per_ceiling[key] = next_value
+                ceiling_changes[key] = {
+                    "current": current,
+                    "target": ceiling,
+                    "next": next_value,
+                    "reason": "per_challenge_env_ceiling",
+                }
+        if ceiling_changes:
+            new_cfg["per_challenge_max_benchmarks"] = next_per_ceiling
+            changes["per_challenge_max_benchmarks"] = {
+                **(changes.get("per_challenge_max_benchmarks") or {}),
+                **ceiling_changes,
+            }
 
     # Always enforce env slave-cap ceilings, even when capacity upscales are gated.
     current_caps = new_cfg.get("adaptive_slave_caps") or {}
