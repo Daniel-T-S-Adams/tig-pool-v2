@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Unit checks for stuck/dark root-owner shedding."""
+"""Unit checks for stuck/dark/overload root-owner shedding."""
 
 from __future__ import annotations
 
@@ -20,9 +20,12 @@ def _load_fn():
         raise RuntimeError("should_shed_slave_roots not found")
     ns = {
         "Optional": __import__("typing").Optional,
-        "STUCK_SLAVE_SHED_MIN_INFLIGHT": 4,
-        "STUCK_SLAVE_SHED_MIN_AGE_MS": 1_200_000,
-        "STUCK_SLAVE_SHED_MAX_COMPLETES": 0,
+        "STUCK_SLAVE_SHED_MIN_INFLIGHT": 2,
+        "STUCK_SLAVE_SHED_MIN_AGE_MS": 12 * 60 * 1000,
+        "STUCK_SLAVE_SHED_MAX_COMPLETES": 1,
+        "OVERLOAD_SLAVE_SHED_MIN_INFLIGHT": 2,
+        "OVERLOAD_SLAVE_SHED_MIN_AGE_MS": 12 * 60 * 1000,
+        "OVERLOAD_SLAVE_SHED_MAX_COMPLETES": 2,
         "DARK_ROOT_SHED_MS": 180_000,
     }
     exec(compile(ast.Module(body=[target], type_ignores=[]), str(path), "exec"), ns, ns)
@@ -31,6 +34,7 @@ def _load_fn():
 
 def main() -> int:
     fn = _load_fn()
+    twelve_min = 12 * 60 * 1000
     cases = [
         (
             fn(
@@ -54,19 +58,29 @@ def main() -> int:
         ),
         (
             fn(
-                inflight=16,
-                oldest_age_ms=1_300_000,
+                inflight=3,
+                oldest_age_ms=twelve_min,
                 completes_in_window=0,
                 owner_online=True,
             )
             == "stuck_no_progress",
-            "online stuck warehouse shed",
+            "online stuck warehouse shed at 12m",
         ),
         (
             fn(
-                inflight=8,
-                oldest_age_ms=1_300_000,
-                completes_in_window=7,
+                inflight=3,
+                oldest_age_ms=twelve_min,
+                completes_in_window=2,
+                owner_online=True,
+            )
+            == "overloaded_slow",
+            "online overloaded slow shed",
+        ),
+        (
+            fn(
+                inflight=3,
+                oldest_age_ms=twelve_min,
+                completes_in_window=5,
                 owner_online=True,
             )
             is None,
@@ -74,13 +88,23 @@ def main() -> int:
         ),
         (
             fn(
-                inflight=2,
-                oldest_age_ms=1_300_000,
+                inflight=1,
+                oldest_age_ms=twelve_min,
                 completes_in_window=0,
                 owner_online=True,
             )
             is None,
             "below min inflight kept",
+        ),
+        (
+            fn(
+                inflight=3,
+                oldest_age_ms=10 * 60 * 1000,
+                completes_in_window=0,
+                owner_online=True,
+            )
+            is None,
+            "under 12m age kept",
         ),
     ]
     failed = 0

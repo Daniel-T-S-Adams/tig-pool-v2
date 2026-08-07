@@ -21,24 +21,37 @@ import math
 
 logger = logging.getLogger(os.path.splitext(os.path.basename(__file__))[0])
 
-# Free root batches from dark / stuck assignees so healthy CPUs can finish jobs.
+# Free root batches from dark / stuck / overloaded assignees so healthy CPUs
+# can finish jobs inside the ~120 minute on-chain precommit lifetime.
+# Proofs are never shed (local artifacts).
 STUCK_SLAVE_SHED_ENABLED = os.environ.get("SLAVE_STUCK_SHED_ENABLED", "true").lower() in (
     "1",
     "true",
     "yes",
     "on",
 )
+# Hard warehouse: almost no finishes in the window.
 STUCK_SLAVE_SHED_MIN_INFLIGHT = max(
-    1, int(os.environ.get("SLAVE_STUCK_SHED_MIN_INFLIGHT", "4"))
+    1, int(os.environ.get("SLAVE_STUCK_SHED_MIN_INFLIGHT", "2"))
 )
 STUCK_SLAVE_SHED_MIN_AGE_MS = max(
-    60_000, int(os.environ.get("SLAVE_STUCK_SHED_MIN_AGE_MS", str(20 * 60 * 1000)))
+    60_000, int(os.environ.get("SLAVE_STUCK_SHED_MIN_AGE_MS", str(12 * 60 * 1000)))
 )
 STUCK_SLAVE_SHED_WINDOW_MS = max(
     60_000, int(os.environ.get("SLAVE_STUCK_SHED_WINDOW_MS", str(30 * 60 * 1000)))
 )
 STUCK_SLAVE_SHED_MAX_COMPLETES = max(
-    0, int(os.environ.get("SLAVE_STUCK_SHED_MAX_COMPLETES", "0"))
+    0, int(os.environ.get("SLAVE_STUCK_SHED_MAX_COMPLETES", "1"))
+)
+# Soft overload: stacked old roots with weak throughput — release only aged roots.
+OVERLOAD_SLAVE_SHED_MIN_INFLIGHT = max(
+    1, int(os.environ.get("SLAVE_OVERLOAD_SHED_MIN_INFLIGHT", "2"))
+)
+OVERLOAD_SLAVE_SHED_MIN_AGE_MS = max(
+    60_000, int(os.environ.get("SLAVE_OVERLOAD_SHED_MIN_AGE_MS", str(12 * 60 * 1000)))
+)
+OVERLOAD_SLAVE_SHED_MAX_COMPLETES = max(
+    0, int(os.environ.get("SLAVE_OVERLOAD_SHED_MAX_COMPLETES", "2"))
 )
 DARK_ROOT_SHED_MS = max(
     0, int(os.environ.get("SLAVE_DARK_OWNER_RECLAIM_MS", str(3 * 60 * 1000)))
@@ -55,8 +68,17 @@ def should_shed_slave_roots(
     min_age_ms: int = STUCK_SLAVE_SHED_MIN_AGE_MS,
     max_completes: int = STUCK_SLAVE_SHED_MAX_COMPLETES,
     dark_reclaim_ms: int = DARK_ROOT_SHED_MS,
+    overload_min_inflight: int = OVERLOAD_SLAVE_SHED_MIN_INFLIGHT,
+    overload_min_age_ms: int = OVERLOAD_SLAVE_SHED_MIN_AGE_MS,
+    overload_max_completes: int = OVERLOAD_SLAVE_SHED_MAX_COMPLETES,
 ) -> Optional[str]:
-    """Return shed reason, or None if the assignee should keep its roots."""
+    """Return shed reason, or None if the assignee should keep its roots.
+
+    Reasons:
+      dark_owner         — offline longer than reclaim grace
+      stuck_no_progress  — online warehouse with little/no finishes
+      overloaded_slow    — online, stacked aged roots, weak throughput
+    """
     if inflight <= 0:
         return None
     if not owner_online:
@@ -69,6 +91,12 @@ def should_shed_slave_roots(
         and completes_in_window <= max_completes
     ):
         return "stuck_no_progress"
+    if (
+        inflight >= overload_min_inflight
+        and oldest_age_ms >= overload_min_age_ms
+        and completes_in_window <= overload_max_completes
+    ):
+        return "overloaded_slow"
     return None
 
 class JobManager:
@@ -437,10 +465,10 @@ class JobManager:
         return False
 
     def _shed_stuck_root_owners(self, now_ms: int):
-        """Unassign unfinished roots from dark or no-progress sticky owners.
+        """Unassign unfinished roots from dark / stuck / overloaded owners.
 
-        Does not touch proofs (local artifacts). Lets healthy CPUs reclaim root
-        work that would otherwise age past create-cap / reward funnel limits.
+        Does not touch proofs (local artifacts). Overload sheds only aged roots
+        so freshly assigned work is not yanked; stuck/dark shed all open roots.
         """
         if not STUCK_SLAVE_SHED_ENABLED:
             return
@@ -496,21 +524,41 @@ class JobManager:
             return
         queries = []
         for slave, reason, inflight in to_shed:
-            logger.warning(
-                f"shedding {inflight} unfinished root batch(es) from {slave} "
-                f"(reason={reason})"
-            )
-            queries.append((
-                """
-                UPDATE root_batch
-                SET slave = NULL,
-                    start_time = NULL,
-                    end_time = NULL
-                WHERE slave = %s
-                  AND ready IS NULL
-                """,
-                (slave,),
-            ))
+            if reason == "overloaded_slow":
+                logger.warning(
+                    f"shedding aged unfinished root batch(es) from {slave} "
+                    f"(reason={reason}, inflight={inflight}, "
+                    f"min_age_ms={OVERLOAD_SLAVE_SHED_MIN_AGE_MS})"
+                )
+                queries.append((
+                    """
+                    UPDATE root_batch
+                    SET slave = NULL,
+                        start_time = NULL,
+                        end_time = NULL
+                    WHERE slave = %s
+                      AND ready IS NULL
+                      AND start_time IS NOT NULL
+                      AND (%s - start_time) >= %s
+                    """,
+                    (slave, now_ms, OVERLOAD_SLAVE_SHED_MIN_AGE_MS),
+                ))
+            else:
+                logger.warning(
+                    f"shedding {inflight} unfinished root batch(es) from {slave} "
+                    f"(reason={reason})"
+                )
+                queries.append((
+                    """
+                    UPDATE root_batch
+                    SET slave = NULL,
+                        start_time = NULL,
+                        end_time = NULL
+                    WHERE slave = %s
+                      AND ready IS NULL
+                    """,
+                    (slave,),
+                ))
         if queries:
             get_db_conn().execute_many(*queries)
 
