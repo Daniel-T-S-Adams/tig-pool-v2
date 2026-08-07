@@ -47,6 +47,13 @@ PROOF_PRIORITY_ENABLED = os.environ.get("SLAVE_PROOF_PRIORITY_ENABLED", "true").
 PROOF_PRIORITY_MAX_ROOTS = max(
     0, int(os.environ.get("SLAVE_PROOF_PRIORITY_MAX_ROOTS", "0"))
 )
+# Sampling gap (roots ready, proofs_batch not created yet) must not proof-only
+# lock a slave forever — otherwise the whole fleet idles while 100+ unassigned
+# roots sit sticky-locked to preferred owners. After this window, the slave can
+# take other root work again; real open proofs_batch rows still lock.
+SAMPLING_GAP_LOCK_MS = max(
+    0, int(os.environ.get("SLAVE_SAMPLING_GAP_LOCK_MS", str(5 * 60 * 1000)))
+)
 # When the sticky preferred owner is online but already at its adaptive cap,
 # allow other live CPUs to take unassigned roots. Without this, pending root
 # batches sit locked to a full owner while the rest of the fleet idles.
@@ -808,14 +815,17 @@ class SlaveManager:
         )
         return {str(r["benchmark_id"]) for r in (rows or []) if r.get("benchmark_id")}
 
-    def _slave_awaiting_proofs(self, slave_name: str) -> bool:
-        """True when this slave still owes proof work (or sampling not done yet).
+    def _slave_awaiting_proofs(self, slave_name: str, now_ms: Optional[int] = None) -> bool:
+        """True when this slave still owes proof work (or a fresh sampling gap).
 
-        Covers the gap after merkle_root_ready before proofs_batch rows exist.
-        Once sampling exists, only lock if this slave has unfinished proof
-        batches on roots it produced — do not idle-lock split contributors
-        whose batches were not sampled while others finish proofs.
+        Covers the gap after merkle_root_ready before proofs_batch rows exist,
+        but only for SAMPLING_GAP_LOCK_MS after this slave's latest ready root.
+        Once that window passes, the slave is free to take other roots so idle
+        machines are not fleet-wide proof-only locked. Open proofs_batch rows
+        for roots this slave produced still lock until those proofs finish.
         """
+        now_ms = int(now_ms if now_ms is not None else time.time() * 1000)
+        gap_cutoff = now_ms - int(SAMPLING_GAP_LOCK_MS)
         row = get_db_conn().fetch_one(
             """
             SELECT 1 AS ok
@@ -832,10 +842,21 @@ class SlaveManager:
                   AND r.ready = true
               )
               AND (
-                NOT EXISTS (
-                  SELECT 1
-                  FROM proofs_batch p
-                  WHERE p.benchmark_id = j.benchmark_id
+                (
+                  NOT EXISTS (
+                    SELECT 1
+                    FROM proofs_batch p
+                    WHERE p.benchmark_id = j.benchmark_id
+                  )
+                  AND EXISTS (
+                    SELECT 1
+                    FROM root_batch r
+                    WHERE r.benchmark_id = j.benchmark_id
+                      AND r.slave = %s
+                      AND r.ready = true
+                      AND r.end_time IS NOT NULL
+                      AND r.end_time >= %s
+                  )
                 )
                 OR EXISTS (
                   SELECT 1
@@ -850,7 +871,7 @@ class SlaveManager:
               )
             LIMIT 1
             """,
-            (slave_name, slave_name),
+            (slave_name, slave_name, gap_cutoff, slave_name),
         )
         return bool(row)
 
@@ -1016,6 +1037,7 @@ class SlaveManager:
                     owner = row.get("slave")
                     if owner and row.get("end_time") is None:
                         active_by_slave[str(owner)] = active_by_slave.get(str(owner), 0) + 1
+                awaiting_cache: Dict[str, bool] = {}
                 for preferred in set(root_affinity.values()):
                     if not preferred or preferred not in online_slaves:
                         continue
@@ -1027,6 +1049,17 @@ class SlaveManager:
                     )
                     if pref_cap > 0 and int(active_by_slave.get(preferred) or 0) >= pref_cap:
                         preferred_at_cap.add(preferred)
+                        continue
+                    # Preferred owner is proof-locked / in sampling gap → they will
+                    # not take new roots. Let other live CPUs claim unassigned roots
+                    # on that job instead of leaving idle machines empty.
+                    if PROOF_PRIORITY_ENABLED:
+                        if preferred not in awaiting_cache:
+                            awaiting_cache[preferred] = self._slave_awaiting_proofs(
+                                preferred, int(now)
+                            )
+                        if awaiting_cache[preferred]:
+                            preferred_at_cap.add(preferred)
 
             with self.lock:
                 route_cap = int(slave["max_concurrent_batches"])
@@ -1066,7 +1099,7 @@ class SlaveManager:
                         if has_artifacts(batch["benchmark_id"], batch["batch_idx"]):
                             own_proof_work.append(b)
                 awaiting_proofs = (
-                    PROOF_PRIORITY_ENABLED and self._slave_awaiting_proofs(slave_name)
+                    PROOF_PRIORITY_ENABLED and self._slave_awaiting_proofs(slave_name, int(now))
                 )
                 has_proof_work = bool(assigned_proofs or own_proof_work or awaiting_proofs)
                 finish_root_bids = (

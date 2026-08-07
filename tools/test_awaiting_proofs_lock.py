@@ -11,19 +11,23 @@ def should_awaiting_proof_lock(
     merkle_proofs_ready: bool,
     proof_batch_count: int,
     my_open_proofs: int,
+    latest_ready_root_age_ms: int | None = None,
+    sampling_gap_lock_ms: int = 5 * 60 * 1000,
 ) -> bool:
     """Mirrors master._slave_awaiting_proofs job filter (no DB)."""
     if not has_ready_roots:
         return False
     if not merkle_root_ready or merkle_proofs_ready:
         return False
-    if proof_batch_count <= 0:
-        return True  # sampling gap
-    return my_open_proofs > 0
+    if proof_batch_count > 0:
+        return my_open_proofs > 0
+    # Sampling gap: only lock while the latest ready root is still fresh.
+    if latest_ready_root_age_ms is None:
+        return True
+    return latest_ready_root_age_ms <= sampling_gap_lock_ms
 
 
 def main() -> int:
-    # pica28 live case: split job, proofs exist, none owed by this slave
     cases = [
         (
             should_awaiting_proof_lock(
@@ -54,9 +58,22 @@ def main() -> int:
                 merkle_proofs_ready=False,
                 proof_batch_count=0,
                 my_open_proofs=0,
+                latest_ready_root_age_ms=60_000,
             )
             is True,
-            "sampling gap still locks root owner",
+            "fresh sampling gap still locks root owner",
+        ),
+        (
+            should_awaiting_proof_lock(
+                has_ready_roots=True,
+                merkle_root_ready=True,
+                merkle_proofs_ready=False,
+                proof_batch_count=0,
+                my_open_proofs=0,
+                latest_ready_root_age_ms=10 * 60 * 1000,
+            )
+            is False,
+            "stale sampling gap unlocks idle owner",
         ),
         (
             should_awaiting_proof_lock(
