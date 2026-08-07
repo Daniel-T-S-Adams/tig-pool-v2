@@ -2751,6 +2751,30 @@ def _target_per_challenge_caps(cfg: dict, capacity: dict, proposed_slots: dict) 
     return proposed
 
 
+
+def _cpu_slave_cap_bounds() -> tuple[int, int]:
+    """Return (floor, ceiling) with ceiling winning when env min > max."""
+    ceiling = max(1, int(MAX_CPU_SLAVE_CAP))
+    floor = min(max(1, int(MIN_CPU_SLAVE_CAP)), ceiling)
+    return floor, ceiling
+
+
+def _gpu_slave_cap_bounds() -> tuple[int, int]:
+    ceiling = max(1, int(MAX_GPU_SLAVE_CAP))
+    floor = min(max(1, int(MIN_GPU_SLAVE_CAP)), ceiling)
+    return floor, ceiling
+
+
+def _clamp_cpu_slave_cap(value: int) -> int:
+    floor, ceiling = _cpu_slave_cap_bounds()
+    return max(floor, min(int(value), ceiling))
+
+
+def _clamp_gpu_slave_cap(value: int) -> int:
+    floor, ceiling = _gpu_slave_cap_bounds()
+    return max(floor, min(int(value), ceiling))
+
+
 def _target_adaptive_slave_caps(capacity: dict) -> dict:
     current = capacity.get("current_adaptive_caps") or {}
     if not current:
@@ -2758,18 +2782,32 @@ def _target_adaptive_slave_caps(capacity: dict) -> dict:
     proposed = dict(current)
     cpu_max = int(current.get("cpu_max_cap", 0) or 0)
     gpu_max = int(current.get("gpu_max_cap", 0) or 0)
-    if capacity["active_cpu"] and cpu_max:
-        cpu_ceiling = max(cpu_max, MAX_CPU_SLAVE_CAP)
+    _, cpu_ceiling = _cpu_slave_cap_bounds()
+    _, gpu_ceiling = _gpu_slave_cap_bounds()
+
+    # Always honor env ceilings: never treat an already-high live cap as permission
+    # to keep climbing past AUTOPILOT_MAX_*_SLAVE_CAP.
+    if cpu_max > cpu_ceiling:
+        proposed["cpu_max_cap"] = cpu_ceiling
+    elif capacity["active_cpu"] and cpu_max:
         if capacity["productive_idle_cpu"] >= PRODUCTIVE_IDLE_CPU_SCALE_MIN:
-            proposed["cpu_max_cap"] = max(MIN_CPU_SLAVE_CAP, min(cpu_max + 1, cpu_ceiling))
-        elif capacity["cpu_completed_recent"] >= CAP_SCALE_COMPLETIONS_PER_STEP and capacity["cpu_pressure"] >= capacity["active_cpu"]:
-            proposed["cpu_max_cap"] = max(MIN_CPU_SLAVE_CAP, min(cpu_max + 1, cpu_ceiling))
-    if capacity["active_gpu"] and gpu_max:
-        gpu_ceiling = max(gpu_max, MAX_GPU_SLAVE_CAP)
+            proposed["cpu_max_cap"] = _clamp_cpu_slave_cap(cpu_max + 1)
+        elif (
+            capacity["cpu_completed_recent"] >= CAP_SCALE_COMPLETIONS_PER_STEP
+            and capacity["cpu_pressure"] >= capacity["active_cpu"]
+        ):
+            proposed["cpu_max_cap"] = _clamp_cpu_slave_cap(cpu_max + 1)
+
+    if gpu_max > gpu_ceiling:
+        proposed["gpu_max_cap"] = gpu_ceiling
+    elif capacity["active_gpu"] and gpu_max:
         if capacity["productive_idle_gpu"] >= PRODUCTIVE_IDLE_GPU_SCALE_MIN:
-            proposed["gpu_max_cap"] = max(MIN_GPU_SLAVE_CAP, min(gpu_max + 1, gpu_ceiling))
-        elif capacity["gpu_completed_recent"] >= CAP_SCALE_COMPLETIONS_PER_STEP and capacity["gpu_pressure"] >= capacity["active_gpu"]:
-            proposed["gpu_max_cap"] = max(MIN_GPU_SLAVE_CAP, min(gpu_max + 1, gpu_ceiling))
+            proposed["gpu_max_cap"] = _clamp_gpu_slave_cap(gpu_max + 1)
+        elif (
+            capacity["gpu_completed_recent"] >= CAP_SCALE_COMPLETIONS_PER_STEP
+            and capacity["gpu_pressure"] >= capacity["active_gpu"]
+        ):
+            proposed["gpu_max_cap"] = _clamp_gpu_slave_cap(gpu_max + 1)
     return proposed
 
 
@@ -2868,10 +2906,17 @@ def _target_slave_route_caps(cfg: dict, capacity: dict, slaves: list[dict] | Non
                 reasons.append(reason)
 
         ceiling = MAX_GPU_SLAVE_CAP if profile == "gpu" else MAX_CPU_SLAVE_CAP
-        target = min(target, ceiling)
-        if target > current:
+        if current > ceiling:
+            target = ceiling
+            reasons.append("env_slave_cap_ceiling")
+        else:
+            target = min(target, ceiling)
+        if target != current:
             step = ROUTE_GPU_UP_STEP if profile == "gpu" else ROUTE_CPU_UP_STEP
-            next_value = _next_value_bounded(current, target, max(1, step), 1)
+            if target < current:
+                next_value = target  # hard clamp down to env ceiling immediately
+            else:
+                next_value = _next_value_bounded(current, target, max(1, step), 1)
             targets.append({
                 "index": idx,
                 "name_regex": route.get("name_regex"),
@@ -3626,9 +3671,13 @@ def _apply_route_cap_targets(new_cfg: dict, route_rec: dict) -> dict | None:
         current = int(current_routes[idx].get("max_concurrent_batches") or 0)
         proposed = int(target.get("target") or current)
         next_value = int(target.get("next") or proposed)
-        if proposed <= current or next_value <= current:
+        if next_value == current:
             continue
-        next_value = min(next_value, proposed)
+        # Allow immediate clamp-down when over env ceiling; keep stepwise ups.
+        if next_value > current:
+            next_value = min(next_value, proposed)
+        else:
+            next_value = min(next_value, proposed)
         current_routes[idx]["max_concurrent_batches"] = next_value
         route_changes.append({
             "name_regex": current_routes[idx].get("name_regex"),
@@ -4148,23 +4197,61 @@ def _plan_config_change(report: dict, cfg: dict, clean_windows: int) -> dict:
             new_cfg["per_challenge_max_benchmarks"] = next_per
             changes["per_challenge_max_benchmarks"] = per_changes
 
-    caps_rec = recommendations.get("adaptive_slave_caps")
+    # Always enforce env slave-cap ceilings, even when capacity upscales are gated.
     current_caps = new_cfg.get("adaptive_slave_caps") or {}
+    if current_caps:
+        next_caps = dict(current_caps)
+        clamp_changes = {}
+        for key, clamp_fn in (
+            ("cpu_max_cap", _clamp_cpu_slave_cap),
+            ("gpu_max_cap", _clamp_gpu_slave_cap),
+        ):
+            current = int(current_caps.get(key, 0) or 0)
+            if current <= 0:
+                continue
+            clamped = clamp_fn(current)
+            if clamped != current:
+                next_caps[key] = clamped
+                clamp_changes[key] = {
+                    "current": current,
+                    "target": clamped,
+                    "next": clamped,
+                    "reason": "env_slave_cap_ceiling",
+                }
+        if clamp_changes:
+            new_cfg["adaptive_slave_caps"] = next_caps
+            changes["adaptive_slave_caps"] = {
+                "changes": clamp_changes,
+                "signals": {"enforced": "AUTOPILOT_MAX_*_SLAVE_CAP"},
+            }
+            current_caps = next_caps
+
+    caps_rec = recommendations.get("adaptive_slave_caps")
+    current_caps = new_cfg.get("adaptive_slave_caps") or current_caps
     if caps_rec and current_caps and capacity_change_allowed:
         proposed_caps = caps_rec.get("proposed") or {}
         next_caps = dict(current_caps)
         cap_changes = {}
-        for key in ("cpu_max_cap", "gpu_max_cap"):
+        for key, clamp_fn in (
+            ("cpu_max_cap", _clamp_cpu_slave_cap),
+            ("gpu_max_cap", _clamp_gpu_slave_cap),
+        ):
             current = int(current_caps.get(key, 0) or 0)
-            target = int(proposed_caps.get(key, current) or current)
+            target = clamp_fn(int(proposed_caps.get(key, current) or current))
+            if target == current:
+                continue
             if target > current:
-                next_value = current + 1
-                next_caps[key] = next_value
-                cap_changes[key] = {
-                    "current": current,
-                    "target": target,
-                    "next": next_value,
-                }
+                next_value = clamp_fn(current + 1)
+            else:
+                next_value = target
+            if next_value == current:
+                continue
+            next_caps[key] = next_value
+            cap_changes[key] = {
+                "current": current,
+                "target": target,
+                "next": next_value,
+            }
         if cap_changes:
             new_cfg["adaptive_slave_caps"] = next_caps
             changes["adaptive_slave_caps"] = {
@@ -4172,6 +4259,21 @@ def _plan_config_change(report: dict, cfg: dict, clean_windows: int) -> dict:
                 "signals": caps_rec.get("signals") or {},
             }
 
+    # Env ceiling clamp-downs for routes should not wait on clean-window upscale gates.
+    if route_rec:
+        proposed_routes = route_rec.get("proposed") or []
+        clamp_only = {
+            **route_rec,
+            "proposed": [
+                row for row in proposed_routes
+                if int(row.get("next") or row.get("target") or 0)
+                < int(row.get("current") or 0)
+            ],
+        }
+        if clamp_only["proposed"]:
+            route_change = _apply_route_cap_targets(new_cfg, clamp_only)
+            if route_change:
+                changes["slaves.max_concurrent_batches"] = route_change
     if route_rec and route_cap_change_allowed:
         route_change = _apply_route_cap_targets(new_cfg, route_rec)
         if route_change:
