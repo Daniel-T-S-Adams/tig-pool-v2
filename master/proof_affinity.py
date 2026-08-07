@@ -55,6 +55,29 @@ def preferred_root_slave(slave_scores: Dict[str, int]) -> Optional[str]:
     return best_slave
 
 
+def should_sticky_idle_overflow(
+    *,
+    preferred_slave: Optional[str],
+    preferred_inflight_on_job: bool,
+    has_unassigned: bool,
+    job_age_ms: int,
+    idle_ms: int,
+    preferred_online: bool,
+) -> bool:
+    """True when aged sticky leftovers should overflow to other live CPUs.
+
+    Preferred is online and under normal sticky protection, but is not working
+    this job while unassigned roots remain past idle_ms.
+    """
+    if idle_ms <= 0:
+        return False
+    if not preferred_slave or not preferred_online:
+        return False
+    if not has_unassigned or preferred_inflight_on_job:
+        return False
+    return int(job_age_ms) >= int(idle_ms)
+
+
 def should_skip_root_for_slave(
     slave_name: str,
     preferred_slave: Optional[str],

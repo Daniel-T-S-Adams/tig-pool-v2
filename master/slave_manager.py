@@ -30,6 +30,7 @@ from master.proof_affinity import (
     fetch_online_slaves,
     preferred_root_slave,
     should_skip_root_for_slave,
+    should_sticky_idle_overflow,
     touch_slave_seen,
 )
 
@@ -63,6 +64,12 @@ STICKY_OVERFLOW_AT_CAP = os.environ.get("SLAVE_STICKY_OVERFLOW_AT_CAP", "true").
     "true",
     "yes",
     "on",
+)
+# If the sticky preferred owner is online under cap but not working that job,
+# unassigned leftovers can sit forever while they take other work. After this
+# job age, allow other live CPUs to take those roots (proofs stay sticky).
+STICKY_OVERFLOW_IDLE_MS = max(
+    0, int(os.environ.get("SLAVE_STICKY_OVERFLOW_IDLE_MS", str(3 * 60 * 1000)))
 )
 
 
@@ -945,7 +952,8 @@ class SlaveManager:
                             'batch_size', B.batch_size,
                             'batch_idx', A.batch_idx,
                             'challenge', B.challenge,
-                            'algorithm', B.algorithm
+                            'algorithm', B.algorithm,
+                            'job_start_time', B.start_time
                         ) AS batch
                     FROM proofs_batch A
                     INNER JOIN job B
@@ -978,7 +986,8 @@ class SlaveManager:
                             'batch_size', B.batch_size,
                             'batch_idx', A.batch_idx,
                             'challenge', B.challenge,
-                            'algorithm', B.algorithm
+                            'algorithm', B.algorithm,
+                            'job_start_time', B.start_time
                         ) AS batch
                     FROM root_batch A
                     INNER JOIN job B
@@ -1065,6 +1074,55 @@ class SlaveManager:
                             )
                         if awaiting_cache[preferred]:
                             preferred_at_cap.add(preferred)
+
+                # Aged leftovers: preferred online under cap, not inflight on the
+                # job, but unassigned roots remain → overflow so the fleet helps.
+                if STICKY_OVERFLOW_IDLE_MS > 0:
+                    inflight_pref_bids: Set[str] = set()
+                    unassigned_job_age: Dict[str, int] = {}
+                    unassigned_pref: Dict[str, str] = {}
+                    for row in self.batches:
+                        batch = row.get("batch") or {}
+                        if batch.get("sampled_nonces") is not None:
+                            continue
+                        if row.get("end_time") is not None:
+                            continue
+                        bid = str(batch.get("benchmark_id") or "")
+                        preferred = root_affinity.get(bid)
+                        if not preferred or preferred not in online_slaves:
+                            continue
+                        if row.get("slave") == preferred:
+                            inflight_pref_bids.add(bid)
+                            continue
+                        if row.get("slave") is not None:
+                            continue
+                        job_start = batch.get("job_start_time")
+                        try:
+                            job_age = int(now) - int(job_start)
+                        except (TypeError, ValueError):
+                            continue
+                        prev = unassigned_job_age.get(bid)
+                        if prev is None or job_age > prev:
+                            unassigned_job_age[bid] = job_age
+                            unassigned_pref[bid] = preferred
+                    for bid, preferred in unassigned_pref.items():
+                        if not should_sticky_idle_overflow(
+                            preferred_slave=preferred,
+                            preferred_inflight_on_job=bid in inflight_pref_bids,
+                            has_unassigned=True,
+                            job_age_ms=unassigned_job_age[bid],
+                            idle_ms=int(STICKY_OVERFLOW_IDLE_MS),
+                            preferred_online=True,
+                        ):
+                            continue
+                        if preferred not in preferred_at_cap:
+                            preferred_at_cap.add(preferred)
+                            logger.info(
+                                "sticky idle overflow preferred=%s bid=%s "
+                                "(unassigned leftovers, owner not inflight on job)",
+                                preferred,
+                                bid[:8],
+                            )
 
             with self.lock:
                 route_cap = int(slave["max_concurrent_batches"])
@@ -1261,9 +1319,28 @@ class SlaveManager:
                         (not is_proof)
                         and batch["benchmark_id"] in starved_slot_benchmarks
                     )
-                    if not cap_enabled or is_proof or starved_root:
+                    sticky_own_unassigned = (
+                        (not is_proof)
+                        and row.get("slave") is None
+                        and row.get("end_time") is None
+                        and root_affinity.get(batch["benchmark_id"]) == slave_name
+                    )
+                    if (
+                        not cap_enabled
+                        or is_proof
+                        or sticky_own_unassigned
+                        or starved_root
+                    ):
                         return (
-                            0 if own_proof else 1 if is_proof else 2 if starved_root else 3,
+                            0
+                            if own_proof
+                            else 1
+                            if is_proof
+                            else 2
+                            if sticky_own_unassigned
+                            else 3
+                            if starved_root
+                            else 4,
                             -starved_slot_benchmarks.get(batch["benchmark_id"], 0),
                             idx,
                         )
