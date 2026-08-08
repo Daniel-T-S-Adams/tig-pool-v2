@@ -1697,6 +1697,42 @@ class SlaveManager:
                 logger.debug(f"no batches available for {slave_name}")
             if len(updates) > 0:
                 get_db_conn().execute_many(*updates)
+            # Final safety net: never hand batches that are already ready in DB.
+            # In-memory ghosts (submit/run race) can still sit in concurrent with
+            # end_time=None even though root_batch.ready=true — that trapped
+            # max_concurrent=1 slaves in resubmit loops.
+            if concurrent:
+                filtered = []
+                dropped_ids = []
+                for batch in concurrent:
+                    bid = batch.get("benchmark_id")
+                    bidx = batch.get("batch_idx")
+                    is_proof = batch.get("sampled_nonces") is not None
+                    table = "proofs_batch" if is_proof else "root_batch"  # nosec B608
+                    row = get_db_conn().fetch_one(
+                        f"""
+                        SELECT 1 AS ok
+                        FROM {table}
+                        WHERE benchmark_id = %s
+                          AND batch_idx = %s
+                          AND ready = true
+                        LIMIT 1
+                        """,
+                        (bid, int(bidx)),
+                    )
+                    if row is not None:
+                        dropped_ids.append(batch.get("id"))
+                        continue
+                    filtered.append(batch)
+                if dropped_ids:
+                    logger.info(
+                        "get-batches dropped %s already-ready batch(es) for %s: %s",
+                        len(dropped_ids),
+                        slave_name,
+                        dropped_ids[:8],
+                    )
+                    self._purge_ready_assigned(slave_name)
+                    concurrent = filtered
             logger.info(
                 f"get-batches slave={slave_name} assigned={len(concurrent)} "
                 f"cap={max_concurrent} route_cap={route_cap} adaptive={max_concurrent != route_cap}"
