@@ -1858,27 +1858,59 @@ class SlaveManager:
 
         @app.post('/submit-batch-root/{batch_id}')
         async def submit_batch_root(batch_id: str, request: Request):
+            benchmark_id, batch_idx_s = batch_id.split("_", 1)
+            batch_idx = int(batch_idx_s)
+            orphan = False
             try:
                 slave_name, b = find_batch(batch_id, request)
             except HTTPException as exc:
-                if exc.status_code == 408:
-                    benchmark_id, batch_idx_s = batch_id.split("_", 1)
-                    if _root_already_ready(benchmark_id, int(batch_idx_s)):
-                        _retire_batch_id(batch_id)
-                        logger.debug(
-                            "idempotent root accept for already-ready %s from %s",
-                            batch_id,
-                            request.headers.get("User-Agent"),
-                        )
-                        return {"status": "OK"}
-                raise
+                if exc.status_code != 408:
+                    raise
+                slave_name = request.headers.get("User-Agent")
+                self._require_authorized_slave(slave_name)
+                if _root_already_ready(benchmark_id, batch_idx):
+                    _retire_batch_id(batch_id)
+                    logger.debug(
+                        "idempotent root accept for already-ready %s from %s",
+                        batch_id,
+                        slave_name,
+                    )
+                    return {"status": "OK"}
+                # Assignment raced away (ghost replace / steal) but work is still
+                # unfinished — accept the root from the slave that computed it.
+                orphan = True
+                b = None
+                logger.warning(
+                    "accepting orphaned root submit for %s from %s",
+                    batch_id,
+                    slave_name,
+                )
             try:
                 result = await request.json()
                 merkle_root = MerkleHash.from_str(result["merkle_root"])
                 solution_quality = result["solution_quality"]
                 if not (isinstance(solution_quality, list) and all(isinstance(x, int) for x in solution_quality)):
                     raise ValueError("solution_quality must be a list of integers")
-                expected_nonces = int(b["batch"]["num_nonces"])
+                if b is not None:
+                    expected_nonces = int(b["batch"]["num_nonces"])
+                else:
+                    row = get_db_conn().fetch_one(
+                        """
+                        SELECT LEAST(
+                            B.batch_size,
+                            B.num_nonces - A.batch_idx * B.batch_size
+                        )::INT AS num_nonces
+                        FROM root_batch A
+                        INNER JOIN job B ON A.benchmark_id = B.benchmark_id
+                        WHERE A.benchmark_id = %s
+                          AND A.batch_idx = %s
+                          AND A.ready IS NULL
+                        """,
+                        (benchmark_id, batch_idx),
+                    )
+                    if row is None or row.get("num_nonces") is None:
+                        raise ValueError("batch not open for root submit")
+                    expected_nonces = int(row["num_nonces"])
                 if len(solution_quality) != expected_nonces:
                     raise ValueError(
                         f"solution_quality length {len(solution_quality)} != expected {expected_nonces}"
@@ -1887,32 +1919,30 @@ class SlaveManager:
             except Exception as e:
                 logger.error(f"slave {slave_name} submitted INVALID root for {batch_id}: {e}")
                 raise HTTPException(status_code=400, detail="INVALID root")
-            # Update roots table with merkle root and solution quality
-            benchmark_id, batch_idx = batch_id.split("_")
-            batch_idx = int(batch_idx)
 
             # Capability EMA: learn slave×track runtime for affinity ranking.
             try:
-                settings_obj = b["batch"].get("settings") or {}
-                challenge = b["batch"].get("challenge") or ""
-                track_id = settings_obj.get("track_id") or ""
-                start_ms = b.get("start_time")
-                end_ms = int(time.time() * 1000)
-                if start_ms is not None:
-                    runtime_ms = max(1.0, float(end_ms) - float(start_ms))
-                    nonces = float(b["batch"].get("num_nonces") or 0)
-                    mpn = runtime_ms / nonces if nonces > 0 else None
-                    update_slave_track_ema(
-                        execute=get_db_conn().execute,
-                        fetch_one=get_db_conn().fetch_one,
-                        slave_name=slave_name,
-                        challenge=challenge,
-                        track_id=track_id,
-                        runtime_ms=runtime_ms,
-                        ms_per_nonce=mpn,
-                        now_ms=end_ms,
-                        alpha=capability_settings(CONFIG).get("ema_alpha", 0.3),
-                    )
+                if b is not None:
+                    settings_obj = b["batch"].get("settings") or {}
+                    challenge = b["batch"].get("challenge") or ""
+                    track_id = settings_obj.get("track_id") or ""
+                    start_ms = b.get("start_time")
+                    end_ms = int(time.time() * 1000)
+                    if start_ms is not None:
+                        runtime_ms = max(1.0, float(end_ms) - float(start_ms))
+                        nonces = float(b["batch"].get("num_nonces") or 0)
+                        mpn = runtime_ms / nonces if nonces > 0 else None
+                        update_slave_track_ema(
+                            execute=get_db_conn().execute,
+                            fetch_one=get_db_conn().fetch_one,
+                            slave_name=slave_name,
+                            challenge=challenge,
+                            track_id=track_id,
+                            runtime_ms=runtime_ms,
+                            ms_per_nonce=mpn,
+                            now_ms=end_ms,
+                            alpha=capability_settings(CONFIG).get("ema_alpha", 0.3),
+                        )
             except Exception as exc:
                 logger.debug("slave_track_ema update failed: %s", exc)
 
@@ -1921,11 +1951,14 @@ class SlaveManager:
                     """
                     UPDATE root_batch
                     SET ready = true,
-                        end_time = (EXTRACT(EPOCH FROM NOW()) * 1000)::BIGINT
+                        end_time = (EXTRACT(EPOCH FROM NOW()) * 1000)::BIGINT,
+                        slave = COALESCE(slave, %s)
                     WHERE benchmark_id = %s 
                         AND batch_idx = %s
+                        AND ready IS NULL
                     """, 
                     (
+                        slave_name,
                         benchmark_id,
                         batch_idx
                     )
