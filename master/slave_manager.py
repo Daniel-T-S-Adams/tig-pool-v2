@@ -1660,6 +1660,51 @@ class SlaveManager:
             
             return slave_name, b
 
+        def _retire_batch_id(batch_id: str):
+            """Mark every in-memory copy of batch_id finished and drop them.
+
+            run() can reload self.batches between find_batch and submit commit,
+            leaving a fresh end_time=None row that would otherwise keep filling
+            max_concurrent=1. Always retire by id against the current list.
+            """
+            end_ms = int(time.time() * 1000)
+            with self.lock:
+                keep = []
+                for row in self.batches:
+                    if (row.get("batch") or {}).get("id") == batch_id:
+                        row["end_time"] = end_ms
+                        continue
+                    keep.append(row)
+                self.batches = keep
+
+        def _root_already_ready(benchmark_id: str, batch_idx: int) -> bool:
+            row = get_db_conn().fetch_one(
+                """
+                SELECT 1 AS ok
+                FROM root_batch
+                WHERE benchmark_id = %s
+                  AND batch_idx = %s
+                  AND ready = true
+                LIMIT 1
+                """,
+                (benchmark_id, batch_idx),
+            )
+            return row is not None
+
+        def _proofs_already_ready(benchmark_id: str, batch_idx: int) -> bool:
+            row = get_db_conn().fetch_one(
+                """
+                SELECT 1 AS ok
+                FROM proofs_batch
+                WHERE benchmark_id = %s
+                  AND batch_idx = %s
+                  AND ready = true
+                LIMIT 1
+                """,
+                (benchmark_id, batch_idx),
+            )
+            return row is not None
+
         @app.post('/submit-batch-error/{batch_id}')
         async def submit_batch_error(batch_id: str, request: Request):
             slave_name, b = find_batch(batch_id, request)
@@ -1708,7 +1753,20 @@ class SlaveManager:
 
         @app.post('/submit-batch-root/{batch_id}')
         async def submit_batch_root(batch_id: str, request: Request):
-            slave_name, b = find_batch(batch_id, request)
+            try:
+                slave_name, b = find_batch(batch_id, request)
+            except HTTPException as exc:
+                if exc.status_code == 408:
+                    benchmark_id, batch_idx_s = batch_id.split("_", 1)
+                    if _root_already_ready(benchmark_id, int(batch_idx_s)):
+                        _retire_batch_id(batch_id)
+                        logger.debug(
+                            "idempotent root accept for already-ready %s from %s",
+                            batch_id,
+                            request.headers.get("User-Agent"),
+                        )
+                        return {"status": "OK"}
+                raise
             try:
                 result = await request.json()
                 merkle_root = MerkleHash.from_str(result["merkle_root"])
@@ -1786,22 +1844,25 @@ class SlaveManager:
                 )
             ]
             get_db_conn().execute_many(*queries)
-            # Free the in-memory assign slot immediately. DB is updated above, but
-            # self.batches is only reloaded on slave_manager.run() (~5s). Until then
-            # get-batches still saw end_time=None and kept re-handing this batch,
-            # filling concurrent=1 so the slave sat idle ("already processed").
-            with self.lock:
-                b["end_time"] = int(time.time() * 1000)
-                try:
-                    self.batches.remove(b)
-                except ValueError:
-                    pass
-
+            _retire_batch_id(batch_id)
             return {"status": "OK"}
 
         @app.post('/submit-batch-proofs/{batch_id}')
         async def submit_batch_proofs(batch_id: str, request: Request):
-            slave_name, b = find_batch(batch_id, request)
+            try:
+                slave_name, b = find_batch(batch_id, request)
+            except HTTPException as exc:
+                if exc.status_code == 408:
+                    benchmark_id, batch_idx_s = batch_id.split("_", 1)
+                    if _proofs_already_ready(benchmark_id, int(batch_idx_s)):
+                        _retire_batch_id(batch_id)
+                        logger.debug(
+                            "idempotent proofs accept for already-ready %s from %s",
+                            batch_id,
+                            request.headers.get("User-Agent"),
+                        )
+                        return {"status": "OK"}
+                raise
             try:
                 result = await request.json()
                 merkle_proofs = [MerkleProof.from_dict(x) for x in result["merkle_proofs"]]
@@ -1837,13 +1898,7 @@ class SlaveManager:
                     )
                 )
             ])
-            with self.lock:
-                b["end_time"] = int(time.time() * 1000)
-                try:
-                    self.batches.remove(b)
-                except ValueError:
-                    pass
-
+            _retire_batch_id(batch_id)
             return {"status": "OK"}
             
         thread = Thread(target=lambda: uvicorn.run(app, host="0.0.0.0", port=5115, access_log=False))  # nosec B104 — container binds all interfaces; nginx controls external exposure
