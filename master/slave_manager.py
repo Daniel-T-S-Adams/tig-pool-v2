@@ -1786,6 +1786,12 @@ class SlaveManager:
                 )
             ]
             get_db_conn().execute_many(*queries)
+            # Free the in-memory assign slot immediately. DB is updated above, but
+            # self.batches is only reloaded on slave_manager.run() (~5s). Until then
+            # get-batches still saw end_time=None and kept re-handing this batch,
+            # filling concurrent=1 so the slave sat idle ("already processed").
+            with self.lock:
+                b["end_time"] = int(time.time() * 1000)
 
             return {"status": "OK"}
 
@@ -1827,6 +1833,8 @@ class SlaveManager:
                     )
                 )
             ])
+            with self.lock:
+                b["end_time"] = int(time.time() * 1000)
 
             return {"status": "OK"}
             
