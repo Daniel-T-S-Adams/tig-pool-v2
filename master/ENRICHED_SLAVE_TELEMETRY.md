@@ -28,6 +28,11 @@ Suggested query params:
 | `free_ram_gb` | float | Free/available RAM |
 | `gpu_util` | float | 0–100 GPU utilization (GPU slaves) |
 | `gpu_vram_free_mb` | int | Free VRAM |
+| `state` | string | `idle` / `downloading` / `running` / `submitting` (v1.5) |
+| `active_batches` | int ≥0 | Batches currently processing (v1.5) |
+| `pending_batches` | int ≥0 | Batches queued locally (v1.5) |
+| `last_idle_ms` | int ≥0 | Last finished→next-work idle gap, or current idle age (v1.5) |
+| `slave_version` | string | e.g. `innopool-slave/0.1.0` (v1.5) |
 
 Headers alternative (if query pollution is a concern):
 
@@ -36,8 +41,16 @@ Headers alternative (if query pollution is a concern):
 - `X-InnoPool-Load-1m`
 - `X-InnoPool-Free-Ram-Gb`
 - `X-InnoPool-Gpu-Util`
+- `X-InnoPool-State`
+- `X-InnoPool-Active-Batches`
+- `X-InnoPool-Pending-Batches`
+- `X-InnoPool-Last-Idle-Ms`
+- `X-InnoPool-Slave-Version`
 
 Identity remains `User-Agent: <slave_name>`.
+
+v1.5 fields are stored on the master for observability / future scheduling. They do
+not by themselves change concurrent caps; capacity gates still use cores/workers/load/RAM.
 
 ## Master behavior
 

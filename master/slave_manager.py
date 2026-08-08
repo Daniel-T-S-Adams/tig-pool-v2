@@ -672,7 +672,23 @@ class SlaveManager:
         """Store optional get-batches telemetry and arm CPU load-shed cooldown."""
         if not telemetry:
             return
-        self._slave_telemetry[slave_name] = dict(telemetry)
+        stored = dict(telemetry)
+        stored["received_at_ms"] = int(now_ms)
+        self._slave_telemetry[slave_name] = stored
+        if stored.get("slave_version") or stored.get("state") is not None:
+            logger.debug(
+                "slave telemetry %s version=%s state=%s active=%s pending=%s last_idle_ms=%s "
+                "cores=%s workers=%s load_1m=%s",
+                slave_name,
+                stored.get("slave_version"),
+                stored.get("state"),
+                stored.get("active_batches"),
+                stored.get("pending_batches"),
+                stored.get("last_idle_ms"),
+                stored.get("cores"),
+                stored.get("num_workers"),
+                stored.get("load_1m"),
+            )
         tier_settings = cpu_tier_cap_settings(CONFIG)
         if not tier_settings.get("live_telemetry_enabled", True):
             return

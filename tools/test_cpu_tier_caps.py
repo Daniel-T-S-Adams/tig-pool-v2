@@ -66,6 +66,33 @@ def main() -> int:
         cases.append((telem.get("free_ram_gb") == 64.0, "parse free ram header"))
         cases.append((parse(query_params={}, headers={}) == {}, "empty telemetry"))
 
+        # v1.5 runtime telemetry (0-valued queues must parse)
+        runtime = parse(
+            query_params={
+                "state": "idle",
+                "active_batches": "0",
+                "pending_batches": "2",
+                "last_idle_ms": "1500",
+                "slave_version": "innopool-slave/0.1.0",
+            }
+        )
+        cases.append((runtime.get("state") == "idle", "parse state"))
+        cases.append((runtime.get("active_batches") == 0, "parse active_batches=0"))
+        cases.append((runtime.get("pending_batches") == 2, "parse pending_batches"))
+        cases.append((runtime.get("last_idle_ms") == 1500, "parse last_idle_ms"))
+        cases.append(
+            (runtime.get("slave_version") == "innopool-slave/0.1.0", "parse slave_version")
+        )
+        cases.append(
+            (parse(query_params={"state": "bogus"}).get("state") is None, "reject bad state")
+        )
+        cases.append(
+            (
+                parse(headers={"X-InnoPool-State": "SUBMITTING"}).get("state") == "submitting",
+                "state header case-insensitive value",
+            )
+        )
+
         # Headroom / shed
         cases.append(
             (

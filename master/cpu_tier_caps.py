@@ -14,6 +14,7 @@ raise Pica-class (M) machines above 1.
 from __future__ import annotations
 
 import os
+import re
 from typing import Any, Dict, Mapping, Optional
 
 # Mirror capability_scheduler tier ints without importing heavy deps in tests.
@@ -122,6 +123,17 @@ def _parse_int(value: Any) -> Optional[int]:
     return parsed if parsed > 0 else None
 
 
+def _parse_nonneg_int(value: Any) -> Optional[int]:
+    """Like _parse_int but allows 0 (queue depths, idle timers)."""
+    if value is None or value == "":
+        return None
+    try:
+        parsed = int(float(value))
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed >= 0 else None
+
+
 def _parse_float(value: Any) -> Optional[float]:
     if value is None or value == "":
         return None
@@ -129,6 +141,27 @@ def _parse_float(value: Any) -> Optional[float]:
         return float(value)
     except (TypeError, ValueError):
         return None
+
+
+# Runtime state from custom InnoPool slaves (Phase C / v1.5).
+SLAVE_RUNTIME_STATES = frozenset({"idle", "downloading", "running", "submitting"})
+_SLAVE_VERSION_RE = re.compile(r"^[A-Za-z0-9._+/-]{1,64}$")
+
+
+def _parse_slave_state(value: Any) -> Optional[str]:
+    if value is None or value == "":
+        return None
+    state = str(value).strip().lower()
+    return state if state in SLAVE_RUNTIME_STATES else None
+
+
+def _parse_slave_version(value: Any) -> Optional[str]:
+    if value is None or value == "":
+        return None
+    version = str(value).strip()
+    if not _SLAVE_VERSION_RE.match(version):
+        return None
+    return version
 
 
 def parse_slave_telemetry(
@@ -139,6 +172,12 @@ def parse_slave_telemetry(
     """Parse optional get-batches telemetry from query params and/or headers.
 
     Missing/invalid fields are omitted. Stock slaves that send nothing get {}.
+
+    Phase C (capacity): cores, num_workers, load_1m, ram_gb, free_ram_gb,
+    gpu_util, gpu_vram_free_mb.
+
+    v1.5 (runtime): state, active_batches, pending_batches, last_idle_ms,
+    slave_version — stored for scheduling/observability; ignored by stock.
     """
     q = query_params or {}
     h = headers or {}
@@ -181,6 +220,37 @@ def parse_slave_telemetry(
             "x-innopool-gpu-vram-free-mb",
         )
     )
+    state = _parse_slave_state(
+        _get("state", "X-InnoPool-State", "x-innopool-state")
+    )
+    active_batches = _parse_nonneg_int(
+        _get(
+            "active_batches",
+            "X-InnoPool-Active-Batches",
+            "x-innopool-active-batches",
+        )
+    )
+    pending_batches = _parse_nonneg_int(
+        _get(
+            "pending_batches",
+            "X-InnoPool-Pending-Batches",
+            "x-innopool-pending-batches",
+        )
+    )
+    last_idle_ms = _parse_nonneg_int(
+        _get(
+            "last_idle_ms",
+            "X-InnoPool-Last-Idle-Ms",
+            "x-innopool-last-idle-ms",
+        )
+    )
+    slave_version = _parse_slave_version(
+        _get(
+            "slave_version",
+            "X-InnoPool-Slave-Version",
+            "x-innopool-slave-version",
+        )
+    )
     if cores is not None:
         out["cores"] = cores
     if num_workers is not None:
@@ -195,6 +265,16 @@ def parse_slave_telemetry(
         out["gpu_util"] = gpu_util
     if gpu_vram_free_mb is not None:
         out["gpu_vram_free_mb"] = gpu_vram_free_mb
+    if state is not None:
+        out["state"] = state
+    if active_batches is not None:
+        out["active_batches"] = active_batches
+    if pending_batches is not None:
+        out["pending_batches"] = pending_batches
+    if last_idle_ms is not None:
+        out["last_idle_ms"] = last_idle_ms
+    if slave_version is not None:
+        out["slave_version"] = slave_version
     return out
 
 
