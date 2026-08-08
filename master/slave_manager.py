@@ -1792,6 +1792,10 @@ class SlaveManager:
             # filling concurrent=1 so the slave sat idle ("already processed").
             with self.lock:
                 b["end_time"] = int(time.time() * 1000)
+                try:
+                    self.batches.remove(b)
+                except ValueError:
+                    pass
 
             return {"status": "OK"}
 
@@ -1835,6 +1839,10 @@ class SlaveManager:
             ])
             with self.lock:
                 b["end_time"] = int(time.time() * 1000)
+                try:
+                    self.batches.remove(b)
+                except ValueError:
+                    pass
 
             return {"status": "OK"}
             
