@@ -1004,6 +1004,72 @@ class SlaveManager:
         )
         return row is not None
 
+    def _purge_ready_assigned(self, slave_name: Optional[str] = None) -> int:
+        """Drop in-memory rows that are already ready=true in the DB.
+
+        Submit can race with run() reloading self.batches, leaving end_time=None
+        ghosts for completed work. Those fill max_concurrent=1 and get-batches
+        keeps re-handing them instead of assigning new roots.
+        """
+        with self.lock:
+            candidates = []
+            for row in self.batches:
+                if row.get("end_time") is not None:
+                    continue
+                if slave_name is not None and row.get("slave") != slave_name:
+                    continue
+                batch = row.get("batch") or {}
+                bid = batch.get("benchmark_id")
+                bidx = batch.get("batch_idx")
+                if bid is None or bidx is None:
+                    continue
+                batch_id = str(batch.get("id") or f"{bid}_{bidx}")
+                is_proof = batch.get("sampled_nonces") is not None
+                candidates.append((batch_id, str(bid), int(bidx), is_proof))
+
+        if not candidates:
+            return 0
+
+        ready_ids = set()
+        for batch_id, bid, bidx, is_proof in candidates:
+            table = "proofs_batch" if is_proof else "root_batch"  # nosec B608 — hardcoded table names
+            row = get_db_conn().fetch_one(
+                f"""
+                SELECT 1 AS ok
+                FROM {table}
+                WHERE benchmark_id = %s
+                  AND batch_idx = %s
+                  AND ready = true
+                LIMIT 1
+                """,
+                (bid, bidx),
+            )
+            if row is not None:
+                ready_ids.add(batch_id)
+
+        if not ready_ids:
+            return 0
+
+        end_ms = int(time.time() * 1000)
+        with self.lock:
+            keep = []
+            for row in self.batches:
+                batch = row.get("batch") or {}
+                batch_id = str(batch.get("id") or "")
+                if batch_id in ready_ids:
+                    row["end_time"] = end_ms
+                    continue
+                keep.append(row)
+            self.batches = keep
+
+        logger.info(
+            "purged %s already-ready in-memory batch(es)%s: %s",
+            len(ready_ids),
+            f" for {slave_name}" if slave_name else "",
+            sorted(ready_ids)[:8],
+        )
+        return len(ready_ids)
+
     def run(self):
         with self.lock:
             get_db_conn().execute(
@@ -1228,6 +1294,9 @@ class SlaveManager:
                                 preferred,
                                 bid[:8],
                             )
+
+            # Free concurrent slots held by completed batches before assign.
+            self._purge_ready_assigned(slave_name)
 
             with self.lock:
                 route_cap = int(slave["max_concurrent_batches"])
