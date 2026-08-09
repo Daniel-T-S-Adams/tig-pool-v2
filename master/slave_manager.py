@@ -238,6 +238,35 @@ class SlaveManager:
         # Optional get-batches telemetry (Phase C) + load-shed cooldown per slave.
         self._slave_telemetry: Dict[str, dict] = {}
         self._cpu_load_shed_until: Dict[str, int] = {}
+        # get-batches was running full slot sync/release/assign + affinity SQL on
+        # EVERY poll. With dozens of idle slaves at 1Hz that saturates Postgres
+        # and drives 40-60s latency / slave timeouts. Throttle + short TTL caches.
+        self._slot_maint_lock = Lock()
+        self._slot_maint_next_ms = 0
+        self._slot_maint_interval_ms = max(
+            250,
+            int(os.environ.get("SLAVE_SLOT_MAINT_INTERVAL_MS", "2000")),
+        )
+        self._affinity_cache: Optional[tuple[Dict[str, str], int]] = None
+        self._affinity_cache_ms = max(
+            250,
+            int(os.environ.get("SLAVE_AFFINITY_CACHE_MS", "2000")),
+        )
+        self._online_cache: Optional[tuple[Set[str], int]] = None
+        self._online_cache_ms = max(
+            250,
+            int(os.environ.get("SLAVE_ONLINE_CACHE_MS", "2000")),
+        )
+        self._auth_cache: Dict[str, tuple[bool, int]] = {}
+        self._auth_cache_ms = max(
+            1_000,
+            int(os.environ.get("SLAVE_AUTH_CACHE_MS", "30000")),
+        )
+        self._awaiting_proofs_cache: Dict[str, tuple[bool, int]] = {}
+        self._awaiting_proofs_cache_ms = max(
+            250,
+            int(os.environ.get("SLAVE_AWAITING_PROOFS_CACHE_MS", "2000")),
+        )
 
     def _ensure_slave_seen_table(self):
         if self._slave_seen_ready:
@@ -250,13 +279,26 @@ class SlaveManager:
         touch_slave_seen(get_db_conn().execute, slave_name, now_ms)
 
     def _online_slaves(self, now_ms: int) -> Set[str]:
+        cached = self._online_cache
+        if cached is not None:
+            slaves, until_ms = cached
+            if now_ms < until_ms:
+                return set(slaves)
         self._ensure_slave_seen_table()
-        return fetch_online_slaves(get_db_conn().fetch_all, now_ms)
+        slaves = fetch_online_slaves(get_db_conn().fetch_all, now_ms)
+        self._online_cache = (set(slaves), now_ms + self._online_cache_ms)
+        return set(slaves)
 
     def _root_affinity_map(self) -> Dict[str, str]:
         """benchmark_id -> preferred root slave for sticky assignment."""
         if not STICKY_ROOTS_ENABLED:
             return {}
+        now_ms = int(time.time() * 1000)
+        cached = self._affinity_cache
+        if cached is not None:
+            mapping, until_ms = cached
+            if now_ms < until_ms:
+                return dict(mapping)
         rows = get_db_conn().fetch_all(
             """
             SELECT
@@ -279,11 +321,13 @@ class SlaveManager:
             # Prefer slaves that already finished roots for this job.
             score = int(row.get("ready_n") or 0) * 100 + int(row.get("inflight_n") or 0)
             scores.setdefault(str(bid), {})[str(slave)] = score
-        return {
+        mapping = {
             bid: owner
             for bid, slave_scores in scores.items()
             if (owner := preferred_root_slave(slave_scores))
         }
+        self._affinity_cache = (dict(mapping), now_ms + self._affinity_cache_ms)
+        return mapping
 
     def _is_trusted_slave(self, slave_name: str) -> bool:
         if slave_name in set(CONFIG.get("trusted_slave_names", [])):
@@ -303,6 +347,13 @@ class SlaveManager:
         if self._is_trusted_slave(slave_name):
             return True
 
+        now_ms = int(time.time() * 1000)
+        cached = self._auth_cache.get(slave_name)
+        if cached is not None:
+            ok, until_ms = cached
+            if now_ms < until_ms:
+                return bool(ok)
+
         row = get_db_conn().fetch_one(
             """
             SELECT 1
@@ -313,7 +364,9 @@ class SlaveManager:
             """,
             (slave_name,)
         )
-        return row is not None
+        ok = row is not None
+        self._auth_cache[slave_name] = (ok, now_ms + self._auth_cache_ms)
+        return ok
 
     def _require_authorized_slave(self, slave_name: str):
         if not self._is_authorized_slave(slave_name):
@@ -481,6 +534,26 @@ class SlaveManager:
             return "J.challenge NOT IN ('vector_search', 'hypergraph', 'neuralnet_optimizer')"
         return "J.challenge = %s"
 
+    def _maybe_maintain_slots(self, slot_types: List[str], now_ms: int):
+        """Run slot sync/release/assign at most once per interval fleet-wide.
+
+        Idle slaves poll get-batches ~1Hz. Re-running full slot maintenance on
+        every poll was the main latency cliff (40-60s) after the AWS fleet joined.
+        """
+        if not slot_types:
+            return
+        if now_ms < self._slot_maint_next_ms:
+            return
+        with self._slot_maint_lock:
+            if now_ms < self._slot_maint_next_ms:
+                return
+            self._sync_slots()
+            self._release_slots()
+            # Empty regex = any algorithm; periodic maint must not be biased to
+            # whichever slave happened to win the throttle race.
+            self._assign_idle_slots(slot_types, "")
+            self._slot_maint_next_ms = now_ms + self._slot_maint_interval_ms
+
     def _assign_idle_slots(self, slot_types: List[str], algorithm_id_regex: str = ""):
         if not slot_types:
             return
@@ -495,89 +568,88 @@ class SlaveManager:
                 ORDER BY slot_id
                 """,
                 (slot_type,)
-            )
-            for slot in idle_slots:
-                if slot_type == "cpu":
-                    job = get_db_conn().fetch_one(
-                        """
-                        SELECT J.benchmark_id, J.challenge, J.settings
-                        FROM job J
-                        WHERE J.stopped IS NULL
-                          AND J.end_time IS NULL
-                          AND J.challenge NOT IN ('vector_search', 'hypergraph', 'neuralnet_optimizer')
-                          AND (%s = '' OR J.settings->>'algorithm_id' ~ %s)
-                          AND NOT EXISTS (
-                            SELECT 1 FROM benchmark_slot S WHERE S.benchmark_id = J.benchmark_id
-                          )
-                          AND (
-                            EXISTS (
-                              SELECT 1 FROM root_batch R
-                              WHERE R.benchmark_id = J.benchmark_id AND R.ready IS NULL
-                            )
-                            OR EXISTS (
-                              SELECT 1 FROM proofs_batch P
-                              WHERE P.benchmark_id = J.benchmark_id AND P.ready IS NULL
-                            )
-                          )
-                        ORDER BY
-                          -- Prefer stranded leftovers (pending roots, nobody assigned)
-                          -- so sticky-unlocked jobs get a slot before fresh creates.
-                          CASE WHEN EXISTS (
-                            SELECT 1 FROM root_batch R
-                            WHERE R.benchmark_id = J.benchmark_id
-                              AND R.ready IS NULL
-                              AND R.slave IS NULL
-                          ) AND NOT EXISTS (
-                            SELECT 1 FROM root_batch R2
-                            WHERE R2.benchmark_id = J.benchmark_id
-                              AND R2.ready IS NULL
-                              AND R2.slave IS NOT NULL
-                          ) THEN 0 ELSE 1 END,
-                          J.block_started, J.start_time, J.benchmark_id
-                        LIMIT 1
-                        """,
-                        (algorithm_id_regex, algorithm_id_regex)
-                    )
-                else:
-                    job = get_db_conn().fetch_one(
-                        """
-                        SELECT J.benchmark_id, J.challenge, J.settings
-                        FROM job J
-                        WHERE J.stopped IS NULL
-                          AND J.end_time IS NULL
-                          AND J.challenge = %s
-                          AND NOT EXISTS (
-                            SELECT 1 FROM benchmark_slot S WHERE S.benchmark_id = J.benchmark_id
-                          )
-                          AND (
-                            EXISTS (
-                              SELECT 1 FROM root_batch R
-                              WHERE R.benchmark_id = J.benchmark_id AND R.ready IS NULL
-                            )
-                            OR EXISTS (
-                              SELECT 1 FROM proofs_batch P
-                              WHERE P.benchmark_id = J.benchmark_id AND P.ready IS NULL
-                            )
-                          )
-                        ORDER BY
-                          CASE WHEN EXISTS (
-                            SELECT 1 FROM root_batch R
-                            WHERE R.benchmark_id = J.benchmark_id
-                              AND R.ready IS NULL
-                              AND R.slave IS NULL
-                          ) AND NOT EXISTS (
-                            SELECT 1 FROM root_batch R2
-                            WHERE R2.benchmark_id = J.benchmark_id
-                              AND R2.ready IS NULL
-                              AND R2.slave IS NOT NULL
-                          ) THEN 0 ELSE 1 END,
-                          J.block_started, J.start_time, J.benchmark_id
-                        LIMIT 1
-                        """,
-                        (slot_type,)
-                    )
-                if job is None:
-                    break
+            ) or []
+            if not idle_slots:
+                continue
+            limit = len(idle_slots)
+            if slot_type == "cpu":
+                jobs = get_db_conn().fetch_all(
+                    """
+                    SELECT J.benchmark_id, J.challenge, J.settings
+                    FROM job J
+                    WHERE J.stopped IS NULL
+                      AND J.end_time IS NULL
+                      AND J.challenge NOT IN ('vector_search', 'hypergraph', 'neuralnet_optimizer')
+                      AND (%s = '' OR J.settings->>'algorithm_id' ~ %s)
+                      AND NOT EXISTS (
+                        SELECT 1 FROM benchmark_slot S WHERE S.benchmark_id = J.benchmark_id
+                      )
+                      AND (
+                        EXISTS (
+                          SELECT 1 FROM root_batch R
+                          WHERE R.benchmark_id = J.benchmark_id AND R.ready IS NULL
+                        )
+                        OR EXISTS (
+                          SELECT 1 FROM proofs_batch P
+                          WHERE P.benchmark_id = J.benchmark_id AND P.ready IS NULL
+                        )
+                      )
+                    ORDER BY
+                      CASE WHEN EXISTS (
+                        SELECT 1 FROM root_batch R
+                        WHERE R.benchmark_id = J.benchmark_id
+                          AND R.ready IS NULL
+                          AND R.slave IS NULL
+                      ) AND NOT EXISTS (
+                        SELECT 1 FROM root_batch R2
+                        WHERE R2.benchmark_id = J.benchmark_id
+                          AND R2.ready IS NULL
+                          AND R2.slave IS NOT NULL
+                      ) THEN 0 ELSE 1 END,
+                      J.block_started, J.start_time, J.benchmark_id
+                    LIMIT %s
+                    """,
+                    (algorithm_id_regex, algorithm_id_regex, limit),
+                ) or []
+            else:
+                jobs = get_db_conn().fetch_all(
+                    """
+                    SELECT J.benchmark_id, J.challenge, J.settings
+                    FROM job J
+                    WHERE J.stopped IS NULL
+                      AND J.end_time IS NULL
+                      AND J.challenge = %s
+                      AND NOT EXISTS (
+                        SELECT 1 FROM benchmark_slot S WHERE S.benchmark_id = J.benchmark_id
+                      )
+                      AND (
+                        EXISTS (
+                          SELECT 1 FROM root_batch R
+                          WHERE R.benchmark_id = J.benchmark_id AND R.ready IS NULL
+                        )
+                        OR EXISTS (
+                          SELECT 1 FROM proofs_batch P
+                          WHERE P.benchmark_id = J.benchmark_id AND P.ready IS NULL
+                        )
+                      )
+                    ORDER BY
+                      CASE WHEN EXISTS (
+                        SELECT 1 FROM root_batch R
+                        WHERE R.benchmark_id = J.benchmark_id
+                          AND R.ready IS NULL
+                          AND R.slave IS NULL
+                      ) AND NOT EXISTS (
+                        SELECT 1 FROM root_batch R2
+                        WHERE R2.benchmark_id = J.benchmark_id
+                          AND R2.ready IS NULL
+                          AND R2.slave IS NOT NULL
+                      ) THEN 0 ELSE 1 END,
+                      J.block_started, J.start_time, J.benchmark_id
+                    LIMIT %s
+                    """,
+                    (slot_type, limit),
+                ) or []
+            for slot, job in zip(idle_slots, jobs):
                 settings = job["settings"] or {}
                 get_db_conn().execute(
                     """
@@ -590,6 +662,7 @@ class SlaveManager:
                         last_activity_at = %s,
                         state = 'root'
                     WHERE slot_id = %s
+                      AND benchmark_id IS NULL
                     """,
                     (
                         job["benchmark_id"],
@@ -957,6 +1030,11 @@ class SlaveManager:
         set root_cap=0 or sticky-unassigned roots stay stranded on idle CPUs.
         """
         now_ms = int(now_ms if now_ms is not None else time.time() * 1000)
+        cached = self._awaiting_proofs_cache.get(slave_name)
+        if cached is not None:
+            ok, until_ms = cached
+            if now_ms < until_ms:
+                return bool(ok)
         gap_ms = int(SAMPLING_GAP_LOCK_MS)
         gap_cutoff = now_ms - gap_ms if gap_ms > 0 else None
         row = get_db_conn().fetch_one(
@@ -1013,7 +1091,9 @@ class SlaveManager:
                 slave_name,
             ),
         )
-        return bool(row)
+        ok = bool(row)
+        self._awaiting_proofs_cache[slave_name] = (ok, now_ms + self._awaiting_proofs_cache_ms)
+        return ok
 
     def _slave_has_root_artifacts(self, slave_name: str, benchmark_id: str, batch_idx: int) -> bool:
         """Proofs must be built by the slave that produced that exact root batch.
@@ -1240,9 +1320,7 @@ class SlaveManager:
             slot_benchmark_ids = set()
             starved_slot_benchmarks = {}
             if slot_types:
-                self._sync_slots()
-                self._release_slots()
-                self._assign_idle_slots(slot_types, slave["algorithm_id_regex"])
+                self._maybe_maintain_slots(slot_types, int(now))
                 slot_benchmark_ids = self._slot_benchmark_ids(slot_types)
                 starved_slot_benchmarks = self._starved_slot_benchmarks(slot_types, int(now))
             root_affinity = self._root_affinity_map()

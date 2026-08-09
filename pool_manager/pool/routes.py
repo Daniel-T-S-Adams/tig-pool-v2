@@ -1000,6 +1000,7 @@ MASTER_PORT={_PUBLIC_MASTER_PORT}
 # CPU: installer defaults to detected logical threads.
 # GPU: normally 1 worker per GPU.
 NUM_WORKERS={num_workers}
+INNOPOOL_IDLE_POLL_SEC=5
 ALGORITHMS_DIR=$(pwd)/data/algorithms
 RESULTS_DIR=$(pwd)/data/results
 DASHBOARD_HOST_PORT=8787
@@ -1032,6 +1033,7 @@ SLAVE_NAME={slave_name}
 MASTER_IP={_PUBLIC_MASTER_HOST}
 MASTER_PORT={_PUBLIC_MASTER_PORT}
 NUM_WORKERS=$DETECTED_NUM_WORKERS
+INNOPOOL_IDLE_POLL_SEC=5
 ALGORITHMS_DIR=$(pwd)/data/algorithms
 RESULTS_DIR=$(pwd)/data/results
 DASHBOARD_HOST_PORT=8787

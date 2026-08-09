@@ -370,6 +370,7 @@ SLAVE_NAME={slave_name}
 MASTER_IP={master_ip}
 MASTER_PORT={master_port}
 NUM_WORKERS={workers}
+INNOPOOL_IDLE_POLL_SEC=5
 TTL=3600
 TIG_VERSION={tig_version}
 ALGORITHMS_DIR={dest / 'data' / 'algorithms'}
