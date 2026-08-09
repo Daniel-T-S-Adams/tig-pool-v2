@@ -2733,7 +2733,15 @@ class SlaveManager:
                         (benchmark_id, batch_idx),
                     )
                     if row is None or row.get("num_nonces") is None:
-                        raise ValueError("batch not open for root submit")
+                        # Job/batch already closed (common after reboot / outage).
+                        # Ack 200 so the slave stops retry-churning a dead result.
+                        logger.warning(
+                            "stale orphan root for %s from %s (batch not open) — acking",
+                            batch_id,
+                            slave_name,
+                        )
+                        _retire_batch_id(batch_id)
+                        return {"status": "OK", "note": "stale_closed_batch"}
                     expected_nonces = int(row["num_nonces"])
                 if len(solution_quality) != expected_nonces:
                     raise ValueError(
