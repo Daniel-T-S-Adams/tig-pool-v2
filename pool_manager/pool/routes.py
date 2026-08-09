@@ -221,6 +221,9 @@ def _fleet_aws_user_data_script(token: str, worker_type: str) -> str:
 set -euxo pipefail
 exec > >(tee -a /var/log/innopool-gpu-userdata.log) 2>&1
 
+# cloud-init often has HOME unset; install.sh needs a home for clone path.
+export HOME="${{HOME:-/root}}"
+export USER="${{USER:-root}}"
 export DEBIAN_FRONTEND=noninteractive
 apt-get update
 apt-get install -y curl git ca-certificates gnupg python3
@@ -269,6 +272,10 @@ echo "INNOPOOL_CUSTOM_SLAVE_GPU_SETUP_DONE"
     return f"""#!/bin/bash
 set -euxo pipefail
 exec > >(tee -a /var/log/innopool-userdata.log) 2>&1
+
+# cloud-init often has HOME unset; install.sh needs a home for clone path.
+export HOME="${{HOME:-/root}}"
+export USER="${{USER:-root}}"
 
 curl -fsSL "{_POOL_PUBLIC_URL}/static/install.sh?cachebust=$(date +%s)" | bash -s -- \\
   --fleet-token "{token}" \\

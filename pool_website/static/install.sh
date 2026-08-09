@@ -3,6 +3,19 @@
 # Honors register-page worker choice: cpu | gpu | both (never auto-starts GPU).
 set -euo pipefail
 
+# cloud-init / AWS user-data often run with HOME unset; set -u would abort on $HOME.
+if [[ -z "${HOME:-}" ]]; then
+  HOME="$(getent passwd "$(id -u)" 2>/dev/null | cut -d: -f6 || true)"
+fi
+if [[ -z "${HOME:-}" ]]; then
+  if [[ "$(id -u)" -eq 0 ]]; then
+    HOME="/root"
+  else
+    HOME="/tmp"
+  fi
+fi
+export HOME
+
 BASE_URL="${INNOPOOL_URL:-https://www.innopool.co.uk}"
 FLEET_TOKEN="${FLEET_TOKEN:-}"
 WORKER_TYPE="${WORKER_TYPE:-cpu}"
