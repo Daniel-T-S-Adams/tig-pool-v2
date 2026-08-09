@@ -11,6 +11,7 @@ INSTALL_ROOT="${INNOPOOL_INSTALL_ROOT:-$HOME}"
 SLAVE_REPO="${INNOPOOL_SLAVE_REPO:-https://github.com/rootztigmod/innopool-slave.git}"
 SLAVE_REF="${INNOPOOL_SLAVE_REF:-main}"
 SKIP_DOCKER_INSTALL=0
+SKIP_NVIDIA_INSTALL=0
 START=1
 
 usage() {
@@ -26,6 +27,7 @@ Options:
   --install-root DIR      Default: $HOME  (creates innopool-slave-cpu / -gpu)
   --base-url URL          Default: https://www.innopool.co.uk
   --skip-docker-install   Do not apt-install Docker
+  --skip-nvidia-install   Do not auto-install NVIDIA drivers / toolkit
   --no-start              Configure .env only; do not compose up
 EOF
 }
@@ -38,6 +40,7 @@ while [[ $# -gt 0 ]]; do
     --install-root) INSTALL_ROOT="${2:-$HOME}"; shift 2 ;;
     --base-url) BASE_URL="${2:-$BASE_URL}"; shift 2 ;;
     --skip-docker-install) SKIP_DOCKER_INSTALL=1; shift ;;
+    --skip-nvidia-install) SKIP_NVIDIA_INSTALL=1; shift ;;
     --no-start) START=0; shift ;;
     -h|--help) usage; exit 0 ;;
     *) echo "Unknown argument: $1" >&2; usage >&2; exit 2 ;;
@@ -115,13 +118,132 @@ gpu_services() {
   echo "slave vector_search hypergraph neuralnet_optimizer"
 }
 
-ensure_nvidia_for_gpu() {
-  if ! need_cmd nvidia-smi; then
-    echo "GPU install selected, but nvidia-smi was not found." >&2
-    echo "Install NVIDIA drivers + NVIDIA Container Toolkit, or register as CPU only." >&2
+nvidia_smi_ok() {
+  if need_cmd nvidia-smi && nvidia-smi >/dev/null 2>&1; then
+    return 0
+  fi
+  if [[ -n "${SUDO}" ]] && $SUDO nvidia-smi >/dev/null 2>&1; then
+    return 0
+  fi
+  return 1
+}
+
+has_nvidia_pci() {
+  if need_cmd lspci && lspci -nn 2>/dev/null | grep -qiE 'NVIDIA|10de:'; then
+    return 0
+  fi
+  return 1
+}
+
+install_nvidia_drivers() {
+  if ! need_cmd apt-get; then
+    echo "apt-get not available; install NVIDIA drivers manually, then re-run." >&2
     exit 1
   fi
-  nvidia-smi >/dev/null
+  echo "Installing NVIDIA drivers (this can take several minutes)..."
+  export DEBIAN_FRONTEND=noninteractive
+  $SUDO apt-get update
+  $SUDO apt-get install -y \
+    "linux-headers-$(uname -r)" \
+    ubuntu-drivers-common \
+    dkms \
+    build-essential \
+    curl \
+    gnupg \
+    ca-certificates
+  $SUDO apt-get install -y "linux-modules-extra-$(uname -r)" || true
+  $SUDO ubuntu-drivers devices || true
+  # Prefer recent open/server packages; fall back to ubuntu-drivers.
+  $SUDO apt-get install -y nvidia-driver-595-open nvidia-utils-595 \
+    || $SUDO apt-get install -y nvidia-driver-580-open nvidia-utils-580 \
+    || $SUDO apt-get install -y nvidia-driver-580-server nvidia-utils-580-server nvidia-dkms-580-server \
+    || $SUDO ubuntu-drivers install
+  $SUDO dkms autoinstall || true
+  $SUDO depmod -a || true
+  $SUDO modprobe nvidia || true
+  if ! nvidia_smi_ok; then
+    echo "NVIDIA drivers installed but nvidia-smi still failed." >&2
+    echo "Try: sudo modprobe nvidia && sudo nvidia-smi" >&2
+    exit 1
+  fi
+  echo "nvidia-smi OK."
+}
+
+install_nvidia_container_toolkit() {
+  if ! need_cmd apt-get; then
+    echo "apt-get not available; install nvidia-container-toolkit manually." >&2
+    exit 1
+  fi
+  echo "Installing NVIDIA Container Toolkit..."
+  export DEBIAN_FRONTEND=noninteractive
+  $SUDO mkdir -p /usr/share/keyrings
+  $SUDO rm -f /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg
+  curl -fsSL https://nvidia.github.io/libnvidia-container/gpgkey \
+    | $SUDO gpg --batch --yes --dearmor -o /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg
+  curl -fsSL https://nvidia.github.io/libnvidia-container/stable/deb/nvidia-container-toolkit.list \
+    | sed 's#deb https://#deb [signed-by=/usr/share/keyrings/nvidia-container-toolkit-keyring.gpg] https://#g' \
+    | $SUDO tee /etc/apt/sources.list.d/nvidia-container-toolkit.list >/dev/null
+  $SUDO apt-get update
+  $SUDO apt-get install -y nvidia-container-toolkit
+  $SUDO nvidia-ctk runtime configure --runtime=docker
+  $SUDO systemctl restart docker || true
+  echo "NVIDIA Container Toolkit configured for Docker."
+}
+
+ensure_nvidia_for_gpu() {
+  if nvidia_smi_ok; then
+    echo "NVIDIA driver present (nvidia-smi OK)."
+  else
+    if [[ "$SKIP_NVIDIA_INSTALL" == "1" ]]; then
+      echo "GPU install selected, but nvidia-smi was not found and --skip-nvidia-install was set." >&2
+      exit 1
+    fi
+    if need_cmd apt-get && ! need_cmd lspci; then
+      $SUDO apt-get update >/dev/null 2>&1 || true
+      $SUDO apt-get install -y pciutils >/dev/null 2>&1 || true
+    fi
+    if need_cmd lspci && ! has_nvidia_pci; then
+      echo "GPU install selected, but no NVIDIA GPU was detected (lspci) and nvidia-smi is missing." >&2
+      echo "Use a GPU instance, or register as CPU only." >&2
+      exit 1
+    fi
+    if has_nvidia_pci; then
+      echo "NVIDIA GPU detected, but drivers are missing — installing..."
+    else
+      echo "nvidia-smi missing (could not confirm PCI device) — installing NVIDIA stack for GPU worker..."
+    fi
+    install_nvidia_drivers
+  fi
+
+  # Toolkit is required for compose services with runtime: nvidia.
+  if need_cmd nvidia-ctk && [[ -f /etc/docker/daemon.json ]] \
+    && grep -q 'nvidia' /etc/docker/daemon.json 2>/dev/null; then
+    echo "NVIDIA Container Toolkit already configured."
+  else
+    if [[ "$SKIP_NVIDIA_INSTALL" == "1" ]]; then
+      echo "nvidia-container-toolkit / Docker nvidia runtime missing and --skip-nvidia-install was set." >&2
+      exit 1
+    fi
+    install_nvidia_container_toolkit
+  fi
+
+  # Final sanity: host + container GPU path.
+  if ! nvidia_smi_ok; then
+    echo "nvidia-smi failed after NVIDIA setup." >&2
+    exit 1
+  fi
+  local dcmd
+  dcmd="$(docker_bin)"
+  if ! $dcmd run --rm --gpus all nvidia/cuda:12.4.1-base-ubuntu22.04 nvidia-smi >/dev/null 2>&1; then
+    echo "Warning: docker --gpus all test failed; retrying after docker restart..."
+    $SUDO systemctl restart docker || true
+    sleep 2
+    if ! $dcmd run --rm --gpus all nvidia/cuda:12.4.1-base-ubuntu22.04 nvidia-smi; then
+      echo "Docker cannot see the GPU. Check nvidia-container-toolkit and 'sudo docker run --rm --gpus all nvidia/cuda:12.4.1-base-ubuntu22.04 nvidia-smi'." >&2
+      exit 1
+    fi
+  fi
+  echo "Docker GPU runtime OK."
 }
 
 clone_or_update_slave() {

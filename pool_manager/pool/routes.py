@@ -261,7 +261,8 @@ curl -fsSL "{_POOL_PUBLIC_URL}/static/install.sh?cachebust=$(date +%s)" | bash -
   --fleet-token "{token}" \\
   --worker-type gpu \\
   --machine-index AUTO \\
-  --skip-docker-install
+  --skip-docker-install \\
+  --skip-nvidia-install
 
 echo "INNOPOOL_CUSTOM_SLAVE_GPU_SETUP_DONE"
 """
