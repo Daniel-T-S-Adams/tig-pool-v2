@@ -245,17 +245,17 @@ class SlaveManager:
         self._slot_maint_next_ms = 0
         self._slot_maint_interval_ms = max(
             250,
-            int(os.environ.get("SLAVE_SLOT_MAINT_INTERVAL_MS", "2000")),
+            int(os.environ.get("SLAVE_SLOT_MAINT_INTERVAL_MS", "5000")),
         )
         self._affinity_cache: Optional[tuple[Dict[str, str], int]] = None
         self._affinity_cache_ms = max(
             250,
-            int(os.environ.get("SLAVE_AFFINITY_CACHE_MS", "2000")),
+            int(os.environ.get("SLAVE_AFFINITY_CACHE_MS", "5000")),
         )
         self._online_cache: Optional[tuple[Set[str], int]] = None
         self._online_cache_ms = max(
             250,
-            int(os.environ.get("SLAVE_ONLINE_CACHE_MS", "2000")),
+            int(os.environ.get("SLAVE_ONLINE_CACHE_MS", "5000")),
         )
         self._auth_cache: Dict[str, tuple[bool, int]] = {}
         self._auth_cache_ms = max(
@@ -265,7 +265,17 @@ class SlaveManager:
         self._awaiting_proofs_cache: Dict[str, tuple[bool, int]] = {}
         self._awaiting_proofs_cache_ms = max(
             250,
-            int(os.environ.get("SLAVE_AWAITING_PROOFS_CACHE_MS", "2000")),
+            int(os.environ.get("SLAVE_AWAITING_PROOFS_CACHE_MS", "10000")),
+        )
+        # Slot ID / starvation views — refreshed with slot maintenance only.
+        self._slot_view_lock = Lock()
+        self._slot_benchmark_ids_cache: Set[str] = set()
+        self._starved_slot_benchmarks_cache: Dict[str, float] = {}
+        self._slot_view_until_ms = 0
+        self._slave_seen_touch_until: Dict[str, int] = {}
+        self._slave_seen_touch_interval_ms = max(
+            1_000,
+            int(os.environ.get("SLAVE_SEEN_TOUCH_INTERVAL_MS", "10000")),
         )
 
     def _ensure_slave_seen_table(self):
@@ -275,8 +285,13 @@ class SlaveManager:
         self._slave_seen_ready = True
 
     def _touch_slave_seen(self, slave_name: str, now_ms: int):
+        # Heartbeats at 1Hz were a major write storm. Touch at most every N ms/slave.
+        until = int(self._slave_seen_touch_until.get(slave_name) or 0)
+        if now_ms < until:
+            return
         self._ensure_slave_seen_table()
         touch_slave_seen(get_db_conn().execute, slave_name, now_ms)
+        self._slave_seen_touch_until[slave_name] = now_ms + self._slave_seen_touch_interval_ms
 
     def _online_slaves(self, now_ms: int) -> Set[str]:
         cached = self._online_cache
@@ -552,7 +567,35 @@ class SlaveManager:
             # Empty regex = any algorithm; periodic maint must not be biased to
             # whichever slave happened to win the throttle race.
             self._assign_idle_slots(slot_types, "")
+            # Refresh read-only slot views here so get-batches does not query them.
+            ids = self._slot_benchmark_ids(slot_types)
+            starved = self._starved_slot_benchmarks(slot_types, now_ms)
+            with self._slot_view_lock:
+                self._slot_benchmark_ids_cache = set(ids)
+                self._starved_slot_benchmarks_cache = dict(starved)
+                self._slot_view_until_ms = now_ms + self._slot_maint_interval_ms
             self._slot_maint_next_ms = now_ms + self._slot_maint_interval_ms
+
+    def _cached_slot_views(self, slot_types: List[str], now_ms: int) -> tuple[Set[str], Dict[str, float]]:
+        """Return cached slot benchmark ids / starvation map (no DB on hit)."""
+        if not slot_types:
+            return set(), {}
+        with self._slot_view_lock:
+            if now_ms < self._slot_view_until_ms:
+                return set(self._slot_benchmark_ids_cache), dict(self._starved_slot_benchmarks_cache)
+        # Prefer refreshing via throttled maintenance (also assigns idle slots).
+        self._maybe_maintain_slots(slot_types, now_ms)
+        with self._slot_view_lock:
+            if now_ms < self._slot_view_until_ms:
+                return set(self._slot_benchmark_ids_cache), dict(self._starved_slot_benchmarks_cache)
+        # Maint was throttled but views stale — one light read-only refresh.
+        ids = self._slot_benchmark_ids(slot_types)
+        starved = self._starved_slot_benchmarks(slot_types, now_ms)
+        with self._slot_view_lock:
+            self._slot_benchmark_ids_cache = set(ids)
+            self._starved_slot_benchmarks_cache = dict(starved)
+            self._slot_view_until_ms = now_ms + self._slot_maint_interval_ms
+            return set(self._slot_benchmark_ids_cache), dict(self._starved_slot_benchmarks_cache)
 
     def _assign_idle_slots(self, slot_types: List[str], algorithm_id_regex: str = ""):
         if not slot_types:
@@ -1320,9 +1363,11 @@ class SlaveManager:
             slot_benchmark_ids = set()
             starved_slot_benchmarks = {}
             if slot_types:
+                # Maint is throttled; slot views come from cache (no per-poll SQL).
                 self._maybe_maintain_slots(slot_types, int(now))
-                slot_benchmark_ids = self._slot_benchmark_ids(slot_types)
-                starved_slot_benchmarks = self._starved_slot_benchmarks(slot_types, int(now))
+                slot_benchmark_ids, starved_slot_benchmarks = self._cached_slot_views(
+                    slot_types, int(now)
+                )
             root_affinity = self._root_affinity_map()
             # Always load heartbeats: sticky affinity + dark-owner root reclaim.
             online_slaves = self._online_slaves(int(now))
@@ -1332,36 +1377,38 @@ class SlaveManager:
             # Specific benchmarks unlocked by idle reclaim — prioritized for pickup.
             overflow_benchmark_ids: Set[str] = set()
             active_by_slave: Dict[str, int] = {}
+            slaves_with_proof_work: Set[str] = set()
+            preferreds_with_unassigned: Set[str] = set()
             if STICKY_ROOTS_ENABLED:
                 for row in self.batches:
+                    if row.get("end_time") is not None:
+                        continue
                     owner = row.get("slave")
-                    if owner and row.get("end_time") is None:
+                    batch = row.get("batch") or {}
+                    if owner:
                         active_by_slave[str(owner)] = active_by_slave.get(str(owner), 0) + 1
+                        if batch.get("sampled_nonces") is not None:
+                            slaves_with_proof_work.add(str(owner))
+                    elif batch.get("sampled_nonces") is None:
+                        bid = str(batch.get("benchmark_id") or "")
+                        pref = root_affinity.get(bid) if bid else None
+                        if pref:
+                            preferreds_with_unassigned.add(str(pref))
             if STICKY_ROOTS_ENABLED and STICKY_OVERFLOW_AT_CAP:
-                # Optional: overflow when preferred is at adaptive cap or
-                # proof-priority-blocked from taking more roots.
-                awaiting_cache: Dict[str, bool] = {}
-                for preferred in set(root_affinity.values()):
+                # Only evaluate preferreds that currently have unassigned roots.
+                # Use in-memory active/proof signals — avoid N adaptive/awaiting
+                # DB queries across the whole affinity map on every poll.
+                for preferred in preferreds_with_unassigned:
                     if not preferred or preferred not in online_slaves:
                         continue
                     pref_route = self._route_cap_for_slave(preferred)
                     if pref_route <= 0:
                         continue
-                    pref_cap = self._adaptive_max_concurrent(
-                        preferred, pref_route, log=False, use_cache=True
-                    )
-                    if pref_cap > 0 and int(active_by_slave.get(preferred) or 0) >= pref_cap:
+                    if int(active_by_slave.get(preferred) or 0) >= pref_route:
                         preferred_at_cap.add(preferred)
                         continue
-                    # Preferred owner has open proof work → root_cap=0 for them.
-                    # Let other live CPUs claim unassigned roots on that job.
-                    if PROOF_PRIORITY_ENABLED:
-                        if preferred not in awaiting_cache:
-                            awaiting_cache[preferred] = self._slave_awaiting_proofs(
-                                preferred, int(now)
-                            )
-                        if awaiting_cache[preferred]:
-                            preferred_at_cap.add(preferred)
+                    if PROOF_PRIORITY_ENABLED and preferred in slaves_with_proof_work:
+                        preferred_at_cap.add(preferred)
 
             # Idle reclaim is independent of AT_CAP overflow. With
             # SLAVE_STICKY_OVERFLOW_AT_CAP=false the fleet still must release
@@ -1425,7 +1472,12 @@ class SlaveManager:
                     )
 
             # Free concurrent slots held by completed batches before assign.
-            self._purge_ready_assigned(slave_name)
+            # Skip the DB round-trip when this slave has no in-memory assignments.
+            if any(
+                row.get("slave") == slave_name and row.get("end_time") is None
+                for row in self.batches
+            ):
+                self._purge_ready_assigned(slave_name)
 
             with self.lock:
                 route_cap = int(slave["max_concurrent_batches"])
