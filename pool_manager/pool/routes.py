@@ -998,8 +998,9 @@ def _build_slave_setup_command(slave_name: str, num_workers: int = 8, worker_typ
         if worker_type == "gpu"
         else """DETECTED_NUM_WORKERS="${NUM_WORKERS:-$(python3 - <<'PY'
 import os
-
-print(max(1, os.cpu_count() or 1))
+cores = max(1, os.cpu_count() or 1)
+# ~50% headroom so live telemetry can earn concurrent > 1
+print(max(1, cores // 2))
 PY
 )}"
 """

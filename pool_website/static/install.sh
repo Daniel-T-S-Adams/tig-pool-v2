@@ -160,9 +160,12 @@ fetch_and_write_env() {
   else
     workers="${NUM_WORKERS:-}"
     if [[ -z "$workers" ]]; then
+      # Leave ~50% headroom so master telemetry can earn concurrent>1
+      # (requires cores/num_workers >= 2). Override with NUM_WORKERS=...
       workers="$(python3 - <<'PY'
 import os
-print(max(1, os.cpu_count() or 1))
+cores = max(1, os.cpu_count() or 1)
+print(max(1, cores // 2))
 PY
 )"
     fi
