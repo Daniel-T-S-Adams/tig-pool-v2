@@ -267,6 +267,16 @@ class SlaveManager:
             250,
             int(os.environ.get("SLAVE_AWAITING_PROOFS_CACHE_MS", "10000")),
         )
+        self._finish_root_cache: Dict[str, tuple[Set[str], int]] = {}
+        self._finish_root_cache_ms = max(
+            250,
+            int(os.environ.get("SLAVE_FINISH_ROOT_CACHE_MS", "15000")),
+        )
+        self._purge_touch_until: Dict[str, int] = {}
+        self._purge_interval_ms = max(
+            250,
+            int(os.environ.get("SLAVE_PURGE_INTERVAL_MS", "10000")),
+        )
         # Slot ID / starvation views — refreshed with slot maintenance only.
         self._slot_view_lock = Lock()
         self._slot_benchmark_ids_cache: Set[str] = set()
@@ -613,6 +623,22 @@ class SlaveManager:
                     dict(self._cap_views_cache),
                     dict(self._job_meta_cache),
                 )
+            # Single-flight: only one thread refreshes; others use stale/empty
+            # briefly rather than N× GROUP BY stampedes.
+            if getattr(self, "_cap_view_refreshing", False):
+                return (
+                    bool(self._cap_enabled_cache),
+                    dict(self._cap_views_cache),
+                    dict(self._job_meta_cache),
+                )
+            self._cap_view_refreshing = True
+        try:
+            return self._refresh_capability_views(now_ms)
+        finally:
+            with self._cap_view_lock:
+                self._cap_view_refreshing = False
+
+    def _refresh_capability_views(self, now_ms: int) -> tuple[bool, dict, Dict[str, dict]]:
         cap_settings = capability_settings(CONFIG)
         if not bool(cap_settings.get("enabled")):
             with self._cap_view_lock:
@@ -1123,6 +1149,16 @@ class SlaveManager:
             )
         return cap
 
+    def _cached_finish_root_benchmarks(self, slave_name: str, now_ms: int) -> Set[str]:
+        cached = self._finish_root_cache.get(slave_name)
+        if cached is not None:
+            bids, until_ms = cached
+            if now_ms < until_ms:
+                return set(bids)
+        bids = self._slave_finish_root_benchmarks(slave_name)
+        self._finish_root_cache[slave_name] = (set(bids), now_ms + self._finish_root_cache_ms)
+        return set(bids)
+
     def _slave_finish_root_benchmarks(self, slave_name: str) -> Set[str]:
         """Jobs this slave should still root even while proof-only.
 
@@ -1559,11 +1595,17 @@ class SlaveManager:
 
             # Free concurrent slots held by completed batches before assign.
             # Skip the DB round-trip when this slave has no in-memory assignments.
-            if any(
-                row.get("slave") == slave_name and row.get("end_time") is None
-                for row in self.batches
+            # Throttle: per-poll N× ready probes was a major DB stampede.
+            now_i_pre = int(now)
+            if (
+                now_i_pre >= int(self._purge_touch_until.get(slave_name) or 0)
+                and any(
+                    row.get("slave") == slave_name and row.get("end_time") is None
+                    for row in self.batches
+                )
             ):
                 self._purge_ready_assigned(slave_name)
+                self._purge_touch_until[slave_name] = now_i_pre + self._purge_interval_ms
 
             # ALL DB / heavy shared reads happen OUTSIDE self.lock. Holding the
             # lock across capability refresh + job meta GROUP BY was serializing
@@ -1608,6 +1650,8 @@ class SlaveManager:
             slave_tier = CAPABILITY_SCHEDULER.settings(CONFIG)["default_tier"]
             if cap_enabled:
                 try:
+                    # Never skip_cache here — live cores already feed the tier helper;
+                    # skip_cache forced a DB round-trip on every poll per slave.
                     slave_tier = CAPABILITY_SCHEDULER.slave_tier(
                         slave_name,
                         fetch_one=get_db_conn().fetch_one,
@@ -1615,10 +1659,25 @@ class SlaveManager:
                         now_ms=now_i,
                         live_cores=live_telem.get("cores"),
                         live_ram_gb=live_telem.get("ram_gb"),
-                        skip_cache=bool(live_telem.get("cores")),
+                        skip_cache=False,
                     )
                 except Exception:
                     pass
+
+            finish_root_bids: Set[str] = set()
+            if PROOF_PRIORITY_ENABLED:
+                # MUST stay outside self.lock — this hits Postgres.
+                finish_root_bids = self._cached_finish_root_benchmarks(slave_name, now_i)
+                if STICKY_ROOTS_ENABLED:
+                    pending_unfinished_roots = {
+                        b["batch"]["benchmark_id"]
+                        for b in self.batches
+                        if b.get("end_time") is None
+                        and (b.get("batch") or {}).get("sampled_nonces") is None
+                    }
+                    for bid, preferred in root_affinity.items():
+                        if preferred == slave_name and bid in pending_unfinished_roots:
+                            finish_root_bids.add(bid)
 
             def has_artifacts(bid: str, batch_idx: int) -> bool:
                 return bool(artifact_hits.get((str(bid), int(batch_idx)), False))
@@ -1638,23 +1697,6 @@ class SlaveManager:
                 # awaiting_proofs alone (esp. sampling gap) was idling CPUs with
                 # "no batches available" while hundreds of root batches were pending.
                 has_proof_work = bool(assigned_proofs or own_proof_work)
-                finish_root_bids = (
-                    self._slave_finish_root_benchmarks(slave_name)
-                    if PROOF_PRIORITY_ENABLED
-                    else set()
-                )
-                # Preferred owner of jobs that still have unfinished roots in the
-                # pending list — same sticky-finish exception without a DB roundtrip.
-                if PROOF_PRIORITY_ENABLED and STICKY_ROOTS_ENABLED:
-                    pending_unfinished_roots = {
-                        b["batch"]["benchmark_id"]
-                        for b in self.batches
-                        if b.get("end_time") is None
-                        and (b.get("batch") or {}).get("sampled_nonces") is None
-                    }
-                    for bid, preferred in root_affinity.items():
-                        if preferred == slave_name and bid in pending_unfinished_roots:
-                            finish_root_bids.add(bid)
                 root_cap_while_proofs = (
                     PROOF_PRIORITY_MAX_ROOTS if has_proof_work else max_concurrent
                 )
@@ -1702,6 +1744,8 @@ class SlaveManager:
                 for b in kept_assigned:
                     bid = b["batch"]["benchmark_id"]
                     concurrent_by_bench[bid] = concurrent_by_bench.get(bid, 0) + 1
+
+                need_assign = len(concurrent) < max_concurrent
 
                 def _batch_meta(batch):
                     bid = batch["benchmark_id"]
@@ -1796,9 +1840,11 @@ class SlaveManager:
                         hard_min_tier=cap_settings["hard_min_tier"],
                     )
 
-                ordered_batches = [
-                    b for _, b in sorted(enumerate(self.batches), key=_batch_priority)
-                ]
+                ordered_batches = []
+                if need_assign:
+                    ordered_batches = [
+                        b for _, b in sorted(enumerate(self.batches), key=_batch_priority)
+                    ]
 
                 def _has_easier_claimable(min_hardness: float) -> bool:
                     if not cap_enabled:
@@ -1929,8 +1975,9 @@ class SlaveManager:
                 # Pass 1: spread across benchmarks (respect per-benchmark cap) so all
                 # challenges advance together. Pass 2: if slots remain because few
                 # benchmarks are active, fill them ignoring the cap (use full capacity).
-                assign_pass(respect_cap=True)
-                assign_pass(respect_cap=False)
+                if need_assign and ordered_batches:
+                    assign_pass(respect_cap=True)
+                    assign_pass(respect_cap=False)
                 if PROOF_PRIORITY_ENABLED and has_proof_work:
                     logger.info(
                         f"proof_only slave={slave_name} proofs_assigned="
@@ -1959,7 +2006,9 @@ class SlaveManager:
             # In-memory ghosts (submit/run race) can still sit in concurrent with
             # end_time=None even though root_batch.ready=true — that trapped
             # max_concurrent=1 slaves in resubmit loops.
-            if concurrent:
+            # Per-batch ready probes on every poll were catastrophic under fleet
+            # load. Ghosts are handled by throttled purge + run() reload.
+            if concurrent and os.environ.get("GET_BATCHES_READY_CHECK", "0") == "1":
                 filtered = []
                 dropped_ids = []
                 for batch in concurrent:
@@ -1991,7 +2040,7 @@ class SlaveManager:
                     )
                     self._purge_ready_assigned(slave_name)
                     concurrent = filtered
-            logger.info(
+            logger.debug(
                 f"get-batches slave={slave_name} assigned={len(concurrent)} "
                 f"cap={max_concurrent} route_cap={route_cap} adaptive={max_concurrent != route_cap}"
             )
