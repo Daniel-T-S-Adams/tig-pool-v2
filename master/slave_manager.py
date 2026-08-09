@@ -1465,7 +1465,10 @@ class SlaveManager:
     def _get_batches_light(self, slave_name: str, slave: dict, now: float):
         """Assign from in-memory pending only — no adaptive/cap/finish-root SQL."""
         route_cap = int(slave["max_concurrent_batches"])
-        max_concurrent = route_cap
+        # Do not hand a full 32-wide route_cap during emergency light mode —
+        # that floods slaves with work that then 408s after restarts/reloads.
+        light_cap = max(1, int(os.environ.get("GET_BATCHES_LIGHT_CAP", "4")))
+        max_concurrent = max(1, min(route_cap, light_cap))
         root_affinity = self._root_affinity_map()
         online_slaves = self._online_slaves(int(now))
         updates = []
@@ -1512,6 +1515,8 @@ class SlaveManager:
                         num_attempts = %s
                     WHERE benchmark_id = %s
                         AND batch_idx = %s
+                        AND ready IS NULL
+                        AND slave IS NULL
                     """,
                     (
                         slave_name,
@@ -2229,15 +2234,72 @@ class SlaveManager:
 
         @app.post('/submit-batch-error/{batch_id}')
         async def submit_batch_error(batch_id: str, request: Request):
-            slave_name, b = find_batch(batch_id, request)
             result = await request.json()
             error = result.get("error", "")
+            benchmark_id, batch_idx_s = batch_id.rsplit("_", 1)
+            batch_idx = int(batch_idx_s)
+            slave_name = request.headers.get("User-Agent")
+            b = None
+            try:
+                slave_name, b = find_batch(batch_id, request)
+            except HTTPException as exc:
+                if exc.status_code != 408:
+                    raise
+                # In-memory miss (restart / run() reload / steal). Fall back to DB
+                # ownership so slaves are not stuck 408-retrying forever.
+                self._require_authorized_slave(slave_name)
+                row = get_db_conn().fetch_one(
+                    """
+                    SELECT num_attempts, 'root' AS kind
+                    FROM root_batch
+                    WHERE benchmark_id = %s
+                      AND batch_idx = %s
+                      AND slave = %s
+                      AND ready IS NULL
+                    UNION ALL
+                    SELECT num_attempts, 'proof' AS kind
+                    FROM proofs_batch
+                    WHERE benchmark_id = %s
+                      AND batch_idx = %s
+                      AND slave = %s
+                      AND ready IS NULL
+                    LIMIT 1
+                    """,
+                    (
+                        benchmark_id,
+                        batch_idx,
+                        slave_name,
+                        benchmark_id,
+                        batch_idx,
+                        slave_name,
+                    ),
+                )
+                if row is None:
+                    # Truly stale — ack so the slave drops local result.json.
+                    logger.warning(
+                        "stale error submit for %s from %s (not assigned) — acking to clear slave loop",
+                        batch_id,
+                        slave_name,
+                    )
+                    _retire_batch_id(batch_id)
+                    return {"status": "OK", "note": "stale_assignment"}
+                b = {
+                    "num_attempts": int(row.get("num_attempts") or 0),
+                    "batch": {
+                        "sampled_nonces": [] if row.get("kind") == "proof" else None,
+                    },
+                }
+                logger.warning(
+                    "accepted error submit for %s from %s via DB ownership fallback",
+                    batch_id,
+                    slave_name,
+                )
+
             logger.warning(f"slave {slave_name} reported failure for {batch_id}: {error}")
 
-            benchmark_id, batch_idx = batch_id.split("_")
-            batch_idx = int(batch_idx)
             if _is_infrastructure_error(error):
                 self._quarantine_slave(slave_name, error)
+                _retire_batch_id(batch_id)
                 return {"status": "QUARANTINED"}
 
             if b["num_attempts"] < CONFIG["max_batch_attempts"]:
@@ -2246,13 +2308,16 @@ class SlaveManager:
                     (
                         f"""
                         UPDATE {table_name}
-                        SET slave = NULL
+                        SET slave = NULL,
+                            start_time = NULL
                         WHERE benchmark_id = %s 
                             AND batch_idx = %s
+                            AND slave = %s
                         """, 
                         (
                             benchmark_id,
-                            batch_idx
+                            batch_idx,
+                            slave_name,
                         )
                     )
                 ]
@@ -2270,6 +2335,7 @@ class SlaveManager:
                     )
                 ]
             get_db_conn().execute_many(*queries)
+            _retire_batch_id(batch_id)
 
             return {"status": "OK"}
 
