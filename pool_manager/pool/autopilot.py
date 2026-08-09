@@ -125,6 +125,13 @@ FUNNEL_MIN_PROOF_CONVERSION_RATE = float(os.environ.get("AUTOPILOT_FUNNEL_MIN_PR
 FUNNEL_SOFT_PROOF_CONVERSION_FLOOR = float(
     os.environ.get("AUTOPILOT_FUNNEL_SOFT_PROOF_CONVERSION_FLOOR", "0.80")
 )
+# How long soft/marginal proof-conversion (soft-floor..target) may skip max drain
+# without proven idle CPU. Default = one funnel metric window so diluted samples
+# from newly joined workers can roll out before drain resumes.
+SOFT_CONVERSION_DRAIN_GRACE_MS = int(
+    os.environ.get("AUTOPILOT_SOFT_CONVERSION_DRAIN_GRACE_MS") or METRIC_WINDOW_MS
+)
+SOFT_CONVERSION_GRACE_SETTING = "autopilot_soft_conversion_grace_started_ms"
 FUNNEL_MAX_STOPPED_OR_EXPIRED_RATE = float(os.environ.get("AUTOPILOT_FUNNEL_MAX_STOPPED_OR_EXPIRED_RATE", "0.10"))
 FUNNEL_DRAIN_MIN_MAX_BENCHMARKS = int(os.environ.get("AUTOPILOT_FUNNEL_DRAIN_MIN_MAX_BENCHMARKS", "12"))
 WORKLOAD_MIN_BUNDLES = int(os.environ.get("AUTOPILOT_WORKLOAD_MIN_BUNDLES", "4"))
@@ -2676,6 +2683,40 @@ def should_idle_cpu_max_scale(
     return True, "free_cpu_slots_need_max_headroom"
 
 
+def soft_conversion_drain_grace_timer(
+    *,
+    in_soft_marginal_state: bool,
+    now_ms: int,
+    grace_started_ms: int | None,
+    grace_limit_ms: int,
+) -> tuple[bool, int | None, dict]:
+    """Track a one-shot grace window for soft/marginal proof-conversion drain skip.
+
+    Returns (grace_active, next_started_ms, details).
+    next_started_ms is None when the stored start should be cleared (left soft
+    marginal state). While still marginal, the start is kept even after expiry so
+    grace cannot restart until conversion recovers above the target.
+    """
+    limit = max(0, int(grace_limit_ms or 0))
+    if not in_soft_marginal_state:
+        return False, None, {
+            "grace_active": False,
+            "grace_limit_ms": limit,
+            "cleared": grace_started_ms is not None,
+        }
+    started = int(now_ms) if grace_started_ms is None else int(grace_started_ms)
+    elapsed = max(0, int(now_ms) - started)
+    active = elapsed < limit
+    return active, started, {
+        "grace_active": active,
+        "grace_started_ms": started,
+        "grace_elapsed_ms": elapsed,
+        "grace_limit_ms": limit,
+        "grace_remaining_ms": max(0, limit - elapsed),
+        "grace_expired": (not active) and limit > 0,
+    }
+
+
 def reward_funnel_max_drain_decision(
     *,
     issues,
@@ -2688,6 +2729,7 @@ def reward_funnel_max_drain_decision(
     min_root_ready_rate: float,
     min_proof_conversion_rate: float,
     soft_proof_conversion_floor: float,
+    soft_conversion_grace_active: bool = False,
 ) -> tuple[bool, dict]:
     """Decide whether unhealthy reward-funnel issues should drain max_concurrent.
 
@@ -2699,6 +2741,11 @@ def reward_funnel_max_drain_decision(
     conversion (>= min_proof_conversion_rate) never drains max_concurrent — it
     should only block upscale via funnel_safe / recovery posture. Busy CPU fleets
     were sawtoothing max down to the drain floor on long GPU/JS proof tails.
+
+    Soft/marginal low_proof_conversion may also skip drain for a bounded grace
+    window (soft_conversion_grace_active) while root_ready is healthy — covering
+    fleet-join dilution before new workers' proofs enter the rolling funnel window.
+    After grace expires, idle_ok is required again to skip.
     """
     hard_drain_issues = {
         "low_proof_conversion",
@@ -2748,8 +2795,20 @@ def reward_funnel_max_drain_decision(
         and soft_hits <= {"slow_time_to_proof_submission"}
     )
     skip_soft_latency = soft_latency_only and conversion_ok
+    # Soft hits that are safe to cover with the fleet-join grace window.
+    grace_soft_issues = {"low_proof_conversion", "slow_time_to_proof_submission"}
+    skip_marginal_grace = (
+        bool(soft_conversion_grace_active)
+        and marginal_conversion
+        and root_ready_ok
+        and (not has_hard)
+        and has_soft
+        and soft_hits <= grace_soft_issues
+    )
     skip_soft = (not has_hard) and has_soft and (
-        skip_soft_latency or (root_ready_ok and idle_ok)
+        skip_soft_latency
+        or skip_marginal_grace
+        or (root_ready_ok and idle_ok)
     )
     should_drain = has_hard or (has_soft and not skip_soft)
     details = {
@@ -2760,6 +2819,8 @@ def reward_funnel_max_drain_decision(
         "marginal_low_proof_conversion": marginal_conversion,
         "skip_soft_drain": skip_soft,
         "skip_soft_latency_healthy_conversion": skip_soft_latency,
+        "skip_marginal_conversion_grace": skip_marginal_grace,
+        "soft_conversion_grace_active": bool(soft_conversion_grace_active),
         "root_ready_ok": root_ready_ok,
         "idle_ok": idle_ok,
         "productive_idle_ok": productive_idle_ok,
@@ -3924,6 +3985,39 @@ def _plan_config_change(report: dict, cfg: dict, clean_windows: int) -> dict:
         }
         # Soft latency / near-threshold conversion should not pin max to the
         # drain floor while roots are converting and CPU workers are idle.
+        # Fleet-join dilution also gets a bounded grace window (one metric window
+        # by default) before soft/marginal conversion can drain without idle_ok.
+        conv_for_grace = funnel_summary.get("proof_conversion_rate")
+        root_ready_for_grace = funnel_summary.get("root_ready_rate")
+        issues_for_grace = set(funnel_summary.get("issues") or [])
+        in_soft_marginal_state = (
+            "low_proof_conversion" in issues_for_grace
+            and conv_for_grace is not None
+            and float(conv_for_grace) >= FUNNEL_SOFT_PROOF_CONVERSION_FLOOR
+            and float(conv_for_grace) < FUNNEL_MIN_PROOF_CONVERSION_RATE
+            and root_ready_for_grace is not None
+            and float(root_ready_for_grace) >= ROOT_READY_RATE_MIN_FOR_UPSCALE
+        )
+        try:
+            raw_grace_started = db.get_setting(SOFT_CONVERSION_GRACE_SETTING, "") or ""
+            grace_started_ms = int(raw_grace_started) if str(raw_grace_started).strip() else None
+        except Exception:
+            grace_started_ms = None
+        now_for_grace = int(report.get("generated_at_ms") or time.time() * 1000)
+        soft_grace_active, next_grace_started, soft_grace_meta = soft_conversion_drain_grace_timer(
+            in_soft_marginal_state=in_soft_marginal_state,
+            now_ms=now_for_grace,
+            grace_started_ms=grace_started_ms,
+            grace_limit_ms=SOFT_CONVERSION_DRAIN_GRACE_MS,
+        )
+        try:
+            if next_grace_started is None:
+                if grace_started_ms is not None:
+                    db.set_setting(SOFT_CONVERSION_GRACE_SETTING, "")
+            elif next_grace_started != grace_started_ms:
+                db.set_setting(SOFT_CONVERSION_GRACE_SETTING, str(next_grace_started))
+        except Exception:
+            pass
         funnel_should_drain, funnel_drain_meta = reward_funnel_max_drain_decision(
             issues=funnel_summary.get("issues") or [],
             proof_conversion_rate=funnel_summary.get("proof_conversion_rate"),
@@ -3935,7 +4029,9 @@ def _plan_config_change(report: dict, cfg: dict, clean_windows: int) -> dict:
             min_root_ready_rate=ROOT_READY_RATE_MIN_FOR_UPSCALE,
             min_proof_conversion_rate=FUNNEL_MIN_PROOF_CONVERSION_RATE,
             soft_proof_conversion_floor=FUNNEL_SOFT_PROOF_CONVERSION_FLOOR,
+            soft_conversion_grace_active=soft_grace_active,
         )
+        funnel_drain_meta.update(soft_grace_meta)
         current = int(cfg.get("max_concurrent_benchmarks") or 0)
         capacity_model = report.get("capacity_model") or {}
         drain_floor = _funnel_drain_floor(capacity_model)
@@ -3963,11 +4059,12 @@ def _plan_config_change(report: dict, cfg: dict, clean_windows: int) -> dict:
             decision["config"] = new_cfg
             return decision
         if funnel_drain_meta.get("skip_soft_drain"):
-            skip_reason = (
-                "marginal_proof_conversion_with_healthy_roots_and_idle_cpu"
-                if funnel_drain_meta.get("marginal_low_proof_conversion")
-                else "soft_funnel_issues_with_healthy_roots_and_idle_cpu"
-            )
+            if funnel_drain_meta.get("skip_marginal_conversion_grace"):
+                skip_reason = "marginal_proof_conversion_within_soft_grace"
+            elif funnel_drain_meta.get("marginal_low_proof_conversion"):
+                skip_reason = "marginal_proof_conversion_with_healthy_roots_and_idle_cpu"
+            else:
+                skip_reason = "soft_funnel_issues_with_healthy_roots_and_idle_cpu"
             decision.setdefault("guardrails", {})["reward_funnel_drain"] = {
                 "skipped": skip_reason,
                 "issues": funnel_summary.get("issues", []),
