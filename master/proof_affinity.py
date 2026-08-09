@@ -90,9 +90,9 @@ def should_skip_root_for_slave(
 
     If the preferred owner is online, only that owner may take more roots.
     If the preferred owner is dark, other live slaves may take over.
-    preferred_at_cap overflow is optional (master sets it only when
-    SLAVE_STICKY_OVERFLOW_AT_CAP is enabled); default sticky lifecycle keeps
-    roots on one machine through proofs.
+    preferred_at_cap means the master released exclusive sticky lock for this
+    owner (at-cap overflow and/or aged idle-leftover reclaim). Dark preferred
+    owners are handled separately via online_slaves.
     """
     if not sticky_enabled:
         return False
