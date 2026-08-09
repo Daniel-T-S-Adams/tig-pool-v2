@@ -15,6 +15,7 @@ from __future__ import annotations
 import logging
 import os
 import threading
+import time
 from typing import Any, Dict, List, Optional
 
 import psycopg2
@@ -38,7 +39,12 @@ class PostgresDB:
         self._minconn = max(1, int(os.environ.get("POSTGRES_POOL_MIN", "4")))
         self._maxconn = max(
             self._minconn,
-            int(os.environ.get("POSTGRES_POOL_MAX", "32")),
+            int(os.environ.get("POSTGRES_POOL_MAX", "24")),
+        )
+        # psycopg2's pool raises immediately when exhausted; wait briefly so
+        # short get-batches bursts do not 500 the fleet.
+        self._pool_wait_sec = max(
+            0.0, float(os.environ.get("POSTGRES_POOL_WAIT_SEC", "15"))
         )
 
     @property
@@ -74,12 +80,31 @@ class PostgresDB:
         if self.closed:
             self.connect()
         assert self._pool is not None
-        return self._pool.getconn()
+        deadline = time.monotonic() + self._pool_wait_sec
+        last_err: Optional[BaseException] = None
+        while True:
+            try:
+                return self._pool.getconn()
+            except pool.PoolError as exc:
+                last_err = exc
+                if self._pool_wait_sec <= 0 or time.monotonic() >= deadline:
+                    logger.error(
+                        "Postgres pool exhausted (max=%s wait=%ss)",
+                        self._maxconn,
+                        self._pool_wait_sec,
+                    )
+                    raise
+                time.sleep(0.05)
+        raise last_err  # pragma: no cover
 
     def _checkin(self, conn) -> None:
         if self._pool is None or conn is None:
             return
         try:
+            # Drop broken connections instead of returning them to the pool.
+            if getattr(conn, "closed", 1):
+                self._pool.putconn(conn, close=True)
+                return
             self._pool.putconn(conn)
         except Exception:
             try:
