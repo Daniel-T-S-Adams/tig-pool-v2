@@ -1,0 +1,453 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="robots" content="noindex, nofollow" />
+  <title>InnoPool — Ops (private)</title>
+  <link rel="icon" type="image/svg+xml" href="/static/favicon.svg" />
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/static/style.css?v=4" />
+  <style>
+    .ops-gate {
+      max-width: 480px; margin: 80px auto 40px; padding: 28px;
+      background: rgba(5,18,35,.72); border: 1px solid var(--border);
+      border-radius: 16px; box-shadow: var(--shadow);
+    }
+    .ops-gate h1 { font-size: 20px; margin-bottom: 8px; }
+    .ops-gate p { color: var(--muted2); font-size: 13px; margin-bottom: 18px; }
+    .ops-gate input {
+      width: 100%; padding: 12px 14px; border-radius: 10px;
+      border: 1px solid var(--border2); background: rgba(2,8,20,.6);
+      color: var(--text); font-family: 'JetBrains Mono', monospace; font-size: 13px;
+    }
+    .ops-gate .row { display:flex; gap:10px; margin-top:12px; }
+    .ops-meta { color: var(--muted); font-size: 12px; margin: 8px 0 20px; }
+    .ops-pill {
+      display:inline-flex; align-items:center; gap:6px; padding:4px 10px;
+      border-radius:999px; font-size:12px; font-weight:700;
+      border:1px solid var(--border); background:rgba(8,29,55,.54); color:var(--muted2);
+    }
+    .ops-pill.ok { color: var(--cyan); border-color: rgba(127,247,255,.3); }
+    .ops-pill.warn { color: var(--orange); border-color: rgba(251,146,60,.3); }
+    .ops-pill.bad { color: var(--red); border-color: rgba(248,113,113,.3); }
+    .reason-list { list-style:none; display:flex; flex-direction:column; gap:8px; }
+    .reason-list li {
+      padding:10px 12px; border-radius:10px; font-size:13px;
+      background:rgba(248,113,113,.08); border:1px solid rgba(248,113,113,.22); color:#fecaca;
+      font-family: 'JetBrains Mono', monospace;
+    }
+    .reason-list li.empty {
+      background:rgba(39,168,255,.08); border-color:rgba(127,247,255,.22); color:var(--cyan);
+    }
+    .fill-bar {
+      height:8px; border-radius:999px; background:rgba(8,29,55,.8);
+      border:1px solid var(--border); overflow:hidden; margin-top:8px;
+    }
+    .fill-bar > span {
+      display:block; height:100%; background:linear-gradient(90deg,#27a8ff,#7ff7ff);
+      width:0%; transition: width .4s ease;
+    }
+    .slave-chip {
+      display:inline-flex; gap:8px; align-items:center; padding:5px 10px;
+      border-radius:8px; border:1px solid var(--border); background:rgba(2,8,20,.4);
+      font-size:12px; margin:0 6px 6px 0; font-family:'JetBrains Mono',monospace;
+    }
+    .slave-chip.idle { border-color: rgba(251,146,60,.35); color: var(--orange); }
+    .slave-chip.busy { border-color: rgba(127,247,255,.35); color: var(--cyan); }
+    .slave-chip.off { opacity:.45; }
+    #ops-app.hidden, #ops-gate.hidden, .hidden { display:none !important; }
+    .ops-grid-2 { display:grid; grid-template-columns:1fr 1fr; gap:20px; }
+    @media (max-width:900px){ .ops-grid-2 { grid-template-columns:1fr; } }
+  </style>
+</head>
+<body>
+  <nav class="navbar">
+    <div class="nav-inner">
+      <a class="nav-logo nav-logo-brand" href="/">
+        <img src="/static/header-banner.png?v=1" alt="InnoPool" />
+      </a>
+      <div class="nav-links">
+        <span class="ops-pill">Private ops</span>
+        <button id="btn-logout" class="btn-secondary" style="padding:6px 12px;font-size:12px;display:none;">Lock</button>
+      </div>
+    </div>
+  </nav>
+
+  <div style="padding-top:60px;"></div>
+
+  <section class="section" style="padding-top:36px; max-width:1200px; margin:0 auto;">
+    <div id="ops-gate" class="ops-gate">
+      <h1>Operator metrics</h1>
+      <p>This page is not linked from the public site. Enter the admin secret to load live pool ops metrics. The secret stays in this browser session only.</p>
+      <input id="admin-secret" type="password" placeholder="X-Admin-Secret" autocomplete="off" />
+      <div class="row">
+        <button id="btn-unlock" class="btn-primary" style="flex:1;">Unlock</button>
+      </div>
+      <div id="gate-error" class="alert error hidden" style="margin-top:14px;"></div>
+    </div>
+
+    <div id="ops-app" class="hidden">
+      <div class="dashboard-header">
+        <div>
+          <p class="section-sub">Observe-only · refreshes every 15s</p>
+          <h2 class="section-title">Ops Metrics</h2>
+          <p class="ops-meta">
+            Updated <span id="updated-at">—</span>
+            · <span id="status-pill" class="ops-pill caution">Loading</span>
+          </p>
+        </div>
+        <div style="display:flex;gap:8px;align-items:center;">
+          <button id="btn-refresh" class="btn-secondary" style="padding:8px 14px;font-size:13px;">Refresh</button>
+        </div>
+      </div>
+
+      <div class="dash-stats" style="margin-bottom:22px;">
+        <div class="dash-tile">
+          <div class="val" id="m-online">—</div>
+          <div class="lbl">Online</div>
+          <div class="tile-sub"><span id="m-busy">—</span> busy · <span id="m-idle">—</span> idle</div>
+        </div>
+        <div class="dash-tile">
+          <div class="val" id="m-fill">—</div>
+          <div class="lbl">Fill rate</div>
+          <div class="tile-sub"><span id="m-inflight">—</span> / <span id="m-caps">—</span> caps</div>
+          <div class="fill-bar"><span id="m-fill-bar"></span></div>
+        </div>
+        <div class="dash-tile">
+          <div class="val" id="m-unassigned">—</div>
+          <div class="lbl">Unassigned roots</div>
+          <div class="tile-sub">Oldest <span id="m-oldest">—</span> min</div>
+        </div>
+        <div class="dash-tile">
+          <div class="val" id="m-creates">—</div>
+          <div class="lbl">Creates (15m)</div>
+          <div class="tile-sub"><span id="m-roots-done">—</span> roots done · <span id="m-stopped">—</span> stopped</div>
+        </div>
+      </div>
+
+      <div class="ops-grid-2" style="margin-bottom:22px;">
+        <div class="card" style="margin:0;">
+          <h2 style="margin-bottom:10px;">Governor</h2>
+          <div id="gov-summary" class="ops-meta" style="margin-top:0;"></div>
+          <ul id="gov-reasons" class="reason-list"></ul>
+          <table class="data-table compact" style="margin-top:14px;">
+            <tbody id="gov-counts"></tbody>
+          </table>
+        </div>
+        <div class="card" style="margin:0;">
+          <h2 style="margin-bottom:10px;">By profile</h2>
+          <table class="data-table">
+            <thead>
+              <tr><th>Profile</th><th>Online</th><th>Busy</th><th>Idle</th><th>Fill</th></tr>
+            </thead>
+            <tbody id="profile-body"></tbody>
+          </table>
+          <p class="ops-meta" id="creates-note" style="margin-top:14px;"></p>
+        </div>
+      </div>
+
+      <div class="card" style="margin-bottom:22px;">
+        <h2 style="margin-bottom:10px;">Unassigned by challenge</h2>
+        <div class="table-scroll">
+          <table class="data-table compact">
+            <thead>
+              <tr>
+                <th>Challenge</th>
+                <th>Track</th>
+                <th>Unassigned</th>
+                <th>Oldest (min)</th>
+              </tr>
+            </thead>
+            <tbody id="unassigned-body">
+              <tr><td colspan="4" class="loading">Loading…</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <div class="card" style="margin-bottom:22px;">
+        <h2 style="margin-bottom:10px;">Fattest open jobs</h2>
+        <div class="table-scroll">
+          <table class="data-table compact">
+            <thead>
+              <tr>
+                <th>Job</th>
+                <th>Challenge / track</th>
+                <th>Nonces</th>
+                <th>Pending</th>
+                <th>Unassigned</th>
+                <th>Age</th>
+              </tr>
+            </thead>
+            <tbody id="fattest-body">
+              <tr><td colspan="6" class="loading">Loading…</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <div class="card" style="margin-bottom:40px;">
+        <h2 style="margin-bottom:10px;">Online slaves</h2>
+        <div id="slave-chips"></div>
+        <div class="table-scroll" style="margin-top:14px;">
+          <table class="data-table compact">
+            <thead>
+              <tr>
+                <th>Slave</th>
+                <th>Profile</th>
+                <th>State</th>
+                <th>Inflight</th>
+                <th>Cap</th>
+                <th>Fill</th>
+              </tr>
+            </thead>
+            <tbody id="slave-body"></tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <script>
+    const STORAGE_KEY = "innopool_ops_admin_secret";
+    const REFRESH_MS = 15000;
+    let timer = null;
+    let secret = sessionStorage.getItem(STORAGE_KEY) || "";
+
+    const el = (id) => document.getElementById(id);
+    const gate = el("ops-gate");
+    const app = el("ops-app");
+    const gateError = el("gate-error");
+
+    function showGate(msg) {
+      app.classList.add("hidden");
+      gate.classList.remove("hidden");
+      el("btn-logout").style.display = "none";
+      if (msg) {
+        gateError.textContent = msg;
+        gateError.classList.remove("hidden");
+      } else {
+        gateError.classList.add("hidden");
+      }
+    }
+
+    function showApp() {
+      gate.classList.add("hidden");
+      app.classList.remove("hidden");
+      el("btn-logout").style.display = "inline-flex";
+    }
+
+    function fmt(n) {
+      if (n === null || n === undefined || Number.isNaN(n)) return "—";
+      return typeof n === "number" ? (Number.isInteger(n) ? String(n) : n.toFixed(2)) : String(n);
+    }
+
+    function pct(rate) {
+      if (rate === null || rate === undefined) return "—";
+      return Math.round(rate * 100) + "%";
+    }
+
+    function setPill(node, text, kind) {
+      node.textContent = text;
+      node.className = "ops-pill " + (kind || "");
+    }
+
+    async function fetchMetrics() {
+      const res = await fetch("/api/admin/ops/metrics", {
+        headers: { "X-Admin-Secret": secret },
+        cache: "no-store",
+      });
+      if (res.status === 401) {
+        sessionStorage.removeItem(STORAGE_KEY);
+        secret = "";
+        stopTimer();
+        showGate("Invalid admin secret.");
+        throw new Error("unauthorized");
+      }
+      if (!res.ok) {
+        const text = await res.text();
+        throw new Error(text || ("HTTP " + res.status));
+      }
+      return res.json();
+    }
+
+    function render(data) {
+      const s = data.slaves || {};
+      el("m-online").textContent = fmt(s.online);
+      el("m-busy").textContent = fmt(s.busy);
+      el("m-idle").textContent = fmt(s.idle);
+      el("m-fill").textContent = pct(s.fill_rate);
+      el("m-inflight").textContent = fmt(s.inflight);
+      el("m-caps").textContent = fmt(s.sum_caps);
+      el("m-fill-bar").style.width = Math.min(100, Math.round((s.fill_rate || 0) * 100)) + "%";
+      el("m-unassigned").textContent = fmt(data.unassigned_root_total);
+      el("m-oldest").textContent = fmt(data.oldest_unassigned_root_age_min);
+      el("m-creates").textContent = fmt((data.creates || {}).creates_15m);
+      el("m-roots-done").textContent = fmt((data.finishes || {}).roots_done_15m);
+      el("m-stopped").textContent = fmt((data.creates || {}).created_stopped_15m);
+
+      const ts = data.generated_at_ms ? new Date(data.generated_at_ms).toLocaleTimeString() : "—";
+      el("updated-at").textContent = ts;
+
+      const gov = data.governor || {};
+      const reasons = gov.block_reasons || [];
+      const pill = el("status-pill");
+      if (data.master_config_error) {
+        setPill(pill, "config error", "bad");
+      } else if (reasons.length) {
+        setPill(pill, "creates constrained", "warn");
+      } else if ((s.fill_rate || 0) < 0.4 && (s.idle || 0) > 0) {
+        setPill(pill, "underfilled", "warn");
+      } else {
+        setPill(pill, "flowing", "ok");
+      }
+
+      el("gov-summary").textContent = gov.enabled
+        ? (gov.at_max_concurrent ? "At max concurrent · " : "") +
+          (gov.idle_cpu_needs_work ? "idle CPU override active · " : "") +
+          (gov.would_block_global ? "global soft-block" : "global soft-gate clear")
+        : "Governor disabled / unavailable";
+
+      const reasonUl = el("gov-reasons");
+      reasonUl.innerHTML = "";
+      if (!reasons.length) {
+        const li = document.createElement("li");
+        li.className = "empty";
+        li.textContent = "No active create blocks detected";
+        reasonUl.appendChild(li);
+      } else {
+        reasons.forEach((r) => {
+          const li = document.createElement("li");
+          li.textContent = r;
+          reasonUl.appendChild(li);
+        });
+      }
+
+      const counts = gov.counts || {};
+      const countRows = [
+        ["CPU claimable unassigned", counts.cpu_unassigned_claimable, (gov.caps || {}).cpu_unassigned_cap],
+        ["GPU claimable unassigned", counts.gpu_unassigned_claimable, (gov.caps || {}).gpu_unassigned_cap],
+        ["CPU roots pending", counts.cpu_roots_pending, (gov.caps || {}).cpu_pending_cap],
+        ["GPU roots pending", counts.gpu_roots_pending, (gov.caps || {}).gpu_pending_cap],
+        ["Open jobs", counts.open_jobs, counts.max_concurrent_benchmarks],
+        ["Root ready rate window", counts.root_ready_benchmarks_window, counts.benchmarks_seen_window],
+      ];
+      el("gov-counts").innerHTML = countRows.map(([label, a, b]) =>
+        `<tr><td style="color:var(--muted);">${label}</td><td style="text-align:right;font-family:JetBrains Mono,monospace;">${fmt(a)}${b !== undefined && b !== null ? " / " + fmt(b) : ""}</td></tr>`
+      ).join("");
+
+      const by = s.by_profile || {};
+      el("profile-body").innerHTML = ["cpu", "gpu"].map((p) => {
+        const row = by[p] || {};
+        return `<tr>
+          <td>${p.toUpperCase()}</td>
+          <td>${fmt(row.online)}</td>
+          <td>${fmt(row.busy)}</td>
+          <td>${fmt(row.idle)}</td>
+          <td>${pct(row.fill_rate)} <span style="color:var(--muted);font-size:11px;">(${fmt(row.inflight)}/${fmt(row.sum_caps)})</span></td>
+        </tr>`;
+      }).join("");
+
+      el("creates-note").textContent = (data.creates || {}).http_400s_note || "";
+
+      const unassigned = data.unassigned_by_challenge || [];
+      el("unassigned-body").innerHTML = unassigned.length
+        ? unassigned.map((r) => `<tr>
+            <td>${r.challenge || r.challenge_id || "—"}</td>
+            <td class="mono">${r.track || "—"}</td>
+            <td>${fmt(r.unassigned_roots)}</td>
+            <td>${fmt(r.oldest_unassigned_age_min ?? r.oldest_job_age_min)}</td>
+          </tr>`).join("")
+        : `<tr><td colspan="4" style="color:var(--muted);">No unassigned roots</td></tr>`;
+
+      const fat = data.fattest_open_jobs || [];
+      el("fattest-body").innerHTML = fat.length
+        ? fat.map((j) => `<tr>
+            <td class="mono" title="${j.benchmark_id || ""}">${j.benchmark || "—"}</td>
+            <td>${j.challenge || "—"} <span style="color:var(--muted);">/</span> <span class="mono">${j.track || "—"}</span></td>
+            <td>${fmt(j.num_nonces)}</td>
+            <td>${fmt(j.roots_pending)}</td>
+            <td>${fmt(j.roots_unassigned)}</td>
+            <td>${fmt(j.age_min)}m</td>
+          </tr>`).join("")
+        : `<tr><td colspan="6" style="color:var(--muted);">No open jobs</td></tr>`;
+
+      const rows = (s.rows || []).filter((r) => r.online || r.inflight > 0);
+      el("slave-chips").innerHTML = rows.filter((r) => r.online).slice(0, 40).map((r) => {
+        const cls = r.busy ? "busy" : "idle";
+        return `<span class="slave-chip ${cls}">${r.slave_name} · ${r.inflight}/${r.cap}</span>`;
+      }).join("") || `<span style="color:var(--muted);font-size:13px;">No online slaves</span>`;
+
+      el("slave-body").innerHTML = rows.map((r) => {
+        const state = !r.online ? "offline" : (r.busy ? "busy" : "idle");
+        return `<tr>
+          <td class="mono">${r.slave_name}</td>
+          <td>${r.profile}</td>
+          <td>${state}</td>
+          <td>${fmt(r.inflight)}</td>
+          <td>${fmt(r.cap)} <span style="color:var(--muted);font-size:11px;">(route ${fmt(r.route_cap)})</span></td>
+          <td>${pct(r.fill)}</td>
+        </tr>`;
+      }).join("") || `<tr><td colspan="6" style="color:var(--muted);">No slaves</td></tr>`;
+    }
+
+    async function tick() {
+      try {
+        const data = await fetchMetrics();
+        showApp();
+        render(data);
+      } catch (err) {
+        if (String(err.message) !== "unauthorized") {
+          setPill(el("status-pill"), "error", "bad");
+          console.error(err);
+        }
+      }
+    }
+
+    function startTimer() {
+      stopTimer();
+      timer = setInterval(tick, REFRESH_MS);
+    }
+    function stopTimer() {
+      if (timer) clearInterval(timer);
+      timer = null;
+    }
+
+    el("btn-unlock").addEventListener("click", async () => {
+      secret = (el("admin-secret").value || "").trim();
+      if (!secret) {
+        showGate("Enter the admin secret.");
+        return;
+      }
+      sessionStorage.setItem(STORAGE_KEY, secret);
+      gateError.classList.add("hidden");
+      await tick();
+      if (secret) startTimer();
+    });
+
+    el("admin-secret").addEventListener("keydown", (e) => {
+      if (e.key === "Enter") el("btn-unlock").click();
+    });
+
+    el("btn-logout").addEventListener("click", () => {
+      sessionStorage.removeItem(STORAGE_KEY);
+      secret = "";
+      stopTimer();
+      el("admin-secret").value = "";
+      showGate();
+    });
+
+    el("btn-refresh").addEventListener("click", () => tick());
+
+    if (secret) {
+      showApp();
+      tick().then(() => { if (secret) startTimer(); });
+    } else {
+      showGate();
+    }
+  </script>
+</body>
+</html>
