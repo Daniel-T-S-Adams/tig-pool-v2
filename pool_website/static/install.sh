@@ -402,9 +402,12 @@ start_stack() {
     $dcmd compose up -d --build --force-recreate $services
     # shellcheck disable=SC2086
     $dcmd compose ps -q $services | xargs -r $dcmd update --restart unless-stopped || true
+    local dash_port
+    dash_port="$(grep -E '^DASHBOARD_HOST_PORT=' .env | cut -d= -f2-)"
     echo
-    echo "Dashboard: http://127.0.0.1:$(grep -E '^DASHBOARD_HOST_PORT=' .env | cut -d= -f2-)"
-    echo "Logs:      cd $dest && $dcmd compose logs -f slave"
+    echo "Dashboard: http://127.0.0.1:${dash_port}"
+    echo "View logs:"
+    echo "  cd $dest && sudo docker compose logs -f slave"
   )
 }
 
@@ -428,15 +431,34 @@ install_one() {
     start_stack "$dest" "$wtype"
   else
     echo "Configured only (--no-start). Next:"
-    echo "  cd $dest && docker compose up -d --build"
+    echo "  cd $dest && sudo docker compose up -d --build"
   fi
 }
 
-install_docker_if_needed
-# Docker may already exist from AMI/userdata; still grant group access.
-if [[ "$INSTALL_USER" != "root" ]] && need_cmd docker; then
+fix_docker_user_access() {
+  # cloud-init/root installs often leave ubuntu out of the live session group and
+  # may create a root-owned ~/.docker that breaks later docker CLI use.
+  if [[ "$INSTALL_USER" == "root" ]] || ! need_cmd docker; then
+    return 0
+  fi
   $SUDO usermod -aG docker "$INSTALL_USER" || true
-fi
+  local docker_cfg="${INSTALL_USER_HOME}/.docker"
+  # Replace root-owned config dir entirely — chown alone still fails if the
+  # directory mode/ACLs block the login user from reading config.json.
+  if [[ -e "$docker_cfg" ]]; then
+    local owner
+    owner="$($SUDO stat -c '%U' "$docker_cfg" 2>/dev/null || true)"
+    if [[ "$owner" != "$INSTALL_USER" ]]; then
+      $SUDO rm -rf "$docker_cfg"
+    fi
+  fi
+  $SUDO mkdir -p "$docker_cfg"
+  $SUDO chown -R "$INSTALL_USER:$INSTALL_USER" "$docker_cfg"
+  $SUDO chmod 700 "$docker_cfg"
+}
+
+install_docker_if_needed
+fix_docker_user_access
 MACHINE_INDEX="$(resolve_machine_index)"
 echo "Using machine_index=${MACHINE_INDEX}"
 echo "Install user/home: ${INSTALL_USER} @ ${INSTALL_ROOT}"
@@ -454,3 +476,13 @@ esac
 echo
 echo "InnoPool install finished."
 echo "Confirm the slave is online on the pool dashboard after the first batch."
+echo "Use sudo for docker commands on this host, e.g.:"
+case "$WORKER_TYPE" in
+  both)
+    echo "  cd ${INSTALL_ROOT%/}/innopool-slave-cpu && sudo docker compose logs -f slave"
+    echo "  cd ${INSTALL_ROOT%/}/innopool-slave-gpu && sudo docker compose logs -f slave"
+    ;;
+  *)
+    echo "  cd ${INSTALL_ROOT%/}/innopool-slave-${WORKER_TYPE} && sudo docker compose logs -f slave"
+    ;;
+esac
