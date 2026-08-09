@@ -23,6 +23,7 @@ from master.capability_scheduler import (
     should_skip_hard_for_weak,
     update_slave_track_ema,
 )
+from master.assign_views import AssignViews
 from master.cpu_tier_caps import (
     cpu_tier_cap_settings,
     effective_cpu_adaptive_max_cap,
@@ -62,17 +63,17 @@ SAMPLING_GAP_LOCK_MS = max(
     0, int(os.environ.get("SLAVE_SAMPLING_GAP_LOCK_MS", "0"))
 )
 
-# Emergency: under large fleets, full get-batches melts Postgres. Light mode
-# assigns from in-memory pending batches only. Default ON until fleet is stable.
-GET_BATCHES_LIGHT = os.environ.get("GET_BATCHES_LIGHT", "1").lower() in (
-    "1",
-    "true",
-    "yes",
-    "on",
-)
+# Permanent scalable path: get-batches is memory-only; smart policy lives in
+# background AssignViews (refreshed from slave_manager.run). FAST defaults ON.
+# GET_BATCHES_LIGHT is kept as a legacy alias for FAST.
+GET_BATCHES_FAST = os.environ.get(
+    "GET_BATCHES_FAST",
+    os.environ.get("GET_BATCHES_LIGHT", "1"),
+).lower() in ("1", "true", "yes", "on")
+GET_BATCHES_LIGHT = GET_BATCHES_FAST  # legacy alias
 # Max concurrent assign handlers. Excess polls get memory-only assignments.
 GET_BATCHES_MAX_INFLIGHT = max(
-    1, int(os.environ.get("GET_BATCHES_MAX_INFLIGHT", "4"))
+    1, int(os.environ.get("GET_BATCHES_MAX_INFLIGHT", "8"))
 )
 # When the sticky preferred owner is online but already at its adaptive cap,
 # allow other live CPUs to take unassigned roots. Without this, pending root
@@ -293,6 +294,8 @@ class SlaveManager:
         self._get_batches_inflight = 0
         self._get_batches_inflight_lock = Lock()
         self._get_batches_max_inflight = GET_BATCHES_MAX_INFLIGHT
+        self._assign_views_lock = Lock()
+        self._assign_views = AssignViews()
         # Slot ID / starvation views — refreshed with slot maintenance only.
         self._slot_view_lock = Lock()
         self._slot_benchmark_ids_cache: Set[str] = set()
@@ -406,6 +409,9 @@ class SlaveManager:
             return True
 
         now_ms = int(time.time() * 1000)
+        views = self._get_assign_views()
+        if slave_name in views.authorized_slaves:
+            return True
         cached = self._auth_cache.get(slave_name)
         if cached is not None:
             ok, until_ms = cached
@@ -1453,6 +1459,139 @@ class SlaveManager:
                 """
             )
             logger.debug(f"Refreshed pending batches. Got {len(self.batches)}")
+        # Smart policy for get-batches — NEVER on the poll path.
+        try:
+            self._refresh_assign_views()
+        except Exception as exc:
+            logger.warning("assign views refresh failed: %s", exc)
+
+    def _get_assign_views(self) -> AssignViews:
+        with self._assign_views_lock:
+            return self._assign_views
+
+    def _refresh_assign_views(self) -> None:
+        """Fleet-wide SQL snapshot used by fast get-batches."""
+        now_ms = int(time.time() * 1000)
+        views = AssignViews(updated_ms=now_ms)
+        db = get_db_conn()
+
+        auth_rows = db.fetch_all(
+            """
+            SELECT slave_name
+            FROM pool_members
+            WHERE active = true
+            """
+        ) or []
+        views.authorized_slaves = {
+            str(r["slave_name"]) for r in auth_rows if r.get("slave_name")
+        }
+        for name in views.authorized_slaves:
+            self._auth_cache[name] = (True, now_ms + self._auth_cache_ms)
+
+        art_rows = db.fetch_all(
+            """
+            SELECT r.slave, r.benchmark_id, r.batch_idx
+            FROM root_batch r
+            INNER JOIN job j ON j.benchmark_id = r.benchmark_id
+            INNER JOIN proofs_batch p
+              ON p.benchmark_id = r.benchmark_id
+             AND p.batch_idx = r.batch_idx
+            WHERE r.ready = true
+              AND r.slave IS NOT NULL
+              AND p.ready IS NULL
+              AND j.stopped IS NULL
+              AND j.end_time IS NULL
+              AND j.merkle_root_ready = true
+              AND j.merkle_proofs_ready IS NULL
+            """
+        ) or []
+        views.proof_artifacts = {
+            (str(r["slave"]), str(r["benchmark_id"]), int(r["batch_idx"]))
+            for r in art_rows
+            if r.get("slave") is not None
+        }
+
+        finish_rows = db.fetch_all(
+            """
+            SELECT DISTINCT r.slave, r.benchmark_id
+            FROM root_batch r
+            INNER JOIN job j ON j.benchmark_id = r.benchmark_id
+            WHERE j.stopped IS NULL
+              AND j.end_time IS NULL
+              AND j.merkle_root_ready IS NULL
+              AND r.slave IS NOT NULL
+              AND r.ready = true
+              AND EXISTS (
+                SELECT 1
+                FROM root_batch u
+                WHERE u.benchmark_id = r.benchmark_id
+                  AND u.ready IS NULL
+              )
+            """
+        ) or []
+        finish_map: Dict[str, Set[str]] = {}
+        for r in finish_rows:
+            slave = r.get("slave")
+            bid = r.get("benchmark_id")
+            if not slave or not bid:
+                continue
+            finish_map.setdefault(str(slave), set()).add(str(bid))
+        views.finish_root_by_slave = finish_map
+
+        await_rows = db.fetch_all(
+            """
+            SELECT DISTINCT r.slave AS slave
+            FROM proofs_batch p
+            INNER JOIN root_batch r
+              ON r.benchmark_id = p.benchmark_id
+             AND r.batch_idx = p.batch_idx
+            INNER JOIN job j ON j.benchmark_id = p.benchmark_id
+            WHERE p.ready IS NULL
+              AND r.ready = true
+              AND r.slave IS NOT NULL
+              AND j.stopped IS NULL
+              AND j.end_time IS NULL
+              AND j.merkle_proofs_ready IS NULL
+            """
+        ) or []
+        views.awaiting_proofs = {
+            str(r["slave"]) for r in await_rows if r.get("slave")
+        }
+
+        try:
+            cap_enabled, cap_views, job_meta = self._refresh_capability_views(now_ms)
+            views.cap_enabled = bool(cap_enabled)
+            views.cap_views = dict(cap_views or {})
+            views.job_meta = dict(job_meta or {})
+        except Exception as exc:
+            logger.warning("capability views in assign refresh failed: %s", exc)
+
+        online = self._online_slaves(now_ms)
+        # Bound work: adaptive SQL is cached; only touch currently-online slaves.
+        for slave_name in list(online)[:250]:
+            route = self._route_cap_for_slave(slave_name)
+            if route <= 0:
+                continue
+            try:
+                views.adaptive_caps[str(slave_name)] = int(
+                    self._adaptive_max_concurrent(
+                        slave_name, route, log=False, use_cache=True
+                    )
+                )
+            except Exception:
+                views.adaptive_caps[str(slave_name)] = int(route)
+
+        with self._assign_views_lock:
+            self._assign_views = views
+        logger.debug(
+            "assign views refreshed artifacts=%s finish_slaves=%s "
+            "awaiting=%s caps=%s auth=%s",
+            len(views.proof_artifacts),
+            len(views.finish_root_by_slave),
+            len(views.awaiting_proofs),
+            len(views.adaptive_caps),
+            len(views.authorized_slaves),
+        )
 
     def _memory_assigned_batches(self, slave_name: str) -> list:
         with self.lock:
@@ -1462,15 +1601,110 @@ class SlaveManager:
                 if b.get("slave") == slave_name and b.get("end_time") is None
             ]
 
-    def _get_batches_light(self, slave_name: str, slave: dict, now: float):
-        """Assign from in-memory pending only — no adaptive/cap/finish-root SQL."""
+    def _get_batches_fast(self, slave_name: str, slave: dict, now: float):
+        """Permanent hot path: memory assign + background AssignViews only.
+
+        No adaptive/capability/artifact/finish-root SQL on the request path.
+        """
+        views = self._get_assign_views()
         route_cap = int(slave["max_concurrent_batches"])
-        # Do not hand a full 32-wide route_cap during emergency light mode —
-        # that floods slaves with work that then 408s after restarts/reloads.
-        light_cap = max(1, int(os.environ.get("GET_BATCHES_LIGHT_CAP", "4")))
-        max_concurrent = max(1, min(route_cap, light_cap))
+        max_concurrent = int(views.adaptive_caps.get(slave_name) or route_cap)
+        max_concurrent = max(0, min(route_cap, max_concurrent))
         root_affinity = self._root_affinity_map()
         online_slaves = self._online_slaves(int(now))
+
+        preferred_at_cap: Set[str] = set()
+        overflow_benchmark_ids: Set[str] = set()
+        active_by_slave: Dict[str, int] = {}
+        slaves_with_proof_work: Set[str] = set()
+        preferreds_with_unassigned: Set[str] = set()
+        if STICKY_ROOTS_ENABLED:
+            for row in self.batches:
+                if row.get("end_time") is not None:
+                    continue
+                owner = row.get("slave")
+                batch = row.get("batch") or {}
+                if owner:
+                    active_by_slave[str(owner)] = active_by_slave.get(str(owner), 0) + 1
+                    if batch.get("sampled_nonces") is not None:
+                        slaves_with_proof_work.add(str(owner))
+                elif batch.get("sampled_nonces") is None:
+                    bid = str(batch.get("benchmark_id") or "")
+                    pref = root_affinity.get(bid) if bid else None
+                    if pref:
+                        preferreds_with_unassigned.add(str(pref))
+        if STICKY_ROOTS_ENABLED and STICKY_OVERFLOW_AT_CAP:
+            for preferred in preferreds_with_unassigned:
+                if not preferred or preferred not in online_slaves:
+                    continue
+                pref_route = self._route_cap_for_slave(preferred)
+                pref_cap = int(views.adaptive_caps.get(preferred) or pref_route)
+                if pref_route <= 0:
+                    continue
+                if int(active_by_slave.get(preferred) or 0) >= min(pref_route, pref_cap):
+                    preferred_at_cap.add(preferred)
+                    continue
+                if PROOF_PRIORITY_ENABLED and preferred in slaves_with_proof_work:
+                    preferred_at_cap.add(preferred)
+        if STICKY_ROOTS_ENABLED and STICKY_OVERFLOW_IDLE_MS > 0:
+            inflight_pref_bids: Set[str] = set()
+            unassigned_job_age: Dict[str, int] = {}
+            unassigned_pref: Dict[str, str] = {}
+            for row in self.batches:
+                batch = row.get("batch") or {}
+                if batch.get("sampled_nonces") is not None:
+                    continue
+                if row.get("end_time") is not None:
+                    continue
+                bid = str(batch.get("benchmark_id") or "")
+                preferred = root_affinity.get(bid)
+                if not preferred or preferred not in online_slaves:
+                    continue
+                if row.get("slave") == preferred:
+                    inflight_pref_bids.add(bid)
+                    continue
+                if row.get("slave") is not None:
+                    continue
+                job_start = batch.get("job_start_time")
+                try:
+                    job_age = int(now) - int(job_start)
+                except (TypeError, ValueError):
+                    continue
+                prev = unassigned_job_age.get(bid)
+                if prev is None or job_age > prev:
+                    unassigned_job_age[bid] = job_age
+                    unassigned_pref[bid] = preferred
+            for bid, preferred in unassigned_pref.items():
+                eff_idle_ms = int(STICKY_OVERFLOW_IDLE_MS)
+                if (
+                    STICKY_OVERFLOW_OWNER_IDLE_MS > 0
+                    and int(active_by_slave.get(preferred) or 0) == 0
+                ):
+                    eff_idle_ms = min(eff_idle_ms, int(STICKY_OVERFLOW_OWNER_IDLE_MS))
+                if not should_sticky_idle_overflow(
+                    preferred_slave=preferred,
+                    preferred_inflight_on_job=bid in inflight_pref_bids,
+                    has_unassigned=True,
+                    job_age_ms=unassigned_job_age[bid],
+                    idle_ms=eff_idle_ms,
+                    preferred_online=True,
+                ):
+                    continue
+                overflow_benchmark_ids.add(bid)
+                preferred_at_cap.add(preferred)
+
+        finish_root_bids = views.finish_roots(slave_name)
+        if PROOF_PRIORITY_ENABLED and STICKY_ROOTS_ENABLED:
+            pending_unfinished_roots = {
+                b["batch"]["benchmark_id"]
+                for b in self.batches
+                if b.get("end_time") is None
+                and (b.get("batch") or {}).get("sampled_nonces") is None
+            }
+            for bid, preferred in root_affinity.items():
+                if preferred == slave_name and bid in pending_unfinished_roots:
+                    finish_root_bids.add(bid)
+
         updates = []
         concurrent = []
         with self.lock:
@@ -1478,56 +1712,163 @@ class SlaveManager:
                 b for b in self.batches
                 if b.get("slave") == slave_name and b.get("end_time") is None
             ]
-            concurrent = [b["batch"] for b in assigned]
-            if len(concurrent) >= max_concurrent:
-                return concurrent, updates
+            assigned_proofs = [b for b in assigned if _is_proof_batch_row(b)]
+            own_proof_work = False
             for b in self.batches:
-                if len(concurrent) >= max_concurrent:
-                    break
-                if b.get("end_time") is not None or b.get("slave") not in (None,):
-                    continue
                 batch = b.get("batch") or {}
-                if batch.get("sampled_nonces") is not None:
-                    # proofs need artifact SQL — skip in light mode
+                if batch.get("sampled_nonces") is None:
                     continue
-                if not re.match(
-                    slave["algorithm_id_regex"],
-                    batch["settings"]["algorithm_id"],
+                if b.get("end_time") is not None:
+                    continue
+                if b.get("slave") not in (None, slave_name):
+                    continue
+                if views.may_take_proof(
+                    slave_name, batch["benchmark_id"], int(batch["batch_idx"])
                 ):
-                    continue
-                bid = batch["benchmark_id"]
-                preferred = root_affinity.get(bid)
-                if should_skip_root_for_slave(
-                    slave_name,
-                    preferred,
-                    online_slaves,
-                    preferred_at_cap=False,
-                ):
-                    continue
-                b["slave"] = slave_name
-                b["start_time"] = now
-                b["num_attempts"] = int(b.get("num_attempts") or 0) + 1
+                    own_proof_work = True
+                    break
+            has_proof_work = bool(
+                assigned_proofs
+                or own_proof_work
+                or (PROOF_PRIORITY_ENABLED and slave_name in views.awaiting_proofs)
+            )
+            kept_assigned, excess_assigned = select_kept_assigned_batches(
+                assigned,
+                max_concurrent,
+                proof_priority=PROOF_PRIORITY_ENABLED and has_proof_work,
+                max_roots_while_proofs=PROOF_PRIORITY_MAX_ROOTS,
+                always_keep_root_benchmarks=finish_root_bids,
+            )
+            for b in excess_assigned:
+                batch = b["batch"]
+                table = (
+                    "root_batch"
+                    if batch.get("sampled_nonces") is None
+                    else "proofs_batch"
+                )
                 updates.append((
-                    """
-                    UPDATE root_batch
-                    SET slave = %s,
-                        start_time = %s,
-                        num_attempts = %s
+                    f"""
+                    UPDATE {table}
+                    SET slave = NULL,
+                        start_time = NULL,
+                        end_time = NULL,
+                        num_attempts = GREATEST(num_attempts - 1, 0)
                     WHERE benchmark_id = %s
-                        AND batch_idx = %s
-                        AND ready IS NULL
-                        AND slave IS NULL
+                      AND batch_idx = %s
+                      AND slave = %s
+                      AND ready IS NULL
                     """,
-                    (
-                        slave_name,
-                        now,
-                        b["num_attempts"],
-                        batch["benchmark_id"],
-                        batch["batch_idx"],
-                    ),
+                    (batch["benchmark_id"], batch["batch_idx"], slave_name),
                 ))
-                concurrent.append(batch)
+                b["slave"] = None
+                b["start_time"] = None
+                b["end_time"] = None
+                b["num_attempts"] = max(0, int(b.get("num_attempts") or 0) - 1)
+
+            concurrent = [b["batch"] for b in kept_assigned]
+            concurrent_by_bench: Dict[str, int] = {}
+            concurrent_roots = sum(
+                1 for batch in concurrent if batch.get("sampled_nonces") is None
+            )
+            for b in kept_assigned:
+                bid = b["batch"]["benchmark_id"]
+                concurrent_by_bench[bid] = concurrent_by_bench.get(bid, 0) + 1
+
+            root_cap_while_proofs = (
+                PROOF_PRIORITY_MAX_ROOTS if has_proof_work else max_concurrent
+            )
+            per_bench_cap = CONFIG.get("max_batches_per_benchmark", 0)
+            if not per_bench_cap or per_bench_cap < 1:
+                per_bench_cap = max(1, max_concurrent // 4) if max_concurrent else 1
+
+            # Pass 1: proofs this slave can build. Pass 2: roots.
+            for want_proof in (True, False):
+                for b in self.batches:
+                    if len(concurrent) >= max_concurrent:
+                        break
+                    if b.get("end_time") is not None:
+                        continue
+                    batch = b.get("batch") or {}
+                    is_proof = batch.get("sampled_nonces") is not None
+                    if is_proof != want_proof:
+                        continue
+                    if b.get("slave") == slave_name:
+                        continue
+                    if not re.match(
+                        slave["algorithm_id_regex"],
+                        batch["settings"]["algorithm_id"],
+                    ):
+                        continue
+                    bid = batch["benchmark_id"]
+                    if is_proof:
+                        if not views.may_take_proof(
+                            slave_name, bid, int(batch["batch_idx"])
+                        ):
+                            continue
+                    else:
+                        if (
+                            PROOF_PRIORITY_ENABLED
+                            and has_proof_work
+                            and bid not in finish_root_bids
+                            and concurrent_roots >= root_cap_while_proofs
+                        ):
+                            continue
+                        preferred = root_affinity.get(bid)
+                        if should_skip_root_for_slave(
+                            slave_name,
+                            preferred,
+                            online_slaves,
+                            preferred_at_cap=bool(
+                                preferred and preferred in preferred_at_cap
+                            ),
+                        ):
+                            # Allow overflow-unlocked leftovers.
+                            if bid not in overflow_benchmark_ids:
+                                continue
+                        if concurrent_by_bench.get(bid, 0) >= per_bench_cap:
+                            continue
+                    if not batch_owner_stealable(
+                        now_ms=int(now),
+                        slave=b.get("slave"),
+                        start_time=b.get("start_time"),
+                        algorithm_id=batch["settings"]["algorithm_id"],
+                        online_slaves=online_slaves,
+                        is_proof=is_proof,
+                    ):
+                        continue
+                    b["slave"] = slave_name
+                    b["start_time"] = now
+                    b["num_attempts"] = int(b.get("num_attempts") or 0) + 1
+                    table = "proofs_batch" if is_proof else "root_batch"
+                    updates.append((
+                        f"""
+                        UPDATE {table}
+                        SET slave = %s,
+                            start_time = %s,
+                            num_attempts = %s
+                        WHERE benchmark_id = %s
+                            AND batch_idx = %s
+                            AND ready IS NULL
+                            AND (slave IS NULL OR slave = %s)
+                        """,
+                        (
+                            slave_name,
+                            now,
+                            b["num_attempts"],
+                            batch["benchmark_id"],
+                            batch["batch_idx"],
+                            slave_name,
+                        ),
+                    ))
+                    concurrent.append(batch)
+                    concurrent_by_bench[bid] = concurrent_by_bench.get(bid, 0) + 1
+                    if not is_proof:
+                        concurrent_roots += 1
         return concurrent, updates
+
+    def _get_batches_light(self, slave_name: str, slave: dict, now: float):
+        """Legacy name — delegates to permanent fast path."""
+        return self._get_batches_fast(slave_name, slave, now)
 
 
     def start(self):
@@ -1585,9 +1926,9 @@ class SlaveManager:
             if shed_only:
                 shed = self._memory_assigned_batches(slave_name)
                 return JSONResponse(content=jsonable_encoder(shed))
-            if GET_BATCHES_LIGHT:
+            if GET_BATCHES_FAST:
                 try:
-                    concurrent, updates = self._get_batches_light(slave_name, slave, now)
+                    concurrent, updates = self._get_batches_fast(slave_name, slave, now)
                     if updates:
                         get_db_conn().execute_many(*updates)
                     return JSONResponse(content=jsonable_encoder(concurrent))
