@@ -5,7 +5,7 @@ import re
 import time
 import random
 import math
-from threading import Thread, Lock
+from threading import Thread, Lock, Semaphore
 from dataclasses import dataclass
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.encoders import jsonable_encoder
@@ -60,6 +60,19 @@ PROOF_PRIORITY_MAX_ROOTS = max(
 # proofs_batch rows should proof-only lock. Set >0 only as an emergency brake.
 SAMPLING_GAP_LOCK_MS = max(
     0, int(os.environ.get("SLAVE_SAMPLING_GAP_LOCK_MS", "0"))
+)
+
+# Emergency: under large fleets, full get-batches melts Postgres. Light mode
+# assigns from in-memory pending batches only. Default ON until fleet is stable.
+GET_BATCHES_LIGHT = os.environ.get("GET_BATCHES_LIGHT", "1").lower() in (
+    "1",
+    "true",
+    "yes",
+    "on",
+)
+# Max concurrent assign handlers. Excess polls get memory-only assignments.
+GET_BATCHES_MAX_INFLIGHT = max(
+    1, int(os.environ.get("GET_BATCHES_MAX_INFLIGHT", "4"))
 )
 # When the sticky preferred owner is online but already at its adaptive cap,
 # allow other live CPUs to take unassigned roots. Without this, pending root
@@ -277,6 +290,9 @@ class SlaveManager:
             250,
             int(os.environ.get("SLAVE_PURGE_INTERVAL_MS", "10000")),
         )
+        self._get_batches_inflight = 0
+        self._get_batches_inflight_lock = Lock()
+        self._get_batches_max_inflight = GET_BATCHES_MAX_INFLIGHT
         # Slot ID / starvation views — refreshed with slot maintenance only.
         self._slot_view_lock = Lock()
         self._slot_benchmark_ids_cache: Set[str] = set()
@@ -1438,6 +1454,77 @@ class SlaveManager:
             )
             logger.debug(f"Refreshed pending batches. Got {len(self.batches)}")
 
+    def _memory_assigned_batches(self, slave_name: str) -> list:
+        with self.lock:
+            return [
+                b["batch"]
+                for b in self.batches
+                if b.get("slave") == slave_name and b.get("end_time") is None
+            ]
+
+    def _get_batches_light(self, slave_name: str, slave: dict, now: float):
+        """Assign from in-memory pending only — no adaptive/cap/finish-root SQL."""
+        route_cap = int(slave["max_concurrent_batches"])
+        max_concurrent = route_cap
+        root_affinity = self._root_affinity_map()
+        online_slaves = self._online_slaves(int(now))
+        updates = []
+        concurrent = []
+        with self.lock:
+            assigned = [
+                b for b in self.batches
+                if b.get("slave") == slave_name and b.get("end_time") is None
+            ]
+            concurrent = [b["batch"] for b in assigned]
+            if len(concurrent) >= max_concurrent:
+                return concurrent, updates
+            for b in self.batches:
+                if len(concurrent) >= max_concurrent:
+                    break
+                if b.get("end_time") is not None or b.get("slave") not in (None,):
+                    continue
+                batch = b.get("batch") or {}
+                if batch.get("sampled_nonces") is not None:
+                    # proofs need artifact SQL — skip in light mode
+                    continue
+                if not re.match(
+                    slave["algorithm_id_regex"],
+                    batch["settings"]["algorithm_id"],
+                ):
+                    continue
+                bid = batch["benchmark_id"]
+                preferred = root_affinity.get(bid)
+                if should_skip_root_for_slave(
+                    slave_name,
+                    preferred,
+                    online_slaves,
+                    preferred_at_cap=False,
+                ):
+                    continue
+                b["slave"] = slave_name
+                b["start_time"] = now
+                b["num_attempts"] = int(b.get("num_attempts") or 0) + 1
+                updates.append((
+                    """
+                    UPDATE root_batch
+                    SET slave = %s,
+                        start_time = %s,
+                        num_attempts = %s
+                    WHERE benchmark_id = %s
+                        AND batch_idx = %s
+                    """,
+                    (
+                        slave_name,
+                        now,
+                        b["num_attempts"],
+                        batch["benchmark_id"],
+                        batch["batch_idx"],
+                    ),
+                ))
+                concurrent.append(batch)
+        return concurrent, updates
+
+
     def start(self):
         app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
 
@@ -1469,6 +1556,7 @@ class SlaveManager:
             concurrent = []
             updates = []
             now = time.time() * 1000
+
             # Optional Phase C telemetry (query params and/or X-InnoPool-* headers).
             # Stock slaves that omit fields keep concurrent CPU cap at the fleet default.
             try:
@@ -1481,6 +1569,26 @@ class SlaveManager:
             if telemetry:
                 self._remember_slave_telemetry(slave_name, telemetry, int(now))
             self._touch_slave_seen(slave_name, int(now))
+
+            # Load-shed: excess concurrent polls get memory snapshot only.
+            shed_only = False
+            with self._get_batches_inflight_lock:
+                if self._get_batches_inflight >= self._get_batches_max_inflight:
+                    shed_only = True
+                else:
+                    self._get_batches_inflight += 1
+            if shed_only:
+                shed = self._memory_assigned_batches(slave_name)
+                return JSONResponse(content=jsonable_encoder(shed))
+            if GET_BATCHES_LIGHT:
+                try:
+                    concurrent, updates = self._get_batches_light(slave_name, slave, now)
+                    if updates:
+                        get_db_conn().execute_many(*updates)
+                    return JSONResponse(content=jsonable_encoder(concurrent))
+                finally:
+                    with self._get_batches_inflight_lock:
+                        self._get_batches_inflight = max(0, self._get_batches_inflight - 1)
             slot_types = self._slot_types_for_slave(slave_name)
             slot_benchmark_ids = set()
             starved_slot_benchmarks = {}
@@ -2044,6 +2152,8 @@ class SlaveManager:
                 f"get-batches slave={slave_name} assigned={len(concurrent)} "
                 f"cap={max_concurrent} route_cap={route_cap} adaptive={max_concurrent != route_cap}"
             )
+            with self._get_batches_inflight_lock:
+                self._get_batches_inflight = max(0, self._get_batches_inflight - 1)
             return JSONResponse(content=jsonable_encoder(concurrent))
 
         def find_batch(batch_id: str, request: Request):
