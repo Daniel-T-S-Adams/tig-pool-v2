@@ -119,7 +119,7 @@
         <div class="dash-tile">
           <div class="val" id="m-unassigned">—</div>
           <div class="lbl">Unassigned roots</div>
-          <div class="tile-sub">Oldest <span id="m-oldest">—</span> min</div>
+          <div class="tile-sub"><span id="m-claimable">—</span> claimable · <span id="m-sticky">—</span> sticky · oldest <span id="m-oldest">—</span>m</div>
         </div>
         <div class="dash-tile">
           <div class="val" id="m-creates">—</div>
@@ -149,22 +149,46 @@
         </div>
       </div>
 
-      <div class="card" style="margin-bottom:22px;">
-        <h2 style="margin-bottom:10px;">Unassigned by challenge</h2>
-        <div class="table-scroll">
-          <table class="data-table compact">
-            <thead>
-              <tr>
-                <th>Challenge</th>
-                <th>Track</th>
-                <th>Unassigned</th>
-                <th>Oldest (min)</th>
-              </tr>
-            </thead>
-            <tbody id="unassigned-body">
-              <tr><td colspan="4" class="loading">Loading…</td></tr>
-            </tbody>
-          </table>
+      <div class="ops-grid-2" style="margin-bottom:22px;">
+        <div class="card" style="margin:0;">
+          <h2 style="margin-bottom:10px;">Unassigned by challenge</h2>
+          <div class="table-scroll">
+            <table class="data-table compact">
+              <thead>
+                <tr>
+                  <th>Challenge</th>
+                  <th>Track</th>
+                  <th>Total</th>
+                  <th>Claimable</th>
+                  <th>Sticky</th>
+                  <th>Oldest</th>
+                </tr>
+              </thead>
+              <tbody id="unassigned-body">
+                <tr><td colspan="6" class="loading">Loading…</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+        <div class="card" style="margin:0;">
+          <h2 style="margin-bottom:10px;">Sticky-reserved jobs</h2>
+          <p class="ops-meta" style="margin-top:0;">Unassigned roots held for an online preferred owner.</p>
+          <div class="table-scroll">
+            <table class="data-table compact">
+              <thead>
+                <tr>
+                  <th>Job</th>
+                  <th>Challenge / track</th>
+                  <th>Sticky</th>
+                  <th>Preferred</th>
+                  <th>Age</th>
+                </tr>
+              </thead>
+              <tbody id="sticky-body">
+                <tr><td colspan="5" class="loading">Loading…</td></tr>
+              </tbody>
+            </table>
+          </div>
         </div>
       </div>
 
@@ -288,6 +312,8 @@
       el("m-caps").textContent = fmt(s.sum_caps);
       el("m-fill-bar").style.width = Math.min(100, Math.round((s.fill_rate || 0) * 100)) + "%";
       el("m-unassigned").textContent = fmt(data.unassigned_root_total);
+      el("m-claimable").textContent = fmt(data.claimable_root_total);
+      el("m-sticky").textContent = fmt(data.sticky_reserved_root_total);
       el("m-oldest").textContent = fmt(data.oldest_unassigned_root_age_min);
       el("m-creates").textContent = fmt((data.creates || {}).creates_15m);
       el("m-roots-done").textContent = fmt((data.finishes || {}).roots_done_15m);
@@ -303,6 +329,8 @@
         setPill(pill, "config error", "bad");
       } else if (reasons.length) {
         setPill(pill, "creates constrained", "warn");
+      } else if ((data.sticky_reserved_root_total || 0) > 0 && (s.idle || 0) > 2) {
+        setPill(pill, "sticky warehousing", "warn");
       } else if ((s.fill_rate || 0) < 0.4 && (s.idle || 0) > 0) {
         setPill(pill, "underfilled", "warn");
       } else {
@@ -363,9 +391,22 @@
             <td>${r.challenge || r.challenge_id || "—"}</td>
             <td class="mono">${r.track || "—"}</td>
             <td>${fmt(r.unassigned_roots)}</td>
+            <td>${fmt(r.claimable_roots)}</td>
+            <td>${fmt(r.sticky_reserved_roots)}</td>
             <td>${fmt(r.oldest_unassigned_age_min ?? r.oldest_job_age_min)}</td>
           </tr>`).join("")
-        : `<tr><td colspan="4" style="color:var(--muted);">No unassigned roots</td></tr>`;
+        : `<tr><td colspan="6" style="color:var(--muted);">No unassigned roots</td></tr>`;
+
+      const sticky = data.sticky_reserved_jobs || [];
+      el("sticky-body").innerHTML = sticky.length
+        ? sticky.map((j) => `<tr>
+            <td class="mono" title="${j.benchmark_id || ""}">${j.benchmark || "—"}</td>
+            <td>${j.challenge || "—"} <span style="color:var(--muted);">/</span> <span class="mono">${j.track || "—"}</span></td>
+            <td>${fmt(j.sticky_reserved_roots)}</td>
+            <td class="mono">${j.preferred_slave || "—"}</td>
+            <td>${fmt(j.age_min)}m</td>
+          </tr>`).join("")
+        : `<tr><td colspan="5" style="color:var(--muted);">No sticky-reserved unassigned roots</td></tr>`;
 
       const fat = data.fattest_open_jobs || [];
       el("fattest-body").innerHTML = fat.length

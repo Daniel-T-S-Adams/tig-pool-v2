@@ -533,13 +533,31 @@ def build_ops_metrics() -> dict:
             "fill_rate": round(inflight / caps, 3) if caps > 0 else None,
         }
 
+    online_cutoff = now_ms - SLAVE_ONLINE_MS
+    # Sticky-reserved = unassigned root on a job that still has an online
+    # sticky owner (someone who already worked that benchmark). Claimable =
+    # unassigned with no such online owner — free for idle newcomers.
+    sticky_owner_exists = """
+        EXISTS (
+            SELECT 1
+            FROM root_batch rb2
+            JOIN slave_seen ss ON ss.slave_name = rb2.slave
+            WHERE rb2.benchmark_id = rb.benchmark_id
+              AND rb2.slave IS NOT NULL
+              AND (rb2.ready = true OR rb2.ready IS NULL)
+              AND ss.last_seen >= %s
+        )
+    """
+
     unassigned = db.fetch_all(
-        """
+        f"""
         SELECT
             j.challenge,
             j.settings->>'challenge_id' AS challenge_id,
             j.settings->>'track_id' AS track,
             COUNT(*) AS unassigned_roots,
+            COUNT(*) FILTER (WHERE NOT ({sticky_owner_exists})) AS claimable_roots,
+            COUNT(*) FILTER (WHERE {sticky_owner_exists}) AS sticky_reserved_roots,
             ROUND(MIN((EXTRACT(EPOCH FROM NOW()) * 1000 - COALESCE(j.start_time, rb.start_time, %s)) / 60000.0), 1)
                 AS oldest_job_age_min,
             ROUND(MIN(
@@ -557,15 +575,17 @@ def build_ops_metrics() -> dict:
         GROUP BY j.challenge, j.settings->>'challenge_id', j.settings->>'track_id'
         ORDER BY unassigned_roots DESC
         """,
-        (now_ms, now_ms),
+        (online_cutoff, online_cutoff, now_ms, now_ms),
     )
 
     oldest_unassigned = db.fetch_one(
-        """
+        f"""
         SELECT
             ROUND(MAX((EXTRACT(EPOCH FROM NOW()) * 1000 - COALESCE(j.start_time, %s)) / 60000.0), 1)
                 AS oldest_unassigned_root_age_min,
-            COUNT(*) AS unassigned_root_total
+            COUNT(*) AS unassigned_root_total,
+            COUNT(*) FILTER (WHERE NOT ({sticky_owner_exists})) AS claimable_root_total,
+            COUNT(*) FILTER (WHERE {sticky_owner_exists}) AS sticky_reserved_root_total
         FROM root_batch rb
         JOIN job j ON j.benchmark_id = rb.benchmark_id
         WHERE rb.ready IS NULL
@@ -573,8 +593,42 @@ def build_ops_metrics() -> dict:
           AND COALESCE(j.stopped, false) = false
           AND j.end_time IS NULL
         """,
-        (now_ms,),
+        (now_ms, online_cutoff, online_cutoff),
     ) or {}
+
+    sticky_jobs = db.fetch_all(
+        f"""
+        SELECT
+            left(j.benchmark_id, 12) AS benchmark,
+            j.benchmark_id,
+            j.challenge,
+            j.settings->>'track_id' AS track,
+            COUNT(*) AS sticky_reserved_roots,
+            (
+                SELECT rb2.slave
+                FROM root_batch rb2
+                JOIN slave_seen ss ON ss.slave_name = rb2.slave
+                WHERE rb2.benchmark_id = j.benchmark_id
+                  AND rb2.slave IS NOT NULL
+                  AND (rb2.ready = true OR rb2.ready IS NULL)
+                  AND ss.last_seen >= %s
+                ORDER BY rb2.end_time DESC NULLS LAST, rb2.start_time DESC NULLS LAST
+                LIMIT 1
+            ) AS preferred_slave,
+            ROUND((EXTRACT(EPOCH FROM NOW()) * 1000 - COALESCE(j.start_time, %s)) / 60000.0, 1) AS age_min
+        FROM root_batch rb
+        JOIN job j ON j.benchmark_id = rb.benchmark_id
+        WHERE rb.ready IS NULL
+          AND rb.slave IS NULL
+          AND COALESCE(j.stopped, false) = false
+          AND j.end_time IS NULL
+          AND {sticky_owner_exists}
+        GROUP BY j.benchmark_id, j.challenge, j.settings, j.start_time
+        ORDER BY sticky_reserved_roots DESC, age_min DESC
+        LIMIT 12
+        """,
+        (online_cutoff, now_ms, online_cutoff),
+    )
 
     fattest = db.fetch_all(
         """
@@ -648,6 +702,9 @@ def build_ops_metrics() -> dict:
         "unassigned_by_challenge": unassigned,
         "oldest_unassigned_root_age_min": oldest_unassigned.get("oldest_unassigned_root_age_min"),
         "unassigned_root_total": int(oldest_unassigned.get("unassigned_root_total") or 0),
+        "claimable_root_total": int(oldest_unassigned.get("claimable_root_total") or 0),
+        "sticky_reserved_root_total": int(oldest_unassigned.get("sticky_reserved_root_total") or 0),
+        "sticky_reserved_jobs": sticky_jobs,
         "governor": governor,
         "creates": {
             "creates_15m": int(creates.get("creates_15m") or 0),
