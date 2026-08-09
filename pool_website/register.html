@@ -85,47 +85,35 @@
             </label>
           </div>
         </div>
-        <div class="form-group">
-          <label>Setup Size</label>
-          <div class="hw-selector">
-            <label class="hw-option">
-              <input type="radio" name="setup_type" value="single" checked />
-              <span class="hw-card">
-                <span class="hw-icon">1</span>
-                <span class="hw-title">Single computer</span>
-                <span class="hw-desc">one machine, or CPU + GPU on one machine using separate folders</span>
-              </span>
-            </label>
-            <label class="hw-option">
-              <input type="radio" name="setup_type" value="fleet" />
-              <span class="hw-card">
-                <span class="hw-icon">#</span>
-                <span class="hw-title">Multiple machines / fleet</span>
-                <span class="hw-desc">many physical machines, VPS instances, AWS, or mixed CPU/GPU workers</span>
-              </span>
-            </label>
-          </div>
-        </div>
-        <div id="fleet-options" class="hidden" style="padding:14px 18px;border-left:3px solid var(--blue);background:rgba(99,179,237,0.06);border-radius:0 8px 8px 0;margin-bottom:20px;">
-          <div class="form-group">
-            <label for="fleet-label">Fleet Label</label>
-            <input type="text" id="fleet-label" placeholder="e.g. epyc-fleet, aws-cpu, gpu-rig" value="fleet" />
-          </div>
-          <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px;">
+        <p class="muted small" style="margin:-8px 0 18px;line-height:1.6;">
+          Choose only the hardware you want to run. CPU-only never starts a GPU slave, even if a card is present.
+          One machine or fifty — same flow; each box gets its own slave ID under your wallet.
+        </p>
+        <details id="fleet-advanced" style="margin-bottom:20px;">
+          <summary style="cursor:pointer;font-weight:600;font-size:14px;color:var(--text);">
+            Multiple machines (advanced)
+          </summary>
+          <div id="fleet-options" style="padding:14px 18px;border-left:3px solid var(--blue);background:rgba(99,179,237,0.06);border-radius:0 8px 8px 0;margin-top:12px;">
             <div class="form-group">
-              <label for="cpu-machines">CPU Machines</label>
-              <input type="number" id="cpu-machines" min="0" value="1" />
+              <label for="fleet-label">Fleet Label</label>
+              <input type="text" id="fleet-label" placeholder="e.g. epyc-fleet, aws-cpu, gpu-rig" value="home" />
             </div>
-            <div class="form-group">
-              <label for="gpu-machines">GPU Machines</label>
-              <input type="number" id="gpu-machines" min="0" value="0" />
+            <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px;">
+              <div class="form-group">
+                <label for="cpu-machines">CPU Machines</label>
+                <input type="number" id="cpu-machines" min="0" value="1" />
+              </div>
+              <div class="form-group">
+                <label for="gpu-machines">GPU Machines</label>
+                <input type="number" id="gpu-machines" min="0" value="0" />
+              </div>
             </div>
+            <p class="muted small" style="margin-top:4px;">
+              Leave at 1 unless you are launching many boxes. Machine counts are still constrained by the
+              hardware type you selected above.
+            </p>
           </div>
-          <p class="muted small" style="margin-top:4px;">
-            Exact cores/GPU model are optional. InnoPool will measure real throughput after machines connect.
-            Each machine gets a unique slave name from the fleet token and machine index.
-          </p>
-        </div>
+        </details>
         <button type="submit" class="btn-primary full">
           Register →
         </button>
@@ -152,81 +140,26 @@
 
         <div id="fleet-block" class="hidden" style="margin-bottom:28px;">
           <div style="padding:14px 18px;border-left:3px solid var(--green);background:rgba(34,211,165,0.06);border-radius:0 8px 8px 0;font-size:13px;color:var(--muted2);line-height:1.7;margin-bottom:16px;">
-            <strong style="color:var(--text);">Fleet registration created.</strong>
-            Use the AWS User Data script for EC2 launch templates, or the Linux/home script on physical
-            machines and normal VPS hosts. Each machine gets its own slave name while rewards stay under
-            the same wallet.
+            <strong style="color:var(--text);">You're registered.</strong>
+            Run the install command on each machine. It installs Docker if needed, clones the InnoPool
+            custom slave (with telemetry), and starts only the hardware type you selected.
           </div>
-          <div id="fleet-install-blocks"></div>
+          <div id="primary-install" style="margin-bottom:20px;"></div>
+          <details id="advanced-install" class="hidden">
+            <summary style="cursor:pointer;font-weight:600;font-size:14px;margin-bottom:12px;">
+              AWS User Data / advanced scripts
+            </summary>
+            <div id="fleet-install-blocks"></div>
+          </details>
         </div>
 
         <div id="dual-worker-note" class="hidden" style="padding:14px 18px;border-left:3px solid var(--orange);background:rgba(251,146,60,0.07);border-radius:0 8px 8px 0;font-size:13px;color:var(--muted2);line-height:1.7;margin-bottom:24px;">
-          <strong style="color:var(--text);">CPU + GPU means two separate slaves.</strong>
-          If you run both on the same machine, use two separate <code>tig-benchmarker</code> folders:
-          one folder for the CPU setup and one folder for the GPU setup. Each folder has its own
-          <code>.env</code>, <code>SLAVE_NAME</code>, <code>algorithms</code>, and <code>results</code>.
-          Do not paste both setup commands into the same folder.
+          <strong style="color:var(--text);">CPU + GPU = two slaves on this machine.</strong>
+          The install command creates <code>~/innopool-slave-cpu</code> and <code>~/innopool-slave-gpu</code>
+          automatically (separate dashboards on ports 8787 and 8788).
         </div>
 
-        <div id="standard-setup-block">
-          <!-- Step 1 -->
-          <div style="display:flex;align-items:baseline;gap:12px;margin-bottom:10px;">
-            <span style="width:24px;height:24px;border-radius:50%;background:var(--blue);color:#fff;font-size:12px;font-weight:700;display:inline-flex;align-items:center;justify-content:center;flex-shrink:0;">1</span>
-            <span style="font-weight:600;font-size:15px;">Clone the TIG Monorepo</span>
-          </div>
-          <div class="code-block" style="margin-bottom:24px;">git clone https://github.com/tig-foundation/tig-monorepo.git
-cd tig-monorepo/tig-benchmarker
-git switch main</div>
-          <div id="second-folder-note" class="hidden" style="font-size:13px;color:var(--muted);line-height:1.7;margin-top:-12px;margin-bottom:24px;">
-            Running CPU and GPU on the same machine? Clone a second folder for the second slave, for example
-            <code>tig-monorepo-cpu</code> and <code>tig-monorepo-gpu</code>. Run the CPU setup command in one
-            folder and the GPU setup command in the other.
-          </div>
-
-          <!-- CPU setup block -->
-          <div id="cpu-block" class="hidden">
-            <div style="display:flex;align-items:baseline;gap:12px;margin-bottom:10px;">
-              <span id="cpu-step-num" style="width:24px;height:24px;border-radius:50%;background:var(--blue);color:#fff;font-size:12px;font-weight:700;display:inline-flex;align-items:center;justify-content:center;flex-shrink:0;">2</span>
-              <span style="font-weight:600;font-size:15px;" id="cpu-step-label">CPU Slave — setup from inside <code>tig-benchmarker</code></span>
-            </div>
-            <div class="code-block" style="position:relative;margin-bottom:12px;">
-              <button class="code-copy" onclick="copyBlock('cpu-setup-text', this)">Copy</button>
-              <span id="cpu-setup-text"></span>
-            </div>
-            <p style="font-size:13px;color:var(--muted);margin-bottom:6px;">Verify Docker mounts, start the CPU services, and watch the slave logs:</p>
-            <div class="code-block" style="position:relative;margin-bottom:12px;">
-              <button class="code-copy" onclick="copyBlock('cpu-preflight-text', this)">Copy</button>
-              <span id="cpu-preflight-text"></span>
-            </div>
-            <p style="font-size:13px;color:var(--muted);margin-bottom:6px;">Future restarts:</p>
-            <div class="code-block" style="position:relative;margin-bottom:24px;">
-              <button class="code-copy" onclick="copyBlock('cpu-start-text', this)">Copy</button>
-              <span id="cpu-start-text"></span>
-            </div>
-          </div>
-
-          <!-- GPU setup block -->
-          <div id="gpu-block" class="hidden">
-            <div style="display:flex;align-items:baseline;gap:12px;margin-bottom:10px;">
-              <span id="gpu-step-num" style="width:24px;height:24px;border-radius:50%;background:#8b5cf6;color:#fff;font-size:12px;font-weight:700;display:inline-flex;align-items:center;justify-content:center;flex-shrink:0;">2</span>
-              <span style="font-weight:600;font-size:15px;" id="gpu-step-label">GPU Slave — setup from inside tig-benchmarker</span>
-            </div>
-            <div class="code-block" style="position:relative;margin-bottom:12px;">
-              <button class="code-copy" onclick="copyBlock('gpu-setup-text', this)">Copy</button>
-              <span id="gpu-setup-text"></span>
-            </div>
-            <p style="font-size:13px;color:var(--muted);margin-bottom:6px;">Verify Docker mounts, start the GPU services, and watch the slave logs:</p>
-            <div class="code-block" style="position:relative;margin-bottom:12px;">
-              <button class="code-copy" onclick="copyBlock('gpu-preflight-text', this)">Copy</button>
-              <span id="gpu-preflight-text"></span>
-            </div>
-            <p style="font-size:13px;color:var(--muted);margin-bottom:6px;">Future restarts:</p>
-            <div class="code-block" style="position:relative;margin-bottom:24px;">
-              <button class="code-copy" onclick="copyBlock('gpu-start-text', this)">Copy</button>
-              <span id="gpu-start-text"></span>
-            </div>
-          </div>
-        </div>
+        <div id="standard-setup-block" class="hidden"></div>
 
         <!-- Footer note -->
         <div style="padding:14px 18px;border-left:3px solid var(--green);background:rgba(34,211,165,0.06);border-radius:0 8px 8px 0;font-size:13px;color:var(--muted2);line-height:1.7;">
@@ -254,13 +187,33 @@ git switch main</div>
 
   <script src="/static/app.js"></script>
   <script>
+    function syncMachineDefaults() {
+      const workerType = document.querySelector('input[name="worker_type"]:checked').value;
+      const cpuEl = document.getElementById("cpu-machines");
+      const gpuEl = document.getElementById("gpu-machines");
+      if (workerType === "gpu") {
+        cpuEl.value = "0";
+        if (parseInt(gpuEl.value || "0", 10) < 1) gpuEl.value = "1";
+      } else if (workerType === "both") {
+        if (parseInt(cpuEl.value || "0", 10) < 1) cpuEl.value = "1";
+        if (parseInt(gpuEl.value || "0", 10) < 1) gpuEl.value = "1";
+      } else {
+        if (parseInt(cpuEl.value || "0", 10) < 1) cpuEl.value = "1";
+        gpuEl.value = "0";
+      }
+    }
+    document.querySelectorAll('input[name="worker_type"]').forEach((el) => {
+      el.addEventListener("change", syncMachineDefaults);
+    });
+    syncMachineDefaults();
+
     document.getElementById("register-form").addEventListener("submit", async (e) => {
       e.preventDefault();
       const wallet      = document.getElementById("wallet").value.trim();
       const invite      = document.getElementById("invite").value.trim();
       const workerType  = document.querySelector('input[name="worker_type"]:checked').value;
-      const setupType   = document.querySelector('input[name="setup_type"]:checked').value;
-      const fleetLabel  = document.getElementById("fleet-label").value.trim() || "fleet";
+      const fleetLabel  = document.getElementById("fleet-label").value.trim() || "home";
+      syncMachineDefaults();
       const cpuMachines = parseInt(document.getElementById("cpu-machines").value || "0", 10);
       const gpuMachines = parseInt(document.getElementById("gpu-machines").value || "0", 10);
       const errEl       = document.getElementById("register-error");
@@ -278,7 +231,7 @@ git switch main</div>
             wallet_address: wallet,
             invite_code: invite,
             worker_type: workerType,
-            setup_type: setupType,
+            setup_type: "fleet",
             fleet_label: fleetLabel,
             cpu_machines: cpuMachines,
             gpu_machines: gpuMachines
@@ -294,111 +247,92 @@ git switch main</div>
           return;
         }
         const data = await resp.json();
-
-        if (data.fleet) {
-          document.getElementById("standard-setup-block").classList.add("hidden");
-          document.getElementById("dual-worker-note").classList.add("hidden");
-          const fleet = data.fleet;
-          document.getElementById("res-summary").textContent =
-            `Fleet ${fleet.label} registered. Token generated for CPU/GPU machine installs.`;
-          const pillsEl = document.getElementById("slave-pills");
-          pillsEl.innerHTML = `<span style="padding:5px 14px;border-radius:20px;background:rgba(39,168,255,0.14);border:1px solid rgba(127,247,255,0.32);color:#b6ecff;font-size:13px;font-family:monospace;">${fleet.fleet_id}</span>`;
-          const blocks = document.getElementById("fleet-install-blocks");
-          blocks.innerHTML = "";
-
-          function appendFleetCodeBlock(title, id, text, note = "") {
-            const titleEl = document.createElement("div");
-            titleEl.style.cssText = "font-weight:600;font-size:15px;margin:16px 0 8px;";
-            titleEl.textContent = title;
-            blocks.appendChild(titleEl);
-            if (note) {
-              const noteEl = document.createElement("p");
-              noteEl.style.cssText = "font-size:13px;color:var(--muted);margin:0 0 8px;line-height:1.6;";
-              noteEl.textContent = note;
-              blocks.appendChild(noteEl);
-            }
-            const codeEl = document.createElement("div");
-            codeEl.className = "code-block";
-            codeEl.style.cssText = "position:relative;margin-bottom:12px;white-space:pre-wrap;";
-            codeEl.innerHTML = `<button class="code-copy" onclick="copyBlock('${id}', this)">Copy</button><span id="${id}"></span>`;
-            blocks.appendChild(codeEl);
-            document.getElementById(id).textContent = text;
-          }
-
-          for (const [kind, payload] of Object.entries(fleet.onboarding || {})) {
-            const label = kind.toUpperCase();
-            appendFleetCodeBlock(
-              `${label} AWS EC2 User Data`,
-              `fleet-${kind}-aws-user-data`,
-              payload.aws_user_data,
-              "Paste this into Advanced details -> User data when launching an Ubuntu 24.04 EC2 instance."
-            );
-            appendFleetCodeBlock(
-              `${label} Linux / home PC / VPS install`,
-              `fleet-${kind}-linux-install`,
-              payload.linux_install_script,
-              "Run this once on each Ubuntu/Debian machine. It uses the hostname as the machine index."
-            );
-            appendFleetCodeBlock(
-              `${label} quick command for an existing tig-benchmarker folder`,
-              `fleet-${kind}-quick-install`,
-              payload.quick_install_command,
-              "Use this only if Docker and tig-monorepo are already installed and you are inside tig-benchmarker."
-            );
-          }
-
-          if (!Object.keys(fleet.onboarding || {}).length) {
-            for (const [kind, cmd] of Object.entries(fleet.install_commands || {})) {
-              appendFleetCodeBlock(`${kind.toUpperCase()} fleet install command`, `fleet-${kind}-install-text`, cmd);
-            }
-          }
-          document.getElementById("fleet-block").classList.remove("hidden");
-          document.getElementById("form-card").classList.add("hidden");
-          document.getElementById("success-block").classList.remove("hidden");
+        const fleet = data.fleet;
+        if (!fleet) {
+          errEl.textContent = "Registration succeeded but no install token was returned.";
+          errEl.classList.remove("hidden");
+          btn.textContent = "Register →";
+          btn.disabled = false;
           return;
         }
 
-        // Populate success block based on worker_type
-        document.getElementById("standard-setup-block").classList.remove("hidden");
-        document.getElementById("fleet-block").classList.add("hidden");
-        const slaves = data.slaves || {};
-        const hasCpu = !!slaves.cpu;
-        const hasGpu = !!slaves.gpu;
+        const typeLabel = workerType === "both" ? "CPU + GPU" : workerType.toUpperCase();
+        document.getElementById("res-summary").textContent =
+          `${typeLabel} registered. Run the install command on each machine.`;
+        document.getElementById("slave-pills").innerHTML =
+          `<span style="padding:5px 14px;border-radius:20px;background:rgba(39,168,255,0.14);border:1px solid rgba(127,247,255,0.32);color:#b6ecff;font-size:13px;font-family:monospace;">${fleet.fleet_id}</span>` +
+          `<span style="padding:5px 14px;border-radius:20px;background:rgba(34,211,165,0.12);border:1px solid rgba(34,211,165,0.35);color:#6ee7b7;font-size:13px;">innopool-slave</span>`;
+        document.getElementById("dual-worker-note").classList.toggle("hidden", workerType !== "both");
 
-        // Slave name pills
-        const pillsEl = document.getElementById("slave-pills");
-        pillsEl.innerHTML = "";
-        if (hasCpu) pillsEl.innerHTML += `<span style="padding:5px 14px;border-radius:20px;background:rgba(99,179,237,0.12);border:1px solid rgba(99,179,237,0.3);color:#93c5fd;font-size:13px;font-family:monospace;">${slaves.cpu.slave_name}</span>`;
-        if (hasGpu) pillsEl.innerHTML += `<span style="padding:5px 14px;border-radius:20px;background:rgba(139,92,246,0.12);border:1px solid rgba(139,92,246,0.3);color:#c4b5fd;font-size:13px;font-family:monospace;">${slaves.gpu.slave_name}</span>`;
+        const primary = document.getElementById("primary-install");
+        primary.innerHTML = "";
+        const onboarding = fleet.onboarding || {};
+        const installCmds = fleet.install_commands || {};
+        const kinds = Object.keys(onboarding).length ? Object.keys(onboarding) : Object.keys(installCmds);
 
-        // Summary line
-        document.getElementById("res-summary").textContent = hasCpu && hasGpu
-          ? "Wallet registered successfully. CPU and GPU are separate slave names; run each setup in its own folder."
-          : "Wallet registered successfully";
-        document.getElementById("dual-worker-note").classList.toggle("hidden", !(hasCpu && hasGpu));
-        document.getElementById("second-folder-note").classList.toggle("hidden", !(hasCpu && hasGpu));
-
-        if (hasCpu) {
-          if (hasGpu) {
-            document.getElementById("cpu-step-label").innerHTML = 'CPU Slave — setup from inside the CPU <code>tig-benchmarker</code> folder';
-          }
-          document.getElementById("cpu-setup-text").textContent = slaves.cpu.setup_command || slaves.cpu.slave_config;
-          document.getElementById("cpu-preflight-text").textContent = slaves.cpu.preflight_command || slaves.cpu.start_command;
-          document.getElementById("cpu-start-text").textContent = slaves.cpu.start_command;
-          document.getElementById("cpu-block").classList.remove("hidden");
-        }
-        if (hasGpu) {
-          document.getElementById("gpu-setup-text").textContent = slaves.gpu.setup_command || slaves.gpu.slave_config;
-          document.getElementById("gpu-preflight-text").textContent = slaves.gpu.preflight_command || slaves.gpu.start_command;
-          document.getElementById("gpu-start-text").textContent = slaves.gpu.start_command;
-          // Step numbers: if both, GPU becomes step 3
-          if (hasCpu) {
-            document.getElementById("gpu-step-num").textContent = "3";
-            document.getElementById("gpu-step-label").textContent = "GPU Slave — setup from inside a separate GPU tig-benchmarker folder";
-          }
-          document.getElementById("gpu-block").classList.remove("hidden");
+        function addPrimary(kind, cmd) {
+          const title = document.createElement("div");
+          title.style.cssText = "display:flex;align-items:baseline;gap:12px;margin-bottom:10px;";
+          title.innerHTML = `<span style="width:24px;height:24px;border-radius:50%;background:var(--blue);color:#fff;font-size:12px;font-weight:700;display:inline-flex;align-items:center;justify-content:center;flex-shrink:0;">1</span>
+            <span style="font-weight:600;font-size:15px;">Install on this machine (${kind.toUpperCase()})</span>`;
+          primary.appendChild(title);
+          const note = document.createElement("p");
+          note.style.cssText = "font-size:13px;color:var(--muted);margin:0 0 8px;line-height:1.6;";
+          note.textContent = "Ubuntu/Debian. Installs Docker if needed, clones innopool-slave, starts containers.";
+          primary.appendChild(note);
+          const id = `primary-${kind}-install`;
+          const codeEl = document.createElement("div");
+          codeEl.className = "code-block";
+          codeEl.style.cssText = "position:relative;margin-bottom:16px;white-space:pre-wrap;";
+          codeEl.innerHTML = `<button class="code-copy" onclick="copyBlock('${id}', this)">Copy</button><span id="${id}"></span>`;
+          primary.appendChild(codeEl);
+          document.getElementById(id).textContent = cmd;
         }
 
+        for (const kind of kinds) {
+          const payload = onboarding[kind] || {};
+          const cmd = payload.install_command || payload.quick_install_command || installCmds[kind];
+          if (cmd) addPrimary(kind, cmd);
+        }
+
+        const adv = document.getElementById("advanced-install");
+        const blocks = document.getElementById("fleet-install-blocks");
+        blocks.innerHTML = "";
+        let hasAdvanced = false;
+
+        function appendFleetCodeBlock(title, id, text, note = "") {
+          if (!text) return;
+          hasAdvanced = true;
+          const titleEl = document.createElement("div");
+          titleEl.style.cssText = "font-weight:600;font-size:15px;margin:16px 0 8px;";
+          titleEl.textContent = title;
+          blocks.appendChild(titleEl);
+          if (note) {
+            const noteEl = document.createElement("p");
+            noteEl.style.cssText = "font-size:13px;color:var(--muted);margin:0 0 8px;line-height:1.6;";
+            noteEl.textContent = note;
+            blocks.appendChild(noteEl);
+          }
+          const codeEl = document.createElement("div");
+          codeEl.className = "code-block";
+          codeEl.style.cssText = "position:relative;margin-bottom:12px;white-space:pre-wrap;";
+          codeEl.innerHTML = `<button class="code-copy" onclick="copyBlock('${id}', this)">Copy</button><span id="${id}"></span>`;
+          blocks.appendChild(codeEl);
+          document.getElementById(id).textContent = text;
+        }
+
+        for (const [kind, payload] of Object.entries(onboarding)) {
+          appendFleetCodeBlock(
+            `${kind.toUpperCase()} AWS EC2 User Data`,
+            `fleet-${kind}-aws-user-data`,
+            payload.aws_user_data,
+            "Paste into Advanced details → User data on Ubuntu 24.04 EC2."
+          );
+        }
+        adv.classList.toggle("hidden", !hasAdvanced);
+
+        document.getElementById("fleet-block").classList.remove("hidden");
+        document.getElementById("standard-setup-block").classList.add("hidden");
         document.getElementById("form-card").classList.add("hidden");
         document.getElementById("success-block").classList.remove("hidden");
       } catch (err) {
@@ -407,13 +341,6 @@ git switch main</div>
         btn.textContent = "Register →";
         btn.disabled = false;
       }
-    });
-
-    document.querySelectorAll('input[name="setup_type"]').forEach((el) => {
-      el.addEventListener("change", () => {
-        const isFleet = document.querySelector('input[name="setup_type"]:checked').value === "fleet";
-        document.getElementById("fleet-options").classList.toggle("hidden", !isFleet);
-      });
     });
 
     function copyBlock(id, btn) {

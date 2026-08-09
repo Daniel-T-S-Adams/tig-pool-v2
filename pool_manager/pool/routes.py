@@ -180,13 +180,6 @@ def _create_fleet(wallet: str, label: str, worker_type: str, cpu_count: int = 0,
     }
 
 
-def _fleet_install_command(token: str, worker_type: str, machine_index: str = "001") -> str:
-    return (
-        f"curl -fsSL \"{_POOL_PUBLIC_URL}/static/fleet-install.sh?cachebust=$(date +%s)\" | bash -s -- "
-        f"--fleet-token {token} --worker-type {worker_type} --machine-index {machine_index}"
-    )
-
-
 def _fleet_services(worker_type: str) -> str:
     return (
         "slave vector_search hypergraph neuralnet_optimizer"
@@ -195,88 +188,45 @@ def _fleet_services(worker_type: str) -> str:
     )
 
 
+def _fleet_install_command(token: str, worker_type: str, machine_index: str = "AUTO") -> str:
+    """One-liner that clones innopool-slave, configures, and starts containers."""
+    return (
+        f"curl -fsSL \"{_POOL_PUBLIC_URL}/static/install.sh?cachebust=$(date +%s)\" | bash -s -- "
+        f"--fleet-token {token} --worker-type {worker_type} --machine-index {machine_index}"
+    )
+
+
 def _compose_restart_policy_command(services: str, sudo: str = "") -> str:
     prefix = f"{sudo} " if sudo else ""
     return (
-        f"{prefix}docker compose -f slave.yml ps -q {services} "
+        f"{prefix}docker compose ps -q {services} "
         f"| xargs -r {prefix}docker update --restart unless-stopped"
     )
 
 
 def _fleet_linux_install_script(token: str, worker_type: str) -> str:
-    services = _fleet_services(worker_type)
-    if worker_type == "gpu":
-        start_commands = """$SUDO docker compose -f slave.yml up -d --force-recreate vector_search hypergraph neuralnet_optimizer
-
-for service in vector_search hypergraph neuralnet_optimizer; do
-  for attempt in $(seq 1 60); do
-    status="$($SUDO docker compose -f slave.yml ps --status running --services | grep -x "$service" || true)"
-    if [ "$status" = "$service" ]; then
-      break
-    fi
-    sleep 2
-  done
-  $SUDO docker compose -f slave.yml ps --status running --services | grep -x "$service"
-done
-
-$SUDO docker compose -f slave.yml up -d --force-recreate slave
-$SUDO docker compose -f slave.yml ps -q slave vector_search hypergraph neuralnet_optimizer | xargs -r $SUDO docker update --restart unless-stopped"""
-    else:
-        start_commands = (
-            f"$SUDO docker compose -f slave.yml up -d --force-recreate {services}\n"
-            f"$SUDO docker compose -f slave.yml ps -q {services} | xargs -r $SUDO docker update --restart unless-stopped"
-        )
     return f"""#!/usr/bin/env bash
 set -euxo pipefail
-
-if [ "$(id -u)" -eq 0 ]; then
-  SUDO=""
-else
-  SUDO="sudo"
-fi
-
-$SUDO apt-get update
-$SUDO apt-get install -y curl git ca-certificates python3
-$SUDO apt-get remove -y docker.io docker-doc docker-compose docker-compose-v2 podman-docker containerd runc || true
-curl -fsSL https://get.docker.com | $SUDO sh
-$SUDO apt-get install -y docker-compose-plugin
-$SUDO systemctl enable --now docker
-
-if [ ! -d "$HOME/tig-monorepo" ]; then
-  git clone https://github.com/tig-foundation/tig-monorepo.git "$HOME/tig-monorepo"
-fi
-
-cd "$HOME/tig-monorepo"
-git pull || true
-
-cd "$HOME/tig-monorepo/tig-benchmarker"
-
-curl -fsSL "{_POOL_PUBLIC_URL}/static/fleet-install.sh?cachebust=$(date +%s)" | bash -s -- \\
+# InnoPool custom slave install (honors Join page worker_type={worker_type})
+curl -fsSL "{_POOL_PUBLIC_URL}/static/install.sh?cachebust=$(date +%s)" | bash -s -- \\
   --fleet-token "{token}" \\
   --worker-type {worker_type} \\
-  --machine-index "$(hostname)"
-
-{start_commands}
+  --machine-index AUTO
 """
 
 
 def _fleet_aws_user_data_script(token: str, worker_type: str) -> str:
-    services = _fleet_services(worker_type)
     if worker_type == "gpu":
         return f"""#!/bin/bash
 set -euxo pipefail
 exec > >(tee -a /var/log/innopool-gpu-userdata.log) 2>&1
 
-FLEET_TOKEN="{token}"
-
 export DEBIAN_FRONTEND=noninteractive
-
 apt-get update
 apt-get install -y curl git ca-certificates gnupg python3
 apt-get remove -y docker.io docker-doc docker-compose docker-compose-v2 podman-docker containerd runc || true
 curl -fsSL https://get.docker.com | sh
 apt-get install -y docker-compose-plugin
-
 systemctl enable --now docker
 
 apt-get install -y \\
@@ -285,120 +235,57 @@ apt-get install -y \\
   dkms \\
   build-essential
 apt-get install -y "linux-modules-extra-$(uname -r)" || true
-
 ubuntu-drivers devices || true
-
 apt-get install -y nvidia-driver-595-open nvidia-utils-595 \\
   || apt-get install -y nvidia-driver-580-open nvidia-utils-580 \\
   || apt-get install -y nvidia-driver-580-server nvidia-utils-580-server nvidia-dkms-580-server \\
   || ubuntu-drivers install
-
 dkms autoinstall || true
 depmod -a
-
 modprobe nvidia
 nvidia-smi
 
 curl -fsSL https://nvidia.github.io/libnvidia-container/gpgkey \\
   | gpg --dearmor -o /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg
-
 curl -fsSL https://nvidia.github.io/libnvidia-container/stable/deb/nvidia-container-toolkit.list \\
   | sed 's#deb https://#deb [signed-by=/usr/share/keyrings/nvidia-container-toolkit-keyring.gpg] https://#g' \\
   > /etc/apt/sources.list.d/nvidia-container-toolkit.list
-
 apt-get update
 apt-get install -y nvidia-container-toolkit
-
 nvidia-ctk runtime configure --runtime=docker
 systemctl restart docker
-
 nvidia-smi
 docker run --rm --gpus all nvidia/cuda:12.4.1-base-ubuntu22.04 nvidia-smi
 
-if [ ! -d /opt/tig-monorepo ]; then
-  git clone https://github.com/tig-foundation/tig-monorepo.git /opt/tig-monorepo
-fi
-
-cd /opt/tig-monorepo
-git pull || true
-
-cd /opt/tig-monorepo/tig-benchmarker
-
-IMDS_TOKEN="$(curl -s -X PUT http://169.254.169.254/latest/api/token \\
-  -H 'X-aws-ec2-metadata-token-ttl-seconds: 21600' || true)"
-
-INSTANCE_ID="$(curl -s -H "X-aws-ec2-metadata-token: $IMDS_TOKEN" \\
-  http://169.254.169.254/latest/meta-data/instance-id || hostname)"
-
-curl -fsSL "{_POOL_PUBLIC_URL}/static/fleet-install.sh?cachebust=$(date +%s)" | bash -s -- \\
-  --fleet-token "$FLEET_TOKEN" \\
+curl -fsSL "{_POOL_PUBLIC_URL}/static/install.sh?cachebust=$(date +%s)" | bash -s -- \\
+  --fleet-token "{token}" \\
   --worker-type gpu \\
-  --machine-index "$INSTANCE_ID"
+  --machine-index AUTO \\
+  --skip-docker-install
 
-docker compose -f slave.yml up -d --force-recreate vector_search hypergraph neuralnet_optimizer
-
-for service in vector_search hypergraph neuralnet_optimizer; do
-  for attempt in $(seq 1 60); do
-    status="$(docker compose -f slave.yml ps --status running --services | grep -x "$service" || true)"
-    if [ "$status" = "$service" ]; then
-      break
-    fi
-    sleep 2
-  done
-  docker compose -f slave.yml ps --status running --services | grep -x "$service"
-done
-
-docker compose -f slave.yml up -d --force-recreate slave
-docker compose -f slave.yml ps -q slave vector_search hypergraph neuralnet_optimizer | xargs -r docker update --restart unless-stopped
-
-docker compose -f slave.yml ps
-docker compose -f slave.yml logs --tail=80 slave
-
-echo "INNOPOOL_STANDARD_UBUNTU_GPU_SETUP_DONE"
+echo "INNOPOOL_CUSTOM_SLAVE_GPU_SETUP_DONE"
 """
     return f"""#!/bin/bash
 set -euxo pipefail
 exec > >(tee -a /var/log/innopool-userdata.log) 2>&1
 
-apt-get update
-apt-get install -y curl git ca-certificates python3
-apt-get remove -y docker.io docker-doc docker-compose docker-compose-v2 podman-docker containerd runc || true
-curl -fsSL https://get.docker.com | sh
-apt-get install -y docker-compose-plugin
-
-systemctl enable --now docker
-
-if [ ! -d /opt/tig-monorepo ]; then
-  git clone https://github.com/tig-foundation/tig-monorepo.git /opt/tig-monorepo
-fi
-
-cd /opt/tig-monorepo
-git pull || true
-
-cd /opt/tig-monorepo/tig-benchmarker
-
-IMDS_TOKEN="$(curl -s -X PUT http://169.254.169.254/latest/api/token \\
-  -H 'X-aws-ec2-metadata-token-ttl-seconds: 21600' || true)"
-
-INSTANCE_ID="$(curl -s -H "X-aws-ec2-metadata-token: $IMDS_TOKEN" \\
-  http://169.254.169.254/latest/meta-data/instance-id || hostname)"
-
-curl -fsSL "{_POOL_PUBLIC_URL}/static/fleet-install.sh?cachebust=$(date +%s)" | bash -s -- \\
+curl -fsSL "{_POOL_PUBLIC_URL}/static/install.sh?cachebust=$(date +%s)" | bash -s -- \\
   --fleet-token "{token}" \\
   --worker-type {worker_type} \\
-  --machine-index "$INSTANCE_ID"
+  --machine-index AUTO
 
-docker compose -f slave.yml up -d --force-recreate {services}
-{_compose_restart_policy_command(services)}
+echo "INNOPOOL_CUSTOM_SLAVE_SETUP_DONE"
 """
 
 
 def _fleet_onboarding_payload(token: str, worker_type: str) -> dict:
     return {
-        "quick_install_command": _fleet_install_command(token, worker_type, "$(hostname)"),
+        "install_command": _fleet_install_command(token, worker_type, "AUTO"),
+        "quick_install_command": _fleet_install_command(token, worker_type, "AUTO"),
         "linux_install_script": _fleet_linux_install_script(token, worker_type),
         "aws_user_data": _fleet_aws_user_data_script(token, worker_type),
         "services": _fleet_services(worker_type),
+        "slave_package": "innopool-slave",
     }
 
 
@@ -983,97 +870,94 @@ def register_member(req: RegisterRequest):
     if not invite:
         raise HTTPException(status_code=400, detail="Invalid or expired invite code")
 
-    if setup_type in ("fleet", "cloud") or req.cpu_machines > 1 or req.gpu_machines > 1:
-        cpu_count = max(0, int(req.cpu_machines or 0))
-        gpu_count = max(0, int(req.gpu_machines or 0))
-        # Hardware type is the source of truth. The form has default machine
-        # counts, so normalize them to avoid "GPU fleet" accidentally becoming
-        # CPU-only when the default CPU count is still 1.
-        if wtype == "gpu":
-            cpu_count = 0
-            gpu_count = max(1, gpu_count)
-        elif wtype == "both":
-            cpu_count = max(1, cpu_count)
-            gpu_count = max(1, gpu_count)
-        else:
-            gpu_count = 0
-            cpu_count = max(1, cpu_count)
-        fleet_type = "mixed" if cpu_count and gpu_count else ("gpu" if gpu_count else "cpu")
-        now_ms = int(time.time() * 1000)
-        fleet = _create_fleet(
-            wallet,
-            req.fleet_label or ("cloud" if setup_type == "cloud" else "fleet"),
-            fleet_type,
-            cpu_count,
-            gpu_count,
-            req.cores_per_machine,
-            req.gpu_model,
-            notes=f"self-registered via {setup_type}",
-        )
-        db.execute(
-            "UPDATE pool_invites SET used_by = %s, used_at = %s WHERE code = %s",
-            (wallet, now_ms, code),
-        )
-        install = {}
-        onboarding = {}
+    # All public registrants get fleet-token onboarding (1 machine or many).
+    # Join-page worker_type is the source of truth for CPU / GPU / BOTH.
+    cpu_count = max(0, int(req.cpu_machines or 0))
+    gpu_count = max(0, int(req.gpu_machines or 0))
+    if wtype == "gpu":
+        cpu_count = 0
+        gpu_count = max(1, gpu_count)
+    elif wtype == "both":
+        cpu_count = max(1, cpu_count)
+        gpu_count = max(1, gpu_count)
+    else:
+        # cpu / c3
+        gpu_count = 0
+        cpu_count = max(1, cpu_count)
+
+    fleet_type = "mixed" if cpu_count and gpu_count else ("gpu" if gpu_count else "cpu")
+    now_ms = int(time.time() * 1000)
+    default_label = "home" if setup_type in ("single", "single_both") else (
+        "cloud" if setup_type == "cloud" else "fleet"
+    )
+    fleet = _create_fleet(
+        wallet,
+        req.fleet_label or default_label,
+        fleet_type,
+        cpu_count,
+        gpu_count,
+        req.cores_per_machine,
+        req.gpu_model,
+        notes=f"self-registered via {setup_type}",
+    )
+    db.execute(
+        "UPDATE pool_invites SET used_by = %s, used_at = %s WHERE code = %s",
+        (wallet, now_ms, code),
+    )
+    install = {}
+    onboarding = {}
+    if cpu_count and gpu_count:
+        # ONE command for BOTH — install.sh starts CPU + GPU in separate folders.
+        both_cmd = _fleet_install_command(fleet["fleet_token"], "both", "AUTO")
+        install["both"] = both_cmd
+        onboarding["both"] = {
+            "install_command": both_cmd,
+            "quick_install_command": both_cmd,
+            "linux_install_script": _fleet_linux_install_script(fleet["fleet_token"], "both"),
+            "aws_user_data": (
+                _fleet_aws_user_data_script(fleet["fleet_token"], "gpu").replace(
+                    "--worker-type gpu",
+                    "--worker-type both",
+                )
+            ),
+            "services": "cpu+gpu",
+            "slave_package": "innopool-slave",
+        }
+    else:
         if cpu_count:
-            install["cpu"] = _fleet_install_command(fleet["fleet_token"], "cpu", "001")
+            install["cpu"] = _fleet_install_command(fleet["fleet_token"], "cpu", "AUTO")
             onboarding["cpu"] = _fleet_onboarding_payload(fleet["fleet_token"], "cpu")
         if gpu_count:
-            install["gpu"] = _fleet_install_command(fleet["fleet_token"], "gpu", "001")
+            install["gpu"] = _fleet_install_command(fleet["fleet_token"], "gpu", "AUTO")
             onboarding["gpu"] = _fleet_onboarding_payload(fleet["fleet_token"], "gpu")
-        return {
-            "success": True,
-            "wallet_address": wallet,
-            "setup_type": setup_type,
-            "worker_type": fleet_type,
-            "fleet": {
-                "fleet_id": fleet["fleet_id"],
-                "label": fleet["label"],
-                "fleet_token": fleet["fleet_token"],
-                "cpu_count": cpu_count,
-                "gpu_count": gpu_count,
-                "install_commands": install,
-                "onboarding": onboarding,
-                "config_url_example": f"{_POOL_PUBLIC_URL}/api/fleet/config?token={fleet['fleet_token']}&worker_type=cpu&machine_index=001",
-            },
-            "slaves": {},
-        }
 
-    # Determine which slave names to create
-    types_to_register = ["cpu", "gpu"] if wtype == "both" else [wtype]
-    slave_names = {t: _wallet_to_slave_name(wallet, t) for t in types_to_register}
-
-    # Check none already exist
-    for t, sname in slave_names.items():
-        existing = db.fetch_one("SELECT 1 FROM pool_members WHERE slave_name = %s", (sname,))
-        if existing:
-            raise HTTPException(status_code=409, detail=f"Already registered as {t} worker")
-
-    now_ms = int(time.time() * 1000)
-    inserts = [
-        (
-            "UPDATE pool_invites SET used_by = %s, used_at = %s WHERE code = %s",
-            (wallet, now_ms, code),
-        )
-    ] + [
-        (
-            "INSERT INTO pool_members (wallet_address, slave_name, invite_code, registered_at, worker_type) VALUES (%s, %s, %s, %s, %s)",
-            (wallet, sname, code, now_ms, t),
-        )
-        for t, sname in slave_names.items()
-    ]
-    db.execute_many(*inserts)
-
-    logger.info(f"New member registered: {wallet} → {list(slave_names.values())}")
+    logger.info(
+        "New member registered (fleet onboarding): %s type=%s cpu=%s gpu=%s fleet=%s",
+        wallet,
+        fleet_type,
+        cpu_count,
+        gpu_count,
+        fleet["fleet_id"],
+    )
     return {
         "success": True,
         "wallet_address": wallet,
-        "worker_type": wtype,
-        "slaves": {t: _slave_payload(sname, t) for t, sname in slave_names.items()},
-        # Convenience aliases for single-type registrations
-        "slave_name": slave_names.get("cpu") or slave_names.get("gpu"),
-        "slave_config": _build_slave_config(list(slave_names.values())[0]),
+        "setup_type": setup_type,
+        "worker_type": fleet_type if wtype != "both" else "both",
+        "fleet": {
+            "fleet_id": fleet["fleet_id"],
+            "label": fleet["label"],
+            "fleet_token": fleet["fleet_token"],
+            "cpu_count": cpu_count,
+            "gpu_count": gpu_count,
+            "install_commands": install,
+            "onboarding": onboarding,
+            "config_url_example": (
+                f"{_POOL_PUBLIC_URL}/api/fleet/config?token={fleet['fleet_token']}"
+                f"&worker_type=cpu&machine_index=001"
+            ),
+        },
+        "slaves": {},
     }
 
 
@@ -1087,33 +971,28 @@ _POOL_PUBLIC_URL = os.environ.get("POOL_PUBLIC_URL", "https://www.innopool.co.uk
 
 
 def _build_slave_config(slave_name: str, num_workers: int = 8) -> str:
-    return f"""# {_POOL_NAME} Slave Configuration
-# Generated for the tig-benchmarker directory.
-# The setup command on the registration page writes absolute paths for you.
+    return f"""# {_POOL_NAME} Slave Configuration (innopool-slave)
+# Prefer the Join-page install.sh one-liner; this .env is written automatically.
 
+TIG_VERSION={_TIG_VERSION}
 VERSION={_TIG_VERSION}
 SLAVE_NAME={slave_name}
 MASTER_IP={_PUBLIC_MASTER_HOST}
 MASTER_PORT={_PUBLIC_MASTER_PORT}
-# Adjust NUM_WORKERS for your machine.
-# CPU: defaults to detected logical threads in the fleet installer.
-# GPU: normally use 1 worker per GPU.
+# CPU: installer defaults to detected logical threads.
+# GPU: normally 1 worker per GPU.
 NUM_WORKERS={num_workers}
-ALGORITHMS_DIR=./algorithms
-RESULTS_DIR=./results
-TTL=300
+ALGORITHMS_DIR=$(pwd)/data/algorithms
+RESULTS_DIR=$(pwd)/data/results
+DASHBOARD_HOST_PORT=8787
+TTL=3600
 VERBOSE=
+INNOPOOL_SLAVE_VERSION=innopool-slave/0.1.4
 """
 
 
 def _build_slave_setup_command(slave_name: str, num_workers: int = 8, worker_type: str = "cpu") -> str:
-    """Return a copy-paste setup command to run from tig-benchmarker.
-
-    The official slave uses in-container paths (algorithms/results), while
-    docker compose uses ALGORITHMS_DIR/RESULTS_DIR to mount host directories
-    into /app. Writing absolute host paths avoids bad mounts from a partial
-    or previously-created .env.
-    """
+    """Return a setup snippet that writes innopool-slave .env (used by install.sh)."""
     worker_setup = (
         'DETECTED_NUM_WORKERS="${NUM_WORKERS:-1}"'
         if worker_type == "gpu"
@@ -1126,28 +1005,34 @@ PY
 """
     )
     return f"""{worker_setup}
-mkdir -p algorithms results
+mkdir -p data/algorithms data/results
 cat > .env <<EOF
+TIG_VERSION={_TIG_VERSION}
 VERSION={_TIG_VERSION}
 SLAVE_NAME={slave_name}
 MASTER_IP={_PUBLIC_MASTER_HOST}
 MASTER_PORT={_PUBLIC_MASTER_PORT}
 NUM_WORKERS=$DETECTED_NUM_WORKERS
-ALGORITHMS_DIR=$(pwd)/algorithms
-RESULTS_DIR=$(pwd)/results
-TTL=300
+ALGORITHMS_DIR=$(pwd)/data/algorithms
+RESULTS_DIR=$(pwd)/data/results
+DASHBOARD_HOST_PORT=8787
+TTL=3600
 VERBOSE=
+INNOPOOL_SLAVE_VERSION=innopool-slave/0.1.4
 EOF
-docker compose -f slave.yml config >/dev/null"""
+docker compose config >/dev/null"""
 
 
 def _build_slave_preflight_command(services: str, worker_type: str) -> str:
-    return f"curl -fsSL {_POOL_PUBLIC_URL}/static/preflight.sh | bash -s -- --worker-type {worker_type} {services}"
+    return (
+        f"# Optional legacy preflight; prefer install.sh which starts the stack directly.\n"
+        f"curl -fsSL {_POOL_PUBLIC_URL}/static/preflight.sh | bash -s -- --worker-type {worker_type} {services}"
+    )
 
 
 def _build_slave_start_command(services: str) -> str:
     return (
-        f"docker compose -f slave.yml up -d --force-recreate {services}\n"
+        f"docker compose up -d --build --force-recreate {services}\n"
         f"{_compose_restart_policy_command(services)}"
     )
 
@@ -1162,6 +1047,12 @@ def _slave_payload(slave_name: str, worker_type: str) -> dict:
     num_workers = 1 if is_gpu else 8
     return {
         "slave_name": slave_name,
+        "worker_type": worker_type,
+        "master_ip": _PUBLIC_MASTER_HOST,
+        "master_port": _PUBLIC_MASTER_PORT,
+        "tig_version": _TIG_VERSION,
+        "version": _TIG_VERSION,
+        "slave_package": "innopool-slave",
         "slave_config": _build_slave_config(slave_name, num_workers),
         "setup_command": _build_slave_setup_command(slave_name, num_workers, worker_type),
         "preflight_command": _build_slave_preflight_command(services, worker_type),
