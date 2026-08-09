@@ -221,9 +221,11 @@ def _fleet_aws_user_data_script(token: str, worker_type: str) -> str:
 set -euxo pipefail
 exec > >(tee -a /var/log/innopool-gpu-userdata.log) 2>&1
 
-# cloud-init often has HOME unset; install.sh needs a home for clone path.
-export HOME="${{HOME:-/root}}"
-export USER="${{USER:-root}}"
+# Install under /home/ubuntu so SSH users can manage the slave (not /root).
+export HOME=/home/ubuntu
+export USER=ubuntu
+export INNOPOOL_INSTALL_USER=ubuntu
+export INNOPOOL_INSTALL_ROOT=/home/ubuntu
 export DEBIAN_FRONTEND=noninteractive
 apt-get update
 apt-get install -y curl git ca-certificates gnupg python3
@@ -231,6 +233,7 @@ apt-get remove -y docker.io docker-doc docker-compose docker-compose-v2 podman-d
 curl -fsSL https://get.docker.com | sh
 apt-get install -y docker-compose-plugin
 systemctl enable --now docker
+usermod -aG docker ubuntu || true
 
 apt-get install -y \\
   "linux-headers-$(uname -r)" \\
@@ -264,8 +267,10 @@ curl -fsSL "{_POOL_PUBLIC_URL}/static/install.sh?cachebust=$(date +%s)" | bash -
   --fleet-token "{token}" \\
   --worker-type gpu \\
   --machine-index AUTO \\
+  --install-root /home/ubuntu \\
   --skip-docker-install \\
   --skip-nvidia-install
+chown -R ubuntu:ubuntu /home/ubuntu/innopool-slave-gpu || true
 
 echo "INNOPOOL_CUSTOM_SLAVE_GPU_SETUP_DONE"
 """
@@ -273,14 +278,19 @@ echo "INNOPOOL_CUSTOM_SLAVE_GPU_SETUP_DONE"
 set -euxo pipefail
 exec > >(tee -a /var/log/innopool-userdata.log) 2>&1
 
-# cloud-init often has HOME unset; install.sh needs a home for clone path.
-export HOME="${{HOME:-/root}}"
-export USER="${{USER:-root}}"
+# Install under /home/ubuntu so SSH users can manage the slave (not /root).
+export HOME=/home/ubuntu
+export USER=ubuntu
+export INNOPOOL_INSTALL_USER=ubuntu
+export INNOPOOL_INSTALL_ROOT=/home/ubuntu
 
 curl -fsSL "{_POOL_PUBLIC_URL}/static/install.sh?cachebust=$(date +%s)" | bash -s -- \\
   --fleet-token "{token}" \\
   --worker-type {worker_type} \\
-  --machine-index AUTO
+  --machine-index AUTO \\
+  --install-root /home/ubuntu
+chown -R ubuntu:ubuntu /home/ubuntu/innopool-slave-cpu /home/ubuntu/innopool-slave-gpu 2>/dev/null || true
+usermod -aG docker ubuntu || true
 
 echo "INNOPOOL_CUSTOM_SLAVE_SETUP_DONE"
 """

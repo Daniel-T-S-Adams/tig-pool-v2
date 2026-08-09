@@ -3,16 +3,39 @@
 # Honors register-page worker choice: cpu | gpu | both (never auto-starts GPU).
 set -euo pipefail
 
+# Prefer a login user home when cloud-init runs as root (AWS ubuntu cannot cd /root).
+resolve_install_user() {
+  if [[ -n "${INNOPOOL_INSTALL_USER:-}" ]]; then
+    echo "$INNOPOOL_INSTALL_USER"
+    return
+  fi
+  if [[ "$(id -u)" -ne 0 ]]; then
+    echo "$(id -un)"
+    return
+  fi
+  local candidate
+  for candidate in ubuntu ec2-user admin debian; do
+    if id "$candidate" >/dev/null 2>&1 && [[ -d "/home/$candidate" ]]; then
+      echo "$candidate"
+      return
+    fi
+  done
+  echo "root"
+}
+
+INSTALL_USER="$(resolve_install_user)"
+INSTALL_USER_HOME="$(getent passwd "$INSTALL_USER" 2>/dev/null | cut -d: -f6 || true)"
+if [[ -z "$INSTALL_USER_HOME" ]]; then
+  if [[ "$INSTALL_USER" == "root" ]]; then
+    INSTALL_USER_HOME="/root"
+  else
+    INSTALL_USER_HOME="/home/$INSTALL_USER"
+  fi
+fi
+
 # cloud-init / AWS user-data often run with HOME unset; set -u would abort on $HOME.
 if [[ -z "${HOME:-}" ]]; then
-  HOME="$(getent passwd "$(id -u)" 2>/dev/null | cut -d: -f6 || true)"
-fi
-if [[ -z "${HOME:-}" ]]; then
-  if [[ "$(id -u)" -eq 0 ]]; then
-    HOME="/root"
-  else
-    HOME="/tmp"
-  fi
+  HOME="$INSTALL_USER_HOME"
 fi
 export HOME
 
@@ -20,7 +43,7 @@ BASE_URL="${INNOPOOL_URL:-https://www.innopool.co.uk}"
 FLEET_TOKEN="${FLEET_TOKEN:-}"
 WORKER_TYPE="${WORKER_TYPE:-cpu}"
 MACHINE_INDEX="${MACHINE_INDEX:-}"
-INSTALL_ROOT="${INNOPOOL_INSTALL_ROOT:-$HOME}"
+INSTALL_ROOT="${INNOPOOL_INSTALL_ROOT:-$INSTALL_USER_HOME}"
 SLAVE_REPO="${INNOPOOL_SLAVE_REPO:-https://github.com/rootztigmod/innopool-slave.git}"
 SLAVE_REF="${INNOPOOL_SLAVE_REF:-main}"
 SKIP_DOCKER_INSTALL=0
@@ -37,7 +60,7 @@ Options:
   --fleet-token TOKEN     Required. From the Join page after register.
   --worker-type TYPE      cpu | gpu | both  (must match what you registered)
   --machine-index NAME    Default: EC2 instance-id, else hostname
-  --install-root DIR      Default: $HOME  (creates innopool-slave-cpu / -gpu)
+  --install-root DIR      Default: login user home (ubuntu on AWS; not /root)
   --base-url URL          Default: https://www.innopool.co.uk
   --skip-docker-install   Do not apt-install Docker
   --skip-nvidia-install   Do not auto-install NVIDIA drivers / toolkit
@@ -99,7 +122,10 @@ install_docker_if_needed() {
   curl -fsSL https://get.docker.com | $SUDO sh
   $SUDO apt-get install -y docker-compose-plugin
   $SUDO systemctl enable --now docker || true
-  if [[ -n "${SUDO}" ]]; then
+  # Ensure the interactive login user can run docker without sudo.
+  if [[ "$INSTALL_USER" != "root" ]]; then
+    $SUDO usermod -aG docker "$INSTALL_USER" || true
+  elif [[ -n "${SUDO}" && -n "${USER:-}" ]]; then
     $SUDO usermod -aG docker "$USER" || true
   fi
 }
@@ -392,8 +418,12 @@ install_one() {
   fi
 
   echo "==> Installing InnoPool ${wtype} slave into ${dest}"
+  mkdir -p "$(dirname "$dest")"
   clone_or_update_slave "$dest"
   fetch_and_write_env "$dest" "$wtype" "$dash_port"
+  if [[ "$(id -u)" -eq 0 && "$INSTALL_USER" != "root" ]]; then
+    chown -R "$INSTALL_USER:$INSTALL_USER" "$dest"
+  fi
   if [[ "$START" == "1" ]]; then
     start_stack "$dest" "$wtype"
   else
@@ -403,8 +433,13 @@ install_one() {
 }
 
 install_docker_if_needed
+# Docker may already exist from AMI/userdata; still grant group access.
+if [[ "$INSTALL_USER" != "root" ]] && need_cmd docker; then
+  $SUDO usermod -aG docker "$INSTALL_USER" || true
+fi
 MACHINE_INDEX="$(resolve_machine_index)"
 echo "Using machine_index=${MACHINE_INDEX}"
+echo "Install user/home: ${INSTALL_USER} @ ${INSTALL_ROOT}"
 echo "Worker type (from Join page choice): ${WORKER_TYPE}"
 
 case "$WORKER_TYPE" in
