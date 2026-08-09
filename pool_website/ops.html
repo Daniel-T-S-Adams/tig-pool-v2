@@ -268,8 +268,12 @@
         throw new Error("unauthorized");
       }
       if (!res.ok) {
-        const text = await res.text();
-        throw new Error(text || ("HTTP " + res.status));
+        let text = await res.text();
+        try {
+          const j = JSON.parse(text);
+          text = j.detail || j.message || text;
+        } catch (_) {}
+        throw new Error((text || ("HTTP " + res.status)).slice(0, 240));
       }
       return res.json();
     }
@@ -399,9 +403,12 @@
         const data = await fetchMetrics();
         showApp();
         render(data);
+        el("creates-note").dataset.lastError = "";
       } catch (err) {
         if (String(err.message) !== "unauthorized") {
           setPill(el("status-pill"), "error", "bad");
+          const note = el("creates-note");
+          if (note) note.textContent = "API error: " + (err.message || err);
           console.error(err);
         }
       }

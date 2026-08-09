@@ -586,7 +586,7 @@ def build_ops_metrics() -> dict:
             j.settings->>'track_id' AS track,
             j.num_nonces,
             j.batch_size,
-            j.num_bundles,
+            NULLIF(j.settings->>'num_bundles', '')::int AS num_bundles,
             CEIL(j.num_nonces::numeric / NULLIF(j.batch_size, 0)) AS root_batches_est,
             COUNT(rb.*) FILTER (WHERE rb.ready IS NULL) AS roots_pending,
             COUNT(rb.*) FILTER (WHERE rb.ready IS NULL AND rb.slave IS NULL) AS roots_unassigned,
@@ -599,7 +599,7 @@ def build_ops_metrics() -> dict:
         WHERE COALESCE(j.stopped, false) = false
           AND j.end_time IS NULL
         GROUP BY j.benchmark_id, j.challenge, j.algorithm, j.settings, j.num_nonces,
-                 j.batch_size, j.num_bundles, j.start_time, j.merkle_root_ready, j.merkle_proofs_ready
+                 j.batch_size, j.start_time, j.merkle_root_ready, j.merkle_proofs_ready
         ORDER BY j.num_nonces DESC NULLS LAST, roots_pending DESC
         LIMIT 12
         """,
