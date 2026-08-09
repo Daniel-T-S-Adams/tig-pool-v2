@@ -27,7 +27,8 @@ TIER_FROM_NAME = {v: k for k, v in TIER_NAMES.items()}
 
 DEFAULT_CPU_TIER_CAPS = {"S": 1, "M": 1, "L": 2, "XL": 2}
 DEFAULT_XL_HARD_CEILING = 2
-DEFAULT_HEADROOM_RATIO = 2.0  # cores / num_workers
+# cores / num_workers. 1.25 ≈ 80% workers (matches install.sh + member docs).
+DEFAULT_HEADROOM_RATIO = 1.25
 DEFAULT_LOAD_OK_MULT = 0.85
 DEFAULT_LOAD_SHED_MULT = 1.25
 DEFAULT_MIN_FREE_RAM_GB = 4.0

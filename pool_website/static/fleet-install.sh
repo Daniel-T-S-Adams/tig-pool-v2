@@ -64,9 +64,9 @@ def detect_cpu_workers():
     if override and override.isdigit() and int(override) > 0:
         return int(override)
 
-    # ~50% headroom so live telemetry can earn concurrent > 1
+    # ~80% of cores (10–20% headroom) for telemetry earn-cap
     cores = max(1, os.cpu_count() or 1)
-    return max(1, cores // 2)
+    return max(1, (cores * 4) // 5)
 
 pathlib.Path("algorithms").mkdir(exist_ok=True)
 pathlib.Path("results").mkdir(exist_ok=True)
