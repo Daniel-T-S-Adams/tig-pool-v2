@@ -277,6 +277,23 @@ class SlaveManager:
             1_000,
             int(os.environ.get("SLAVE_SEEN_TOUCH_INTERVAL_MS", "10000")),
         )
+        # Capability / job-meta used to refresh INSIDE self.lock on every
+        # get-batches call — that serialized the whole fleet behind one heavy
+        # GROUP BY. Cache fleet-wide and refresh outside the lock.
+        self._cap_view_lock = Lock()
+        self._cap_views_cache = {}
+        self._job_meta_cache: Dict[str, dict] = {}
+        self._cap_enabled_cache = False
+        self._cap_view_until_ms = 0
+        self._cap_view_cache_ms = max(
+            500,
+            int(os.environ.get("SLAVE_CAP_VIEW_CACHE_MS", "5000")),
+        )
+        self._artifact_cache: Dict[tuple, tuple[bool, int]] = {}
+        self._artifact_cache_ms = max(
+            500,
+            int(os.environ.get("SLAVE_ARTIFACT_CACHE_MS", "15000")),
+        )
 
     def _ensure_slave_seen_table(self):
         if self._slave_seen_ready:
@@ -575,6 +592,75 @@ class SlaveManager:
                 self._starved_slot_benchmarks_cache = dict(starved)
                 self._slot_view_until_ms = now_ms + self._slot_maint_interval_ms
             self._slot_maint_next_ms = now_ms + self._slot_maint_interval_ms
+
+    def _cached_root_artifacts(self, slave_name: str, benchmark_id: str, batch_idx: int, now_ms: int) -> bool:
+        key = (slave_name, str(benchmark_id), int(batch_idx))
+        cached = self._artifact_cache.get(key)
+        if cached is not None:
+            ok, until_ms = cached
+            if now_ms < until_ms:
+                return bool(ok)
+        ok = self._slave_has_root_artifacts(slave_name, benchmark_id, int(batch_idx))
+        self._artifact_cache[key] = (ok, now_ms + self._artifact_cache_ms)
+        return ok
+
+    def _cached_capability_views(self, now_ms: int) -> tuple[bool, dict, Dict[str, dict]]:
+        """Return (enabled, cap_views, job_meta) without holding self.lock."""
+        with self._cap_view_lock:
+            if now_ms < self._cap_view_until_ms:
+                return (
+                    bool(self._cap_enabled_cache),
+                    dict(self._cap_views_cache),
+                    dict(self._job_meta_cache),
+                )
+        cap_settings = capability_settings(CONFIG)
+        if not bool(cap_settings.get("enabled")):
+            with self._cap_view_lock:
+                self._cap_enabled_cache = False
+                self._cap_views_cache = {}
+                self._job_meta_cache = {}
+                self._cap_view_until_ms = now_ms + self._cap_view_cache_ms
+            return False, {}, {}
+        try:
+            cap_views = CAPABILITY_SCHEDULER.refresh_runtime_views(
+                fetch_all=get_db_conn().fetch_all,
+                execute=get_db_conn().execute,
+                config=CONFIG,
+                now_ms=int(now_ms),
+            )
+            meta_rows = get_db_conn().fetch_all(
+                """
+                SELECT
+                    J.benchmark_id,
+                    J.challenge,
+                    COALESCE(J.settings->>'track_id', '') AS track_id,
+                    J.start_time,
+                    COUNT(*) FILTER (WHERE R.ready = true) AS roots_ready
+                FROM job J
+                LEFT JOIN root_batch R ON R.benchmark_id = J.benchmark_id
+                WHERE J.stopped IS NULL
+                  AND J.end_time IS NULL
+                GROUP BY J.benchmark_id, J.challenge, J.settings, J.start_time
+                """
+            ) or []
+            job_meta = {str(row["benchmark_id"]): row for row in meta_rows}
+            with self._cap_view_lock:
+                self._cap_enabled_cache = True
+                self._cap_views_cache = dict(cap_views or {})
+                self._job_meta_cache = dict(job_meta)
+                self._cap_view_until_ms = now_ms + self._cap_view_cache_ms
+                return True, dict(self._cap_views_cache), dict(self._job_meta_cache)
+        except Exception as exc:
+            logger.warning(
+                "capability scheduler refresh failed; using FIFO assign: %s",
+                exc,
+            )
+            with self._cap_view_lock:
+                self._cap_enabled_cache = False
+                self._cap_views_cache = {}
+                self._job_meta_cache = {}
+                self._cap_view_until_ms = now_ms + self._cap_view_cache_ms
+            return False, {}, {}
 
     def _cached_slot_views(self, slot_types: List[str], now_ms: int) -> tuple[Set[str], Dict[str, float]]:
         """Return cached slot benchmark ids / starvation map (no DB on hit)."""
@@ -1479,46 +1565,75 @@ class SlaveManager:
             ):
                 self._purge_ready_assigned(slave_name)
 
+            # ALL DB / heavy shared reads happen OUTSIDE self.lock. Holding the
+            # lock across capability refresh + job meta GROUP BY was serializing
+            # every slave poll behind one Postgres round-trip.
+            route_cap = int(slave["max_concurrent_batches"])
+            max_concurrent = self._adaptive_max_concurrent(slave_name, route_cap)
+            per_bench_cap = CONFIG.get("max_batches_per_benchmark", 0)
+            if not per_bench_cap or per_bench_cap < 1:
+                per_bench_cap = max(1, max_concurrent // 4)
+
+            now_i = int(now)
+            proof_candidates = []
+            if PROOF_PRIORITY_ENABLED:
+                for b in self.batches:
+                    batch = b["batch"]
+                    if batch.get("sampled_nonces") is None or b["end_time"] is not None:
+                        continue
+                    if b["slave"] not in (None, slave_name):
+                        continue
+                    proof_candidates.append(b)
+            artifact_hits = {}
+            for b in proof_candidates:
+                batch = b["batch"]
+                key = (str(batch["benchmark_id"]), int(batch["batch_idx"]))
+                if key not in artifact_hits:
+                    artifact_hits[key] = self._cached_root_artifacts(
+                        slave_name, batch["benchmark_id"], batch["batch_idx"], now_i
+                    )
+            own_proof_work = [
+                b for b in proof_candidates
+                if artifact_hits.get(
+                    (str(b["batch"]["benchmark_id"]), int(b["batch"]["batch_idx"])),
+                    False,
+                )
+            ]
+            awaiting_proofs = (
+                PROOF_PRIORITY_ENABLED and self._slave_awaiting_proofs(slave_name, now_i)
+            )
+            cap_enabled, cap_views, job_meta = self._cached_capability_views(now_i)
+            cap_settings = capability_settings(CONFIG)
+            live_telem = self._slave_telemetry.get(slave_name) or {}
+            slave_tier = CAPABILITY_SCHEDULER.settings(CONFIG)["default_tier"]
+            if cap_enabled:
+                try:
+                    slave_tier = CAPABILITY_SCHEDULER.slave_tier(
+                        slave_name,
+                        fetch_one=get_db_conn().fetch_one,
+                        config=CONFIG,
+                        now_ms=now_i,
+                        live_cores=live_telem.get("cores"),
+                        live_ram_gb=live_telem.get("ram_gb"),
+                        skip_cache=bool(live_telem.get("cores")),
+                    )
+                except Exception:
+                    pass
+
+            def has_artifacts(bid: str, batch_idx: int) -> bool:
+                return bool(artifact_hits.get((str(bid), int(batch_idx)), False))
+
             with self.lock:
-                route_cap = int(slave["max_concurrent_batches"])
-                max_concurrent = self._adaptive_max_concurrent(slave_name, route_cap)
                 # Fair-share: cap how many concurrent batches any single benchmark may hold
                 # on this slave, so one benchmark can't drain every slot and starve the other
                 # challenges (the batches are ordered oldest-precommit-first). Default to a
                 # quarter of the slave's capacity when not explicitly configured.
-                per_bench_cap = CONFIG.get("max_batches_per_benchmark", 0)
-                if not per_bench_cap or per_bench_cap < 1:
-                    per_bench_cap = max(1, max_concurrent // 4)
 
                 assigned = [
                     b for b in self.batches
                     if b["slave"] == slave_name and b["end_time"] is None
                 ]
                 assigned_proofs = [b for b in assigned if _is_proof_batch_row(b)]
-                artifact_cache = {}
-
-                def has_artifacts(bid: str, batch_idx: int) -> bool:
-                    key = (bid, int(batch_idx))
-                    if key not in artifact_cache:
-                        artifact_cache[key] = self._slave_has_root_artifacts(
-                            slave_name, bid, int(batch_idx)
-                        )
-                    return artifact_cache[key]
-
-                # Unfinished proofs this slave can actually build (local artifacts).
-                own_proof_work = []
-                if PROOF_PRIORITY_ENABLED:
-                    for b in self.batches:
-                        batch = b["batch"]
-                        if batch.get("sampled_nonces") is None or b["end_time"] is not None:
-                            continue
-                        if b["slave"] not in (None, slave_name):
-                            continue
-                        if has_artifacts(batch["benchmark_id"], batch["batch_idx"]):
-                            own_proof_work.append(b)
-                awaiting_proofs = (
-                    PROOF_PRIORITY_ENABLED and self._slave_awaiting_proofs(slave_name, int(now))
-                )
                 # root_cap=0 only when this slave can actually run proof batches now.
                 # awaiting_proofs alone (esp. sampling gap) was idling CPUs with
                 # "no batches available" while hundreds of root batches were pending.
@@ -1587,54 +1702,6 @@ class SlaveManager:
                 for b in kept_assigned:
                     bid = b["batch"]["benchmark_id"]
                     concurrent_by_bench[bid] = concurrent_by_bench.get(bid, 0) + 1
-
-                # Capability views: tier + track hardness + slave×track speed.
-                cap_settings = capability_settings(CONFIG)
-                cap_enabled = bool(cap_settings.get("enabled"))
-                cap_views = {}
-                slave_tier = CAPABILITY_SCHEDULER.settings(CONFIG)["default_tier"]
-                job_meta = {}
-                if cap_enabled:
-                    try:
-                        cap_views = CAPABILITY_SCHEDULER.refresh_runtime_views(
-                            fetch_all=get_db_conn().fetch_all,
-                            execute=get_db_conn().execute,
-                            config=CONFIG,
-                            now_ms=int(now),
-                        )
-                        live_telem = self._slave_telemetry.get(slave_name) or {}
-                        slave_tier = CAPABILITY_SCHEDULER.slave_tier(
-                            slave_name,
-                            fetch_one=get_db_conn().fetch_one,
-                            config=CONFIG,
-                            now_ms=int(now),
-                            live_cores=live_telem.get("cores"),
-                            live_ram_gb=live_telem.get("ram_gb"),
-                            skip_cache=bool(live_telem.get("cores")),
-                        )
-                        meta_rows = get_db_conn().fetch_all(
-                            """
-                            SELECT
-                                J.benchmark_id,
-                                J.challenge,
-                                COALESCE(J.settings->>'track_id', '') AS track_id,
-                                J.start_time,
-                                COUNT(*) FILTER (WHERE R.ready = true) AS roots_ready
-                            FROM job J
-                            LEFT JOIN root_batch R ON R.benchmark_id = J.benchmark_id
-                            WHERE J.stopped IS NULL
-                              AND J.end_time IS NULL
-                            GROUP BY J.benchmark_id, J.challenge, J.settings, J.start_time
-                            """
-                        ) or []
-                        for row in meta_rows:
-                            job_meta[str(row["benchmark_id"])] = row
-                    except Exception as exc:
-                        logger.warning(
-                            "capability scheduler refresh failed; using FIFO assign: %s",
-                            exc,
-                        )
-                        cap_enabled = False
 
                 def _batch_meta(batch):
                     bid = batch["benchmark_id"]
