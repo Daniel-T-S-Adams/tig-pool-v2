@@ -79,6 +79,11 @@ STICKY_OVERFLOW_AT_CAP = os.environ.get("SLAVE_STICKY_OVERFLOW_AT_CAP", "true").
 STICKY_OVERFLOW_IDLE_MS = max(
     0, int(os.environ.get("SLAVE_STICKY_OVERFLOW_IDLE_MS", str(3 * 60 * 1000)))
 )
+# Faster unlock when the preferred owner has zero inflight batches anywhere
+# (fully idle / between jobs). 0 disables the fast path.
+STICKY_OVERFLOW_OWNER_IDLE_MS = max(
+    0, int(os.environ.get("SLAVE_STICKY_OVERFLOW_OWNER_IDLE_MS", str(60 * 1000)))
+)
 
 
 def _is_proof_batch_row(row: dict) -> bool:
@@ -514,7 +519,21 @@ class SlaveManager:
                               WHERE P.benchmark_id = J.benchmark_id AND P.ready IS NULL
                             )
                           )
-                        ORDER BY J.block_started, J.start_time, J.benchmark_id
+                        ORDER BY
+                          -- Prefer stranded leftovers (pending roots, nobody assigned)
+                          -- so sticky-unlocked jobs get a slot before fresh creates.
+                          CASE WHEN EXISTS (
+                            SELECT 1 FROM root_batch R
+                            WHERE R.benchmark_id = J.benchmark_id
+                              AND R.ready IS NULL
+                              AND R.slave IS NULL
+                          ) AND NOT EXISTS (
+                            SELECT 1 FROM root_batch R2
+                            WHERE R2.benchmark_id = J.benchmark_id
+                              AND R2.ready IS NULL
+                              AND R2.slave IS NOT NULL
+                          ) THEN 0 ELSE 1 END,
+                          J.block_started, J.start_time, J.benchmark_id
                         LIMIT 1
                         """,
                         (algorithm_id_regex, algorithm_id_regex)
@@ -540,7 +559,19 @@ class SlaveManager:
                               WHERE P.benchmark_id = J.benchmark_id AND P.ready IS NULL
                             )
                           )
-                        ORDER BY J.block_started, J.start_time, J.benchmark_id
+                        ORDER BY
+                          CASE WHEN EXISTS (
+                            SELECT 1 FROM root_batch R
+                            WHERE R.benchmark_id = J.benchmark_id
+                              AND R.ready IS NULL
+                              AND R.slave IS NULL
+                          ) AND NOT EXISTS (
+                            SELECT 1 FROM root_batch R2
+                            WHERE R2.benchmark_id = J.benchmark_id
+                              AND R2.ready IS NULL
+                              AND R2.slave IS NOT NULL
+                          ) THEN 0 ELSE 1 END,
+                          J.block_started, J.start_time, J.benchmark_id
                         LIMIT 1
                         """,
                         (slot_type,)
@@ -1220,14 +1251,17 @@ class SlaveManager:
             # preferred_at_cap is a misnomer retained for callers: members of this
             # set lose exclusive sticky lock so other live CPUs may take roots.
             preferred_at_cap: Set[str] = set()
-            if STICKY_ROOTS_ENABLED and STICKY_OVERFLOW_AT_CAP:
-                # Optional: overflow when preferred is at adaptive cap or
-                # proof-priority-blocked from taking more roots.
-                active_by_slave: Dict[str, int] = {}
+            # Specific benchmarks unlocked by idle reclaim — prioritized for pickup.
+            overflow_benchmark_ids: Set[str] = set()
+            active_by_slave: Dict[str, int] = {}
+            if STICKY_ROOTS_ENABLED:
                 for row in self.batches:
                     owner = row.get("slave")
                     if owner and row.get("end_time") is None:
                         active_by_slave[str(owner)] = active_by_slave.get(str(owner), 0) + 1
+            if STICKY_ROOTS_ENABLED and STICKY_OVERFLOW_AT_CAP:
+                # Optional: overflow when preferred is at adaptive cap or
+                # proof-priority-blocked from taking more roots.
                 awaiting_cache: Dict[str, bool] = {}
                 for preferred in set(root_affinity.values()):
                     if not preferred or preferred not in online_slaves:
@@ -1284,23 +1318,33 @@ class SlaveManager:
                         unassigned_job_age[bid] = job_age
                         unassigned_pref[bid] = preferred
                 for bid, preferred in unassigned_pref.items():
+                    # Fully-idle preferred → unlock sooner so between-job gaps
+                    # do not warehouse leftovers for the full idle_ms window.
+                    eff_idle_ms = int(STICKY_OVERFLOW_IDLE_MS)
+                    if (
+                        STICKY_OVERFLOW_OWNER_IDLE_MS > 0
+                        and int(active_by_slave.get(preferred) or 0) == 0
+                    ):
+                        eff_idle_ms = min(eff_idle_ms, int(STICKY_OVERFLOW_OWNER_IDLE_MS))
                     if not should_sticky_idle_overflow(
                         preferred_slave=preferred,
                         preferred_inflight_on_job=bid in inflight_pref_bids,
                         has_unassigned=True,
                         job_age_ms=unassigned_job_age[bid],
-                        idle_ms=int(STICKY_OVERFLOW_IDLE_MS),
+                        idle_ms=eff_idle_ms,
                         preferred_online=True,
                     ):
                         continue
+                    overflow_benchmark_ids.add(bid)
                     if preferred not in preferred_at_cap:
                         preferred_at_cap.add(preferred)
-                        logger.info(
-                            "sticky idle overflow preferred=%s bid=%s "
-                            "(unassigned leftovers, owner not inflight on job)",
-                            preferred,
-                            bid[:8],
-                        )
+                    logger.debug(
+                        "sticky idle overflow preferred=%s bid=%s "
+                        "(unassigned leftovers, owner not inflight on job, idle_ms=%s)",
+                        preferred,
+                        bid[:8],
+                        eff_idle_ms,
+                    )
 
             # Free concurrent slots held by completed batches before assign.
             self._purge_ready_assigned(slave_name)
@@ -1491,8 +1535,9 @@ class SlaveManager:
                     roots_ready = int(meta.get("roots_ready") or 0)
                     return challenge, track_id, hardness, speed, job_age_ms, roots_ready
 
-                # Own proofs first, then other proofs, then starved roots, then
-                # capability-ranked roots (hard→strong fit).
+                # Own proofs first, then other proofs, then own sticky leftovers,
+                # then sticky-idle-overflow leftovers (unlocked for the fleet),
+                # then starved slotted roots, then capability-ranked roots.
                 def _batch_priority(item):
                     idx, row = item
                     batch = row["batch"]
@@ -1510,10 +1555,17 @@ class SlaveManager:
                         and row.get("end_time") is None
                         and root_affinity.get(batch["benchmark_id"]) == slave_name
                     )
+                    overflow_root = (
+                        (not is_proof)
+                        and row.get("slave") is None
+                        and row.get("end_time") is None
+                        and batch["benchmark_id"] in overflow_benchmark_ids
+                    )
                     if (
                         not cap_enabled
                         or is_proof
                         or sticky_own_unassigned
+                        or overflow_root
                         or starved_root
                     ):
                         return (
@@ -1524,8 +1576,10 @@ class SlaveManager:
                             else 2
                             if sticky_own_unassigned
                             else 3
+                            if overflow_root
+                            else 4
                             if starved_root
-                            else 4,
+                            else 5,
                             -starved_slot_benchmarks.get(batch["benchmark_id"], 0),
                             idx,
                         )
