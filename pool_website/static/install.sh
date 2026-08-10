@@ -377,7 +377,6 @@ ALGORITHMS_DIR={dest / 'data' / 'algorithms'}
 RESULTS_DIR={dest / 'data' / 'results'}
 DASHBOARD_HOST_PORT={dash_port}
 VERBOSE=
-INNOPOOL_SLAVE_VERSION=innopool-slave/0.1.4
 """
 (dest / ".env").write_text(env)
 print(f"Configured {slave_name} ({data.get('worker_type')}) in {dest}")

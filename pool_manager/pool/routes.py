@@ -1006,7 +1006,6 @@ RESULTS_DIR=$(pwd)/data/results
 DASHBOARD_HOST_PORT=8787
 TTL=3600
 VERBOSE=
-INNOPOOL_SLAVE_VERSION=innopool-slave/0.1.4
 """
 
 
@@ -1039,7 +1038,6 @@ RESULTS_DIR=$(pwd)/data/results
 DASHBOARD_HOST_PORT=8787
 TTL=3600
 VERBOSE=
-INNOPOOL_SLAVE_VERSION=innopool-slave/0.1.4
 EOF
 docker compose config >/dev/null"""
 
