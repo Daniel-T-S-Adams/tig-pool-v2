@@ -30,10 +30,12 @@ def main() -> int:
         "compute_profile_root_caps",
         "profile_root_backlog_blocks",
         "should_block_precommit_create",
+        "compute_idle_cpu_needs_work",
     )
     should_block = ns["should_block_precommit_create"]
     compute_caps = ns["compute_profile_root_caps"]
     profile_blocks = ns["profile_root_backlog_blocks"]
+    idle_needs = ns["compute_idle_cpu_needs_work"]
 
     settings = {
         "enabled": True,
@@ -158,6 +160,81 @@ def main() -> int:
     )
     if not ok:
         failed += 1
+
+    # Idle-CPU bias: claimable must cover the idle fleet, not just be non-zero.
+    idle_cases = [
+        (
+            dict(
+                idle_cpu_override=True,
+                cpu_slots=96,
+                cpu_unassigned_claimable=0,
+                cpu_jobs_needing_roots=4,
+                cpu_create_target=96,
+                cpu_profile_blocked=False,
+                online_idle_cpu_slaves=21,
+            ),
+            True,
+            "zero claimable + idle CPUs => needs work",
+        ),
+        (
+            dict(
+                idle_cpu_override=True,
+                cpu_slots=96,
+                cpu_unassigned_claimable=5,
+                cpu_jobs_needing_roots=4,
+                cpu_create_target=96,
+                cpu_profile_blocked=False,
+                online_idle_cpu_slaves=21,
+            ),
+            True,
+            "claimable 5 < idle 21 => still needs work",
+        ),
+        (
+            dict(
+                idle_cpu_override=True,
+                cpu_slots=96,
+                cpu_unassigned_claimable=25,
+                cpu_jobs_needing_roots=4,
+                cpu_create_target=96,
+                cpu_profile_blocked=False,
+                online_idle_cpu_slaves=21,
+            ),
+            False,
+            "claimable 25 >= idle 21 => no boost",
+        ),
+        (
+            dict(
+                idle_cpu_override=True,
+                cpu_slots=96,
+                cpu_unassigned_claimable=5,
+                cpu_jobs_needing_roots=4,
+                cpu_create_target=96,
+                cpu_profile_blocked=False,
+                online_idle_cpu_slaves=0,
+            ),
+            False,
+            "no idle CPUs + claimable>0 => legacy off",
+        ),
+        (
+            dict(
+                idle_cpu_override=True,
+                cpu_slots=96,
+                cpu_unassigned_claimable=0,
+                cpu_jobs_needing_roots=4,
+                cpu_create_target=96,
+                cpu_profile_blocked=False,
+                online_idle_cpu_slaves=0,
+            ),
+            True,
+            "no idle CPUs + zero claimable => legacy on",
+        ),
+    ]
+    for kwargs, expect, label in idle_cases:
+        got = idle_needs(**kwargs)
+        ok = got is expect
+        print(f"{'pass' if ok else 'FAIL'}: {label} got={got}")
+        if not ok:
+            failed += 1
 
     return 2 if failed else 0
 

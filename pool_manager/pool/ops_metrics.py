@@ -145,7 +145,11 @@ def _gpu_slots_total(cfg: dict) -> int:
     return max(total, floor_total)
 
 
-def _governor_view(cfg: dict, now_ms: int) -> dict:
+def _governor_view(
+    cfg: dict,
+    now_ms: int,
+    online_idle_cpu_slaves: int = 0,
+) -> dict:
     settings = _gov_settings(cfg)
     if not settings.get("enabled", True):
         return {
@@ -350,13 +354,19 @@ def _governor_view(cfg: dict, now_ms: int) -> dict:
     roots_pending = int(row.get("roots_pending") or 0)
     benchmarks_seen = int(row.get("benchmarks_seen") or 0)
     root_ready = int(row.get("root_ready_benchmarks") or 0)
-    idle_cpu_needs_work = (
-        bool(settings.get("idle_cpu_override", True))
-        and cpu_create_target > 0
-        and cpu_claimable == 0
-        and cpu_jobs_needing_roots < cpu_create_target
-        and not bool(cpu_reasons)
-    )
+    online_idle_cpu = max(0, int(online_idle_cpu_slaves or 0))
+    # Mirror master/precommit_manager.compute_idle_cpu_needs_work: claimable
+    # only suppresses idle bias when it can absorb the idle CPU fleet.
+    if not bool(settings.get("idle_cpu_override", True)):
+        idle_cpu_needs_work = False
+    elif cpu_create_target <= 0 or bool(cpu_reasons):
+        idle_cpu_needs_work = False
+    elif cpu_jobs_needing_roots >= cpu_create_target:
+        idle_cpu_needs_work = False
+    elif online_idle_cpu <= 0:
+        idle_cpu_needs_work = cpu_claimable == 0
+    else:
+        idle_cpu_needs_work = cpu_claimable < online_idle_cpu
 
     global_reason = ""
     would_block_global = False
@@ -418,6 +428,7 @@ def _governor_view(cfg: dict, now_ms: int) -> dict:
             "gpu_unassigned_roots": int(row.get("gpu_unassigned_roots") or 0),
             "cpu_unassigned_claimable": cpu_claimable,
             "gpu_unassigned_claimable": gpu_claimable,
+            "online_idle_cpu_slaves": online_idle_cpu,
             "benchmarks_seen_window": benchmarks_seen,
             "root_ready_benchmarks_window": root_ready,
             "cpu_jobs_needing_roots": cpu_jobs_needing_roots,
@@ -683,7 +694,15 @@ def build_ops_metrics() -> dict:
         (now_ms - 15 * 60 * 1000, now_ms - 60 * 60 * 1000),
     ) or {}
 
-    governor = _governor_view(cfg, now_ms) if cfg else {"enabled": False, "block_reasons": [], "counts": {}}
+    governor = {"enabled": False, "block_reasons": [], "counts": {}}
+    if cfg:
+        # Pass live idle CPU count so ops mirrors master's claimable-vs-idle gate.
+        idle_cpu_n = int((by_profile.get("cpu") or {}).get("idle") or 0)
+        governor = _governor_view(
+            cfg,
+            now_ms,
+            online_idle_cpu_slaves=idle_cpu_n,
+        )
 
     return _json_safe({
         "generated_at_ms": now_ms,

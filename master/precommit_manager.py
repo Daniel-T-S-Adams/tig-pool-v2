@@ -113,8 +113,8 @@ def _governor_settings():
                 os.environ.get("PRECOMMIT_GOVERNOR_CACHE_MS", "15000"),
             )
         ),
-        # When CPU has spare slot capacity but no free root batches to assign,
-        # do not let a low global root_ready_rate idle the CPU fleet.
+        # When CPU has spare capacity and claimable roots can't feed idle
+        # workers, do not let a low global root_ready_rate idle the CPU fleet.
         "idle_cpu_override": (
             bool(gov["idle_cpu_override"])
             if "idle_cpu_override" in gov
@@ -249,6 +249,38 @@ def _cpu_create_target(cpu_slots: int) -> int:
     return max(1, cpu_slots)
 
 
+def compute_idle_cpu_needs_work(
+    *,
+    idle_cpu_override: bool = True,
+    cpu_slots: int = 0,
+    cpu_unassigned_claimable: int = 0,
+    cpu_jobs_needing_roots: int = 0,
+    cpu_create_target: int = 0,
+    cpu_profile_blocked: bool = False,
+    online_idle_cpu_slaves: int = 0,
+) -> bool:
+    """True when precommit should bias toward CPU work for an underfed fleet.
+
+    Claimable roots only suppress the bias when they can absorb the idle CPU
+    fleet. A handful of claimable batches must not disable the CPU weight boost
+    while many online CPU slaves sit empty (create/claimable oscillation).
+    """
+    if not idle_cpu_override:
+        return False
+    if int(cpu_slots or 0) <= 0:
+        return False
+    if cpu_profile_blocked:
+        return False
+    if int(cpu_jobs_needing_roots or 0) >= max(1, int(cpu_create_target or 0)):
+        return False
+    claimable = max(0, int(cpu_unassigned_claimable or 0))
+    idle = max(0, int(online_idle_cpu_slaves or 0))
+    if idle <= 0:
+        # No observed idle CPUs: keep legacy "zero claimable" gate.
+        return claimable == 0
+    return claimable < idle
+
+
 def should_block_precommit_create(
     roots_pending,
     benchmarks_seen,
@@ -260,8 +292,8 @@ def should_block_precommit_create(
 
     Per-profile pending/unassigned caps are enforced separately via
     profile_root_backlog_blocks (filter eligible algos). This function only
-    applies the soft root_ready_rate drain. Idle CPU with no unassigned CPU
-    roots may override that soft gate so spare CPU workers are not left empty.
+    applies the soft root_ready_rate drain. Idle CPU with claimable roots below
+    idle capacity may override that soft gate so spare CPU workers are not left empty.
 
     Legacy max_roots_pending is retained in settings for adaptive ceiling
     defaults only; it is not a global hard create-block anymore.
@@ -282,7 +314,7 @@ def should_block_precommit_create(
                 return False, (
                     f"idle_cpu_override: root_ready_rate {root_ready_rate:.3f} "
                     f"< {min_root_ready_rate:.3f} but CPU has spare capacity "
-                    f"and no unassigned CPU roots"
+                    f"and claimable roots below idle fleet size"
                 )
             return True, (
                 f"root_ready_rate {root_ready_rate:.3f} < {min_root_ready_rate:.3f} "
@@ -482,7 +514,21 @@ class PrecommitManager:
                               AND (rb2.ready = true OR rb2.ready IS NULL)
                               AND ss.last_seen >= %s
                           )
-                    ) AS gpu_unassigned_claimable
+                    ) AS gpu_unassigned_claimable,
+                    (
+                        -- Online CPU slaves with no assigned unfinished root work.
+                        SELECT COUNT(*)
+                        FROM slave_seen ss
+                        WHERE ss.last_seen >= %s
+                          AND ss.slave_name LIKE 'pool-cpu-%%'
+                          AND NOT EXISTS (
+                            SELECT 1
+                            FROM root_batch rb
+                            WHERE rb.slave = ss.slave_name
+                              AND rb.ready IS NULL
+                              AND rb.start_time IS NOT NULL
+                          )
+                    ) AS online_idle_cpu_slaves
                 """,
                 (
                     CPU_CHALLENGE_IDS,
@@ -505,6 +551,7 @@ class PrecommitManager:
                     now_ms - int(SLAVE_ONLINE_MS),
                     GPU_CHALLENGE_IDS,
                     now_ms - int(SLAVE_ONLINE_MS),
+                    now_ms - int(SLAVE_ONLINE_MS),
                 ),
             ) or {}
             cpu_slots = _cpu_slot_target()
@@ -520,6 +567,7 @@ class PrecommitManager:
             gpu_unassigned_roots = int(row.get("gpu_unassigned_roots") or 0)
             cpu_unassigned_claimable = int(row.get("cpu_unassigned_claimable") or 0)
             gpu_unassigned_claimable = int(row.get("gpu_unassigned_claimable") or 0)
+            online_idle_cpu_slaves = int(row.get("online_idle_cpu_slaves") or 0)
             gpu_floor = _gpu_slot_floor_total()
             profile_caps = compute_profile_root_caps(
                 settings, cpu_create_target, gpu_slots_total
@@ -531,14 +579,16 @@ class PrecommitManager:
                 gpu_unassigned_claimable,
                 profile_caps,
             )
-            # Spare CPU create budget + no claimable CPU root batches => bias
-            # toward CPU work. Sticky-reserved unassigned roots do not count.
-            idle_cpu_needs_work = (
-                settings.get("idle_cpu_override", True)
-                and cpu_slots > 0
-                and cpu_unassigned_claimable == 0
-                and cpu_jobs_needing_roots < cpu_create_target
-                and not profile_blocks.get("cpu")
+            # Bias CPU creates when claimable roots cannot feed the idle fleet.
+            # Sticky-reserved unassigned roots do not count as claimable.
+            idle_cpu_needs_work = compute_idle_cpu_needs_work(
+                idle_cpu_override=bool(settings.get("idle_cpu_override", True)),
+                cpu_slots=cpu_slots,
+                cpu_unassigned_claimable=cpu_unassigned_claimable,
+                cpu_jobs_needing_roots=cpu_jobs_needing_roots,
+                cpu_create_target=cpu_create_target,
+                cpu_profile_blocked=bool(profile_blocks.get("cpu")),
+                online_idle_cpu_slaves=online_idle_cpu_slaves,
             )
             snapshot = {
                 "enabled": True,
@@ -560,6 +610,7 @@ class PrecommitManager:
                 "gpu_unassigned_roots": gpu_unassigned_roots,
                 "cpu_unassigned_claimable": cpu_unassigned_claimable,
                 "gpu_unassigned_claimable": gpu_unassigned_claimable,
+                "online_idle_cpu_slaves": online_idle_cpu_slaves,
                 "profile_caps": profile_caps,
                 "profile_blocks": profile_blocks,
                 "idle_cpu_needs_work": idle_cpu_needs_work,
