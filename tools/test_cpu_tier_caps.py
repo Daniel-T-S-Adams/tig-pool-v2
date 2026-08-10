@@ -153,8 +153,41 @@ def main() -> int:
                     settings=settings,
                     load_shed_active=True,
                 )
-                == 1,
-                "load-shed cooldown forces 1",
+                == 0,
+                "load-shed cooldown forces 0",
+            )
+        )
+        cases.append(
+            (
+                earnable(
+                    tier=TIER_M,
+                    telemetry=good,
+                    settings=settings,
+                    load_shed_active=True,
+                )
+                == 0,
+                "load-shed cooldown forces 0 even for M/tier-ceiling-1",
+            )
+        )
+        overloaded = {"cores": 96, "num_workers": 32, "load_1m": 130, "free_ram_gb": 32}
+        cases.append(
+            (
+                earnable(tier=TIER_M, telemetry=overloaded, settings=settings) == 0,
+                "live overload forces 0 even for M",
+            )
+        )
+        cases.append(
+            (
+                effective(
+                    route_cap=8,
+                    fleet_cpu_max_cap=1,
+                    tier=TIER_M,
+                    telemetry=good,
+                    settings=settings,
+                    load_shed_active=True,
+                )
+                == 0,
+                "effective load-shed → 0 under fleet max=1",
             )
         )
         cases.append(

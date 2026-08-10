@@ -37,7 +37,8 @@ still keys off cores/workers/load/RAM.
 
 **Headroom rule:** `cores / num_workers >= 1.25` (~80% workers) and
 `load_1m <= cores * 0.85`. Then L/XL may earn concurrent **2**. Load spikes
-(`load_1m > cores * 1.25` or `free_ram_gb < 4`) force cap back to 1 for a cooldown.
+(`load_1m > cores * 1.25` or `free_ram_gb < 4`) force concurrent **0** (no new
+jobs) for a cooldown — including fleet/Pica boxes already at cap 1.
 
 ## Member recommendations
 

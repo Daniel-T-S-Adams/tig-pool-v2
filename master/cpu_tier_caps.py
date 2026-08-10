@@ -307,7 +307,7 @@ def telemetry_requires_load_shed(
     telemetry: Mapping[str, Any],
     settings: Mapping[str, Any],
 ) -> bool:
-    """True when live load/RAM says force concurrent back to 1."""
+    """True when live load/RAM says stop assigning new CPU work (concurrent 0)."""
     if not telemetry:
         return False
     cores = _parse_int(telemetry.get("cores"))
@@ -339,17 +339,17 @@ def cpu_earnable_concurrent_ceiling(
     settings: Mapping[str, Any],
     load_shed_active: bool = False,
 ) -> int:
-    """Per-slave CPU concurrent ceiling (1 for S/M or no evidence)."""
+    """Per-slave CPU concurrent ceiling (1 for S/M or no evidence; 0 while load-shed)."""
+    # Load-shed must win even when tier ceiling is already 1 (fleet/Pica),
+    # otherwise cooldown is a no-op and overloaded boxes keep receiving work.
+    if load_shed_active or telemetry_requires_load_shed(telemetry or {}, settings):
+        return 0
     ceiling = tier_concurrent_ceiling(tier, settings)
     if ceiling <= 1:
-        return 1
-    if load_shed_active:
         return 1
     if settings.get("cpu_concurrent_requires_telemetry", True):
         if not telemetry_has_cpu_headroom(telemetry or {}, settings):
             return 1
-    if telemetry_requires_load_shed(telemetry or {}, settings):
-        return 1
     return ceiling
 
 
