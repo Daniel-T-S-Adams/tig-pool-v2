@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Unit checks for stuck/dark/overload root-owner shedding."""
+"""Unit checks for stuck/dark/overload/zombie root-owner shedding."""
 
 from __future__ import annotations
 
@@ -27,6 +27,8 @@ def _load_fn():
         "OVERLOAD_SLAVE_SHED_MIN_AGE_MS": 12 * 60 * 1000,
         "OVERLOAD_SLAVE_SHED_MAX_COMPLETES": 2,
         "DARK_ROOT_SHED_MS": 180_000,
+        "ZOMBIE_IDLE_AGE_MS": 5 * 60 * 1000,
+        "ZOMBIE_SINGLE_AGE_MS": 45 * 60 * 1000,
     }
     exec(compile(ast.Module(body=[target], type_ignores=[]), str(path), "exec"), ns, ns)
     return ns["should_shed_slave_roots"]
@@ -35,6 +37,8 @@ def _load_fn():
 def main() -> int:
     fn = _load_fn()
     twelve_min = 12 * 60 * 1000
+    five_min = 5 * 60 * 1000
+    forty_five_min = 45 * 60 * 1000
     cases = [
         (
             fn(
@@ -94,7 +98,7 @@ def main() -> int:
                 owner_online=True,
             )
             is None,
-            "below min inflight kept",
+            "below min inflight at 12m without telem kept",
         ),
         (
             fn(
@@ -105,6 +109,70 @@ def main() -> int:
             )
             is None,
             "under 12m age kept",
+        ),
+        (
+            fn(
+                inflight=1,
+                oldest_age_ms=five_min,
+                completes_in_window=0,
+                owner_online=True,
+                telem_active_batches=0,
+            )
+            == "zombie_idle",
+            "telem idle + aged single root → zombie_idle",
+        ),
+        (
+            fn(
+                inflight=1,
+                oldest_age_ms=five_min,
+                completes_in_window=0,
+                owner_online=True,
+                telem_active_batches=1,
+            )
+            is None,
+            "telem active worker kept at 5m",
+        ),
+        (
+            fn(
+                inflight=1,
+                oldest_age_ms=4 * 60 * 1000,
+                completes_in_window=0,
+                owner_online=True,
+                telem_active_batches=0,
+            )
+            is None,
+            "telem idle under zombie idle age kept",
+        ),
+        (
+            fn(
+                inflight=1,
+                oldest_age_ms=forty_five_min,
+                completes_in_window=0,
+                owner_online=True,
+            )
+            == "zombie_no_progress",
+            "single-batch 45m no-telem backstop",
+        ),
+        (
+            fn(
+                inflight=1,
+                oldest_age_ms=forty_five_min,
+                completes_in_window=1,
+                owner_online=True,
+            )
+            is None,
+            "single-batch with a recent complete kept",
+        ),
+        (
+            fn(
+                inflight=1,
+                oldest_age_ms=five_min,
+                completes_in_window=1,
+                owner_online=True,
+                telem_active_batches=0,
+            )
+            is None,
+            "telem idle but recent complete kept",
         ),
     ]
     failed = 0

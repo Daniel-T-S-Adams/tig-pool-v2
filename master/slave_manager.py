@@ -40,6 +40,12 @@ from master.proof_affinity import (
     should_sticky_idle_overflow,
     touch_slave_seen,
 )
+from master.job_manager import (
+    OVERLOAD_SLAVE_SHED_MIN_AGE_MS,
+    STUCK_SLAVE_SHED_ENABLED,
+    STUCK_SLAVE_SHED_WINDOW_MS,
+    should_shed_slave_roots,
+)
 
 
 logger = logging.getLogger(os.path.splitext(os.path.basename(__file__))[0])
@@ -305,6 +311,16 @@ class SlaveManager:
         self._slave_seen_touch_interval_ms = max(
             1_000,
             int(os.environ.get("SLAVE_SEEN_TOUCH_INTERVAL_MS", "10000")),
+        )
+        # Zombie/stuck root shed using live get-batches telemetry (throttled).
+        self._zombie_shed_next_ms = 0
+        self._zombie_shed_interval_ms = max(
+            1_000,
+            int(os.environ.get("SLAVE_ZOMBIE_SHED_INTERVAL_MS", "15000")),
+        )
+        self._zombie_telem_max_age_ms = max(
+            5_000,
+            int(os.environ.get("SLAVE_ZOMBIE_TELEM_MAX_AGE_MS", "120000")),
         )
         # Capability / job-meta used to refresh INSIDE self.lock on every
         # get-batches call — that serialized the whole fleet behind one heavy
@@ -990,6 +1006,129 @@ class SlaveManager:
                     telemetry.get("free_ram_gb"),
                     int(tier_settings.get("load_shed_cooldown_ms") or 0),
                 )
+
+    def _telem_active_batches(self, slave_name: str, now_ms: int) -> Optional[int]:
+        """Fresh get-batches active_batches, or None if telem missing/stale."""
+        telem = self._slave_telemetry.get(slave_name) or {}
+        received = int(telem.get("received_at_ms") or 0)
+        if received <= 0 or (int(now_ms) - received) > int(self._zombie_telem_max_age_ms):
+            return None
+        if telem.get("active_batches") is None:
+            return None
+        try:
+            return int(telem.get("active_batches"))
+        except (TypeError, ValueError):
+            return None
+
+    def _maybe_shed_zombie_owners(self, now_ms: int) -> None:
+        """Unassign roots from heartbeating slaves that are not actually working.
+
+        Uses live get-batches telemetry (active_batches=0) plus the shared shed
+        rules in job_manager.should_shed_slave_roots. Throttled — safe on the
+        poll path. Proofs are never touched.
+        """
+        if not STUCK_SLAVE_SHED_ENABLED:
+            return
+        now_i = int(now_ms)
+        if now_i < int(self._zombie_shed_next_ms):
+            return
+        self._zombie_shed_next_ms = now_i + int(self._zombie_shed_interval_ms)
+
+        ensure_slave_seen_table(get_db_conn().execute)
+        online = fetch_online_slaves(get_db_conn().fetch_all, now_i)
+        since_ms = now_i - STUCK_SLAVE_SHED_WINDOW_MS
+        rows = get_db_conn().fetch_all(
+            """
+            SELECT
+                r.slave AS slave_name,
+                COUNT(*) FILTER (
+                    WHERE r.ready IS NULL
+                      AND r.end_time IS NULL
+                      AND r.start_time IS NOT NULL
+                ) AS inflight,
+                COALESCE(
+                    MAX(
+                        CASE
+                            WHEN r.ready IS NULL
+                             AND r.end_time IS NULL
+                             AND r.start_time IS NOT NULL
+                            THEN %s - r.start_time
+                            ELSE NULL
+                        END
+                    ),
+                    0
+                ) AS oldest_age_ms,
+                COUNT(*) FILTER (
+                    WHERE r.ready = true
+                      AND r.end_time IS NOT NULL
+                      AND r.end_time >= %s
+                ) AS completes_in_window
+            FROM root_batch r
+            WHERE r.slave IS NOT NULL
+            GROUP BY r.slave
+            """,
+            (now_i, since_ms),
+        ) or []
+        to_shed = []
+        for row in rows:
+            slave = str(row.get("slave_name") or "")
+            if not slave:
+                continue
+            reason = should_shed_slave_roots(
+                inflight=int(row.get("inflight") or 0),
+                oldest_age_ms=int(row.get("oldest_age_ms") or 0),
+                completes_in_window=int(row.get("completes_in_window") or 0),
+                owner_online=slave in online,
+                telem_active_batches=self._telem_active_batches(slave, now_i),
+            )
+            if reason:
+                to_shed.append((slave, reason, int(row.get("inflight") or 0)))
+        if not to_shed:
+            return
+        queries = []
+        for slave, reason, inflight in to_shed:
+            if reason == "overloaded_slow":
+                logger.warning(
+                    "shedding aged unfinished root batch(es) from %s "
+                    "(reason=%s, inflight=%s, min_age_ms=%s)",
+                    slave,
+                    reason,
+                    inflight,
+                    OVERLOAD_SLAVE_SHED_MIN_AGE_MS,
+                )
+                queries.append((
+                    """
+                    UPDATE root_batch
+                    SET slave = NULL,
+                        start_time = NULL,
+                        end_time = NULL
+                    WHERE slave = %s
+                      AND ready IS NULL
+                      AND start_time IS NOT NULL
+                      AND (%s - start_time) >= %s
+                    """,
+                    (slave, now_i, OVERLOAD_SLAVE_SHED_MIN_AGE_MS),
+                ))
+            else:
+                logger.warning(
+                    "shedding %s unfinished root batch(es) from %s (reason=%s)",
+                    inflight,
+                    slave,
+                    reason,
+                )
+                queries.append((
+                    """
+                    UPDATE root_batch
+                    SET slave = NULL,
+                        start_time = NULL,
+                        end_time = NULL
+                    WHERE slave = %s
+                      AND ready IS NULL
+                    """,
+                    (slave,),
+                ))
+        if queries:
+            get_db_conn().execute_many(*queries)
 
     def _adaptive_max_concurrent(
         self,
@@ -1915,6 +2054,11 @@ class SlaveManager:
             if telemetry:
                 self._remember_slave_telemetry(slave_name, telemetry, int(now))
             self._touch_slave_seen(slave_name, int(now))
+            # Heartbeating-but-idle / stuck root reclaim (throttled fleet scan).
+            try:
+                self._maybe_shed_zombie_owners(int(now))
+            except Exception as exc:
+                logger.warning("zombie root shed failed: %s", exc)
 
             # Load-shed: excess concurrent polls get memory snapshot only.
             shed_only = False

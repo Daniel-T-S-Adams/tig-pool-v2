@@ -56,6 +56,14 @@ OVERLOAD_SLAVE_SHED_MAX_COMPLETES = max(
 DARK_ROOT_SHED_MS = max(
     0, int(os.environ.get("SLAVE_DARK_OWNER_RECLAIM_MS", str(3 * 60 * 1000)))
 )
+# Heartbeating but not working: telem says active_batches=0 while holding roots.
+ZOMBIE_IDLE_AGE_MS = max(
+    60_000, int(os.environ.get("SLAVE_ZOMBIE_IDLE_AGE_MS", str(5 * 60 * 1000)))
+)
+# Single-batch backstop when telem is unavailable (old slaves / no telemetry).
+ZOMBIE_SINGLE_AGE_MS = max(
+    60_000, int(os.environ.get("SLAVE_ZOMBIE_SINGLE_AGE_MS", str(45 * 60 * 1000)))
+)
 
 
 def should_shed_slave_roots(
@@ -71,13 +79,18 @@ def should_shed_slave_roots(
     overload_min_inflight: int = OVERLOAD_SLAVE_SHED_MIN_INFLIGHT,
     overload_min_age_ms: int = OVERLOAD_SLAVE_SHED_MIN_AGE_MS,
     overload_max_completes: int = OVERLOAD_SLAVE_SHED_MAX_COMPLETES,
+    telem_active_batches: Optional[int] = None,
+    zombie_idle_age_ms: int = ZOMBIE_IDLE_AGE_MS,
+    zombie_single_age_ms: int = ZOMBIE_SINGLE_AGE_MS,
 ) -> Optional[str]:
     """Return shed reason, or None if the assignee should keep its roots.
 
     Reasons:
-      dark_owner         — offline longer than reclaim grace
-      stuck_no_progress  — online warehouse with little/no finishes
-      overloaded_slow    — online, stacked aged roots, weak throughput
+      dark_owner          — offline longer than reclaim grace
+      zombie_idle         — online, telem active_batches=0, aged assigned roots
+      stuck_no_progress   — online warehouse with little/no finishes
+      zombie_no_progress  — online single-batch stall (no telem required)
+      overloaded_slow     — online, stacked aged roots, weak throughput
     """
     if inflight <= 0:
         return None
@@ -85,12 +98,27 @@ def should_shed_slave_roots(
         if dark_reclaim_ms > 0 and oldest_age_ms > dark_reclaim_ms:
             return "dark_owner"
         return None
+    # Prefer telemetry contradiction over heartbeat: slave is polling but not
+    # processing the roots master still has assigned to it.
+    if (
+        telem_active_batches is not None
+        and int(telem_active_batches) <= 0
+        and oldest_age_ms >= int(zombie_idle_age_ms)
+        and int(completes_in_window) <= 0
+    ):
+        return "zombie_idle"
     if (
         inflight >= min_inflight
         and oldest_age_ms >= min_age_ms
         and completes_in_window <= max_completes
     ):
         return "stuck_no_progress"
+    if (
+        inflight >= 1
+        and int(completes_in_window) <= 0
+        and oldest_age_ms >= int(zombie_single_age_ms)
+    ):
+        return "zombie_no_progress"
     if (
         inflight >= overload_min_inflight
         and oldest_age_ms >= overload_min_age_ms
@@ -465,10 +493,12 @@ class JobManager:
         return False
 
     def _shed_stuck_root_owners(self, now_ms: int):
-        """Unassign unfinished roots from dark / stuck / overloaded owners.
+        """Unassign unfinished roots from dark / stuck / zombie / overloaded owners.
 
         Does not touch proofs (local artifacts). Overload sheds only aged roots
-        so freshly assigned work is not yanked; stuck/dark shed all open roots.
+        so freshly assigned work is not yanked; stuck/dark/zombie shed all open
+        roots. Telemetry-aware zombie_idle shedding also runs from SlaveManager
+        on the get-batches path.
         """
         if not STUCK_SLAVE_SHED_ENABLED:
             return
