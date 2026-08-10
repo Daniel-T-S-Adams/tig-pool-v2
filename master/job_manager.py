@@ -6,11 +6,12 @@ import requests
 from common.merkle_tree import MerkleHash, MerkleBranch, MerkleTree
 from common.structs import *
 from common.utils import *
-from typing import Dict, List, Optional, Set
+from typing import Dict, List, Optional, Set, Tuple
 from master.sql import get_db_conn
 from master.client_manager import CONFIG
 from master.proof_affinity import (
     PRE_SUBMIT_OWNER_ONLINE_MS,
+    SLAVE_ONLINE_MS,
     STRANDED_PROOF_STOP_ENABLED,
     STRANDED_PROOF_STOP_MS,
     ensure_slave_seen_table,
@@ -20,6 +21,175 @@ from master.proof_affinity import (
 import math
 
 logger = logging.getLogger(os.path.splitext(os.path.basename(__file__))[0])
+
+# Mirrored from precommit_manager — keep local to avoid import cycles.
+CPU_CHALLENGE_IDS = ("c001", "c002", "c003", "c007", "c008")
+
+# Adaptive CPU batch_size at job-create time (kill-switched off by default).
+# Smaller batch_size → more root_batch rows → better fill when claimable << idle.
+# Larger batch_size → fewer rows → less unassigned flood when claimable already covers idle.
+ADAPTIVE_CPU_BATCH_SIZE_ENABLED = os.environ.get(
+    "ADAPTIVE_CPU_BATCH_SIZE_ENABLED", "false"
+).lower() in ("1", "true", "yes", "on")
+ADAPTIVE_CPU_BATCH_SIZE_MIN = max(
+    1, int(os.environ.get("ADAPTIVE_CPU_BATCH_SIZE_MIN", "8"))
+)
+ADAPTIVE_CPU_BATCH_SIZE_MAX = max(
+    ADAPTIVE_CPU_BATCH_SIZE_MIN,
+    int(os.environ.get("ADAPTIVE_CPU_BATCH_SIZE_MAX", "128")),
+)
+# When underfed, aim for this many new root batches per idle-CPU deficit unit.
+ADAPTIVE_CPU_BATCH_TARGET_PER_IDLE = max(
+    0.25, float(os.environ.get("ADAPTIVE_CPU_BATCH_TARGET_PER_IDLE", "1.0"))
+)
+
+
+def choose_adaptive_cpu_batch_size(
+    configured_batch_size: int,
+    num_nonces: int,
+    *,
+    cpu_unassigned_claimable: int = 0,
+    online_idle_cpu_slaves: int = 0,
+    enabled: bool = False,
+    min_batch: int = 8,
+    max_batch: int = 128,
+    max_job_batches: int = 256,
+    target_batches_per_idle: float = 1.0,
+) -> Tuple[int, Dict]:
+    """Pick an effective CPU job batch_size from idle/claimable telemetry.
+
+    Pure function — safe for unit tests. Never returns a size that would push
+    num_batches above max_job_batches (those jobs are created already-stopped).
+    """
+    configured = max(1, int(configured_batch_size or 1))
+    nonces = max(1, int(num_nonces or 1))
+    claimable = max(0, int(cpu_unassigned_claimable or 0))
+    idle = max(0, int(online_idle_cpu_slaves or 0))
+    max_batches = max(1, int(max_job_batches or 1))
+    floor_for_cap = int(math.ceil(nonces / max_batches))
+    lo = max(1, int(min_batch or 1), floor_for_cap)
+    hi = max(lo, int(max_batch or lo))
+
+    meta: Dict = {
+        "enabled": bool(enabled),
+        "configured": configured,
+        "claimable": claimable,
+        "idle": idle,
+        "mode": "disabled",
+        "target_batches": None,
+    }
+    if not enabled:
+        return configured, meta
+
+    configured_batches = int(math.ceil(nonces / configured))
+    deficit = max(0, idle - claimable)
+
+    if deficit > 0:
+        # Underfed fleet: shrink batch_size so this job fans out more root rows.
+        want = int(math.ceil(deficit * max(0.25, float(target_batches_per_idle or 1.0))))
+        target_batches = min(max_batches, max(configured_batches, want, 1))
+        batch_size = int(math.ceil(nonces / target_batches))
+        # Only shrink vs config when underfed (never grow past configured here).
+        batch_size = min(configured, batch_size)
+        batch_size = max(lo, min(hi, batch_size))
+        meta.update(
+            {
+                "mode": "shrink_for_idle",
+                "deficit": deficit,
+                "target_batches": target_batches,
+                "effective": batch_size,
+                "effective_batches": int(math.ceil(nonces / batch_size)),
+            }
+        )
+        return batch_size, meta
+
+    if claimable >= max(idle, 1) * 2 and configured < hi:
+        # Claimable already covers idle with headroom: grow toward max to
+        # reduce future unassigned floods (still clamped by max_job_batches).
+        grown = min(hi, max(configured, configured * 2))
+        grown = max(lo, min(hi, grown))
+        # Refuse growth that would leave fewer than 1 batch.
+        grown = min(grown, nonces)
+        meta.update(
+            {
+                "mode": "grow_for_surplus",
+                "deficit": 0,
+                "target_batches": int(math.ceil(nonces / grown)),
+                "effective": grown,
+                "effective_batches": int(math.ceil(nonces / grown)),
+            }
+        )
+        return grown, meta
+
+    kept = max(lo, min(hi, configured))
+    meta.update(
+        {
+            "mode": "keep_configured",
+            "deficit": 0,
+            "target_batches": int(math.ceil(nonces / kept)),
+            "effective": kept,
+            "effective_batches": int(math.ceil(nonces / kept)),
+        }
+    )
+    return kept, meta
+
+
+def fetch_cpu_adaptive_batch_telemetry(now_ms: Optional[int] = None) -> Dict:
+    """Light claimable/idle snapshot for adaptive batch sizing at job create."""
+    now = int(now_ms if now_ms is not None else time.time() * 1000)
+    online_cutoff = now - int(SLAVE_ONLINE_MS)
+    try:
+        row = get_db_conn().fetch_one(
+            """
+            SELECT
+                (
+                    SELECT COUNT(*)
+                    FROM root_batch rb
+                    JOIN job j ON j.benchmark_id = rb.benchmark_id
+                    WHERE rb.ready IS NULL
+                      AND rb.slave IS NULL
+                      AND j.stopped IS NULL
+                      AND j.end_time IS NULL
+                      AND j.merkle_root_ready IS NULL
+                      AND j.settings->>'challenge_id' IN %s
+                      AND NOT EXISTS (
+                        SELECT 1
+                        FROM root_batch rb2
+                        JOIN slave_seen ss ON ss.slave_name = rb2.slave
+                        WHERE rb2.benchmark_id = rb.benchmark_id
+                          AND rb2.slave IS NOT NULL
+                          AND (rb2.ready = true OR rb2.ready IS NULL)
+                          AND ss.last_seen >= %s
+                      )
+                ) AS cpu_unassigned_claimable,
+                (
+                    SELECT COUNT(*)
+                    FROM slave_seen ss
+                    WHERE ss.last_seen >= %s
+                      AND ss.slave_name LIKE 'pool-cpu-%%'
+                      AND NOT EXISTS (
+                        SELECT 1
+                        FROM root_batch rb
+                        WHERE rb.slave = ss.slave_name
+                          AND rb.ready IS NULL
+                          AND rb.start_time IS NOT NULL
+                      )
+                ) AS online_idle_cpu_slaves
+            """,
+            (CPU_CHALLENGE_IDS, online_cutoff, online_cutoff),
+        ) or {}
+        return {
+            "cpu_unassigned_claimable": int(row.get("cpu_unassigned_claimable") or 0),
+            "online_idle_cpu_slaves": int(row.get("online_idle_cpu_slaves") or 0),
+            "error": None,
+        }
+    except Exception as exc:
+        logger.warning("adaptive CPU batch telemetry failed; using configured batch_size: %s", exc)
+        return {
+            "cpu_unassigned_claimable": 0,
+            "online_idle_cpu_slaves": 0,
+            "error": str(exc),
+        }
 
 # Free root batches from dark / stuck / overloaded assignees so healthy CPUs
 # can finish jobs inside the ~120 minute on-chain precommit lifetime.
@@ -197,8 +367,52 @@ class JobManager:
             batch_size = track_batch_size or algo_sel["batch_size"]
             if track_batch_size:
                 logger.debug(f"job {benchmark_id}: using per-track batch_size={batch_size} for track '{track_id}'")
-            num_batches = math.ceil(x.details.num_nonces / batch_size)
             max_job_batches = CONFIG.get("max_job_batches", 256)
+            # Adaptive CPU batch_size: more root fanout when claimable cannot feed
+            # idle CPUs; optional growth when claimable already has surplus.
+            # Kill-switched via ADAPTIVE_CPU_BATCH_SIZE_ENABLED (default off).
+            if (
+                ADAPTIVE_CPU_BATCH_SIZE_ENABLED
+                and getattr(x.settings, "challenge_id", None) in CPU_CHALLENGE_IDS
+            ):
+                telem = fetch_cpu_adaptive_batch_telemetry()
+                adapted, adapt_meta = choose_adaptive_cpu_batch_size(
+                    batch_size,
+                    x.details.num_nonces,
+                    cpu_unassigned_claimable=telem["cpu_unassigned_claimable"],
+                    online_idle_cpu_slaves=telem["online_idle_cpu_slaves"],
+                    enabled=True,
+                    min_batch=ADAPTIVE_CPU_BATCH_SIZE_MIN,
+                    max_batch=ADAPTIVE_CPU_BATCH_SIZE_MAX,
+                    max_job_batches=int(max_job_batches or 256),
+                    target_batches_per_idle=ADAPTIVE_CPU_BATCH_TARGET_PER_IDLE,
+                )
+                if adapted != batch_size:
+                    logger.info(
+                        "job %s adaptive CPU batch_size %s -> %s mode=%s "
+                        "nonces=%s batches~%s claimable=%s idle_cpu=%s deficit=%s",
+                        benchmark_id,
+                        batch_size,
+                        adapted,
+                        adapt_meta.get("mode"),
+                        x.details.num_nonces,
+                        adapt_meta.get("effective_batches"),
+                        adapt_meta.get("claimable"),
+                        adapt_meta.get("idle"),
+                        adapt_meta.get("deficit"),
+                    )
+                else:
+                    logger.debug(
+                        "job %s adaptive CPU batch_size kept=%s mode=%s "
+                        "claimable=%s idle_cpu=%s",
+                        benchmark_id,
+                        batch_size,
+                        adapt_meta.get("mode"),
+                        adapt_meta.get("claimable"),
+                        adapt_meta.get("idle"),
+                    )
+                batch_size = adapted
+            num_batches = math.ceil(x.details.num_nonces / batch_size)
             oversized = bool(max_job_batches) and num_batches > max_job_batches
 
             # Per-challenge track allowlist. Tracks are assigned on-chain at random, so
