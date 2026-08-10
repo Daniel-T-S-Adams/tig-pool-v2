@@ -774,11 +774,13 @@ class PrecommitManager:
                 int(per_challenge_counts.get(cid, 0) or 0) for cid in GPU_CHALLENGE_IDS
             )
         gpu_below_floor = gpu_active_jobs < max(1, gpu_floor)
-        # Hard CPU-only only when the rate-gate bypass itself is active.
+        # Hard CPU-only whenever the idle fleet needs work and GPU floor is met.
+        # Previously this required governor_reason.startswith("idle_cpu_override:"),
+        # which only fires when the soft ready-rate gate would have blocked — so a
+        # healthy ready-rate left idle CPUs with GPU still in the lottery.
         force_cpu_only = (
             idle_cpu_needs_work
             and (not gpu_below_floor)
-            and governor_reason.startswith("idle_cpu_override:")
             and not profile_blocks.get("cpu")
         )
         if force_cpu_only:
@@ -819,10 +821,13 @@ class PrecommitManager:
             weight = int(x.get("weight") or 0)
             if weight <= 0:
                 continue
-            if idle_cpu_needs_work and not force_cpu_only and not gpu_below_floor:
+            # Boost CPU whenever the idle fleet needs work. Do not use elif with
+            # gpu_below_floor — that inverted intent and boosted only GPU when
+            # both pressures were active (common at low open_jobs).
+            if idle_cpu_needs_work and not force_cpu_only:
                 if x["algorithm_id"][:4] in CPU_CHALLENGE_IDS:
                     weight = max(1, int(round(weight * idle_mult)))
-            elif gpu_below_floor and x["algorithm_id"][:4] in GPU_CHALLENGE_IDS:
+            if gpu_below_floor and x["algorithm_id"][:4] in GPU_CHALLENGE_IDS:
                 weight = max(1, int(round(weight * idle_mult)))
             if cap_settings.get("enabled"):
                 cid = x["algorithm_id"][:4]

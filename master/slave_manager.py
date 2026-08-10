@@ -1747,8 +1747,11 @@ class SlaveManager:
         """
         views = self._get_assign_views()
         route_cap = int(slave["max_concurrent_batches"])
-        max_concurrent = int(views.adaptive_caps.get(slave_name) or route_cap)
-        max_concurrent = max(0, min(route_cap, max_concurrent))
+        # Honor adaptive cap 0 (load-shed). `dict.get(k) or route` treats 0 as missing.
+        if slave_name in views.adaptive_caps:
+            max_concurrent = max(0, min(route_cap, int(views.adaptive_caps[slave_name])))
+        else:
+            max_concurrent = route_cap
         root_affinity = self._root_affinity_map()
         online_slaves = self._online_slaves(int(now))
 
@@ -1777,13 +1780,22 @@ class SlaveManager:
                 if not preferred or preferred not in online_slaves:
                     continue
                 pref_route = self._route_cap_for_slave(preferred)
-                pref_cap = int(views.adaptive_caps.get(preferred) or pref_route)
+                if preferred in views.adaptive_caps:
+                    pref_cap = max(0, min(pref_route, int(views.adaptive_caps[preferred])))
+                else:
+                    pref_cap = pref_route
                 if pref_route <= 0:
                     continue
                 if int(active_by_slave.get(preferred) or 0) >= min(pref_route, pref_cap):
                     preferred_at_cap.add(preferred)
                     continue
-                if PROOF_PRIORITY_ENABLED and preferred in slaves_with_proof_work:
+                # Unlock sticky when preferred can take proofs OR is awaiting proofs.
+                # Awaiting-only used to warehouse roots: preferred got root_cap=0 on
+                # the FAST path while other CPUs still skipped sticky leftovers.
+                if PROOF_PRIORITY_ENABLED and (
+                    preferred in slaves_with_proof_work
+                    or preferred in views.awaiting_proofs
+                ):
                     preferred_at_cap.add(preferred)
         if STICKY_ROOTS_ENABLED and STICKY_OVERFLOW_IDLE_MS > 0:
             inflight_pref_bids: Set[str] = set()
@@ -1866,11 +1878,10 @@ class SlaveManager:
                 ):
                     own_proof_work = True
                     break
-            has_proof_work = bool(
-                assigned_proofs
-                or own_proof_work
-                or (PROOF_PRIORITY_ENABLED and slave_name in views.awaiting_proofs)
-            )
+            # Match slow path: root_cap=0 only when this slave can actually run
+            # proof batches now. awaiting_proofs alone idled CPUs while claimable
+            # roots sat behind sticky / unfinished jobs.
+            has_proof_work = bool(assigned_proofs or own_proof_work)
             kept_assigned, excess_assigned = select_kept_assigned_batches(
                 assigned,
                 max_concurrent,
