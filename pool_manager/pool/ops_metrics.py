@@ -14,6 +14,11 @@ import time
 from decimal import Decimal
 
 from pool import autopilot, database as db
+from pool.idle_tracker import (
+    CPU_IDLE_TRACKER,
+    FLEET_IDLE_TRACKER,
+    idle_window_settings,
+)
 
 logger = logging.getLogger("pool.ops_metrics")
 
@@ -149,6 +154,7 @@ def _governor_view(
     cfg: dict,
     now_ms: int,
     online_idle_cpu_slaves: int = 0,
+    decision_idle_cpu_slaves: int | None = None,
 ) -> dict:
     settings = _gov_settings(cfg)
     if not settings.get("enabled", True):
@@ -354,7 +360,16 @@ def _governor_view(
     roots_pending = int(row.get("roots_pending") or 0)
     benchmarks_seen = int(row.get("benchmarks_seen") or 0)
     root_ready = int(row.get("root_ready_benchmarks") or 0)
-    online_idle_cpu = max(0, int(online_idle_cpu_slaves or 0))
+    online_idle_cpu_instant = max(0, int(online_idle_cpu_slaves or 0))
+    # Prefer sustained/windowed idle when the caller supplies it (master mirror).
+    online_idle_cpu = max(
+        0,
+        int(
+            decision_idle_cpu_slaves
+            if decision_idle_cpu_slaves is not None
+            else online_idle_cpu_instant
+        ),
+    )
     # Mirror master/precommit_manager.compute_idle_cpu_needs_work: claimable
     # only suppresses idle bias when it can absorb the idle CPU fleet.
     if not bool(settings.get("idle_cpu_override", True)):
@@ -428,7 +443,9 @@ def _governor_view(
             "gpu_unassigned_roots": int(row.get("gpu_unassigned_roots") or 0),
             "cpu_unassigned_claimable": cpu_claimable,
             "gpu_unassigned_claimable": gpu_claimable,
-            "online_idle_cpu_slaves": online_idle_cpu,
+            "online_idle_cpu_slaves": online_idle_cpu_instant,
+            "online_idle_cpu_slaves_instant": online_idle_cpu_instant,
+            "sustained_idle_cpu_slaves": online_idle_cpu,
             "benchmarks_seen_window": benchmarks_seen,
             "root_ready_benchmarks_window": root_ready,
             "cpu_jobs_needing_roots": cpu_jobs_needing_roots,
@@ -526,6 +543,41 @@ def build_ops_metrics() -> dict:
     busy = [s for s in online if s["busy"]]
     idle = [s for s in online if s["idle"]]
 
+    win = idle_window_settings()
+    online_names = [s["slave_name"] for s in online]
+    idle_names = [s["slave_name"] for s in idle]
+    cpu_online_names = [s["slave_name"] for s in online if s.get("profile") == "cpu"]
+    cpu_idle_names = [s["slave_name"] for s in idle if s.get("profile") == "cpu"]
+    if win.get("enabled", True):
+        FLEET_IDLE_TRACKER.update(
+            now_ms, online_names, idle_names, window_ms=int(win.get("window_ms") or 120_000)
+        )
+        CPU_IDLE_TRACKER.update(
+            now_ms,
+            cpu_online_names,
+            cpu_idle_names,
+            window_ms=int(win.get("window_ms") or 120_000),
+        )
+    fleet_idle_win = FLEET_IDLE_TRACKER.summary(
+        online_names=online_names,
+        instant_idle_names=idle_names,
+        settings=win,
+    )
+    cpu_idle_win = CPU_IDLE_TRACKER.summary(
+        online_names=cpu_online_names,
+        instant_idle_names=cpu_idle_names,
+        settings=win,
+    )
+    frac_by_name = {
+        r["slave_name"]: r for r in (fleet_idle_win.get("rows") or [])
+    }
+    for s in slaves:
+        meta = frac_by_name.get(s["slave_name"]) or {}
+        s["idle_frac_window"] = meta.get("idle_frac_window")
+        s["sustained_idle"] = bool(meta.get("sustained_idle"))
+        s["continuous_idle_ms"] = int(meta.get("continuous_idle_ms") or 0)
+        s["idle_observed_ms"] = int(meta.get("observed_ms") or 0)
+
     sum_caps = sum(int(s["cap"] or 0) for s in online)
     sum_inflight = sum(int(s["inflight"] or 0) for s in online)
     fill_rate = round(sum_inflight / sum_caps, 3) if sum_caps > 0 else None
@@ -535,10 +587,18 @@ def build_ops_metrics() -> dict:
         prof = [s for s in online if s["profile"] == profile]
         caps = sum(int(s["cap"] or 0) for s in prof)
         inflight = sum(int(s["inflight"] or 0) for s in prof)
+        sustained_n = sum(1 for s in prof if s.get("sustained_idle"))
+        fracs = [
+            float(s["idle_frac_window"])
+            for s in prof
+            if s.get("idle_frac_window") is not None
+        ]
         by_profile[profile] = {
             "online": len(prof),
             "busy": sum(1 for s in prof if s["busy"]),
             "idle": sum(1 for s in prof if s["idle"]),
+            "sustained_idle": sustained_n,
+            "mean_idle_frac_window": round(sum(fracs) / len(fracs), 3) if fracs else None,
             "inflight": inflight,
             "sum_caps": caps,
             "fill_rate": round(inflight / caps, 3) if caps > 0 else None,
@@ -696,13 +756,20 @@ def build_ops_metrics() -> dict:
 
     governor = {"enabled": False, "block_reasons": [], "counts": {}}
     if cfg:
-        # Pass live idle CPU count so ops mirrors master's claimable-vs-idle gate.
+        # Instant for display; sustained for create-bias mirror (matches master).
         idle_cpu_n = int((by_profile.get("cpu") or {}).get("idle") or 0)
+        sustained_cpu_n = int(
+            cpu_idle_win.get("sustained_idle")
+            if win.get("enabled", True)
+            else idle_cpu_n
+        )
         governor = _governor_view(
             cfg,
             now_ms,
             online_idle_cpu_slaves=idle_cpu_n,
+            decision_idle_cpu_slaves=sustained_cpu_n,
         )
+        governor["idle_window"] = cpu_idle_win
 
     return _json_safe({
         "generated_at_ms": now_ms,
@@ -712,6 +779,33 @@ def build_ops_metrics() -> dict:
             "online": len(online),
             "busy": len(busy),
             "idle": len(idle),
+            "sustained_idle": int(fleet_idle_win.get("sustained_idle") or 0),
+            "mean_idle_frac_window": fleet_idle_win.get("mean_idle_frac_window"),
+            "idle_window": {
+                "enabled": bool(win.get("enabled", True)),
+                "window_ms": int(win.get("window_ms") or 0),
+                "frac_threshold": float(win.get("frac_threshold") or 0.5),
+                "min_observed_ms": int(win.get("min_observed_ms") or 0),
+                "min_continuous_ms": int(win.get("min_continuous_ms") or 0),
+                "fleet": {
+                    k: fleet_idle_win.get(k)
+                    for k in (
+                        "online",
+                        "instant_idle",
+                        "sustained_idle",
+                        "mean_idle_frac_window",
+                    )
+                },
+                "cpu": {
+                    k: cpu_idle_win.get(k)
+                    for k in (
+                        "online",
+                        "instant_idle",
+                        "sustained_idle",
+                        "mean_idle_frac_window",
+                    )
+                },
+            },
             "sum_caps": sum_caps,
             "inflight": sum_inflight,
             "fill_rate": fill_rate,

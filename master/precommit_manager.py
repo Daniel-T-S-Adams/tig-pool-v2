@@ -11,6 +11,7 @@ from typing import Dict, List, Optional, Set, Tuple
 from master.sql import get_db_conn
 from master.client_manager import CONFIG
 from master.proof_affinity import SLAVE_ONLINE_MS, ensure_slave_seen_table
+from master.idle_tracker import CPU_IDLE_TRACKER, idle_window_settings
 from master.capability_scheduler import (
     SCHEDULER as CAPABILITY_SCHEDULER,
     algo_is_schedulable,
@@ -264,6 +265,9 @@ def compute_idle_cpu_needs_work(
     Claimable roots only suppress the bias when they can absorb the idle CPU
     fleet. A handful of claimable batches must not disable the CPU weight boost
     while many online CPU slaves sit empty (create/claimable oscillation).
+
+    ``online_idle_cpu_slaves`` should be the *decision* idle count — preferably
+    sustained/windowed idle from IdleWindowTracker, not a single point sample.
     """
     if not idle_cpu_override:
         return False
@@ -333,6 +337,87 @@ class PrecommitManager:
         self._governor_cache_until_ms = 0
         # Read by master/main.py idle-burst loop.
         self.last_idle_cpu_needs_work = False
+        self.last_idle_window = {}
+
+    def _refresh_cpu_idle_window(self, now_ms: Optional[int] = None) -> dict:
+        """Sample online/idle CPU names and update the sustained-idle window."""
+        now_ms = int(now_ms if now_ms is not None else time.time() * 1000)
+        win = idle_window_settings()
+        try:
+            ensure_slave_seen_table(get_db_conn().execute)
+            online_cutoff = now_ms - int(SLAVE_ONLINE_MS)
+            online_rows = get_db_conn().fetch_all(
+                """
+                SELECT ss.slave_name
+                FROM slave_seen ss
+                WHERE ss.last_seen >= %s
+                  AND ss.slave_name LIKE 'pool-cpu-%%'
+                """,
+                (online_cutoff,),
+            ) or []
+            idle_rows = get_db_conn().fetch_all(
+                """
+                SELECT ss.slave_name
+                FROM slave_seen ss
+                WHERE ss.last_seen >= %s
+                  AND ss.slave_name LIKE 'pool-cpu-%%'
+                  AND NOT EXISTS (
+                    SELECT 1
+                    FROM root_batch rb
+                    WHERE rb.slave = ss.slave_name
+                      AND rb.ready IS NULL
+                      AND rb.start_time IS NOT NULL
+                  )
+                """,
+                (online_cutoff,),
+            ) or []
+            online_names = [r["slave_name"] for r in online_rows if r.get("slave_name")]
+            idle_names = [r["slave_name"] for r in idle_rows if r.get("slave_name")]
+        except Exception as exc:
+            logger.warning("cpu idle window sample failed: %s", exc)
+            summary = {
+                "enabled": bool(win.get("enabled", True)),
+                "window_ms": int(win.get("window_ms") or 0),
+                "frac_threshold": float(win.get("frac_threshold") or 0.5),
+                "min_observed_ms": int(win.get("min_observed_ms") or 0),
+                "min_continuous_ms": int(win.get("min_continuous_ms") or 0),
+                "online": 0,
+                "instant_idle": 0,
+                "sustained_idle": 0,
+                "mean_idle_frac_window": None,
+                "rows": [],
+                "error": str(exc),
+            }
+            self.last_idle_window = summary
+            return summary
+
+        if win.get("enabled", True):
+            CPU_IDLE_TRACKER.update(
+                now_ms,
+                online_names,
+                idle_names,
+                window_ms=int(win.get("window_ms") or 120_000),
+            )
+            summary = CPU_IDLE_TRACKER.summary(
+                online_names=online_names,
+                instant_idle_names=idle_names,
+                settings=win,
+            )
+        else:
+            summary = {
+                "enabled": False,
+                "window_ms": int(win.get("window_ms") or 0),
+                "frac_threshold": float(win.get("frac_threshold") or 0.5),
+                "min_observed_ms": int(win.get("min_observed_ms") or 0),
+                "min_continuous_ms": int(win.get("min_continuous_ms") or 0),
+                "online": len(online_names),
+                "instant_idle": len(idle_names),
+                "sustained_idle": len(idle_names),
+                "mean_idle_frac_window": None,
+                "rows": [],
+            }
+        self.last_idle_window = summary
+        return summary
 
     def on_new_block(self, block: Block, **kwargs):
         self.last_block_id = block.id
@@ -353,18 +438,56 @@ class PrecommitManager:
         except Exception:
             pass
 
+    def _apply_idle_window_to_snapshot(self, snapshot: dict, idle_win: dict) -> dict:
+        """Overlay sustained idle onto a governor snapshot for create decisions."""
+        snap = dict(snapshot or {})
+        settings = snap.get("settings") or _governor_settings()
+        instant = int(
+            idle_win.get("instant_idle")
+            if idle_win.get("instant_idle") is not None
+            else snap.get("online_idle_cpu_slaves")
+            or 0
+        )
+        sustained = int(
+            idle_win.get("sustained_idle")
+            if idle_win.get("enabled", True)
+            else instant
+        )
+        if not idle_win.get("enabled", True):
+            sustained = instant
+        decision_idle = sustained
+        profile_blocks = snap.get("profile_blocks") or {"cpu": False, "gpu": False}
+        idle_cpu_needs_work = compute_idle_cpu_needs_work(
+            idle_cpu_override=bool(settings.get("idle_cpu_override", True)),
+            cpu_slots=int(snap.get("cpu_slots") or 0),
+            cpu_unassigned_claimable=int(snap.get("cpu_unassigned_claimable") or 0),
+            cpu_jobs_needing_roots=int(snap.get("cpu_jobs_needing_roots") or 0),
+            cpu_create_target=int(snap.get("cpu_create_target") or 0),
+            cpu_profile_blocked=bool(profile_blocks.get("cpu")),
+            online_idle_cpu_slaves=decision_idle,
+        )
+        snap["online_idle_cpu_slaves"] = instant
+        snap["online_idle_cpu_slaves_instant"] = instant
+        snap["sustained_idle_cpu_slaves"] = sustained
+        snap["idle_window"] = idle_win
+        snap["idle_cpu_needs_work"] = idle_cpu_needs_work
+        return snap
+
     def _governor_snapshot(self) -> dict:
         settings = _governor_settings()
         if not settings.get("enabled", True):
             return {"enabled": False, "idle_cpu_needs_work": False}
         now_ms = int(time.time() * 1000)
+        # Always refresh the idle window (cheap) so burst/create sees sustained
+        # idle even while heavier governor counts are cached.
+        idle_win = self._refresh_cpu_idle_window(now_ms)
         cache_ms = max(0, int(settings.get("cache_ms") or 0))
         if (
             self._governor_cache is not None
             and cache_ms > 0
             and now_ms < self._governor_cache_until_ms
         ):
-            return self._governor_cache
+            return self._apply_idle_window_to_snapshot(self._governor_cache, idle_win)
         try:
             ensure_slave_seen_table(get_db_conn().execute)
             cutoff_ms = now_ms - int(settings.get("window_ms") or (30 * 60 * 1000))
@@ -581,17 +704,7 @@ class PrecommitManager:
                 gpu_unassigned_claimable,
                 profile_caps,
             )
-            # Bias CPU creates when claimable roots cannot feed the idle fleet.
-            # Sticky-reserved unassigned roots do not count as claimable.
-            idle_cpu_needs_work = compute_idle_cpu_needs_work(
-                idle_cpu_override=bool(settings.get("idle_cpu_override", True)),
-                cpu_slots=cpu_slots,
-                cpu_unassigned_claimable=cpu_unassigned_claimable,
-                cpu_jobs_needing_roots=cpu_jobs_needing_roots,
-                cpu_create_target=cpu_create_target,
-                cpu_profile_blocked=bool(profile_blocks.get("cpu")),
-                online_idle_cpu_slaves=online_idle_cpu_slaves,
-            )
+            # Instant idle from SQL; sustained overlay applied below.
             snapshot = {
                 "enabled": True,
                 "settings": settings,
@@ -615,13 +728,18 @@ class PrecommitManager:
                 "online_idle_cpu_slaves": online_idle_cpu_slaves,
                 "profile_caps": profile_caps,
                 "profile_blocks": profile_blocks,
-                "idle_cpu_needs_work": idle_cpu_needs_work,
+                "idle_cpu_needs_work": False,
             }
         except Exception as exc:
             # Fail open: a transient DB blip must not freeze precommit creation.
             logger.warning("precommit governor query failed; allowing create: %s", exc)
             snapshot = {"enabled": False, "idle_cpu_needs_work": False, "error": str(exc)}
-        self._governor_cache = snapshot
+        snapshot = self._apply_idle_window_to_snapshot(snapshot, idle_win)
+        # Cache the heavy counts without pinning a stale idle decision.
+        self._governor_cache = {
+            k: v for k, v in snapshot.items()
+            if k not in ("idle_cpu_needs_work", "idle_window", "sustained_idle_cpu_slaves")
+        }
         self._governor_cache_until_ms = now_ms + cache_ms
         return snapshot
 

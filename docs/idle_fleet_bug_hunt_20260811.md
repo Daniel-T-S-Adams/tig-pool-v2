@@ -61,7 +61,8 @@ Aug 10 load-shed→concurrent=0 never applied on the hot path.
 | Master loop ~1 create / 5s | Hard cadence; cannot burst-fill 38 CPUs |
 | `PRECOMMIT_GOVERNOR_MAX_CPU_UNASSIGNED_ROOTS` (often 64/256) | Caps claimable inventory |
 | Adaptive batch off + large `batch_size` | Low roots/job (~9 finishes per create in live stats) |
-| Ops `idle` = online + inflight==0 | Does not show load-shed / proof-lock |
+| Ops `idle` = online + inflight==0 | Point sample; now also exposes windowed `sustained_idle` / `idle_frac_window` |
+| Create burst / idle-CPU bias | Uses **sustained** idle (default 120s window, ≥50% idle frac) so between-job gaps do not look like fleet starvation |
 
 ## Deploy (when awake)
 

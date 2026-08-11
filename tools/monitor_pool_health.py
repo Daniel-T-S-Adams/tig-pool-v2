@@ -83,9 +83,13 @@ def sample_from_metrics(d: Dict[str, Any]) -> Dict[str, Any]:
     online = int(slaves.get("online") or 0)
     idle = int(slaves.get("idle") or 0)
     busy = int(slaves.get("busy") or 0)
+    sustained_idle = int(slaves.get("sustained_idle") or 0)
+    mean_idle_frac_window = slaves.get("mean_idle_frac_window")
     fill = slaves.get("fill_rate")
     cpu_online = int(cpu.get("online") or 0)
     cpu_idle = int(cpu.get("idle") or 0)
+    cpu_sustained_idle = int(cpu.get("sustained_idle") or 0)
+    cpu_mean_idle_frac_window = cpu.get("mean_idle_frac_window")
     cpu_fill = cpu.get("fill_rate")
     gpu_fill = gpu.get("fill_rate")
     claimable = int(d.get("claimable_root_total") or 0)
@@ -93,9 +97,14 @@ def sample_from_metrics(d: Dict[str, Any]) -> Dict[str, Any]:
     unassigned = int(d.get("unassigned_root_total") or 0)
     creates_15m = int(creates.get("creates_15m") or 0)
     roots_done_15m = int(finishes.get("roots_done_15m") or 0)
+    gov_counts = counts
 
     idle_frac = (idle / online) if online > 0 else None
     cpu_idle_frac = (cpu_idle / cpu_online) if cpu_online > 0 else None
+    sustained_idle_frac = (sustained_idle / online) if online > 0 else None
+    cpu_sustained_idle_frac = (
+        (cpu_sustained_idle / cpu_online) if cpu_online > 0 else None
+    )
     sticky_frac = (sticky / unassigned) if unassigned > 0 else 0.0
 
     return {
@@ -105,11 +114,17 @@ def sample_from_metrics(d: Dict[str, Any]) -> Dict[str, Any]:
         "busy": busy,
         "idle": idle,
         "idle_frac": idle_frac,
+        "sustained_idle": sustained_idle,
+        "sustained_idle_frac": sustained_idle_frac,
+        "mean_idle_frac_window": mean_idle_frac_window,
         "fill_rate": fill,
         "cpu_online": cpu_online,
         "cpu_busy": int(cpu.get("busy") or 0),
         "cpu_idle": cpu_idle,
         "cpu_idle_frac": cpu_idle_frac,
+        "cpu_sustained_idle": cpu_sustained_idle,
+        "cpu_sustained_idle_frac": cpu_sustained_idle_frac,
+        "cpu_mean_idle_frac_window": cpu_mean_idle_frac_window,
         "cpu_fill": cpu_fill,
         "gpu_online": int(gpu.get("online") or 0),
         "gpu_busy": int(gpu.get("busy") or 0),
@@ -129,9 +144,10 @@ def sample_from_metrics(d: Dict[str, Any]) -> Dict[str, Any]:
         "gpu_reasons": list(blocks.get("gpu_reasons") or []),
         "cpu_unassigned_cap": caps.get("cpu_unassigned_cap"),
         "cpu_unassigned_claimable_gov": counts.get("cpu_unassigned_claimable"),
-        "online_idle_cpu_slaves_gov": counts.get("online_idle_cpu_slaves"),
-        "open_jobs": counts.get("open_jobs"),
-        "max_concurrent": counts.get("max_concurrent_benchmarks"),
+        "online_idle_cpu_slaves_gov": gov_counts.get("online_idle_cpu_slaves"),
+        "sustained_idle_cpu_slaves_gov": gov_counts.get("sustained_idle_cpu_slaves"),
+        "open_jobs": gov_counts.get("open_jobs"),
+        "max_concurrent": gov_counts.get("max_concurrent_benchmarks"),
     }
 
 
@@ -160,6 +176,16 @@ def analyze(samples: List[Dict[str, Any]]) -> Dict[str, Any]:
     idle_fracs = [float(s["idle_frac"]) for s in samples if s.get("idle_frac") is not None]
     cpu_idle_fracs = [
         float(s["cpu_idle_frac"]) for s in samples if s.get("cpu_idle_frac") is not None
+    ]
+    sustained_idle_fracs = [
+        float(s["sustained_idle_frac"])
+        for s in samples
+        if s.get("sustained_idle_frac") is not None
+    ]
+    cpu_sustained_idle_fracs = [
+        float(s["cpu_sustained_idle_frac"])
+        for s in samples
+        if s.get("cpu_sustained_idle_frac") is not None
     ]
     claimables = [float(s["claimable"]) for s in samples]
     stickies = [float(s["sticky"]) for s in samples]
@@ -238,15 +264,17 @@ def analyze(samples: List[Dict[str, Any]]) -> Dict[str, Any]:
         score -= 1
         reasons.append(f"CPU profile blocked {blocked_frac:.0%} of samples")
 
-    # Absolute latest health
+    # Absolute latest health — prefer sustained idle (less between-job flicker).
     latest_fill = latest.get("fill_rate")
-    latest_cpu_idle_frac = latest.get("cpu_idle_frac")
+    latest_cpu_idle_frac = latest.get("cpu_sustained_idle_frac")
+    if latest_cpu_idle_frac is None:
+        latest_cpu_idle_frac = latest.get("cpu_idle_frac")
     if latest_fill is not None and float(latest_fill) >= 0.75:
         score += 1
         reasons.append(f"latest fill healthy ({float(latest_fill):.0%})")
     if latest_cpu_idle_frac is not None and float(latest_cpu_idle_frac) >= 0.4:
         score -= 1
-        reasons.append(f"latest cpu idle high ({float(latest_cpu_idle_frac):.0%})")
+        reasons.append(f"latest cpu sustained idle high ({float(latest_cpu_idle_frac):.0%})")
 
     if score >= 2:
         verdict = "HELPING"
@@ -269,6 +297,8 @@ def analyze(samples: List[Dict[str, Any]]) -> Dict[str, Any]:
             "avg_cpu_fill": _mean(cpu_fills),
             "avg_idle_frac": _mean(idle_fracs),
             "avg_cpu_idle_frac": _mean(cpu_idle_fracs),
+            "avg_sustained_idle_frac": _mean(sustained_idle_fracs),
+            "avg_cpu_sustained_idle_frac": _mean(cpu_sustained_idle_fracs),
             "avg_claimable": _mean(claimables),
             "avg_sticky": _mean(stickies),
             "avg_sticky_frac": _mean(sticky_fracs),
@@ -296,6 +326,7 @@ def write_summary(path: Path, analysis: Dict[str, Any]) -> None:
         "averages:",
         f"  fill={_fmt_pct(w.get('avg_fill'))}  cpu_fill={_fmt_pct(w.get('avg_cpu_fill'))}",
         f"  idle_frac={_fmt_pct(w.get('avg_idle_frac'))}  cpu_idle_frac={_fmt_pct(w.get('avg_cpu_idle_frac'))}",
+        f"  sustained_idle_frac={_fmt_pct(w.get('avg_sustained_idle_frac'))}  cpu_sustained_idle_frac={_fmt_pct(w.get('avg_cpu_sustained_idle_frac'))}",
         f"  claimable={_fmt_num(w.get('avg_claimable'))}  sticky={_fmt_num(w.get('avg_sticky'))}  sticky_frac={_fmt_pct(w.get('avg_sticky_frac'))}",
         f"  creates_15m={_fmt_num(w.get('avg_creates_15m'))}  roots_done_15m={_fmt_num(w.get('avg_roots_done_15m'))}",
         "",
