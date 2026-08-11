@@ -100,6 +100,13 @@ def cpu_tier_cap_settings(config: Optional[Mapping[str, Any]] = None) -> dict:
                 ),
             )
         ),
+        # When true (default), load_1m shed arms only if runtime telem shows the
+        # slave is processing work. Idle + residual load must not 10m-lock the box.
+        "load_shed_require_active": (
+            bool(cfg["load_shed_require_active"])
+            if "load_shed_require_active" in cfg
+            else _env_bool("CPU_LOAD_SHED_REQUIRE_ACTIVE", "true")
+        ),
         "live_telemetry_enabled": _env_bool("CAPABILITY_LIVE_TELEMETRY", "true")
         or bool(cfg.get("live_telemetry_enabled")),
     }
@@ -303,33 +310,105 @@ def telemetry_has_cpu_headroom(
     return True
 
 
+def telem_slave_is_working(telemetry: Mapping[str, Any]) -> Optional[bool]:
+    """Whether v1.5 runtime telem says this slave is processing InnoPool work.
+
+    Returns:
+      True  — active_batches > 0 or state in downloading/running/submitting
+      False — clearly idle (active_batches == 0 and/or state == idle)
+      None  — no runtime telem (stock slaves); caller should keep legacy behavior
+    """
+    if not telemetry:
+        return None
+    active_raw = telemetry.get("active_batches")
+    state = _parse_slave_state(telemetry.get("state"))
+    active: Optional[int] = None
+    if active_raw is not None:
+        try:
+            active = int(active_raw)
+            if active < 0:
+                active = None
+        except (TypeError, ValueError):
+            active = None
+
+    if active is not None:
+        if active > 0:
+            return True
+        # active == 0: still "working" during download/submit transitions.
+        if state in ("downloading", "submitting", "running"):
+            return True
+        return False
+    if state == "idle":
+        return False
+    if state in ("downloading", "running", "submitting"):
+        return True
+    return None
+
+
+def telemetry_ram_critical(
+    telemetry: Mapping[str, Any],
+    settings: Mapping[str, Any],
+) -> bool:
+    """True when free RAM is below the safety floor."""
+    free_ram = telemetry.get("free_ram_gb")
+    if free_ram is None:
+        return False
+    try:
+        return float(free_ram) < float(
+            settings.get("min_free_ram_gb") or DEFAULT_MIN_FREE_RAM_GB
+        )
+    except (TypeError, ValueError):
+        return False
+
+
+def telemetry_load_over_shed(
+    telemetry: Mapping[str, Any],
+    settings: Mapping[str, Any],
+) -> bool:
+    """True when load_1m exceeds cores * load_shed_mult."""
+    cores = _parse_int(telemetry.get("cores"))
+    load_1m = telemetry.get("load_1m")
+    if cores is None or load_1m is None:
+        return False
+    try:
+        return float(load_1m) > float(cores) * float(
+            settings.get("load_shed_mult") or DEFAULT_LOAD_SHED_MULT
+        )
+    except (TypeError, ValueError):
+        return False
+
+
 def telemetry_requires_load_shed(
     telemetry: Mapping[str, Any],
     settings: Mapping[str, Any],
 ) -> bool:
-    """True when live load/RAM says stop assigning new CPU work (concurrent 0)."""
+    """True when live telem says stop assigning new CPU work (concurrent 0).
+
+    Load-average shed only applies while the slave is actually processing work
+    (or when runtime telem is absent — stock-slave legacy). Idle slaves with a
+    lagging high ``load_1m`` after finishing a batch must not be locked out for
+    the full cooldown; that created a self-reinforcing idle fleet.
+
+    Low free RAM still sheds even when idle (OOM risk is real regardless of
+    active batches).
+    """
     if not telemetry:
         return False
-    cores = _parse_int(telemetry.get("cores"))
-    load_1m = telemetry.get("load_1m")
-    if cores is not None and load_1m is not None:
-        try:
-            if float(load_1m) > float(cores) * float(
-                settings.get("load_shed_mult") or DEFAULT_LOAD_SHED_MULT
-            ):
-                return True
-        except (TypeError, ValueError):
-            pass
-    free_ram = telemetry.get("free_ram_gb")
-    if free_ram is not None:
-        try:
-            if float(free_ram) < float(
-                settings.get("min_free_ram_gb") or DEFAULT_MIN_FREE_RAM_GB
-            ):
-                return True
-        except (TypeError, ValueError):
-            pass
-    return False
+    if telemetry_ram_critical(telemetry, settings):
+        return True
+    if not telemetry_load_over_shed(telemetry, settings):
+        return False
+    require_active = settings.get("load_shed_require_active")
+    if require_active is None:
+        require_active = _env_bool("CPU_LOAD_SHED_REQUIRE_ACTIVE", "true")
+    if not require_active:
+        return True
+    working = telem_slave_is_working(telemetry)
+    if working is False:
+        # Residual 1m load while InnoPool has nothing running — do not shed.
+        return False
+    # working True → overload while busy; None → no runtime telem → legacy.
+    return True
 
 
 def cpu_earnable_concurrent_ceiling(

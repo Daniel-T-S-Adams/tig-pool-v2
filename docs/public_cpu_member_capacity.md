@@ -32,13 +32,15 @@ Headers: `X-InnoPool-Cores`, `X-InnoPool-Num-Workers`, `X-InnoPool-Load-1m`,
 `X-InnoPool-Free-Ram-Gb`, plus `X-InnoPool-State`, `X-InnoPool-Active-Batches`,
 `X-InnoPool-Pending-Batches`, `X-InnoPool-Last-Idle-Ms`, `X-InnoPool-Slave-Version`.
 
-Runtime (v1.5) fields are stored for observability; concurrent earn/load-shed
-still keys off cores/workers/load/RAM.
+Runtime (v1.5) fields drive load-shed gating: high `load_1m` only sheds while
+`active_batches > 0` / working `state`. Idle residual load is ignored (and any
+cooldown is cleared) so lagging 1m averages cannot idle the fleet. Low
+`free_ram_gb` still sheds when idle.
 
 **Headroom rule:** `cores / num_workers >= 1.25` (~80% workers) and
-`load_1m <= cores * 0.85`. Then L/XL may earn concurrent **2**. Load spikes
-(`load_1m > cores * 1.25` or `free_ram_gb < 4`) force concurrent **0** (no new
-jobs) for a cooldown — including fleet/Pica boxes already at cap 1.
+`load_1m <= cores * 0.85`. Then L/XL may earn concurrent **2**. While a slave is
+**working**, load spikes (`load_1m > cores * 1.25`) or `free_ram_gb < 4` force
+concurrent **0** for a cooldown — including fleet/Pica boxes already at cap 1.
 
 ## Member recommendations
 

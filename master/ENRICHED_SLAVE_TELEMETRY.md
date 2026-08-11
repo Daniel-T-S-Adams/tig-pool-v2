@@ -49,8 +49,8 @@ Headers alternative (if query pollution is a concern):
 
 Identity remains `User-Agent: <slave_name>`.
 
-v1.5 fields are stored on the master for observability / future scheduling. They do
-not by themselves change concurrent caps; capacity gates still use cores/workers/load/RAM.
+v1.5 runtime fields (`state`, `active_batches`, …) are first-class inputs to
+load-shed: residual `load_1m` after a finish must not lock an idle box out.
 
 ## Master behavior
 
@@ -58,9 +58,16 @@ Implemented in `master/cpu_tier_caps.py` + `slave_manager._adaptive_max_concurre
 
 1. Parse optional telemetry on each `/get-batches` poll; ignore invalid values.
 2. Refresh `HardwareTier` with live `cores`/`ram_gb` when present (override stale preflight).
-3. Soft load-shed: if `load_1m > cores * 1.25` or `free_ram_gb < 4`, force CPU
-   concurrent cap to **0** (skip new assigns) for `CPU_LOAD_SHED_COOLDOWN_MS`
-   (default 10m), including slaves whose normal ceiling is already 1.
+3. Soft load-shed:
+   - **Load:** `load_1m > cores * 1.25` only arms shed while runtime telem says
+     the slave is working (`active_batches > 0` or `state` in
+     `running`/`downloading`/`submitting`). Idle + high lagging load does **not**
+     arm (and clears any residual cooldown). Stock slaves without runtime telem
+     keep the legacy load-only rule.
+   - **RAM:** `free_ram_gb < 4` still sheds even when idle (OOM risk).
+   - Cooldown: `CPU_LOAD_SHED_COOLDOWN_MS` (default 10m), including fleet/Pica
+     boxes whose normal ceiling is already 1.
+   - Toggle: `CPU_LOAD_SHED_REQUIRE_ACTIVE=true` (default).
 4. L/XL earnable concurrent ceiling (default 2) only when
    `CPU_CONCURRENT_REQUIRES_TELEMETRY=true` (default) **and** headroom evidence
    exists; S/M always stay at 1.

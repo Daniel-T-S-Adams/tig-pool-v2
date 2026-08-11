@@ -63,6 +63,7 @@ Aug 10 load-shed→concurrent=0 never applied on the hot path.
 | Adaptive batch off + large `batch_size` | Low roots/job (~9 finishes per create in live stats) |
 | Ops `idle` = online + inflight==0 | Point sample; now also exposes windowed `sustained_idle` / `idle_frac_window` |
 | Create burst / idle-CPU bias | Uses **sustained** idle (default 120s window, ≥50% idle frac) so between-job gaps do not look like fleet starvation |
+| Load-shed on residual `load_1m` | Armed shed while `state=idle active=0` → 10m concurrent=0 lock; fixed via `CPU_LOAD_SHED_REQUIRE_ACTIVE` (shed only while working; clear on idle telem) |
 
 ## Deploy (when awake)
 
