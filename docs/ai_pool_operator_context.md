@@ -344,7 +344,10 @@ Current autopilot responsibilities:
 
 If AI analysis is re-enabled later, it must not bypass autopilot guardrails. It
 should recommend target changes, explain evidence, and let deterministic code
-validate and apply.
+validate and apply. Future guarded apply authority is earned only after the AI
+repeatedly diagnoses create lag, sustained vs instant idle, load-shed cool-off,
+sticky vs claimable roots, and post-outage funnel scars correctly under
+`observe_only` / `report` mode.
 
 Autopilot is expected to scale proportionally with fleet size:
 
@@ -438,7 +441,8 @@ workers from silently expanding global workload.
 Public worker preflight requirements:
 
 - CPU workers should have at least 24 logical threads.
-- CPU workers should have around 32 GB RAM and 100 GB free disk.
+- CPU workers should have around 32 GB RAM (preflight floor is 28 GB so
+  MemTotal ~30 GB on a 32 GB box still passes) and 100 GB free disk.
 - GPU workers need a working NVIDIA driver and visible `nvidia-smi`.
 - There is no default VRAM floor; any working NVIDIA GPU is accepted. Operators
   may optionally set `INNOPOOL_MIN_GPU_VRAM_GB` if they want a custom check.
@@ -486,6 +490,156 @@ workers exist. It should distinguish:
 
 Weak or unproven workers are a pool-health risk because they can increase
 precommit pressure, slow proof submission, and dilute reward efficiency.
+
+## 9B. Create Path, Idle Telemetry, Load-Shed, And Ops Monitoring (2026-08)
+
+These systems were added/hardened after chronic idle-fleet and load-shed
+false-positives. The AI must use them when diagnosing "idle CPUs" or "no creates."
+
+### Precommit → local job lag
+
+1. Master submits `/submit-precommit` to TIG (HTTP 200 means accepted by API).
+2. TIG confirms the precommit on a later block (~60s per block).
+3. `data_fetcher` pulls confirmed precommits via `/get-benchmarks`.
+4. `job_manager` creates the local `job` row (`creating job from confirmed precommit`).
+
+Therefore:
+
+- `submit-precommit 200` is **not** proof that slaves have work yet.
+- Prefer evidence of `creating job from confirmed precommit` and new `job.start_time`
+  rows when claiming "creates are flowing."
+- `PRECOMMIT_IDLE_BURST` (default 4) lets master submit multiple precommits per 5s
+  tick while `idle_cpu_needs_work` is true. Burst does not bypass
+  `max_concurrent_benchmarks` (pending jobs + in-flight submitted precommits).
+
+Master pending count for the create gate is:
+
+```sql
+SELECT COUNT(*) FROM job
+WHERE merkle_proofs_ready IS NULL AND stopped IS NULL;
+```
+
+Note: `stopped IS NULL` only. Jobs with `stopped=true` do not consume the cap.
+
+### Instant idle vs sustained idle
+
+Ops metrics expose both:
+
+- Instant idle: online slave with `root_inflight + proof_inflight == 0` right now.
+- Sustained idle: time-weighted idle fraction over `IDLE_WINDOW_MS` (default 120s)
+  at/above `IDLE_WINDOW_FRAC_THRESHOLD` (default 0.5). Warm-up requires continuous
+  idle of `IDLE_WINDOW_MIN_CONTINUOUS_MS` (default 15s).
+
+Create bias / idle-CPU override / `PRECOMMIT_IDLE_BURST` should follow
+**sustained** idle (or governor `sustained_idle_cpu_slaves`), not flickering
+between-job empty slots.
+
+Live fields (ops `/api/admin/ops/metrics`):
+
+- `slaves.idle` / `slaves.by_profile.cpu.idle` — instant
+- `slaves.sustained_idle` / `slaves.by_profile.cpu.sustained_idle` — windowed
+- `slaves.mean_idle_frac_window`
+- per-row `idle_frac_window`, `sustained_idle`, `continuous_idle_ms`
+- `governor.idle_cpu_needs_work`, `governor.counts.sustained_idle_cpu_slaves`
+- `claimable_root_total` vs `sticky_reserved_root_total`
+- `creates.creates_15m`, `finishes.roots_done_15m`
+
+Monitor helper: `python3 tools/monitor_pool_health.py` samples ops metrics and
+trends fill / idle / sustained idle / claimable.
+
+### CPU load-shed (runtime telem)
+
+Custom slaves send v1.5 fields: `state`, `active_batches`, `pending_batches`,
+`last_idle_ms`, `slave_version`, plus capacity fields `cores`, `num_workers`,
+`load_1m`, `free_ram_gb`.
+
+Load-shed rules (master `cpu_tier_caps` + `slave_manager`):
+
+- **Hard shed** (concurrent=0 for `CPU_LOAD_SHED_COOLDOWN_MS`, default 10m):
+  `load_1m > cores * CPU_LOAD_SHED_MULT` (default 1.25) **only while the slave is
+  working** (`active_batches > 0` or working `state`), or `free_ram_gb` below floor.
+  Timer is armed once per overload episode — polls must not reset it.
+- **Idle cool-off** (`CPU_LOAD_SHED_IDLE_COOL_MS`, default 60s): idle/`active=0`
+  with load still hot → short hold, not a 10m lock.
+- **Escape** (`CPU_LOAD_SHED_IDLE_MAX_MS`, default 180s): if still idle+hot after
+  this idle age, clear shed (`reason=idle_cool_escape`) so sticky load averages
+  cannot starve a box forever.
+- Stock slaves without runtime telem keep legacy load-only shed.
+
+Master log signals to trust:
+
+- `cpu load-shed armed ... state=running active=1`
+- `cpu load-shed cool-off ... load still hot while idle`
+- `cpu load-shed cleared ... reason=idle_cool_escape|idle_load_ok`
+
+Do **not** treat idle+high `load_1m` alone as proof the fleet should downscale.
+Do **not** recommend raising concurrent caps on Pica-class CPUs just because load
+is low while idle.
+
+### GPU floor vs idle-CPU create bias
+
+Precommit selection may show:
+
+- `idle_cpu=True` — claimable CPU roots cannot feed sustained idle CPUs.
+- `gpu_below_floor=True` — active GPU jobs below `gpu_slot_floor`.
+- `force_cpu_only=True` only when idle-CPU needs work **and** GPU floor is met.
+
+While GPU is below floor, creates can prefer GPU even if many CPUs are idle.
+That is expected, not a CPU assign bug. After the floor is met, idle-CPU bias
+should force CPU-only selection more often.
+
+### Claimable vs sticky roots
+
+- **Claimable**: unassigned roots with no online sticky owner — free for idle
+  newcomers.
+- **Sticky-reserved**: unassigned leftovers still preferred for an online owner
+  (artifact affinity). High sticky with low claimable can idle newcomers even
+  when `unassigned_root_total` looks large.
+
+Always cite `claimable_root_total` and `sticky_reserved_root_total` separately.
+
+### API outage / recovery patterns
+
+When TIG API is down or slow for a long time:
+
+1. Roots may finish locally but benchmarks/proofs cannot submit.
+2. Open jobs pile up in proof phase (`merkle_root_ready=true`, proofs null).
+3. `max_concurrent_benchmarks` saturates → `number of pending benchmarks has
+   reached max of N` → **no new precommits**.
+4. Operators may mass-stop stuck proof jobs to free slots.
+
+Metric consequences (AI must not misread):
+
+- `unexpected_stopped_rate` spikes after operator recovery stops — scar tissue,
+  not steady-state pool failure.
+- `proof_conversion_rate` can look bad across the outage window even after API
+  recovery.
+- Prefer `observe_only` / wait for clean windows before recommending drain or
+  large capacity cuts after a known outage recovery.
+- Theoretical `safe_capacity_upscale` to a huge `max_concurrent_benchmarks`
+  (e.g. 100+) is **not** an apply target. Respect step limits and
+  `AUTOPILOT_UPSTREAM_SAFE_MAX_BENCHMARKS`. Never recommend jumping from a
+  crushed cap (e.g. 12) to fleet-theoretical capacity in one step.
+
+### How to monitor (preferred checks)
+
+- Ops metrics: `curl -sS -H "X-Admin-Secret: $ADMIN_SECRET"
+  http://127.0.0.1:${WEB_PORT}/api/admin/ops/metrics`
+- Health monitor: `python3 tools/monitor_pool_health.py --summary-only`
+- Master create path:
+  `docker logs innopool_master --since 10m | grep -E
+  'submit-precommit|submitted precommit|creating job|max of|Selecting algorithm|idle_cpu|load-shed'`
+- Pending vs max:
+  `SELECT COUNT(*) FROM job WHERE merkle_proofs_ready IS NULL AND stopped IS NULL;`
+- TIG API liveness: `curl -sS https://mainnet-api.tig.foundation/get-block`
+
+Handover readiness (future apply authority):
+
+- AI may only gain guarded apply rights after repeatedly diagnosing create lag,
+  idle vs sustained idle, load-shed cool-off/escape, sticky vs claimable, and
+  post-outage funnel scars correctly under `observe_only`.
+- Until then: recommend + explain; deterministic autopilot + human remain
+  executors.
 
 ## 10. Known Failure Modes
 
@@ -592,6 +746,42 @@ Autopilot classifies stranded benchmarks:
 Adaptive caps should reduce work for machines that complete few batches or have
 long runtimes. Do not manually force high caps for weak public miners.
 
+### Instant Idle Misread As Fleet Starvation
+
+`slaves.idle` is point-in-time. Between-job empty slots flicker. Prefer
+`slaves.sustained_idle` / `mean_idle_frac_window` and governor
+`idle_cpu_needs_work` before recommending create bias or capacity changes.
+
+### Load-Shed False Positive On Idle Sticky Load
+
+Idle slaves can show `load_1m` well above cores after heavy jobs (e.g. Pico /
+Pica melt). That alone is not a reason to downscale the fleet or keep hard
+shed armed. Expect cool-off / idle_cool_escape in master logs. Only treat hard
+shed as capacity loss when the slave was working (`active_batches > 0` or
+working state) or RAM was low.
+
+### Creates Blocked By Proof-Phase Cap Saturation
+
+When many jobs sit at `merkle_root_ready=true` with proofs unfinished,
+`max_concurrent_benchmarks` fills and precommits return "pending benchmarks has
+reached max of N". Diagnose pending open jobs and proof backlog before cutting
+CPU create bias or blaming idle assignment. After operator mass-stops during
+API recovery, treat `unexpected_stopped_rate` as scar tissue for one clean
+window.
+
+### Claimable Vs Sticky Starvation
+
+High `unassigned_root_total` with low `claimable_root_total` and high
+`sticky_reserved_root_total` can idle newcomers while sticky owners are busy or
+offline. Do not recommend more creates until claimable work exists or sticky
+owners can absorb leftovers.
+
+### GPU Floor Blocks Idle-CPU Force
+
+`gpu_below_floor=True` with `idle_cpu=True` and `force_cpu_only=False` is
+expected: GPU floor refill can outrank idle-CPU create bias until the floor is
+met.
+
 ## 11. Safe Action Surface
 
 The AI may recommend changes to these keys, subject to deterministic validation.
@@ -696,8 +886,8 @@ Each live request to the AI should include:
   submitted proofs, and errors.
 - Recent Cloudflare/tunnel errors if available.
 - `derived_pool_facts`, which contains precomputed slot counts, active GPU slave
-  health notes, stale totals, and interpretation hints. Prefer these derived facts
-  over vague impressions when describing current health.
+  health notes, stale totals, ops live facts, and interpretation hints. Prefer
+  these derived facts over vague impressions when describing current health.
 - `derived_pool_facts.stale_totals` is authoritative for stale root/proof totals.
   Do not contradict it in summaries or evidence.
 - `derived_pool_facts.autopilot_recommendation_signals` is authoritative for
@@ -705,10 +895,15 @@ Each live request to the AI should include:
 - If `derived_pool_facts.stale_track_signals` is non-empty, the AI should include
   a concrete `recommended_actions` item to investigate or wait for stale cleanup
   on those tracks. Do not return empty actions with only `observe_only`.
+- `ops_metrics` / `derived_pool_facts.ops_live`: fill rate, instant vs sustained
+  idle, claimable vs sticky unassigned roots, create/finish rates, governor
+  block reasons, and `idle_cpu_needs_work`. Prefer sustained idle and claimable
+  roots when diagnosing CPU starvation.
 - `known_database_schema`, which lists the only database tables and columns that
   may be referenced.
 - `allowed_followup_checks`, which lists preferred check IDs and commands for
-  follow-up investigation.
+  follow-up investigation. Prefer `ops_metrics_snapshot` and
+  `pool_health_monitor` before inventing ad-hoc shell.
 
 ## 14. Known Database Schema
 
@@ -770,6 +965,18 @@ Use exact values when describing throughput.
   waiting for capacity, not blocked by broken stranded work.
 - Stale roots/proofs and active job filters matter more than historical leftover
   rows.
+- Prefer `ops_live.sustained_idle_cpu` over instant idle when claiming CPUs need
+  work. Instant idle can be between-batch flicker.
+- Cite `claimable_root_total` separately from `unassigned_root_total`. Sticky
+  reserved roots are not free lunch for newcomers.
+- `creates_15m == 0` with governor `at_max_concurrent` or block reason
+  `max_concurrent_benchmarks saturated` means the create gate is full — usually
+  proof-phase backlog — not that the algorithm picker is broken.
+- `safe_capacity_upscale` to a large theoretical max is advisory only. Never
+  recommend jumping from a crushed cap to fleet-theoretical capacity in one
+  step; respect step limits and upstream safe max.
+- After a known API outage + mass job stops, do not treat a high
+  `unexpected_stopped_rate` alone as proof the pool needs permanent drain.
 
 ## 16. Decision Categories
 
@@ -945,6 +1152,44 @@ Bad recommendation:
 
 - Increase all GPU slave caps globally without distinguishing C3 from local GPUs.
 
+### Sustained Idle CPUs With Cap Saturation
+
+Situation:
+
+- Many online CPUs, high `sustained_idle_cpu`, low fill rate.
+- `creates_15m` near zero.
+- Governor shows `max_concurrent_benchmarks saturated` and open jobs mostly
+  proof-phase (`merkle_root_ready` set).
+- Autopilot also shows a huge theoretical `safe_capacity_upscale` (e.g. to 100+).
+
+Good recommendation:
+
+- `observe_only` or `request_more_data` on proof backlog / open jobs by phase.
+- Do not recommend jumping max concurrent to the theoretical upscale.
+- After recovery stops, wait for a clean window before trusting stopped-rate.
+
+Bad recommendation:
+
+- "Safe to raise max_concurrent_benchmarks to 116 now."
+- "Downscale CPU caps because load_1m is high on idle boxes."
+
+### Sticky Roots Idle Newcomers
+
+Situation:
+
+- `unassigned_root_total` looks healthy.
+- `claimable_root_total` near zero; `sticky_reserved_root_total` high.
+- Sustained idle CPUs that never owned those jobs.
+
+Good recommendation:
+
+- Explain sticky reservation; do not invent a create storm.
+- Suggest monitoring sticky owners online / finishing, or wait for claimable.
+
+Bad recommendation:
+
+- Raise create caps solely because unassigned totals look large.
+
 ## 19. Operator Style
 
 The AI operator should be precise, conservative, and evidence-driven.
@@ -981,3 +1226,14 @@ It should avoid:
 - Every action must be validated, bounded, logged, and reversible.
 - TIG 0.0.7 requires `compute_type` on every `algo_selection` entry. Missing or
   invalid compute types should be treated as a configuration health issue.
+- Sustained idle (windowed) drives create bias / idle-CPU override; instant idle
+  is display-only.
+- `submit-precommit 200` is not a local job until confirmed precommit →
+  `creating job from confirmed precommit`.
+- Claimable roots feed newcomers; sticky-reserved roots prefer online owners.
+- Load-shed hard-locks working overloaded CPUs; idle+hot load uses short
+  cool-off and idle_cool_escape, not perpetual 10m starvation.
+- Theoretical fleet capacity is not an apply target; step and upstream safe max
+  bound every upscale.
+- AI remains recommend-only until operators explicitly enable a guarded apply
+  path after diagnosis quality is proven.

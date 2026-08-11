@@ -19,6 +19,7 @@ import requests
 
 from pool import autopilot
 from pool import database as db
+from pool import ops_metrics
 
 logger = logging.getLogger("pool.ai_optimizer")
 
@@ -340,7 +341,91 @@ def _normalize_gpu_stranded(stranded: dict) -> dict:
     return normalized
 
 
-def _derived_pool_facts(report: dict) -> dict:
+def _compact_ops_metrics(ops: dict | None) -> dict:
+    """Shrink ops metrics for the model prompt (no per-slave row spam)."""
+    if not ops:
+        return {}
+    slaves = ops.get("slaves") or {}
+    by_profile = slaves.get("by_profile") or {}
+    governor = ops.get("governor") or {}
+    creates = ops.get("creates") or {}
+    finishes = ops.get("finishes") or {}
+    idle_window = slaves.get("idle_window") or {}
+    return {
+        "fill_rate": slaves.get("fill_rate"),
+        "online": slaves.get("online"),
+        "instant_idle": slaves.get("idle"),
+        "sustained_idle": slaves.get("sustained_idle"),
+        "mean_idle_frac_window": slaves.get("mean_idle_frac_window"),
+        "by_profile": {
+            profile: {
+                "online": (by_profile.get(profile) or {}).get("online"),
+                "busy": (by_profile.get(profile) or {}).get("busy"),
+                "instant_idle": (by_profile.get(profile) or {}).get("idle"),
+                "sustained_idle": (by_profile.get(profile) or {}).get("sustained_idle"),
+                "mean_idle_frac_window": (by_profile.get(profile) or {}).get(
+                    "mean_idle_frac_window"
+                ),
+                "fill_rate": (by_profile.get(profile) or {}).get("fill_rate"),
+                "inflight": (by_profile.get(profile) or {}).get("inflight"),
+                "sum_caps": (by_profile.get(profile) or {}).get("sum_caps"),
+            }
+            for profile in ("cpu", "gpu")
+        },
+        "idle_window": {
+            "enabled": idle_window.get("enabled"),
+            "window_ms": idle_window.get("window_ms"),
+            "frac_threshold": idle_window.get("frac_threshold"),
+            "cpu": idle_window.get("cpu"),
+            "fleet": idle_window.get("fleet"),
+        },
+        "unassigned_root_total": ops.get("unassigned_root_total"),
+        "claimable_root_total": ops.get("claimable_root_total"),
+        "sticky_reserved_root_total": ops.get("sticky_reserved_root_total"),
+        "oldest_unassigned_root_age_min": ops.get("oldest_unassigned_root_age_min"),
+        "creates_15m": creates.get("creates_15m"),
+        "creates_60m": creates.get("creates_60m"),
+        "created_stopped_15m": creates.get("created_stopped_15m"),
+        "roots_done_15m": finishes.get("roots_done_15m"),
+        "roots_done_60m": finishes.get("roots_done_60m"),
+        "governor": {
+            "enabled": governor.get("enabled"),
+            "idle_cpu_needs_work": governor.get("idle_cpu_needs_work"),
+            "at_max_concurrent": governor.get("at_max_concurrent"),
+            "would_block_global": governor.get("would_block_global"),
+            "global_reason": governor.get("global_reason"),
+            "block_reasons": (governor.get("block_reasons") or [])[:8],
+            "profile_blocks": governor.get("profile_blocks"),
+            "counts": {
+                k: (governor.get("counts") or {}).get(k)
+                for k in (
+                    "open_jobs",
+                    "max_concurrent_benchmarks",
+                    "cpu_unassigned_claimable",
+                    "gpu_unassigned_claimable",
+                    "online_idle_cpu_slaves_instant",
+                    "sustained_idle_cpu_slaves",
+                    "cpu_jobs_needing_roots",
+                    "cpu_create_target",
+                    "gpu_slots_total",
+                    "roots_pending",
+                )
+            },
+        },
+        "config_snapshot": ops.get("config_snapshot") or {},
+        "fattest_open_jobs": (ops.get("fattest_open_jobs") or [])[:6],
+    }
+
+
+def _safe_ops_metrics() -> dict:
+    try:
+        return ops_metrics.build_ops_metrics() or {}
+    except Exception as exc:
+        logger.warning("ai_optimizer ops_metrics unavailable: %s", exc)
+        return {"error": str(exc)}
+
+
+def _derived_pool_facts(report: dict, ops: dict | None = None) -> dict:
     gpu_slaves = []
     cpu_slaves = []
     worker_trust = {
@@ -486,6 +571,37 @@ def _derived_pool_facts(report: dict) -> dict:
         and any(item.get("key") == "per_challenge_max_benchmarks" for item in safe_capacity_upscale)
     )
 
+    ops_live = _compact_ops_metrics(ops if isinstance(ops, dict) else None)
+    gov = ops_live.get("governor") or {}
+    gov_counts = gov.get("counts") or {}
+    creates_15m = ops_live.get("creates_15m")
+    claimable = ops_live.get("claimable_root_total")
+    sticky = ops_live.get("sticky_reserved_root_total")
+    sustained_cpu = ((ops_live.get("by_profile") or {}).get("cpu") or {}).get("sustained_idle")
+    instant_cpu = ((ops_live.get("by_profile") or {}).get("cpu") or {}).get("instant_idle")
+    create_gate_saturated = bool(gov.get("at_max_concurrent")) or any(
+        "max_concurrent_benchmarks saturated" in str(reason)
+        for reason in (gov.get("block_reasons") or [])
+    )
+    sticky_starvation_risk = (
+        claimable is not None
+        and sticky is not None
+        and int(claimable or 0) == 0
+        and int(sticky or 0) > 0
+        and int(sustained_cpu or 0) > 0
+    )
+    theoretical_upscale_only = False
+    for item in safe_capacity_upscale:
+        if item.get("key") != "max_concurrent_benchmarks":
+            continue
+        try:
+            current = int(item.get("current") or 0)
+            proposed = int(item.get("proposed") or 0)
+        except (TypeError, ValueError):
+            continue
+        if proposed >= current + 20 or (current > 0 and proposed >= current * 2):
+            theoretical_upscale_only = True
+
     return {
         "slot_state_counts": _slot_state_counts(report),
         "active_gpu_slaves": gpu_slaves,
@@ -508,6 +624,41 @@ def _derived_pool_facts(report: dict) -> dict:
         "stale_roots_tolerated_for_capacity_upscale": stale_roots_tolerated_for_capacity,
         "selective_challenge_upscale_allowed": selective_challenge_upscale_allowed,
         "productive_idle_stale_root_tolerance": autopilot.PRODUCTIVE_IDLE_STALE_ROOT_TOLERANCE,
+        "ops_live": ops_live,
+        "create_path": {
+            "creates_15m": creates_15m,
+            "creates_60m": ops_live.get("creates_60m"),
+            "created_stopped_15m": ops_live.get("created_stopped_15m"),
+            "roots_done_15m": ops_live.get("roots_done_15m"),
+            "idle_cpu_needs_work": gov.get("idle_cpu_needs_work"),
+            "create_gate_saturated": create_gate_saturated,
+            "open_jobs": gov_counts.get("open_jobs"),
+            "max_concurrent_benchmarks": gov_counts.get("max_concurrent_benchmarks"),
+            "governor_block_reasons": gov.get("block_reasons") or [],
+        },
+        "idle_telemetry": {
+            "instant_idle_cpu": instant_cpu,
+            "sustained_idle_cpu": sustained_cpu,
+            "mean_idle_frac_window_cpu": (
+                ((ops_live.get("by_profile") or {}).get("cpu") or {}).get("mean_idle_frac_window")
+            ),
+            "fill_rate_cpu": ((ops_live.get("by_profile") or {}).get("cpu") or {}).get("fill_rate"),
+            "prefer_sustained_over_instant": True,
+        },
+        "root_availability": {
+            "unassigned_root_total": ops_live.get("unassigned_root_total"),
+            "claimable_root_total": claimable,
+            "sticky_reserved_root_total": sticky,
+            "sticky_starvation_risk": sticky_starvation_risk,
+            "oldest_unassigned_root_age_min": ops_live.get("oldest_unassigned_root_age_min"),
+        },
+        "capacity_caution": {
+            "theoretical_upscale_not_apply_target": theoretical_upscale_only or bool(
+                safe_capacity_upscale
+            ),
+            "step_bounded_upscale_only": True,
+            "post_outage_stopped_rate_is_scar_tissue": True,
+        },
         "interpretation_hints": [
             "Do not describe a GPU slave with completed_recent >= 10 and stale_total == 0 as low throughput.",
             "A C3 GPU dispatcher with live_roots > 0 and completed_recent >= 10 is healthy unless stale work exists.",
@@ -522,6 +673,14 @@ def _derived_pool_facts(report: dict) -> dict:
             "Use worker_trust.active and worker_trust.capacity_eligible when discussing scaling readiness.",
             "Do not count registered-but-offline workers as active miners or capacity-eligible workers.",
             "Low-spec override workers should remain conservative unless recent clean completions prove them.",
+            "Prefer idle_telemetry.sustained_idle_cpu over instant idle when diagnosing CPU starvation or create bias.",
+            "If create_path.create_gate_saturated is true, diagnose proof-phase / open-job backlog before recommending create or capacity jumps.",
+            "If root_availability.sticky_starvation_risk is true, cite claimable vs sticky separately; do not treat unassigned_root_total as free work.",
+            "safe_capacity_upscale is advisory. Never recommend jumping from a crushed max_concurrent_benchmarks to fleet-theoretical capacity in one step.",
+            "Idle CPU boxes with high load_1m alone are not a downscale signal; load-shed uses cool-off/escape while idle.",
+            "submit-precommit HTTP 200 is not a local job until creating job from confirmed precommit appears.",
+            "After API outage recovery with mass stops, treat unexpected_stopped_rate as scar tissue for one clean window.",
+            "AI remains recommend-only; do not claim changes were applied.",
         ],
     }
 
@@ -537,6 +696,31 @@ def _allowed_followup_checks() -> list[dict]:
             "check_id": "ai_optimizer_json",
             "command": "python3 admin.py ai-optimizer --json",
             "purpose": "Show the full AI recommendation and evidence.",
+        },
+        {
+            "check_id": "ops_metrics_snapshot",
+            "command": "curl -sS -H \"X-Admin-Secret: $ADMIN_SECRET\" \"http://127.0.0.1:${WEB_PORT:-8080}/api/admin/ops/metrics\"",
+            "purpose": "Live fill rate, sustained idle, claimable/sticky roots, creates, and governor blocks.",
+        },
+        {
+            "check_id": "pool_health_monitor",
+            "command": "python3 tools/monitor_pool_health.py --summary-only",
+            "purpose": "Trend fill / idle / sustained idle / claimable over recent samples.",
+        },
+        {
+            "check_id": "create_path_logs",
+            "command": "docker compose logs --since 10m master | grep -Ei \"submit-precommit|submitted precommit|creating job|max of|Selecting algorithm|idle_cpu|force_cpu_only|gpu_below_floor|load-shed\"",
+            "purpose": "Verify create lag, idle-CPU bias, GPU floor, and load-shed cool-off/escape.",
+        },
+        {
+            "check_id": "open_jobs_by_phase",
+            "command": "docker compose exec -T db psql -U postgres -d innopool -c \"select count(*) filter (where merkle_root_ready is null) as root_phase, count(*) filter (where merkle_root_ready is not null and merkle_proofs_ready is null) as proof_phase, count(*) as open_jobs from job where merkle_proofs_ready is null and stopped is null;\"",
+            "purpose": "Split open jobs into root vs proof phase when creates are blocked.",
+        },
+        {
+            "check_id": "tig_api_liveness",
+            "command": "curl -sS -o /tmp/tig_block.json -w \"%{http_code}\" https://mainnet-api.tig.foundation/get-block && echo && head -c 200 /tmp/tig_block.json",
+            "purpose": "Confirm TIG API reachability before blaming local create path.",
         },
         {
             "check_id": "gpu_slot_detail",
@@ -675,17 +859,23 @@ def _compact_autopilot_report(report: dict, derived: dict) -> dict:
         "safe_capacity_upscale": derived.get("safe_capacity_upscale"),
         "workload_safety_reductions": derived.get("workload_safety_reductions"),
         "root_backlog_drain_available": derived.get("root_backlog_drain_available"),
+        "create_path": derived.get("create_path"),
+        "idle_telemetry": derived.get("idle_telemetry"),
+        "root_availability": derived.get("root_availability"),
+        "capacity_caution": derived.get("capacity_caution"),
         "recommendations": recommendations[:30],
     }
 
 
 def _build_prompt_payload(report: dict) -> dict:
-    derived = _derived_pool_facts(report)
+    ops = _safe_ops_metrics()
+    derived = _derived_pool_facts(report, ops=ops)
     return {
         "generated_at_ms": int(time.time() * 1000),
         "mode": AI_OPTIMIZER_MODE,
         "autopilot_report": _compact_autopilot_report(report, derived),
         "derived_pool_facts": derived,
+        "ops_metrics": derived.get("ops_live") or {},
         "known_database_schema": {table: sorted(cols) for table, cols in KNOWN_SCHEMA.items()},
         "allowed_action_contract": _allowed_action_contract(),
         "allowed_followup_checks": _allowed_followup_checks(),
@@ -693,11 +883,20 @@ def _build_prompt_payload(report: dict) -> dict:
         "recent_ai_optimizer_decisions": _recent_ai_decisions(),
         "instructions": {
             "output": "Return strict JSON only. Follow the schema in the context document.",
-            "apply_policy": "Read-only analysis. Do not claim any change has been applied.",
+            "apply_policy": "Read-only analysis. Do not claim any change has been applied. Guarded apply is not enabled.",
             "if_uncertain": "Use request_more_data or observe_only.",
             "sql_policy": "Do not invent SQL. Prefer allowed_followup_checks check_id values. If SQL is included, it must use only known_database_schema tables and columns.",
-            "accuracy_policy": "Use derived_pool_facts for throughput statements; do not call healthy GPU completion counts low throughput.",
+            "accuracy_policy": (
+                "Use derived_pool_facts for throughput, create_path, idle_telemetry, and "
+                "root_availability statements. Prefer sustained idle over instant idle. "
+                "Cite claimable vs sticky separately. Treat theoretical safe_capacity_upscale "
+                "as advisory only, not an apply target."
+            ),
             "contract_policy": "Use only allowed_action_contract action types and config keys; unsupported suggestions will be blocked.",
+            "monitoring_policy": (
+                "Prefer follow-up check_ids ops_metrics_snapshot, pool_health_monitor, "
+                "create_path_logs, and open_jobs_by_phase when diagnosing idle CPUs or no creates."
+            ),
         },
     }
 
@@ -762,6 +961,9 @@ def _ensure_evidence_metric(recommendation: dict, metric: str, value: int, inter
 def _deterministic_summary(derived: dict) -> str:
     stale_totals = derived.get("stale_totals") or {}
     stranded = derived.get("stranded_classification") or {}
+    create_path = derived.get("create_path") or {}
+    idle_telem = derived.get("idle_telemetry") or {}
+    root_avail = derived.get("root_availability") or {}
     stale_roots = int(stale_totals.get("roots") or 0)
     stale_proofs = int(stale_totals.get("proofs") or 0)
     unserved_count = len(stranded.get("unserved") or [])
@@ -774,6 +976,26 @@ def _deterministic_summary(derived: dict) -> str:
     parts.append(
         f"Stranded classification: unserved={unserved_count}, capacity_waiting={capacity_waiting_count}."
     )
+    if idle_telem:
+        parts.append(
+            "Idle telemetry: "
+            f"sustained_idle_cpu={idle_telem.get('sustained_idle_cpu')}, "
+            f"instant_idle_cpu={idle_telem.get('instant_idle_cpu')}."
+        )
+    if create_path:
+        parts.append(
+            "Create path: "
+            f"creates_15m={create_path.get('creates_15m')}, "
+            f"create_gate_saturated={create_path.get('create_gate_saturated')}, "
+            f"idle_cpu_needs_work={create_path.get('idle_cpu_needs_work')}."
+        )
+    if root_avail:
+        parts.append(
+            "Roots: "
+            f"claimable={root_avail.get('claimable_root_total')}, "
+            f"sticky={root_avail.get('sticky_reserved_root_total')}, "
+            f"sticky_starvation_risk={root_avail.get('sticky_starvation_risk')}."
+        )
     if stale_track_count:
         parts.append(f"{stale_track_count} active track(s) need stale-work investigation.")
     if unserved_count:
@@ -871,6 +1093,100 @@ def _enforce_recommendation_consistency(recommendation: dict, prompt_context: di
             "Deterministic autopilot reported stale active tracks that need investigation or drain handling.",
         )
 
+    create_path = derived.get("create_path") or {}
+    idle_telem = derived.get("idle_telemetry") or {}
+    root_avail = derived.get("root_availability") or {}
+    create_gate_saturated = bool(create_path.get("create_gate_saturated"))
+    sticky_starvation_risk = bool(root_avail.get("sticky_starvation_risk"))
+    sustained_idle_cpu = idle_telem.get("sustained_idle_cpu")
+    claimable_roots = root_avail.get("claimable_root_total")
+    sticky_roots = root_avail.get("sticky_reserved_root_total")
+    creates_15m = create_path.get("creates_15m")
+    if creates_15m is not None:
+        _ensure_evidence_metric(
+            recommendation,
+            "ops_creates_15m",
+            int(creates_15m or 0),
+            f"Ops metrics: creates_15m={creates_15m}; create_gate_saturated={create_gate_saturated}.",
+        )
+    if sustained_idle_cpu is not None:
+        _ensure_evidence_metric(
+            recommendation,
+            "ops_sustained_idle_cpu",
+            int(sustained_idle_cpu or 0),
+            (
+                f"Ops metrics: sustained_idle_cpu={sustained_idle_cpu}, "
+                f"instant_idle_cpu={idle_telem.get('instant_idle_cpu')}; prefer sustained."
+            ),
+        )
+    if claimable_roots is not None or sticky_roots is not None:
+        _ensure_evidence_metric(
+            recommendation,
+            "ops_claimable_vs_sticky_roots",
+            {
+                "claimable_root_total": claimable_roots,
+                "sticky_reserved_root_total": sticky_roots,
+                "unassigned_root_total": root_avail.get("unassigned_root_total"),
+            },
+            (
+                "Claimable roots feed newcomers; sticky-reserved roots prefer online owners. "
+                f"sticky_starvation_risk={sticky_starvation_risk}."
+            ),
+        )
+
+    # Block one-shot jumps of max_concurrent_benchmarks when create gate is full
+    # or the proposed jump is theoretical fleet capacity.
+    if create_gate_saturated or sticky_starvation_risk:
+        actions = recommendation.get("recommended_actions") or []
+        blocked_actions = recommendation.setdefault("blocked_actions", [])
+        if not isinstance(blocked_actions, list):
+            blocked_actions = []
+            recommendation["blocked_actions"] = blocked_actions
+        kept = []
+        for action in actions:
+            if not isinstance(action, dict):
+                kept.append(action)
+                continue
+            key = action.get("key")
+            action_type = action.get("action_type")
+            if key == "max_concurrent_benchmarks" and action_type in CONFIG_ACTION_TYPES:
+                blocked = dict(action)
+                if create_gate_saturated:
+                    blocked["reason"] = (
+                        "Create gate is saturated (open jobs at max_concurrent_benchmarks). "
+                        "Diagnose proof-phase backlog before raising the global cap; "
+                        "theoretical fleet upscale is not an apply target."
+                    )
+                else:
+                    blocked["reason"] = (
+                        "Sticky-reserved roots dominate while sustained idle CPUs have no "
+                        "claimable work. Raising max_concurrent_benchmarks will not feed newcomers."
+                    )
+                blocked_actions.append(blocked)
+                warnings.append({
+                    "field": "recommended_actions",
+                    "reason": "blocked_max_concurrent_while_create_or_sticky_blocked",
+                    "create_gate_saturated": create_gate_saturated,
+                    "sticky_starvation_risk": sticky_starvation_risk,
+                })
+                continue
+            kept.append(action)
+        recommendation["recommended_actions"] = kept
+        if create_gate_saturated and recommendation.get("decision_category") == "safe_config_change":
+            recommendation["decision_category"] = "investigate"
+            recommendation.setdefault("queries_to_run_next", [])
+            queries = recommendation["queries_to_run_next"]
+            if isinstance(queries, list):
+                have = {q.get("check_id") for q in queries if isinstance(q, dict)}
+                for check_id, purpose in (
+                    ("open_jobs_by_phase", "Split open jobs into root vs proof phase."),
+                    ("create_path_logs", "Confirm create gate / load-shed / idle-cpu bias."),
+                    ("ops_metrics_snapshot", "Refresh sustained idle and governor blocks."),
+                ):
+                    if check_id not in have:
+                        queries.append({"check_id": check_id, "purpose": purpose})
+
+    if stale_track_signals:
         deduped_stale_tracks = []
         seen_stale_track_keys = set()
         for signal in stale_track_signals:
