@@ -65,6 +65,9 @@ Implemented in `master/cpu_tier_caps.py` + `slave_manager._adaptive_max_concurre
    - **Load (idle cool-off):** if idle/`active=0` but load is still hot, hold
      assigns for `CPU_LOAD_SHED_IDLE_COOL_MS` (default 60s) instead of a 10m
      lock or an immediate re-feed. Clear fully once load drops under threshold.
+     After `CPU_LOAD_SHED_IDLE_MAX_MS` (default 180s) idle while still hot,
+     escape and allow the next job (`reason=idle_cool_escape`) so sticky load
+     averages cannot starve a box forever.
    - **RAM:** `free_ram_gb < 4` still sheds even when idle (OOM risk).
    - Stock slaves without runtime telem keep the legacy load-only rule.
    - Toggle: `CPU_LOAD_SHED_REQUIRE_ACTIVE=true` (default).

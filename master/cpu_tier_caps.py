@@ -36,6 +36,9 @@ DEFAULT_LOAD_SHED_COOLDOWN_MS = 10 * 60 * 1000
 # After a finish, if load is still over shed threshold, hold assigns this long
 # instead of a full 10m lock or an immediate re-feed into a melting box.
 DEFAULT_LOAD_SHED_IDLE_COOL_MS = 60 * 1000
+# If still idle+hot after this many ms, stop cool-off and allow the next job
+# (load average can stick high on Picas long after InnoPool work ends).
+DEFAULT_LOAD_SHED_IDLE_MAX_MS = 180 * 1000
 
 
 def _env_bool(name: str, default: str = "true") -> bool:
@@ -118,6 +121,18 @@ def cpu_tier_cap_settings(config: Optional[Mapping[str, Any]] = None) -> dict:
                     os.environ.get(
                         "CPU_LOAD_SHED_IDLE_COOL_MS",
                         str(DEFAULT_LOAD_SHED_IDLE_COOL_MS),
+                    ),
+                )
+            ),
+        ),
+        "load_shed_idle_max_ms": max(
+            0,
+            int(
+                cfg.get(
+                    "cpu_load_shed_idle_max_ms",
+                    os.environ.get(
+                        "CPU_LOAD_SHED_IDLE_MAX_MS",
+                        str(DEFAULT_LOAD_SHED_IDLE_MAX_MS),
                     ),
                 )
             ),

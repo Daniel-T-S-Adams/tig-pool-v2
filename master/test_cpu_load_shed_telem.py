@@ -102,6 +102,13 @@ def test_idle_high_load_not_hard_shed_but_over_threshold():
     assert telemetry_load_over_shed(telem, SETTINGS) is True
 
 
+def test_idle_max_ms_setting_present():
+    from master.cpu_tier_caps import cpu_tier_cap_settings
+
+    s = cpu_tier_cap_settings({})
+    assert int(s.get("load_shed_idle_max_ms") or 0) >= 60_000
+
+
 if __name__ == "__main__":
     test_idle_high_load_does_not_shed()
     test_running_high_load_does_shed()
@@ -109,4 +116,5 @@ if __name__ == "__main__":
     test_idle_low_ram_still_sheds()
     test_require_active_can_disable()
     test_idle_high_load_not_hard_shed_but_over_threshold()
+    test_idle_max_ms_setting_present()
     print("ok")

@@ -34,8 +34,9 @@ Headers: `X-InnoPool-Cores`, `X-InnoPool-Num-Workers`, `X-InnoPool-Load-1m`,
 
 Runtime (v1.5) fields drive load-shed gating: high `load_1m` hard-sheds while
 `active_batches > 0` / working `state` (timer not reset every poll). Idle with
-load still hot gets a short cool-off (`CPU_LOAD_SHED_IDLE_COOL_MS`); clear when
-load drops. Low `free_ram_gb` still sheds when idle.
+load still hot gets a short cool-off (`CPU_LOAD_SHED_IDLE_COOL_MS`); after
+`CPU_LOAD_SHED_IDLE_MAX_MS` escape and allow work even if load is still hot;
+clear immediately when load drops. Low `free_ram_gb` still sheds when idle.
 
 **Headroom rule:** `cores / num_workers >= 1.25` (~80% workers) and
 `load_1m <= cores * 0.85`. Then L/XL may earn concurrent **2**. While a slave is

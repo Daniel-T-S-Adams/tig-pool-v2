@@ -261,6 +261,10 @@ class SlaveManager:
         # Optional get-batches telemetry (Phase C) + load-shed cooldown per slave.
         self._slave_telemetry: Dict[str, dict] = {}
         self._cpu_load_shed_until: Dict[str, int] = {}
+        # When idle+hot but last_idle_ms missing, track local idle-hot start.
+        self._cpu_idle_hot_since: Dict[str, int] = {}
+        # Idle+hot slaves that already used the cool-off escape this idle episode.
+        self._cpu_idle_cool_escaped: Set[str] = set()
         # get-batches was running full slot sync/release/assign + affinity SQL on
         # EVERY poll. With dozens of idle slaves at 1Hz that saturates Postgres
         # and drives 40-60s latency / slave timeouts. Throttle + short TTL caches.
@@ -997,6 +1001,10 @@ class SlaveManager:
         if _slave_profile(slave_name) != "cpu":
             return
         prev = int(self._cpu_load_shed_until.get(slave_name) or 0)
+        if telem_slave_is_working(telemetry) is True:
+            # New work episode — cool-off escape applies only while idle.
+            self._cpu_idle_cool_escaped.discard(slave_name)
+            self._cpu_idle_hot_since.pop(slave_name, None)
         if telemetry_requires_load_shed(telemetry, tier_settings):
             # Arm once per overload episode — do not reset the 10m clock on every
             # poll while still hot (that permanently extended shed before).
@@ -1023,6 +1031,32 @@ class SlaveManager:
         ):
             if telemetry_load_over_shed(telemetry, tier_settings):
                 cool_ms = int(tier_settings.get("load_shed_idle_cool_ms") or 0)
+                max_idle_ms = int(tier_settings.get("load_shed_idle_max_ms") or 0)
+                idle_age_ms = self._telem_idle_age_ms(
+                    slave_name, telemetry, int(now_ms)
+                )
+                # Already escaped this idle episode — stay assignable, no re-cool.
+                if slave_name in self._cpu_idle_cool_escaped:
+                    if prev > int(now_ms):
+                        del self._cpu_load_shed_until[slave_name]
+                    return
+                # Escape hatch: load can stick >shed for many minutes after
+                # InnoPool work ends. After max idle age, allow the next assign.
+                if max_idle_ms > 0 and idle_age_ms >= max_idle_ms:
+                    if prev > int(now_ms):
+                        del self._cpu_load_shed_until[slave_name]
+                    self._cpu_idle_cool_escaped.add(slave_name)
+                    logger.info(
+                        "cpu load-shed cleared slave=%s reason=idle_cool_escape "
+                        "state=%s active=%s load_1m=%s idle_age_ms=%s max_ms=%s",
+                        slave_name,
+                        telemetry.get("state"),
+                        telemetry.get("active_batches"),
+                        telemetry.get("load_1m"),
+                        idle_age_ms,
+                        max_idle_ms,
+                    )
+                    return
                 if cool_ms <= 0:
                     if prev > int(now_ms):
                         del self._cpu_load_shed_until[slave_name]
@@ -1041,14 +1075,18 @@ class SlaveManager:
                     self._cpu_load_shed_until[slave_name] = until
                     logger.info(
                         "cpu load-shed cool-off slave=%s state=%s active=%s "
-                        "load_1m=%s until_in_ms=%s (load still hot while idle)",
+                        "load_1m=%s idle_age_ms=%s until_in_ms=%s "
+                        "(load still hot while idle)",
                         slave_name,
                         telemetry.get("state"),
                         telemetry.get("active_batches"),
                         telemetry.get("load_1m"),
+                        idle_age_ms,
                         cool_ms,
                     )
                 return
+            self._cpu_idle_cool_escaped.discard(slave_name)
+            self._cpu_idle_hot_since.pop(slave_name, None)
             if prev > int(now_ms):
                 remaining = prev - int(now_ms)
                 del self._cpu_load_shed_until[slave_name]
@@ -1061,6 +1099,32 @@ class SlaveManager:
                     telemetry.get("load_1m"),
                     remaining,
                 )
+
+    def _telem_idle_age_ms(
+        self, slave_name: str, telemetry: dict, now_ms: int
+    ) -> int:
+        """Best-effort current idle age for cool-off escape.
+
+        Prefers telem ``last_idle_ms`` while idle; otherwise accumulates local
+        time since we first observed idle+hot on this slave.
+        """
+        working = telem_slave_is_working(telemetry)
+        if working is not False:
+            self._cpu_idle_hot_since.pop(slave_name, None)
+            return 0
+        try:
+            last_idle = telemetry.get("last_idle_ms")
+            if last_idle is not None and str(telemetry.get("state") or "").lower() == "idle":
+                age = int(last_idle)
+                if age >= 0:
+                    return age
+        except (TypeError, ValueError):
+            pass
+        since = int(self._cpu_idle_hot_since.get(slave_name) or 0)
+        if since <= 0:
+            self._cpu_idle_hot_since[slave_name] = int(now_ms)
+            return 0
+        return max(0, int(now_ms) - since)
 
     def _telem_active_batches(self, slave_name: str, now_ms: int) -> Optional[int]:
         """Fresh get-batches active_batches, or None if telem missing/stale."""
