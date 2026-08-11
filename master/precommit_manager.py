@@ -331,6 +331,8 @@ class PrecommitManager:
         self.challenge_name_2_id = {}
         self._governor_cache = None
         self._governor_cache_until_ms = 0
+        # Read by master/main.py idle-burst loop.
+        self.last_idle_cpu_needs_work = False
 
     def on_new_block(self, block: Block, **kwargs):
         self.last_block_id = block.id
@@ -638,10 +640,12 @@ class PrecommitManager:
         num_pending_benchmarks = num_pending_jobs + self.num_precommits_submitted
         if  num_pending_benchmarks >= CONFIG["max_concurrent_benchmarks"]:
             logger.debug(f"number of pending benchmarks has reached max of {CONFIG['max_concurrent_benchmarks']}")
+            self.last_idle_cpu_needs_work = False
             return
 
         governor = self._governor_snapshot()
         idle_cpu_needs_work = bool(governor.get("idle_cpu_needs_work"))
+        self.last_idle_cpu_needs_work = idle_cpu_needs_work
         governor_reason = ""
         profile_blocks = governor.get("profile_blocks") or {"cpu": False, "gpu": False}
         if governor.get("enabled"):
@@ -654,6 +658,7 @@ class PrecommitManager:
             )
             if block:
                 logger.info("precommit governor blocked create: %s", governor_reason)
+                self.last_idle_cpu_needs_work = False
                 return
             if governor_reason.startswith("idle_cpu_override:"):
                 logger.info(
