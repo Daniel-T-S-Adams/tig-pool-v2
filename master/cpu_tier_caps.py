@@ -33,6 +33,9 @@ DEFAULT_LOAD_OK_MULT = 0.85
 DEFAULT_LOAD_SHED_MULT = 1.25
 DEFAULT_MIN_FREE_RAM_GB = 4.0
 DEFAULT_LOAD_SHED_COOLDOWN_MS = 10 * 60 * 1000
+# After a finish, if load is still over shed threshold, hold assigns this long
+# instead of a full 10m lock or an immediate re-feed into a melting box.
+DEFAULT_LOAD_SHED_IDLE_COOL_MS = 60 * 1000
 
 
 def _env_bool(name: str, default: str = "true") -> bool:
@@ -106,6 +109,18 @@ def cpu_tier_cap_settings(config: Optional[Mapping[str, Any]] = None) -> dict:
             bool(cfg["load_shed_require_active"])
             if "load_shed_require_active" in cfg
             else _env_bool("CPU_LOAD_SHED_REQUIRE_ACTIVE", "true")
+        ),
+        "load_shed_idle_cool_ms": max(
+            0,
+            int(
+                cfg.get(
+                    "cpu_load_shed_idle_cool_ms",
+                    os.environ.get(
+                        "CPU_LOAD_SHED_IDLE_COOL_MS",
+                        str(DEFAULT_LOAD_SHED_IDLE_COOL_MS),
+                    ),
+                )
+            ),
         ),
         "live_telemetry_enabled": _env_bool("CAPABILITY_LIVE_TELEMETRY", "true")
         or bool(cfg.get("live_telemetry_enabled")),

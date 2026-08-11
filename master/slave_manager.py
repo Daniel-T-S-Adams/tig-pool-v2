@@ -29,6 +29,7 @@ from master.cpu_tier_caps import (
     effective_cpu_adaptive_max_cap,
     parse_slave_telemetry,
     telem_slave_is_working,
+    telemetry_load_over_shed,
     telemetry_ram_critical,
     telemetry_requires_load_shed,
 )
@@ -995,11 +996,13 @@ class SlaveManager:
             return
         if _slave_profile(slave_name) != "cpu":
             return
+        prev = int(self._cpu_load_shed_until.get(slave_name) or 0)
         if telemetry_requires_load_shed(telemetry, tier_settings):
-            until = now_ms + int(tier_settings.get("load_shed_cooldown_ms") or 0)
-            prev = int(self._cpu_load_shed_until.get(slave_name) or 0)
-            if until > prev:
-                self._cpu_load_shed_until[slave_name] = until
+            # Arm once per overload episode — do not reset the 10m clock on every
+            # poll while still hot (that permanently extended shed before).
+            if prev <= int(now_ms):
+                cool = int(tier_settings.get("load_shed_cooldown_ms") or 0)
+                self._cpu_load_shed_until[slave_name] = int(now_ms) + cool
                 logger.info(
                     "cpu load-shed armed slave=%s state=%s active=%s cores=%s "
                     "load_1m=%s free_ram_gb=%s until_in_ms=%s",
@@ -1009,28 +1012,55 @@ class SlaveManager:
                     telemetry.get("cores"),
                     telemetry.get("load_1m"),
                     telemetry.get("free_ram_gb"),
-                    int(tier_settings.get("load_shed_cooldown_ms") or 0),
+                    cool,
                 )
             return
-        # Runtime telem says idle: clear residual load-shed so lagging load_1m
-        # after a finish cannot keep concurrent=0 for the full cooldown.
-        # Memory-critical still arms above; do not clear while RAM is unsafe.
+        # Idle (or not working): never keep a full 10m residual lock, but also
+        # do not re-feed a melting box while load_1m is still over threshold.
         if (
             telem_slave_is_working(telemetry) is False
             and not telemetry_ram_critical(telemetry, tier_settings)
-            and slave_name in self._cpu_load_shed_until
         ):
-            remaining = int(self._cpu_load_shed_until.get(slave_name) or 0) - int(now_ms)
-            del self._cpu_load_shed_until[slave_name]
-            logger.info(
-                "cpu load-shed cleared slave=%s reason=idle_telemetry "
-                "state=%s active=%s load_1m=%s remaining_ms_was=%s",
-                slave_name,
-                telemetry.get("state"),
-                telemetry.get("active_batches"),
-                telemetry.get("load_1m"),
-                max(0, remaining),
-            )
+            if telemetry_load_over_shed(telemetry, tier_settings):
+                cool_ms = int(tier_settings.get("load_shed_idle_cool_ms") or 0)
+                if cool_ms <= 0:
+                    if prev > int(now_ms):
+                        del self._cpu_load_shed_until[slave_name]
+                        logger.info(
+                            "cpu load-shed cleared slave=%s reason=idle_telemetry "
+                            "state=%s active=%s load_1m=%s",
+                            slave_name,
+                            telemetry.get("state"),
+                            telemetry.get("active_batches"),
+                            telemetry.get("load_1m"),
+                        )
+                    return
+                until = int(now_ms) + cool_ms
+                # Shorten a hard shed to the idle cool-off; arm cool-off if none.
+                if prev <= int(now_ms) or prev > until:
+                    self._cpu_load_shed_until[slave_name] = until
+                    logger.info(
+                        "cpu load-shed cool-off slave=%s state=%s active=%s "
+                        "load_1m=%s until_in_ms=%s (load still hot while idle)",
+                        slave_name,
+                        telemetry.get("state"),
+                        telemetry.get("active_batches"),
+                        telemetry.get("load_1m"),
+                        cool_ms,
+                    )
+                return
+            if prev > int(now_ms):
+                remaining = prev - int(now_ms)
+                del self._cpu_load_shed_until[slave_name]
+                logger.info(
+                    "cpu load-shed cleared slave=%s reason=idle_load_ok "
+                    "state=%s active=%s load_1m=%s remaining_ms_was=%s",
+                    slave_name,
+                    telemetry.get("state"),
+                    telemetry.get("active_batches"),
+                    telemetry.get("load_1m"),
+                    remaining,
+                )
 
     def _telem_active_batches(self, slave_name: str, now_ms: int) -> Optional[int]:
         """Fresh get-batches active_batches, or None if telem missing/stale."""

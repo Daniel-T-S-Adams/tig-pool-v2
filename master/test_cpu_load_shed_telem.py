@@ -87,10 +87,26 @@ def test_require_active_can_disable():
     assert telemetry_requires_load_shed(telem, settings) is True
 
 
+def test_idle_high_load_not_hard_shed_but_over_threshold():
+    """Hard shed path is false; caller applies short idle cool-off separately."""
+    from master.cpu_tier_caps import telemetry_load_over_shed
+
+    telem = {
+        "cores": 32,
+        "load_1m": 208.0,
+        "free_ram_gb": 29.0,
+        "state": "idle",
+        "active_batches": 0,
+    }
+    assert telemetry_requires_load_shed(telem, SETTINGS) is False
+    assert telemetry_load_over_shed(telem, SETTINGS) is True
+
+
 if __name__ == "__main__":
     test_idle_high_load_does_not_shed()
     test_running_high_load_does_shed()
     test_stock_slave_legacy_load_shed()
     test_idle_low_ram_still_sheds()
     test_require_active_can_disable()
+    test_idle_high_load_not_hard_shed_but_over_threshold()
     print("ok")

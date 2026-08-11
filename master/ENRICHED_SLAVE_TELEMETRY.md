@@ -59,14 +59,14 @@ Implemented in `master/cpu_tier_caps.py` + `slave_manager._adaptive_max_concurre
 1. Parse optional telemetry on each `/get-batches` poll; ignore invalid values.
 2. Refresh `HardwareTier` with live `cores`/`ram_gb` when present (override stale preflight).
 3. Soft load-shed:
-   - **Load:** `load_1m > cores * 1.25` only arms shed while runtime telem says
-     the slave is working (`active_batches > 0` or `state` in
-     `running`/`downloading`/`submitting`). Idle + high lagging load does **not**
-     arm (and clears any residual cooldown). Stock slaves without runtime telem
-     keep the legacy load-only rule.
+   - **Load (hard):** `load_1m > cores * 1.25` while runtime telem says the
+     slave is working. Arms once per episode (`CPU_LOAD_SHED_COOLDOWN_MS`,
+     default 10m) — polls do **not** reset the timer.
+   - **Load (idle cool-off):** if idle/`active=0` but load is still hot, hold
+     assigns for `CPU_LOAD_SHED_IDLE_COOL_MS` (default 60s) instead of a 10m
+     lock or an immediate re-feed. Clear fully once load drops under threshold.
    - **RAM:** `free_ram_gb < 4` still sheds even when idle (OOM risk).
-   - Cooldown: `CPU_LOAD_SHED_COOLDOWN_MS` (default 10m), including fleet/Pica
-     boxes whose normal ceiling is already 1.
+   - Stock slaves without runtime telem keep the legacy load-only rule.
    - Toggle: `CPU_LOAD_SHED_REQUIRE_ACTIVE=true` (default).
 4. L/XL earnable concurrent ceiling (default 2) only when
    `CPU_CONCURRENT_REQUIRES_TELEMETRY=true` (default) **and** headroom evidence
