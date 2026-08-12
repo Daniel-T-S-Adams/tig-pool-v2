@@ -17,6 +17,7 @@ PRECOMMIT_IDLE_BURST = max(1, int(os.environ.get("PRECOMMIT_IDLE_BURST", "4")))
 
 def main():
     last_block_id = None
+    last_data_generation = None
 
     client_manager = ClientManager()
     client_manager.start()
@@ -32,8 +33,13 @@ def main():
     while True:
         try:
             data = data_fetcher.run()
-            if data["block"].id != last_block_id:
+            generation = data.get("generation")
+            if (
+                data["block"].id != last_block_id
+                or generation != last_data_generation
+            ):
                 last_block_id = data["block"].id
+                last_data_generation = generation
                 client_manager.on_new_block(**data)
                 job_manager.on_new_block(**data)
                 submissions_manager.on_new_block(**data)

@@ -1,14 +1,43 @@
-import requests
 import json
 import logging
 import os
+import threading
+from concurrent.futures import ThreadPoolExecutor
+from typing import Any, Dict, Optional
+
+import requests
 from common.structs import *
 from common.utils import *
-from typing import Dict, Any, Optional
-from concurrent.futures import ThreadPoolExecutor
 from master.client_manager import CONFIG
 
 logger = logging.getLogger(os.path.splitext(os.path.basename(__file__))[0])
+
+def light_payload_from_cache(block, prev: Optional[dict], generation: int) -> dict:
+    """New block header plus last-good TIG maps. Does not wait on tracks."""
+    src = prev or {
+        "algorithms": {},
+        "binarys": {},
+        "precommits": {},
+        "benchmarks": {},
+        "proofs": {},
+        "frauds": {},
+        "challenges": {},
+        "tracks_data": {},
+    }
+    return {
+        "block": block,
+        "algorithms": src.get("algorithms") or {},
+        "binarys": src.get("binarys") or {},
+        "precommits": src.get("precommits") or {},
+        "benchmarks": src.get("benchmarks") or {},
+        "proofs": src.get("proofs") or {},
+        "frauds": src.get("frauds") or {},
+        "challenges": src.get("challenges") or {},
+        "tracks_data": src.get("tracks_data") or {},
+        "generation": int(generation),
+        "complete": False,
+    }
+
 
 def _get(url: str) -> Dict[str, Any]:
     logger.debug(f"Fetching from {url}")
@@ -42,6 +71,10 @@ class DataFetcher:
     def __init__(self):
         self.last_fetch = 0
         self._cache = None
+        self._lock = threading.Lock()
+        self._generation = 0
+        self._bg_thread = None
+        self._bg_block_id = None
 
     def run(self) -> dict:
         config = CONFIG
@@ -49,15 +82,72 @@ class DataFetcher:
         block_data = _get(f"{config['api_url']}/get-block")
         block = Block.from_dict(block_data["block"])
 
-        if self._cache is not None and block.id == self._cache["block"].id:
-            logger.debug("no new block data")
-            return self._cache
+        with self._lock:
+            cache = self._cache
+            if cache is not None and block.id == cache["block"].id:
+                return cache
 
+        light = self._publish_light(block)
+        self._start_background_fetch(block, config)
+        return light
+
+    def _publish_light(self, block) -> dict:
+        with self._lock:
+            self._generation += 1
+            payload = light_payload_from_cache(block, self._cache, self._generation)
+            self._cache = payload
+        logger.info(
+            "new block @ height %s, creating with cached TIG data while fetch continues",
+            block.details.height,
+        )
+        return payload
+
+    def _start_background_fetch(self, block, config) -> None:
+        if (
+            self._bg_thread is not None
+            and self._bg_thread.is_alive()
+            and self._bg_block_id == block.id
+        ):
+            return
+        self._bg_block_id = block.id
+        self._bg_thread = threading.Thread(
+            target=self._background_fetch,
+            args=(block, config),
+            daemon=True,
+            name=f"tig-fetch-{block.details.height}",
+        )
+        self._bg_thread.start()
+
+    def _background_fetch(self, block, config) -> None:
+        try:
+            payload = self._fetch_full(block, config)
+        except Exception as exc:
+            logger.warning(
+                "background TIG fetch failed for height %s: %s",
+                block.details.height,
+                exc,
+            )
+            return
+        with self._lock:
+            current = self._cache
+            if current is not None and current["block"].id != block.id:
+                logger.info(
+                    "discarding stale background fetch for height %s",
+                    block.details.height,
+                )
+                return
+            self._generation += 1
+            payload["generation"] = self._generation
+            payload["complete"] = True
+            self._cache = payload
+        logger.info("background TIG fetch complete for height %s", block.details.height)
+
+    def _fetch_full(self, block, config) -> dict:
         logger.info(f"new block @ height {block.details.height}, fetching data")
         tasks = [
             f"{config['api_url']}/get-algorithms?block_id={block.id}",
             f"{config['api_url']}/get-benchmarks?player_id={config['player_id']}&block_id={block.id}",
-            f"{config['api_url']}/get-challenges?block_id={block.id}"
+            f"{config['api_url']}/get-challenges?block_id={block.id}",
         ]
 
         with ThreadPoolExecutor(max_workers=4) as executor:
@@ -76,9 +166,6 @@ class DataFetcher:
             if c["state"]["round_active"] <= block.details.round
         }
 
-        # Fetch difficulty data for each challenge — use _get_safe so a single
-        # API timeout logs a clean warning and falls back to cached data instead
-        # of crashing the master with a full traceback.
         tracks_urls = [
             f"{config['api_url']}/get-tracks-data?block_id={block.id}&challenge_id={c_id}"
             for c_id in challenges
@@ -87,22 +174,32 @@ class DataFetcher:
         with ThreadPoolExecutor(max_workers=4) as executor:
             tracks_responses = list(executor.map(_get_safe, tracks_urls))
 
+        with self._lock:
+            prev_tracks = (self._cache or {}).get("tracks_data") or {}
+
         if any(r is None for r in tracks_responses):
-            logger.warning("WARNING - TIG API tracks fetch incomplete — using cached data for this cycle")
-            if self._cache is not None:
-                return self._cache
-            # No cache yet: substitute empty track data so we don't crash
-            tracks_responses = [r if r is not None else {"data": {}} for r in tracks_responses]
-
-        tracks_data = {
-            c_id: {
-                track_id: [TrackData.from_dict(x) for x in v]
-                for track_id, v in resp["data"].items()
+            logger.warning("WARNING - TIG API tracks fetch incomplete — using cached tracks")
+            if prev_tracks:
+                tracks_data = prev_tracks
+            else:
+                tracks_responses = [r if r is not None else {"data": {}} for r in tracks_responses]
+                tracks_data = {
+                    c_id: {
+                        track_id: [TrackData.from_dict(x) for x in v]
+                        for track_id, v in resp["data"].items()
+                    }
+                    for c_id, resp in zip(challenges, tracks_responses)
+                }
+        else:
+            tracks_data = {
+                c_id: {
+                    track_id: [TrackData.from_dict(x) for x in v]
+                    for track_id, v in resp["data"].items()
+                }
+                for c_id, resp in zip(challenges, tracks_responses)
             }
-            for c_id, resp in zip(challenges, tracks_responses)
-        }
 
-        self._cache = {
+        return {
             "block": block,
             "algorithms": algorithms,
             "binarys": binarys,
@@ -111,6 +208,5 @@ class DataFetcher:
             "proofs": proofs,
             "frauds": frauds,
             "challenges": challenges,
-            "tracks_data": tracks_data
+            "tracks_data": tracks_data,
         }
-        return self._cache
