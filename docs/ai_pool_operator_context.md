@@ -355,7 +355,13 @@ Autopilot is expected to scale proportionally with fleet size:
   room faster than a single-slot nudge, within configured step limits.
 - Active GPU workers and C3 dispatchers reserve benchmark room so CPU work cannot
   consume the whole global benchmark cap.
-- `c004`, `c005`, and `c006` caps should rise with GPU slot capacity when GPU
+- GPU resource slots and `c004` / `c005` / `c006` caps follow live
+  capacity-eligible GPU **slave headcount** both up and down (stepped on apply).
+  They no longer ratchet to a historical high when GPUs leave. Targets stay at
+  least as high as currently busy GPU slots and the configured `gpu_slot_floor`.
+  (C3 multi-GPU weighting is still future work; today one GPU slave name = one
+  unit.)
+- `c004`, `c005`, and `c006` caps should track proposed GPU slot capacity when GPU
   workers are active.
 - CPU challenge caps such as `c001`, `c002`, `c003`, `c007`, and `c008` should
   also rise with CPU slot capacity. Otherwise `max_concurrent_benchmarks` can be
