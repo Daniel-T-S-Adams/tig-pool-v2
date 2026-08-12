@@ -33,6 +33,25 @@ def main() -> int:
         ok = got == expect
         print(f"{'pass' if ok else 'FAIL'}: {label} -> {got} (want {expect})")
         failed += 0 if ok else 1
+
+    # Wallet-split: each slave gets a slice of *that wallet's* coinbase,
+    # not of the whole pool. Two wallets, same pool nonce pile.
+    wallet_a_tig, wallet_a_nonces = 37.42, 1000
+    a1 = fn(600, wallet_a_nonces, wallet_a_tig)
+    a2 = fn(400, wallet_a_nonces, wallet_a_tig)
+    wallet_b_tig, wallet_b_nonces = 10.0, 500
+    b1 = fn(500, wallet_b_nonces, wallet_b_tig)
+    pool_wrong_a1 = fn(600, 1500, wallet_a_tig + wallet_b_tig)
+    ok = (
+        abs((a1 + a2) - wallet_a_tig) < 1e-9
+        and abs(b1 - wallet_b_tig) < 1e-9
+        and a1 != pool_wrong_a1
+    )
+    print(
+        f"{'pass' if ok else 'FAIL'}: wallet rows sum to that wallet's TIG "
+        f"-> a={a1}+{a2}={a1+a2} (want {wallet_a_tig}), b={b1}"
+    )
+    failed += 0 if ok else 1
     return 2 if failed else 0
 
 

@@ -102,7 +102,7 @@
 
     <div class="card worker-earnings-card" style="margin-top:24px;">
       <h2>Worker earnings <span class="section-sub" style="display:inline;margin-left:8px;font-weight:500;">this round · approximate</span></h2>
-      <p id="worker-earnings-note" class="section-sub" style="margin:8px 0 14px;">Payouts stay per wallet. This splits the round’s member TIG by each slave’s completed root nonces.</p>
+      <p id="worker-earnings-note" class="section-sub" style="margin:8px 0 14px;">Payouts stay per wallet. Each slave’s TIG is that wallet’s coinbase split by the slave’s share of the wallet’s completed root nonces.</p>
       <div class="table-scroll worker-earnings-scroll">
         <table class="data-table compact">
           <thead>
@@ -110,7 +110,7 @@
               <th>Worker</th>
               <th>Type</th>
               <th>Nonces</th>
-              <th>Share</th>
+              <th>Wallet share</th>
               <th>Est. TIG</th>
             </tr>
           </thead>
@@ -351,7 +351,7 @@
             <td class="mono" title="${escapeHtml(row.slave_name || "")}">${escapeHtml(row.slave_name || "—")}</td>
             <td>${(row.worker_type || "cpu").toUpperCase()}</td>
             <td>${fmtNum(row.nonces || 0)}</td>
-            <td>${Number(row.share_pct || 0).toFixed(2)}%</td>
+            <td>${Number(row.wallet_share_pct || 0).toFixed(2)}%</td>
             <td class="mono">${fmtTig(row.est_tig)}</td>
           </tr>
         `).join("");
@@ -632,7 +632,7 @@
         const tigEl = document.createElement("div");
         tigEl.className = "mono";
         tigEl.textContent = fmtTig(slave.est_tig_round);
-        tigEl.title = `${fmtNum(slave.nonces_round || 0)} nonces this round · ${Number(slave.share_pct_round || 0).toFixed(2)}% of pool`;
+        tigEl.title = `${fmtNum(slave.nonces_round || 0)} nonces this round · ${Number(slave.share_pct_round || 0).toFixed(2)}% of this wallet`;
         tigEl.style.cssText = "justify-self:end;font-weight:700;color:var(--cyan);";
         row.appendChild(tigEl);
 

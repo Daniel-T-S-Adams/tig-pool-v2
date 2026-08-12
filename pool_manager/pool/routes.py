@@ -525,6 +525,7 @@ def get_worker_earnings():
                 "batches": int(row.get("batches") or 0),
                 "nonces": int(row.get("nonces") or 0),
                 "share_pct": float(row.get("share_pct") or 0),
+                "wallet_share_pct": float(row.get("wallet_share_pct") or 0),
                 "est_tig": float(row.get("est_tig") or 0),
             }
         )
@@ -864,7 +865,7 @@ def get_member_stats(wallet_address: str):
                 "last_activity_ms": int((slave_activity.get(r["slave_name"]) or {}).get("last_activity_ms") or 0),
                 "nonces_round": int((earnings_by_slave.get(r["slave_name"]) or {}).get("nonces") or 0),
                 "batches_round": int((earnings_by_slave.get(r["slave_name"]) or {}).get("batches") or 0),
-                "share_pct_round": float((earnings_by_slave.get(r["slave_name"]) or {}).get("share_pct") or 0),
+                "share_pct_round": float((earnings_by_slave.get(r["slave_name"]) or {}).get("wallet_share_pct") or 0),
                 "est_tig_round": float((earnings_by_slave.get(r["slave_name"]) or {}).get("est_tig") or 0),
             }
             for r in members

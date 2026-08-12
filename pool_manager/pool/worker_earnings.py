@@ -1,9 +1,10 @@
 """
 Display-only per-slave TIG estimates.
 
-Payouts stay per wallet via /set-coinbase. This module splits the current
-round's member coinbase by each registered slave's completed root nonces —
-the same work unit used for wallet allocation.
+Payouts stay per wallet via /set-coinbase. Each slave's estimate is that
+wallet's current-round coinbase TIG, split by the slave's share of the
+wallet's completed root nonces. A member's slave rows therefore sum to
+that member's coinbase, not to a pool-wide slice of it.
 """
 from __future__ import annotations
 
@@ -98,22 +99,31 @@ def build_worker_earnings(
     api_url = (cfg.get("api_url") or "https://mainnet-api.tig.foundation").rstrip("/")
 
     member_tig = 0.0
+    coinbase_map: dict[str, float] = {}
     if round_num is not None and player_id and not player_id.startswith("0x000000"):
-        _total, coinbase_map = fetch_round_coinbase(api_url, player_id, round_num, False)
-        if coinbase_map:
-            member_tig = round(sum(float(v or 0) for v in coinbase_map.values()), 6)
+        _total, fetched_map = fetch_round_coinbase(api_url, player_id, round_num, False)
+        if fetched_map:
+            coinbase_map = {
+                str(addr).lower(): float(amt or 0)
+                for addr, amt in fetched_map.items()
+            }
+            member_tig = round(sum(coinbase_map.values()), 6)
         elif _total:
             member_tig = round(float(_total) * max(0.0, 1.0 - float(pool_fee or 0)), 6)
 
     workers = []
     total_nonces = 0
+    wallet_nonces: dict[str, int] = {}
     for member in members:
         name = member.get("slave_name")
         if not name:
             continue
         stats = work.get(name) or {"batches": 0, "nonces": 0}
         nonces = int(stats["nonces"])
+        wallet = (member.get("wallet_address") or "").strip().lower()
         total_nonces += nonces
+        if wallet:
+            wallet_nonces[wallet] = wallet_nonces.get(wallet, 0) + nonces
         workers.append(
             {
                 "slave_name": name,
@@ -125,14 +135,21 @@ def build_worker_earnings(
             }
         )
 
-    # Work from a slave name that is no longer in pool_members does not pay
-    # (tracker skips it). Do not show it as earning TIG.
-
+    # Payouts are per wallet. Each slave's estimate is that wallet's coinbase
+    # TIG split by the slave's share of the wallet's completed root nonces.
     for row in workers:
+        wallet = (row.get("wallet_address") or "").strip().lower()
+        w_nonces = int(wallet_nonces.get(wallet, 0) or 0)
+        wallet_tig = float(coinbase_map.get(wallet, 0) or 0)
+        if wallet_tig <= 0 and w_nonces > 0 and member_tig > 0:
+            wallet_tig = allocate_tig(w_nonces, total_nonces, member_tig)
         row["share_pct"] = (
             round((row["nonces"] / total_nonces) * 100, 4) if total_nonces > 0 else 0.0
         )
-        row["est_tig"] = allocate_tig(row["nonces"], total_nonces, member_tig)
+        row["wallet_share_pct"] = (
+            round((row["nonces"] / w_nonces) * 100, 4) if w_nonces > 0 else 0.0
+        )
+        row["est_tig"] = allocate_tig(row["nonces"], w_nonces, wallet_tig)
 
     workers.sort(key=lambda r: (-float(r["est_tig"]), -int(r["nonces"]), r["slave_name"] or ""))
 
@@ -145,8 +162,8 @@ def build_worker_earnings(
         "worker_count": len(workers),
         "note": (
             "Approximate. Payouts are per wallet at round claim. "
-            "This splits the current round's member coinbase by each slave's "
-            "completed root nonces."
+            "Each slave's TIG is that wallet's current-round coinbase split by "
+            "the slave's share of the wallet's completed root nonces."
         ),
         "workers": workers,
     }
