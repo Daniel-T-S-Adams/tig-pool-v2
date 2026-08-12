@@ -71,6 +71,17 @@ class SubmissionsManager:
         }
         if submission_type == "precommit":
             logger.info(f"submitting {submission_type}")
+            # TIG only accepts latest or second-latest block_id. The 5s loop
+            # (and a slow slave_manager.run) can leave last_block_id stale.
+            try:
+                block_data = requests.get(f"{api_url}/get-block", timeout=10).json()
+                latest = (block_data.get("block") or {}).get("id")
+                old = getattr(req.settings, "block_id", None)
+                if latest and old != latest:
+                    req.settings.block_id = latest
+                    logger.info("precommit block_id refreshed %s -> %s", old, latest)
+            except Exception as exc:
+                logger.warning("precommit block_id refresh failed: %s", exc)
         else:
             logger.info(f"submitting {submission_type} '{req.benchmark_id}'")
         logger.debug(f"{req}")
