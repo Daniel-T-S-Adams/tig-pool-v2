@@ -8,7 +8,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
-  <link rel="stylesheet" href="/static/style.css?v=4" />
+  <link rel="stylesheet" href="/static/style.css?v=5" />
 </head>
 <body>
 
@@ -100,6 +100,27 @@
       </div>
     </div>
 
+    <div class="card worker-earnings-card" style="margin-top:24px;">
+      <h2>Worker earnings <span class="section-sub" style="display:inline;margin-left:8px;font-weight:500;">this round · approximate</span></h2>
+      <p id="worker-earnings-note" class="section-sub" style="margin:8px 0 14px;">Payouts stay per wallet. This splits the round’s member TIG by each slave’s completed root nonces.</p>
+      <div class="table-scroll worker-earnings-scroll">
+        <table class="data-table compact">
+          <thead>
+            <tr>
+              <th>Worker</th>
+              <th>Type</th>
+              <th>Nonces</th>
+              <th>Share</th>
+              <th>Est. TIG</th>
+            </tr>
+          </thead>
+          <tbody id="worker-earnings-body">
+            <tr><td colspan="5" class="loading">Loading worker earnings...</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
     <hr class="divider dashboard-divider" />
 
     <h2 class="section-title">Member Dashboard</h2>
@@ -133,6 +154,13 @@
         <div class="slave-summary-head" style="display:flex;justify-content:space-between;gap:12px;color:var(--muted);font-size:11px;font-weight:600;letter-spacing:.5px;margin-bottom:8px;text-transform:uppercase;">
           <span>Registered Slaves</span>
           <span id="d-slave-count">—</span>
+        </div>
+        <div style="display:grid;grid-template-columns:74px minmax(0,1fr) 92px 108px 78px;gap:10px;padding:0 0 6px;color:var(--muted);font-size:10px;font-weight:700;letter-spacing:.4px;text-transform:uppercase;">
+          <span>Type</span>
+          <span>Worker</span>
+          <span style="text-align:right;">Est. TIG</span>
+          <span style="text-align:right;">Trust</span>
+          <span style="text-align:right;">Status</span>
         </div>
         <div id="d-slaves"></div>
       </div>
@@ -280,6 +308,56 @@
     function readableChallenge(value) {
       if (!value) return "—";
       return value.replace(/_/g, " ");
+    }
+
+    function fmtTig(value) {
+      if (value == null || value === "") return "—";
+      const n = Number(value);
+      if (!Number.isFinite(n)) return "—";
+      if (n === 0) return "0";
+      if (Math.abs(n) >= 1) return n.toFixed(3);
+      if (Math.abs(n) >= 0.01) return n.toFixed(4);
+      return n.toFixed(6);
+    }
+
+    function escapeHtml(value) {
+      return String(value ?? "")
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;");
+    }
+
+    async function loadWorkerEarnings() {
+      const body = document.getElementById("worker-earnings-body");
+      const note = document.getElementById("worker-earnings-note");
+      try {
+        const resp = await fetch("/api/worker-earnings");
+        if (!resp.ok) throw new Error("worker earnings request failed");
+        const data = await resp.json();
+        const workers = data.workers || [];
+        const fee = data.pool_fee_pct == null ? "" : ` Pool fee ${data.pool_fee_pct}%.`;
+        note.textContent =
+          `${data.note || "Approximate split of this round’s member TIG by completed root nonces."}` +
+          ` Round ${data.round ?? "—"} · ${fmtTig(data.pool_member_tig)} TIG to members so far.${fee}`;
+
+        if (!workers.length) {
+          body.innerHTML = '<tr><td colspan="5" class="loading">No registered workers yet</td></tr>';
+          return;
+        }
+
+        body.innerHTML = workers.map((row) => `
+          <tr>
+            <td class="mono" title="${escapeHtml(row.slave_name || "")}">${escapeHtml(row.slave_name || "—")}</td>
+            <td>${(row.worker_type || "cpu").toUpperCase()}</td>
+            <td>${fmtNum(row.nonces || 0)}</td>
+            <td>${Number(row.share_pct || 0).toFixed(2)}%</td>
+            <td class="mono">${fmtTig(row.est_tig)}</td>
+          </tr>
+        `).join("");
+      } catch (_) {
+        body.innerHTML = '<tr><td colspan="5" class="loading">Could not load worker earnings</td></tr>';
+      }
     }
 
     async function loadPoolHealth() {
@@ -528,7 +606,7 @@
       visibleSlaves.forEach((slave) => {
         const type = inferSlaveType(slave);
         const row = document.createElement("div");
-        row.style.cssText = "display:grid;grid-template-columns:74px minmax(0,1fr) 108px 78px;gap:10px;align-items:center;padding:7px 0;border-top:1px solid rgba(255,255,255,0.05);font-size:12px;";
+        row.style.cssText = "display:grid;grid-template-columns:74px minmax(0,1fr) 92px 108px 78px;gap:10px;align-items:center;padding:7px 0;border-top:1px solid rgba(255,255,255,0.05);font-size:12px;";
 
         const typeEl = document.createElement("div");
         typeEl.textContent = type.toUpperCase();
@@ -550,6 +628,13 @@
           nameWrap.appendChild(subEl);
         }
         row.appendChild(nameWrap);
+
+        const tigEl = document.createElement("div");
+        tigEl.className = "mono";
+        tigEl.textContent = fmtTig(slave.est_tig_round);
+        tigEl.title = `${fmtNum(slave.nonces_round || 0)} nonces this round · ${Number(slave.share_pct_round || 0).toFixed(2)}% of pool`;
+        tigEl.style.cssText = "justify-self:end;font-weight:700;color:var(--cyan);";
+        row.appendChild(tigEl);
 
         const trustEl = document.createElement("div");
         const trust = slaveTrustStatus(slave);
@@ -673,7 +758,9 @@
     }
 
     loadPoolHealth();
+    loadWorkerEarnings();
     setInterval(loadPoolHealth, REFRESH_MS);
+    setInterval(loadWorkerEarnings, REFRESH_MS);
   </script>
 </body>
 </html>

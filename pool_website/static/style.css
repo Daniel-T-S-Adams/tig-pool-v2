@@ -486,6 +486,17 @@ code, pre, .mono {
 .health-panels .card { min-width: 0; }
 .challenge-pressure-card { min-width: 0; }
 .dashboard-divider { margin: 4px 0 44px; }
+.worker-earnings-card { min-width: 0; }
+.worker-earnings-scroll { max-height: 480px; }
+.worker-earnings-card .data-table.compact th:nth-child(1) { width: 44%; }
+.worker-earnings-card .data-table.compact th:nth-child(2) { width: 10%; }
+.worker-earnings-card .data-table.compact th:nth-child(3) { width: 16%; }
+.worker-earnings-card .data-table.compact th:nth-child(4) { width: 12%; }
+.worker-earnings-card .data-table.compact th:nth-child(5) { width: 18%; }
+.worker-earnings-card .data-table.compact td:nth-child(1) {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
 .table-scroll {
   max-height: 360px;
   overflow-y: auto;

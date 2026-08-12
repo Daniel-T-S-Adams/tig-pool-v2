@@ -1,7 +1,7 @@
 """
 Pool Manager HTTP Routes
 ========================
-Public routes:  /stats, /members, /member/{wallet}, /leaderboard
+Public routes:  /stats, /members, /member/{wallet}, /leaderboard, /worker-earnings
 Admin routes:   /admin/invite, /admin/members, /admin/ops/metrics (require X-Admin-Secret header)
 Registration:   /register (requires valid invite code)
 """
@@ -17,7 +17,7 @@ from decimal import Decimal
 from fastapi import APIRouter, HTTPException, Header
 from pydantic import BaseModel
 from . import database as db
-from . import autopilot, ai_optimizer, ops_metrics
+from . import autopilot, ai_optimizer, ops_metrics, worker_earnings
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -505,6 +505,41 @@ def _member_earnings(wallet: str, rounds: int) -> dict:
     }
 
 
+@router.get("/worker-earnings")
+def get_worker_earnings():
+    """
+    Public, display-only per-slave TIG estimates for the current round.
+    Does not change coinbase or payouts.
+    """
+    payload = worker_earnings.build_worker_earnings(
+        pool_fee=POOL_FEE,
+        fetch_round_coinbase=_fetch_round_coinbase_map,
+    )
+    public_workers = []
+    for row in payload.get("workers") or []:
+        public_workers.append(
+            {
+                "slave_name": row.get("slave_name"),
+                "worker_type": _infer_worker_type(row.get("slave_name") or "", row.get("worker_type")),
+                "active": bool(row.get("active")),
+                "batches": int(row.get("batches") or 0),
+                "nonces": int(row.get("nonces") or 0),
+                "share_pct": float(row.get("share_pct") or 0),
+                "est_tig": float(row.get("est_tig") or 0),
+            }
+        )
+    return {
+        "round": payload.get("round"),
+        "round_start_ms": payload.get("round_start_ms"),
+        "pool_member_tig": payload.get("pool_member_tig"),
+        "pool_fee_pct": payload.get("pool_fee_pct"),
+        "total_nonces": payload.get("total_nonces"),
+        "worker_count": payload.get("worker_count"),
+        "note": payload.get("note"),
+        "workers": public_workers,
+    }
+
+
 @router.get("/member-earnings")
 def get_member_earnings(wallet: str, rounds: int = 8):
     """
@@ -799,9 +834,21 @@ def get_member_stats(wallet_address: str):
         )
         slave_activity = {r["slave_name"]: r for r in activity_rows}
 
+    earnings_payload = worker_earnings.build_worker_earnings(
+        pool_fee=POOL_FEE,
+        fetch_round_coinbase=_fetch_round_coinbase_map,
+    )
+    earnings_by_slave = worker_earnings.earnings_by_slave(earnings_payload)
+
     return {
         "wallet_address": member["wallet_address"],
         "slave_name": member["slave_name"],
+        "round_earnings": {
+            "round": earnings_payload.get("round"),
+            "pool_member_tig": earnings_payload.get("pool_member_tig"),
+            "pool_fee_pct": earnings_payload.get("pool_fee_pct"),
+            "note": earnings_payload.get("note"),
+        },
         "slaves": [
             {
                 "slave_name": r["slave_name"],
@@ -815,6 +862,10 @@ def get_member_stats(wallet_address: str):
                 "active_roots": int((slave_activity.get(r["slave_name"]) or {}).get("active_roots") or 0),
                 "active_proofs": int((slave_activity.get(r["slave_name"]) or {}).get("active_proofs") or 0),
                 "last_activity_ms": int((slave_activity.get(r["slave_name"]) or {}).get("last_activity_ms") or 0),
+                "nonces_round": int((earnings_by_slave.get(r["slave_name"]) or {}).get("nonces") or 0),
+                "batches_round": int((earnings_by_slave.get(r["slave_name"]) or {}).get("batches") or 0),
+                "share_pct_round": float((earnings_by_slave.get(r["slave_name"]) or {}).get("share_pct") or 0),
+                "est_tig_round": float((earnings_by_slave.get(r["slave_name"]) or {}).get("est_tig") or 0),
             }
             for r in members
         ],
