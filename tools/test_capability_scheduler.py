@@ -26,6 +26,7 @@ def main() -> int:
     blend_hardness = ns["blend_hardness"]
     should_skip_hard_for_weak = ns["should_skip_hard_for_weak"]
     assign_rank_tuple = ns["assign_rank_tuple"]
+    prefer_shorter_rank_key = ns["prefer_shorter_rank_key"]
     precommit_hardness_weight_mult = ns["precommit_hardness_weight_mult"]
     algo_is_schedulable = ns["algo_is_schedulable"]
     min_tier_for_hardness = ns["min_tier_for_hardness"]
@@ -164,6 +165,40 @@ def main() -> int:
         hard_min_tier=TIER_L,
     )
     cases.append((strong_key < weak_key, "XL ranks ahead of S on hard first-owner"))
+
+    slow_hard = prefer_shorter_rank_key(
+        hardness=0.9, slave_speed_ratio=2.0, job_age_ms=0, original_idx=0
+    )
+    slow_easy = prefer_shorter_rank_key(
+        hardness=0.3, slave_speed_ratio=2.0, job_age_ms=0, original_idx=1
+    )
+    cases.append((slow_easy < slow_hard, "slow slave prefers easier track"))
+    fast_hard = prefer_shorter_rank_key(
+        hardness=0.9, slave_speed_ratio=0.7, job_age_ms=0, original_idx=0
+    )
+    fast_easy = prefer_shorter_rank_key(
+        hardness=0.3, slave_speed_ratio=0.7, job_age_ms=0, original_idx=1
+    )
+    cases.append((fast_hard < fast_easy, "fast slave prefers harder track"))
+    avg_a = prefer_shorter_rank_key(
+        hardness=0.9, slave_speed_ratio=1.0, job_age_ms=0, original_idx=0
+    )
+    avg_b = prefer_shorter_rank_key(
+        hardness=0.3, slave_speed_ratio=1.0, job_age_ms=0, original_idx=1
+    )
+    cases.append((avg_a < avg_b, "unknown speed stays FIFO by original_idx"))
+    sticky = prefer_shorter_rank_key(
+        hardness=0.9,
+        slave_speed_ratio=2.0,
+        job_age_ms=0,
+        original_idx=5,
+        sticky_own=True,
+    )
+    cases.append((sticky < slow_easy, "sticky/finish-root stays ahead of ranking"))
+    aged_hard = prefer_shorter_rank_key(
+        hardness=0.9, slave_speed_ratio=2.0, job_age_ms=60 * 60 * 1000, original_idx=0
+    )
+    cases.append((aged_hard < slow_easy, "hour-old hard job rises above new easy"))
 
     mult_ok = precommit_hardness_weight_mult(
         hardness=0.9,

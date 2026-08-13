@@ -20,6 +20,7 @@ from master.capability_scheduler import (
     SCHEDULER as CAPABILITY_SCHEDULER,
     assign_rank_tuple,
     capability_settings,
+    prefer_shorter_rank_key,
     should_skip_hard_for_weak,
     update_slave_track_ema,
 )
@@ -1863,6 +1864,8 @@ class SlaveManager:
         """Permanent hot path: memory assign + background AssignViews only.
 
         No adaptive/capability/artifact/finish-root SQL on the request path.
+        Roots are ranked from cached hardness/speed (no skip): slow slaves
+        see easier tracks first; fast slaves see hard tracks first.
         """
         views = self._get_assign_views()
         route_cap = int(slave["max_concurrent_batches"])
@@ -2050,9 +2053,57 @@ class SlaveManager:
             if not per_bench_cap or per_bench_cap < 1:
                 per_bench_cap = max(1, max_concurrent // 4) if max_concurrent else 1
 
-            # Pass 1: proofs this slave can build. Pass 2: roots.
-            for want_proof in (True, False):
-                for b in self.batches:
+            # Rank roots only (no skip). Proofs keep list order. Slow slaves
+            # see easier tracks first; fast slaves see hard tracks first.
+            cap_enabled = bool(views.cap_enabled)
+            cap_views = views.cap_views or {}
+            job_meta = views.job_meta or {}
+            root_rows = list(self.batches)
+            if cap_enabled:
+                def _fast_root_key(item):
+                    idx, row = item
+                    batch = row.get("batch") or {}
+                    if batch.get("sampled_nonces") is not None:
+                        return (3, 0.0, idx)
+                    bid = str(batch.get("benchmark_id") or "")
+                    meta = job_meta.get(bid) or {}
+                    challenge = batch.get("challenge") or meta.get("challenge") or ""
+                    settings = batch.get("settings") or {}
+                    track_id = settings.get("track_id") or meta.get("track_id") or ""
+                    hardness = CAPABILITY_SCHEDULER.track_hardness(
+                        challenge, track_id, views=cap_views
+                    )
+                    speed = CAPABILITY_SCHEDULER.slave_speed_ratio(
+                        slave_name, challenge, track_id, views=cap_views
+                    )
+                    start_time = meta.get("start_time")
+                    try:
+                        job_age_ms = int(now) - int(start_time) if start_time is not None else 0
+                    except (TypeError, ValueError):
+                        job_age_ms = 0
+                    sticky_own = (
+                        row.get("end_time") is None
+                        and (
+                            bid in finish_root_bids
+                            or root_affinity.get(bid) == slave_name
+                        )
+                    )
+                    return prefer_shorter_rank_key(
+                        hardness=hardness,
+                        slave_speed_ratio=speed,
+                        job_age_ms=job_age_ms,
+                        original_idx=idx,
+                        sticky_own=sticky_own,
+                        overflow=bid in overflow_benchmark_ids,
+                    )
+
+                root_rows = [
+                    row for _, row in sorted(enumerate(self.batches), key=_fast_root_key)
+                ]
+
+            # Pass 1: proofs this slave can build. Pass 2: ranked roots.
+            for want_proof, rows in ((True, self.batches), (False, root_rows)):
+                for b in rows:
                     if len(concurrent) >= max_concurrent:
                         break
                     if b.get("end_time") is not None:

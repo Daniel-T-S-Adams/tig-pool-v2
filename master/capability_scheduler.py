@@ -395,6 +395,34 @@ def assign_rank_tuple(
     )
 
 
+def prefer_shorter_rank_key(
+    *,
+    hardness: float,
+    slave_speed_ratio: float,
+    job_age_ms: int,
+    original_idx: int,
+    sticky_own: bool = False,
+    overflow: bool = False,
+) -> tuple:
+    """FAST-path root order: lower is better. Does not skip any root.
+
+    Slow slaves (speed_ratio > 1) see hard tracks later; fast slaves see them
+    sooner. Unknown/average speed (1.0) is FIFO among open roots, plus age so
+    a long-waiting hard job still rises. Sticky own / finish-root and overflow
+    leftovers stay ahead of ranking.
+    """
+    if sticky_own:
+        bucket = 0
+    elif overflow:
+        bucket = 1
+    else:
+        bucket = 2
+    speed = float(slave_speed_ratio) if slave_speed_ratio and slave_speed_ratio > 0 else 1.0
+    age_boost = min(2.0, float(max(0, int(job_age_ms))) / float(60 * 60 * 1000))
+    prefer = float(hardness) * (speed - 1.0) - age_boost
+    return (bucket, prefer, int(original_idx))
+
+
 def precommit_hardness_weight_mult(
     *,
     hardness: float,
