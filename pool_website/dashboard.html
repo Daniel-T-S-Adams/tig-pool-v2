@@ -462,10 +462,22 @@
         const data  = await mResp.json();
         const stats = sResp.ok ? await sResp.json() : null;
 
-        // Status badge
+        // Status badge: live assignment / recent batch activity, not only
+        // contribution snapshots (a long CPU batch can be working for >5 min
+        // before a snapshot credits the wallet).
         const lastContrib = data.recent_contributions[0];
-        const lastMs = lastContrib ? lastContrib.snapshot_end_ms : null;
-        const isActive = lastMs && (Date.now() - lastMs) < 5 * 60 * 1000;
+        const slavesForBadge = data.slaves || [];
+        const anyWorking = slavesForBadge.some((s) => slaveRuntimeStatus(s).key === "working");
+        const latestSlaveMs = Math.max(
+          0,
+          ...slavesForBadge.map((s) => Number(s.last_activity_ms || 0)),
+        );
+        const lastMs = Math.max(
+          lastContrib ? Number(lastContrib.snapshot_end_ms || 0) : 0,
+          latestSlaveMs,
+        ) || null;
+        const isActive =
+          anyWorking || (lastMs && (Date.now() - lastMs) < 10 * 60 * 1000);
         const badge = document.getElementById("d-status-badge");
         const dot   = document.getElementById("d-status-dot");
         const txt   = document.getElementById("d-status-text");
