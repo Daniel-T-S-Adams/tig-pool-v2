@@ -362,8 +362,10 @@ Autopilot is expected to scale proportionally with fleet size:
   capacity-eligible GPU **slave headcount** both up and down (stepped on apply).
   They no longer ratchet to a historical high when GPUs leave. Targets stay at
   least as high as currently busy GPU slots and the configured `gpu_slot_floor`.
-  C3 dispatchers count as `num_workers` (or their route cap if telemetry is
-  missing), not as a single laptop GPU. Local single-GPU slaves stay 1 unit.
+  C3 `num_workers` sizes concurrent **root batches** and the C3 route cap, not
+  the number of GPU benchmarks. Job/slot/`c004`/`c005`/`c006` caps still follow
+  GPU slave headcount plus `gpu_slot_floor`. A 12-GPU dispatcher should share a
+  few fat jobs, not open 12 separate precommits.
 - `c004`, `c005`, and `c006` caps should track proposed GPU slot capacity when GPU
   workers are active.
 - CPU challenge caps such as `c001`, `c002`, `c003`, `c007`, and `c008` should

@@ -457,9 +457,8 @@ def _is_c3_slave(slave_name: str) -> bool:
 def _gpu_units(slave: dict, cfg: dict | None = None) -> int:
     """How many parallel GPU workers one slave name represents.
 
-    A C3 dispatcher is one User-Agent controlling many remote GPUs. Count
-    reported num_workers, then the matching route cap, so 12-GPU C3 is not
-    treated as a single laptop.
+    Used for C3 route/batch concurrency only. Do not turn this into a
+    benchmark-job target — 12 C3 GPUs share roots on a few jobs.
     """
     name = str(slave.get("slave_name") or "")
     if (slave.get("profile") or _slave_profile(name)) != "gpu":
@@ -2550,10 +2549,9 @@ def _target_resource_slots(capacity: dict) -> dict:
             proposed[slot_type] = int(gpu_slot_floor.get(slot_type, 0) or 0)
         return proposed
 
-    active_gpu = max(
-        1,
-        int(capacity.get("active_gpu_units") or capacity.get("active_gpu") or 0),
-    )
+    # Job/slot count follows GPU slave names, not C3 worker count. Twelve C3
+    # GPUs share root batches on a few benchmarks; they do not need 12 jobs.
+    active_gpu = max(1, int(capacity.get("active_gpu") or 0))
     gpu_target_total = active_gpu
     if capacity["productive_idle_gpu"] >= PRODUCTIVE_IDLE_GPU_SCALE_MIN:
         extra_slots = max(
@@ -2641,7 +2639,7 @@ def _live_worker_floor_max_concurrent(capacity: dict) -> int:
     """
     aws_cpu_jobs = int(capacity.get("aws_cpu_jobs") or 0)
     active_cpu = int(capacity.get("active_cpu") or 0)
-    active_gpu = int(capacity.get("active_gpu_units") or capacity.get("active_gpu") or 0)
+    active_gpu = int(capacity.get("active_gpu") or 0)
     cpu_pressure = int(capacity.get("cpu_pressure") or 0)
     gpu_pressure = int(capacity.get("gpu_pressure") or 0)
     # Prefer observed in-flight work / AWS batch jobs over raw slave counts so a
@@ -2747,7 +2745,7 @@ def _capacity_floor_max_concurrent(capacity: dict, proposed_slots: dict | None =
     cpu_floor = max(aws_cpu_jobs, cpu_slots if active_cpu else 0)
 
     gpu_slots = sum(int(proposed_slots.get(k, 0) or 0) for k in GPU_SLOT_TYPES)
-    active_gpu = int(capacity.get("active_gpu_units") or capacity.get("active_gpu") or 0)
+    active_gpu = int(capacity.get("active_gpu") or 0)
     gpu_floor = max(active_gpu, min(gpu_slots, active_gpu or gpu_slots))
 
     buffer = BENCHMARK_BUFFER if (cpu_floor or gpu_floor) else 0
@@ -2762,11 +2760,7 @@ def _funnel_drain_floor(capacity_model: dict | None = None) -> int:
     Keep a small GPU reserve so focused GPU work is not starved during CPU drain.
     """
     floor = max(MIN_MAX_BENCHMARKS, FUNNEL_DRAIN_MIN_MAX_BENCHMARKS)
-    active_gpu = int(
-        (capacity_model or {}).get("active_gpu_units")
-        or (capacity_model or {}).get("active_gpu")
-        or 0
-    )
+    active_gpu = int((capacity_model or {}).get("active_gpu") or 0)
     if active_gpu > 0:
         floor = max(floor, min(active_gpu + BENCHMARK_BUFFER, UPSTREAM_SAFE_MAX_BENCHMARKS))
     return floor
@@ -4395,7 +4389,7 @@ def _plan_config_change(report: dict, cfg: dict, clean_windows: int) -> dict:
         productive_jobs = max(0, active_jobs - stranded_count)
         gpu_slot_total, _ = _gpu_slot_counts(report)
         active_gpu_reserve = max(
-            _active_gpu_units(report, cfg),
+            _active_gpu_slave_count(report),
             int((health.get("live_by_profile") or {}).get("gpu") or 0),
         )
         gpu_reserve = min(gpu_slot_total, active_gpu_reserve) if gpu_slot_total else active_gpu_reserve

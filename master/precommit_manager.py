@@ -991,7 +991,7 @@ class PrecommitManager:
             if idle_cpu_needs_work and not force_cpu_only:
                 if x["algorithm_id"][:4] in CPU_CHALLENGE_IDS:
                     weight = max(1, int(round(weight * idle_mult)))
-            if (gpu_below_floor or idle_gpu_needs_work) and x["algorithm_id"][:4] in GPU_CHALLENGE_IDS:
+            if gpu_below_floor and x["algorithm_id"][:4] in GPU_CHALLENGE_IDS:
                 weight = max(1, int(round(weight * idle_mult)))
             if cap_settings.get("enabled"):
                 cid = x["algorithm_id"][:4]
