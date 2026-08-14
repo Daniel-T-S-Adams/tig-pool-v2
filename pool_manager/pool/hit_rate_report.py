@@ -109,6 +109,32 @@ def _nonces_per_bundle_from_precommits(precommits) -> dict[tuple[str, str], int]
     return {key: int(statistics.median(vals)) for key, vals in samples.items() if vals}
 
 
+def _learn_block_sec(jobs: list[dict]) -> float:
+    samples = []
+    for job in jobs:
+        blocks = job.get("blocks_to_proof")
+        proof_sec = job.get("proof_wall_clock_sec")
+        if blocks and proof_sec and float(blocks) > 0 and float(proof_sec) > 0:
+            samples.append(float(proof_sec) / float(blocks))
+    return _median(samples) or 60.0
+
+
+def _fill_local_proof_blocks(jobs: list[dict]) -> float:
+    """TIG /get-benchmarks only keeps ~120 blocks of proofs. Older local proofs still count."""
+    block_sec = _learn_block_sec(jobs)
+    for job in jobs:
+        if job.get("blocks_to_proof") is not None:
+            job["blocks_source"] = "tig"
+            continue
+        proof_sec = job.get("proof_wall_clock_sec")
+        if job.get("proof_submitted") and proof_sec is not None and proof_sec > 0:
+            job["blocks_to_proof"] = max(1, int(round(float(proof_sec) / block_sec)))
+            job["blocks_source"] = "local"
+        else:
+            job["blocks_source"] = None
+    return block_sec
+
+
 def _derive_bundles(num_nonces, nonces_per_bundle) -> int | None:
     try:
         nonces = int(num_nonces)
@@ -385,6 +411,7 @@ def annotate_job(
         "wall_clock_sec": wall_sec,
         "proof_wall_clock_sec": proof_sec,
         "blocks_to_proof": blocks_to_proof,
+        "blocks_source": "tig" if blocks_to_proof is not None else None,
         "proof_submitted": bool(row.get("proof_submitted")),
         "stopped": bool(row.get("stopped")),
     }
@@ -438,6 +465,8 @@ def aggregate_rows(jobs: list[dict]) -> list[dict]:
             "proof_wall_clock_sec_p50": _median(proofs),
             "blocks_to_proof_p50": _median([float(x) for x in blocks]),
             "blocks_to_proof_p90": _p90([float(x) for x in blocks]),
+            "proofs_local": sum(1 for r in rows if r.get("proof_submitted")),
+            "proofs_tig": sum(1 for r in rows if r.get("blocks_source") == "tig"),
         })
     out.sort(key=lambda r: (
         0 if str(r.get("challenge") or "").startswith("c00") and str(r.get("challenge")) in {"c004", "c005", "c006"} else 1,
@@ -472,17 +501,21 @@ def build_hit_rate_report(window_ms: int | None = None) -> dict:
         )
         for row in raw_jobs
     ]
+    block_sec = _fill_local_proof_blocks(jobs)
     tracks = aggregate_rows(jobs)
     judged = [j for j in jobs if j.get("hit") is not None]
     return _json_safe({
         "generated_at_ms": now_ms,
         "window_ms": window_ms,
         "block_height": tig.get("block_height"),
+        "block_sec": block_sec,
         "tig_error": tig.get("error"),
         "jobs_with_quality": len(jobs),
         "jobs_vs_floor": len(judged),
         "hits": sum(1 for j in judged if j.get("hit")),
         "hit_rate": (sum(1 for j in judged if j.get("hit")) / len(judged)) if judged else None,
+        "proofs_local": sum(1 for j in jobs if j.get("proof_submitted")),
+        "proofs_tig": sum(1 for j in jobs if j.get("blocks_source") == "tig"),
         "tracks": tracks,
         "recent_jobs": jobs[:40],
     })

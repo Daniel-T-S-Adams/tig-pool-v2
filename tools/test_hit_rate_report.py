@@ -27,6 +27,8 @@ def _load_fns():
         "_challenge_id_from_algorithm",
         "_derive_bundles",
         "_nonces_per_bundle_from_precommits",
+        "_learn_block_sec",
+        "_fill_local_proof_blocks",
     }
     nodes = [
         node

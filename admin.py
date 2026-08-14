@@ -461,6 +461,12 @@ def cmd_hit_rate(args):
     print(f"  block       : {report.get('block_height')}")
     print(f"  jobs w/ qty : {report.get('jobs_with_quality')}")
     print(f"  vs floor    : {report.get('jobs_vs_floor')}  hits={report.get('hits')}  rate={report.get('hit_rate')}")
+    print(
+        f"  proofs      : {report.get('proofs_local')} local submitted / "
+        f"{report.get('proofs_tig')} still in TIG 120-block window"
+    )
+    if report.get("block_sec"):
+        print(f"  block ~     : {report['block_sec']:.0f}s (used to backfill BLK on older local proofs)")
     if report.get("tig_error"):
         print(f"  tig warning : {report['tig_error']}")
 
