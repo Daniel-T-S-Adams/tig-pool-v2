@@ -926,9 +926,11 @@ class PrecommitManager:
                 return
             eligible = filtered
 
-        # Idle CPU: bias toward CPU creates, but keep GPU floor filled.
-        # A hard CPU-only filter previously starved GPU when resource_slots.cpu
-        # was much larger than max_concurrent_benchmarks.
+        # Idle CPU: bias toward CPU creates. Keep at most a 1-job GPU reserve so
+        # GPUs can share roots. Do NOT treat gpu_slot_floor (often 12) as
+        # "need 12 GPU precommits" — that starves AWS/Pica while the lottery
+        # fills c004/c006. An idle local GPU must not block CPU-only either;
+        # it can pull leftovers from the one reserved GPU job.
         gpu_floor = int(governor.get("gpu_slot_floor") or _gpu_slot_floor_total())
         gpu_active_jobs = int(governor.get("gpu_active_jobs") or 0)
         if gpu_active_jobs <= 0:
@@ -936,15 +938,11 @@ class PrecommitManager:
                 int(per_challenge_counts.get(cid, 0) or 0) for cid in GPU_CHALLENGE_IDS
             )
         gpu_below_floor = gpu_active_jobs < max(1, gpu_floor)
-        # Hard CPU-only whenever the idle fleet needs work and GPU floor is met.
-        # Previously this required governor_reason.startswith("idle_cpu_override:"),
-        # which only fires when the soft ready-rate gate would have blocked — so a
-        # healthy ready-rate left idle CPUs with GPU still in the lottery.
+        gpu_starved = gpu_active_jobs <= 0
         idle_gpu_needs_work = bool(governor.get("idle_gpu_needs_work"))
         force_cpu_only = (
             idle_cpu_needs_work
-            and (not gpu_below_floor)
-            and (not idle_gpu_needs_work)
+            and (not gpu_starved)
             and not profile_blocks.get("cpu")
         )
         if force_cpu_only:
@@ -991,7 +989,7 @@ class PrecommitManager:
             if idle_cpu_needs_work and not force_cpu_only:
                 if x["algorithm_id"][:4] in CPU_CHALLENGE_IDS:
                     weight = max(1, int(round(weight * idle_mult)))
-            if gpu_below_floor and x["algorithm_id"][:4] in GPU_CHALLENGE_IDS:
+            if gpu_starved and x["algorithm_id"][:4] in GPU_CHALLENGE_IDS:
                 weight = max(1, int(round(weight * idle_mult)))
             if cap_settings.get("enabled"):
                 cid = x["algorithm_id"][:4]
