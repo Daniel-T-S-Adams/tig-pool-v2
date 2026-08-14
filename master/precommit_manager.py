@@ -300,6 +300,68 @@ def compute_idle_gpu_needs_work(
     return int(gpu_unassigned_claimable or 0) < idle
 
 
+def challenge_under_create_cap(
+    challenge_id: str,
+    *,
+    pending_counts: dict,
+    root_phase_counts: dict,
+    submitted: dict,
+    per_challenge_max: dict,
+    idle_gpu_needs_work: bool = False,
+    gpu_ids: tuple = ("c004", "c005", "c006"),
+) -> bool:
+    """True when this challenge may receive another precommit.
+
+    Proof-phase GPU jobs do not feed idle GPUs (proofs need local artifacts).
+    When GPUs are idle with no claimable roots, count only root-phase jobs
+    against the GPU per-challenge cap so a new root job can start.
+    """
+    cid = str(challenge_id or "")[:4]
+    cap = per_challenge_max.get(cid)
+    if cap is None:
+        return True
+    counts = (
+        root_phase_counts
+        if idle_gpu_needs_work and cid in gpu_ids
+        else pending_counts
+    )
+    used = int((counts or {}).get(cid, 0) or 0) + int((submitted or {}).get(cid, 0) or 0)
+    return used < int(cap)
+
+
+def should_force_cpu_only(
+    *,
+    idle_cpu_needs_work: bool,
+    gpu_starved: bool,
+    idle_gpu_needs_work: bool,
+    cpu_profile_blocked: bool,
+) -> bool:
+    """Hard CPU filter. Idle GPUs with no claimable work stay in the lottery."""
+    return bool(
+        idle_cpu_needs_work
+        and (not gpu_starved)
+        and (not idle_gpu_needs_work)
+        and (not cpu_profile_blocked)
+    )
+
+
+def should_reserve_idle_gpu_create(
+    *,
+    idle_gpu_needs_work: bool,
+    last_create_ms: int = 0,
+    now_ms: int = 0,
+    cooldown_ms: int = 30_000,
+) -> bool:
+    """At most one idle-GPU create per cooldown so CPU burst cannot flood GPU."""
+    if not idle_gpu_needs_work:
+        return False
+    last = int(last_create_ms or 0)
+    now = int(now_ms or 0)
+    if last > 0 and now > 0 and (now - last) < int(cooldown_ms):
+        return False
+    return True
+
+
 def should_block_precommit_create(
     roots_pending,
     benchmarks_seen,
@@ -353,6 +415,7 @@ class PrecommitManager:
         # Read by master/main.py idle-burst loop.
         self.last_idle_cpu_needs_work = False
         self.last_idle_window = {}
+        self._idle_gpu_create_ms = 0
 
     def _refresh_cpu_idle_window(self, now_ms: Optional[int] = None) -> dict:
         """Sample online/idle CPU names and update the sustained-idle window."""
@@ -856,9 +919,13 @@ class PrecommitManager:
 
         # Build per-challenge pending counts keyed by challenge_id (e.g. "c004")
         per_challenge_counts = {}
+        root_phase_counts = {}
         rows = get_db_conn().fetch_all(
             """
-            SELECT settings->>'challenge_id' AS challenge_id, COUNT(*) AS cnt
+            SELECT
+                settings->>'challenge_id' AS challenge_id,
+                COUNT(*) AS cnt,
+                COUNT(*) FILTER (WHERE merkle_root_ready IS NULL) AS root_cnt
             FROM job
             WHERE merkle_proofs_ready IS NULL
                 AND stopped IS NULL
@@ -867,17 +934,23 @@ class PrecommitManager:
         )
         for row in rows:
             per_challenge_counts[row["challenge_id"]] = row["cnt"]
+            root_phase_counts[row["challenge_id"]] = row["root_cnt"]
 
         per_challenge_max = CONFIG.get("per_challenge_max_benchmarks", {})
+        idle_gpu_needs_work = bool(governor.get("idle_gpu_needs_work"))
 
-        # Filter eligible algorithms (not over their per-challenge limit)
+        # Filter eligible algorithms (not over their per-challenge limit).
+        # Idle GPUs: proof-phase jobs do not count against GPU caps.
         eligible = [
             x for x in algo_selection
-            if per_challenge_max.get(x["algorithm_id"][:4]) is None
-            or (
-                per_challenge_counts.get(x["algorithm_id"][:4], 0)
-                + self.per_challenge_precommits_submitted.get(x["algorithm_id"][:4], 0)
-            ) < per_challenge_max[x["algorithm_id"][:4]]
+            if challenge_under_create_cap(
+                x["algorithm_id"][:4],
+                pending_counts=per_challenge_counts,
+                root_phase_counts=root_phase_counts,
+                submitted=self.per_challenge_precommits_submitted,
+                per_challenge_max=per_challenge_max,
+                idle_gpu_needs_work=idle_gpu_needs_work,
+            )
         ]
         # TIG hygiene: skip banned / not-yet-active / failed-binary algorithms.
         algorithms = getattr(self, "_algorithms", None)
@@ -926,11 +999,9 @@ class PrecommitManager:
                 return
             eligible = filtered
 
-        # Idle CPU: bias toward CPU creates. Keep at most a 1-job GPU reserve so
-        # GPUs can share roots. Do NOT treat gpu_slot_floor (often 12) as
-        # "need 12 GPU precommits" — that starves AWS/Pica while the lottery
-        # fills c004/c006. An idle local GPU must not block CPU-only either;
-        # it can pull leftovers from the one reserved GPU job.
+        # Idle CPU: bias toward CPU creates. Do NOT treat gpu_slot_floor as
+        # "need N GPU precommits". Proof-phase GPU jobs also do not feed idle
+        # GPUs — those need a new root job, not leftovers from a proving box.
         gpu_floor = int(governor.get("gpu_slot_floor") or _gpu_slot_floor_total())
         gpu_active_jobs = int(governor.get("gpu_active_jobs") or 0)
         if gpu_active_jobs <= 0:
@@ -939,12 +1010,33 @@ class PrecommitManager:
             )
         gpu_below_floor = gpu_active_jobs < max(1, gpu_floor)
         gpu_starved = gpu_active_jobs <= 0
-        idle_gpu_needs_work = bool(governor.get("idle_gpu_needs_work"))
-        force_cpu_only = (
-            idle_cpu_needs_work
-            and (not gpu_starved)
-            and not profile_blocks.get("cpu")
+        reserve_gpu = should_reserve_idle_gpu_create(
+            idle_gpu_needs_work=idle_gpu_needs_work,
+            last_create_ms=int(getattr(self, "_idle_gpu_create_ms", 0) or 0),
+            now_ms=int(time.time() * 1000),
         )
+        force_cpu_only = should_force_cpu_only(
+            idle_cpu_needs_work=idle_cpu_needs_work,
+            gpu_starved=gpu_starved,
+            idle_gpu_needs_work=idle_gpu_needs_work,
+            cpu_profile_blocked=bool(profile_blocks.get("cpu")),
+        )
+        if reserve_gpu:
+            gpu_eligible = [
+                x for x in eligible
+                if x["algorithm_id"][:4] in GPU_CHALLENGE_IDS
+            ]
+            if gpu_eligible:
+                eligible = gpu_eligible
+                force_cpu_only = False
+                logger.info(
+                    "precommit governor reserving GPU create for idle GPUs "
+                    "(root_phase=%s pending=%s)",
+                    {cid: root_phase_counts.get(cid, 0) for cid in GPU_CHALLENGE_IDS},
+                    {cid: per_challenge_counts.get(cid, 0) for cid in GPU_CHALLENGE_IDS},
+                )
+            else:
+                reserve_gpu = False
         if force_cpu_only:
             cpu_eligible = [
                 x for x in eligible
@@ -989,7 +1081,7 @@ class PrecommitManager:
             if idle_cpu_needs_work and not force_cpu_only:
                 if x["algorithm_id"][:4] in CPU_CHALLENGE_IDS:
                     weight = max(1, int(round(weight * idle_mult)))
-            if gpu_starved and x["algorithm_id"][:4] in GPU_CHALLENGE_IDS:
+            if (gpu_starved or idle_gpu_needs_work) and x["algorithm_id"][:4] in GPU_CHALLENGE_IDS:
                 weight = max(1, int(round(weight * idle_mult)))
             if cap_settings.get("enabled"):
                 cid = x["algorithm_id"][:4]
@@ -1119,5 +1211,7 @@ class PrecommitManager:
             track_settings=selection["track_settings"],
             compute_type=compute_type,
         )
+        if reserve_gpu and c_id in GPU_CHALLENGE_IDS:
+            self._idle_gpu_create_ms = int(time.time() * 1000)
         logger.info(f"Created precommit with algorithm: {a_id}")
         return req

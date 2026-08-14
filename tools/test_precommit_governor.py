@@ -32,12 +32,18 @@ def main() -> int:
         "should_block_precommit_create",
         "compute_idle_cpu_needs_work",
         "compute_idle_gpu_needs_work",
+        "challenge_under_create_cap",
+        "should_force_cpu_only",
+        "should_reserve_idle_gpu_create",
     )
     should_block = ns["should_block_precommit_create"]
     compute_caps = ns["compute_profile_root_caps"]
     profile_blocks = ns["profile_root_backlog_blocks"]
     idle_needs = ns["compute_idle_cpu_needs_work"]
     idle_gpu = ns["compute_idle_gpu_needs_work"]
+    under_cap = ns["challenge_under_create_cap"]
+    force_cpu = ns["should_force_cpu_only"]
+    reserve_gpu = ns["should_reserve_idle_gpu_create"]
 
     settings = {
         "enabled": True,
@@ -254,6 +260,84 @@ def main() -> int:
         print(f"{'pass' if ok else 'FAIL'}: {label} got={got}")
         if not ok:
             failed += 1
+
+    cap_cases = [
+        (
+            under_cap(
+                "c004",
+                pending_counts={"c004": 3},
+                root_phase_counts={"c004": 0},
+                submitted={},
+                per_challenge_max={"c004": 2},
+                idle_gpu_needs_work=False,
+            )
+            is False,
+            "proof-phase GPU jobs block creates when GPUs are busy",
+        ),
+        (
+            under_cap(
+                "c004",
+                pending_counts={"c004": 3},
+                root_phase_counts={"c004": 0},
+                submitted={},
+                per_challenge_max={"c004": 2},
+                idle_gpu_needs_work=True,
+            )
+            is True,
+            "idle GPUs ignore proof-phase jobs for GPU create cap",
+        ),
+        (
+            under_cap(
+                "c001",
+                pending_counts={"c001": 4},
+                root_phase_counts={"c001": 0},
+                submitted={},
+                per_challenge_max={"c001": 4},
+                idle_gpu_needs_work=True,
+            )
+            is False,
+            "idle GPU override does not lift CPU caps",
+        ),
+    ]
+    for ok, label in cap_cases:
+        print(f"{'pass' if ok else 'FAIL'}: {label}")
+        if not ok:
+            failed += 1
+
+    ok = force_cpu(
+        idle_cpu_needs_work=True,
+        gpu_starved=False,
+        idle_gpu_needs_work=False,
+        cpu_profile_blocked=False,
+    ) is True
+    print(f"{'pass' if ok else 'FAIL'}: force CPU when GPUs already have work")
+    if not ok:
+        failed += 1
+
+    ok = force_cpu(
+        idle_cpu_needs_work=True,
+        gpu_starved=False,
+        idle_gpu_needs_work=True,
+        cpu_profile_blocked=False,
+    ) is False
+    print(f"{'pass' if ok else 'FAIL'}: do not force CPU while idle GPUs need work")
+    if not ok:
+        failed += 1
+
+    ok = reserve_gpu(idle_gpu_needs_work=True, last_create_ms=0, now_ms=1000) is True
+    print(f"{'pass' if ok else 'FAIL'}: reserve first idle-GPU create")
+    if not ok:
+        failed += 1
+
+    ok = reserve_gpu(
+        idle_gpu_needs_work=True,
+        last_create_ms=1_000,
+        now_ms=10_000,
+        cooldown_ms=30_000,
+    ) is False
+    print(f"{'pass' if ok else 'FAIL'}: idle-GPU create respects cooldown")
+    if not ok:
+        failed += 1
 
     return 2 if failed else 0
 
