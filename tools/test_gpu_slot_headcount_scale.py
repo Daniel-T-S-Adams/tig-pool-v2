@@ -178,6 +178,17 @@ def main() -> int:
     print(f"{'pass' if ok else 'FAIL'}: challenge caps follow slots down -> {caps}")
     failed += 0 if ok else 1
 
+    # C3 12-GPU dispatcher + local GPU = 13 units, 2 slave names.
+    proposed_units = target_slots(_capacity(active_gpu=2, active_gpu_units=13))
+    units_total = (
+        int(proposed_units["vector_search"])
+        + int(proposed_units["hypergraph"])
+        + int(proposed_units["neuralnet_optimizer"])
+    )
+    ok = units_total == 13
+    print(f"{'pass' if ok else 'FAIL'}: C3 worker units size GPU slots -> total={units_total}")
+    failed += 0 if ok else 1
+
     return 2 if failed else 0
 
 

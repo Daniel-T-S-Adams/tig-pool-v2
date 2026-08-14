@@ -285,6 +285,21 @@ def compute_idle_cpu_needs_work(
     return claimable < idle
 
 
+def compute_idle_gpu_needs_work(
+    *,
+    gpu_unassigned_claimable: int = 0,
+    online_idle_gpu_slaves: int = 0,
+    gpu_profile_blocked: bool = False,
+) -> bool:
+    """True when online GPUs are empty and there is not enough claimable GPU work."""
+    if gpu_profile_blocked:
+        return False
+    idle = max(0, int(online_idle_gpu_slaves or 0))
+    if idle <= 0:
+        return False
+    return int(gpu_unassigned_claimable or 0) < idle
+
+
 def should_block_precommit_create(
     roots_pending,
     benchmarks_seen,
@@ -653,7 +668,23 @@ class PrecommitManager:
                               AND rb.ready IS NULL
                               AND rb.start_time IS NOT NULL
                           )
-                    ) AS online_idle_cpu_slaves
+                    ) AS online_idle_cpu_slaves,
+                    (
+                        SELECT COUNT(*)
+                        FROM slave_seen ss
+                        WHERE ss.last_seen >= %s
+                          AND (
+                            ss.slave_name LIKE 'pool-gpu-%%'
+                            OR ss.slave_name LIKE 'c3-slave-%%'
+                          )
+                          AND NOT EXISTS (
+                            SELECT 1
+                            FROM root_batch rb
+                            WHERE rb.slave = ss.slave_name
+                              AND rb.ready IS NULL
+                              AND rb.start_time IS NOT NULL
+                          )
+                    ) AS online_idle_gpu_slaves
                 """,
                 (
                     CPU_CHALLENGE_IDS,
@@ -677,6 +708,7 @@ class PrecommitManager:
                     GPU_CHALLENGE_IDS,
                     now_ms - int(SLAVE_ONLINE_MS),
                     now_ms - int(SLAVE_ONLINE_MS),
+                    now_ms - int(SLAVE_ONLINE_MS),
                 ),
             ) or {}
             cpu_slots = _cpu_slot_target()
@@ -693,6 +725,7 @@ class PrecommitManager:
             cpu_unassigned_claimable = int(row.get("cpu_unassigned_claimable") or 0)
             gpu_unassigned_claimable = int(row.get("gpu_unassigned_claimable") or 0)
             online_idle_cpu_slaves = int(row.get("online_idle_cpu_slaves") or 0)
+            online_idle_gpu_slaves = int(row.get("online_idle_gpu_slaves") or 0)
             gpu_floor = _gpu_slot_floor_total()
             profile_caps = compute_profile_root_caps(
                 settings, cpu_create_target, gpu_slots_total
@@ -726,9 +759,15 @@ class PrecommitManager:
                 "cpu_unassigned_claimable": cpu_unassigned_claimable,
                 "gpu_unassigned_claimable": gpu_unassigned_claimable,
                 "online_idle_cpu_slaves": online_idle_cpu_slaves,
+                "online_idle_gpu_slaves": online_idle_gpu_slaves,
                 "profile_caps": profile_caps,
                 "profile_blocks": profile_blocks,
                 "idle_cpu_needs_work": False,
+                "idle_gpu_needs_work": compute_idle_gpu_needs_work(
+                    gpu_unassigned_claimable=gpu_unassigned_claimable,
+                    online_idle_gpu_slaves=online_idle_gpu_slaves,
+                    gpu_profile_blocked=bool(profile_blocks.get("gpu")),
+                ),
             }
         except Exception as exc:
             # Fail open: a transient DB blip must not freeze precommit creation.
@@ -901,9 +940,11 @@ class PrecommitManager:
         # Previously this required governor_reason.startswith("idle_cpu_override:"),
         # which only fires when the soft ready-rate gate would have blocked — so a
         # healthy ready-rate left idle CPUs with GPU still in the lottery.
+        idle_gpu_needs_work = bool(governor.get("idle_gpu_needs_work"))
         force_cpu_only = (
             idle_cpu_needs_work
             and (not gpu_below_floor)
+            and (not idle_gpu_needs_work)
             and not profile_blocks.get("cpu")
         )
         if force_cpu_only:
@@ -950,7 +991,7 @@ class PrecommitManager:
             if idle_cpu_needs_work and not force_cpu_only:
                 if x["algorithm_id"][:4] in CPU_CHALLENGE_IDS:
                     weight = max(1, int(round(weight * idle_mult)))
-            if gpu_below_floor and x["algorithm_id"][:4] in GPU_CHALLENGE_IDS:
+            if (gpu_below_floor or idle_gpu_needs_work) and x["algorithm_id"][:4] in GPU_CHALLENGE_IDS:
                 weight = max(1, int(round(weight * idle_mult)))
             if cap_settings.get("enabled"):
                 cid = x["algorithm_id"][:4]
@@ -1004,9 +1045,10 @@ class PrecommitManager:
             return
 
         logger.debug(
-            "Selecting algorithm from: %s idle_cpu=%s gpu_below_floor=%s force_cpu_only=%s",
+            "Selecting algorithm from: %s idle_cpu=%s idle_gpu=%s gpu_below_floor=%s force_cpu_only=%s",
             list(zip([x["algorithm_id"] for x in weighted_eligible], weights)),
             idle_cpu_needs_work,
+            idle_gpu_needs_work,
             gpu_below_floor,
             force_cpu_only,
         )

@@ -354,9 +354,9 @@ def _route_profile(route: dict) -> str | None:
 def _route_is_manual_gpu(route: dict) -> bool:
     """Return True for GPU routes where a static operator cap is intentional.
 
-    Local GPU and C3 dispatcher routes represent special execution models. Do not
-    auto-raise them with generic fleet logic; operators should scale their local
-    worker count / C3 num_workers first.
+    Local GPU routes stay static. C3 routes are still skipped by generic fleet
+    step-ups, but `_target_slave_route_caps` may raise a C3 route toward
+    reported `num_workers` so a 12-GPU dispatcher is not stuck at 1 or 8.
     """
     name_regex = str(route.get("name_regex") or "").lower()
     return (
@@ -449,6 +449,39 @@ def _slave_profile(slave_name: str) -> str:
     return "cpu"
 
 
+def _is_c3_slave(slave_name: str) -> bool:
+    name = str(slave_name or "").lower()
+    return "-c3-" in name or name.startswith("c3-slave-")
+
+
+def _gpu_units(slave: dict, cfg: dict | None = None) -> int:
+    """How many parallel GPU workers one slave name represents.
+
+    A C3 dispatcher is one User-Agent controlling many remote GPUs. Count
+    reported num_workers, then the matching route cap, so 12-GPU C3 is not
+    treated as a single laptop.
+    """
+    name = str(slave.get("slave_name") or "")
+    if (slave.get("profile") or _slave_profile(name)) != "gpu":
+        return 0
+    reported = 0
+    try:
+        reported = int(slave.get("num_workers") or 0)
+    except (TypeError, ValueError):
+        reported = 0
+    route_cap = 0
+    for route in (cfg or {}).get("slaves") or []:
+        if _route_matches_slave(route, name):
+            try:
+                route_cap = int(route.get("max_concurrent_batches") or 0)
+            except (TypeError, ValueError):
+                route_cap = 0
+            break
+    if _is_c3_slave(name):
+        return max(1, reported, route_cap)
+    return max(1, reported) if reported else 1
+
+
 def _is_public_member_slave(slave_name: str) -> bool:
     return slave_name.startswith(("pool-cpu-", "pool-gpu-"))
 
@@ -464,6 +497,16 @@ def _ensure_member_hardening_schema():
             ("ALTER TABLE pool_members ADD COLUMN IF NOT EXISTS preflight_report JSONB", None),
             ("ALTER TABLE pool_members ADD COLUMN IF NOT EXISTS trusted_at BIGINT", None),
             ("CREATE INDEX IF NOT EXISTS idx_pool_members_trust_state ON pool_members(trust_state)", None),
+            (
+                """
+                CREATE TABLE IF NOT EXISTS slave_seen (
+                    slave_name TEXT PRIMARY KEY,
+                    last_seen BIGINT NOT NULL
+                )
+                """,
+                None,
+            ),
+            ("ALTER TABLE slave_seen ADD COLUMN IF NOT EXISTS num_workers INTEGER", None),
         )
         _member_hardening_schema_ready = True
     except Exception as exc:
@@ -1308,10 +1351,12 @@ def _slave_metrics(now_ms: int) -> list[dict]:
             rs.avg_runtime_sec,
             ps.avg_proof_runtime_sec,
             rs.last_assigned_at,
-            rs.last_completed_at
+            rs.last_completed_at,
+            ss.num_workers
         FROM registered r
         FULL OUTER JOIN root_stats rs ON rs.slave_name = r.slave_name
         FULL OUTER JOIN proof_stats ps ON ps.slave_name = COALESCE(r.slave_name, rs.slave_name)
+        LEFT JOIN slave_seen ss ON ss.slave_name = COALESCE(r.slave_name, rs.slave_name, ps.slave_name)
         WHERE COALESCE(r.slave_name, rs.slave_name, ps.slave_name) IS NOT NULL
         ORDER BY COALESCE(rs.nonces_recent, 0) DESC, COALESCE(rs.last_assigned_at, 0) DESC
         """,
@@ -2414,9 +2459,11 @@ def _fleet_capacity(
         s for s in active_gpu
         if int(s.get("completed_recent") or 0) > 0 and int(s.get("active_unfinished") or 0) == 0
     ]
+    active_gpu_units = sum(_gpu_units(s, cfg) for s in active_gpu)
     return {
         "active_cpu": len(active_cpu),
         "active_gpu": len(active_gpu),
+        "active_gpu_units": max(len(active_gpu), int(active_gpu_units or 0)),
         "productive_idle_cpu": len(productive_idle_cpu),
         "productive_idle_gpu": len(productive_idle_gpu),
         "cpu_pressure": cpu_pressure,
@@ -2503,7 +2550,10 @@ def _target_resource_slots(capacity: dict) -> dict:
             proposed[slot_type] = int(gpu_slot_floor.get(slot_type, 0) or 0)
         return proposed
 
-    active_gpu = max(1, int(capacity["active_gpu"] or 0))
+    active_gpu = max(
+        1,
+        int(capacity.get("active_gpu_units") or capacity.get("active_gpu") or 0),
+    )
     gpu_target_total = active_gpu
     if capacity["productive_idle_gpu"] >= PRODUCTIVE_IDLE_GPU_SCALE_MIN:
         extra_slots = max(
@@ -2591,7 +2641,7 @@ def _live_worker_floor_max_concurrent(capacity: dict) -> int:
     """
     aws_cpu_jobs = int(capacity.get("aws_cpu_jobs") or 0)
     active_cpu = int(capacity.get("active_cpu") or 0)
-    active_gpu = int(capacity.get("active_gpu") or 0)
+    active_gpu = int(capacity.get("active_gpu_units") or capacity.get("active_gpu") or 0)
     cpu_pressure = int(capacity.get("cpu_pressure") or 0)
     gpu_pressure = int(capacity.get("gpu_pressure") or 0)
     # Prefer observed in-flight work / AWS batch jobs over raw slave counts so a
@@ -2697,7 +2747,7 @@ def _capacity_floor_max_concurrent(capacity: dict, proposed_slots: dict | None =
     cpu_floor = max(aws_cpu_jobs, cpu_slots if active_cpu else 0)
 
     gpu_slots = sum(int(proposed_slots.get(k, 0) or 0) for k in GPU_SLOT_TYPES)
-    active_gpu = int(capacity.get("active_gpu") or 0)
+    active_gpu = int(capacity.get("active_gpu_units") or capacity.get("active_gpu") or 0)
     gpu_floor = max(active_gpu, min(gpu_slots, active_gpu or gpu_slots))
 
     buffer = BENCHMARK_BUFFER if (cpu_floor or gpu_floor) else 0
@@ -2712,7 +2762,11 @@ def _funnel_drain_floor(capacity_model: dict | None = None) -> int:
     Keep a small GPU reserve so focused GPU work is not starved during CPU drain.
     """
     floor = max(MIN_MAX_BENCHMARKS, FUNNEL_DRAIN_MIN_MAX_BENCHMARKS)
-    active_gpu = int((capacity_model or {}).get("active_gpu") or 0)
+    active_gpu = int(
+        (capacity_model or {}).get("active_gpu_units")
+        or (capacity_model or {}).get("active_gpu")
+        or 0
+    )
     if active_gpu > 0:
         floor = max(floor, min(active_gpu + BENCHMARK_BUFFER, UPSTREAM_SAFE_MAX_BENCHMARKS))
     return floor
@@ -3205,7 +3259,21 @@ def _target_slave_route_caps(cfg: dict, capacity: dict, slaves: list[dict] | Non
             reasons.append("aws_cpu_jobs_floor")
 
         if profile == "gpu" and _route_is_manual_gpu(route):
-            signals["skipped"] = "manual_gpu_route"
+            name_regex = str(route.get("name_regex") or "").lower()
+            if "c3" in name_regex:
+                c3_units = sum(
+                    _gpu_units(row, cfg)
+                    for row in (slaves or [])
+                    if _route_matches_slave(route, str(row.get("slave_name") or ""))
+                    and _counts_for_capacity(row)
+                )
+                if c3_units > current:
+                    target = max(target, min(int(MAX_GPU_SLAVE_CAP), int(c3_units)))
+                    reasons.append("c3_worker_units")
+                else:
+                    signals["skipped"] = "manual_gpu_route"
+            else:
+                signals["skipped"] = "manual_gpu_route"
         else:
             ready, reason = _route_cap_ready(profile, current, signals)
             signals["route_cap_ready"] = ready
@@ -3648,6 +3716,14 @@ def _active_gpu_slave_count(report: dict) -> int:
         for slave in report.get("slaves") or []
         if slave.get("profile") == "gpu" and _counts_for_capacity(slave)
     )
+
+
+def _active_gpu_units(report: dict, cfg: dict | None = None) -> int:
+    units = 0
+    for slave in report.get("slaves") or []:
+        if slave.get("profile") == "gpu" and _counts_for_capacity(slave):
+            units += _gpu_units(slave, cfg)
+    return max(_active_gpu_slave_count(report), units)
 
 
 def _gpu_capacity_needs_benchmark_room(report: dict) -> bool:
@@ -4319,7 +4395,7 @@ def _plan_config_change(report: dict, cfg: dict, clean_windows: int) -> dict:
         productive_jobs = max(0, active_jobs - stranded_count)
         gpu_slot_total, _ = _gpu_slot_counts(report)
         active_gpu_reserve = max(
-            _active_gpu_slave_count(report),
+            _active_gpu_units(report, cfg),
             int((health.get("live_by_profile") or {}).get("gpu") or 0),
         )
         gpu_reserve = min(gpu_slot_total, active_gpu_reserve) if gpu_slot_total else active_gpu_reserve
@@ -4798,6 +4874,7 @@ def _scale_readiness_summary(
         "posture": policy_posture.get("posture"),
         "active_cpu": capacity.get("active_cpu"),
         "active_gpu": capacity.get("active_gpu"),
+        "active_gpu_units": capacity.get("active_gpu_units"),
         "productive_idle_cpu": capacity.get("productive_idle_cpu"),
         "productive_idle_gpu": capacity.get("productive_idle_gpu"),
         "current": {

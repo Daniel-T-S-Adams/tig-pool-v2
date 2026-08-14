@@ -354,13 +354,18 @@ class SlaveManager:
         ensure_slave_seen_table(get_db_conn().execute)
         self._slave_seen_ready = True
 
-    def _touch_slave_seen(self, slave_name: str, now_ms: int):
+    def _touch_slave_seen(self, slave_name: str, now_ms: int, num_workers=None):
         # Heartbeats at 1Hz were a major write storm. Touch at most every N ms/slave.
         until = int(self._slave_seen_touch_until.get(slave_name) or 0)
         if now_ms < until:
             return
         self._ensure_slave_seen_table()
-        touch_slave_seen(get_db_conn().execute, slave_name, now_ms)
+        if num_workers is None:
+            try:
+                num_workers = int((self._slave_telemetry.get(slave_name) or {}).get("num_workers") or 0) or None
+            except (TypeError, ValueError):
+                num_workers = None
+        touch_slave_seen(get_db_conn().execute, slave_name, now_ms, num_workers=num_workers)
         self._slave_seen_touch_until[slave_name] = now_ms + self._slave_seen_touch_interval_ms
 
     def _online_slaves(self, now_ms: int) -> Set[str]:
@@ -1391,6 +1396,11 @@ class SlaveManager:
         completed = int(stats.get("completed_recent") or 0)
         active = int(stats.get("active_unfinished") or 0)
         avg_runtime_ms = float(stats.get("avg_runtime_ms") or 0)
+        workers = None
+        try:
+            workers = int((telemetry or {}).get("num_workers") or 0) or None
+        except (TypeError, ValueError):
+            workers = None
 
         if completed < warmup_completed:
             cap = min_cap
@@ -1398,21 +1408,16 @@ class SlaveManager:
             # Keep roughly target_buffer_ms worth of work in flight. The
             # throughput estimate lets multi-worker machines earn more slots,
             # while runtime keeps very fast single batches from being underfed.
-            # Prefer reported num_workers when present (Phase C telemetry).
-            workers = None
-            try:
-                workers = int((telemetry or {}).get("num_workers") or 0) or None
-            except (TypeError, ValueError):
-                workers = None
             throughput_cap = math.ceil(completed * target_buffer_ms / window_ms)
             runtime_cap = math.ceil(target_buffer_ms / avg_runtime_ms)
-            if workers and workers > 0:
-                # More workers → higher single-batch burn; do not invent extra
-                # concurrent slots from worker count alone (that overloads).
-                runtime_cap = max(1, runtime_cap)
             cap = max(min_cap, throughput_cap, runtime_cap)
         else:
             cap = min_cap
+
+        if profile == "gpu" and workers:
+            # Each reported GPU worker can run one root batch. Route / gpu_max
+            # still bound this so a public 1-cap slave cannot claim 64 slots.
+            cap = max(int(cap or 0), min(int(workers), int(max_cap), int(route_cap)))
 
         if max_cap <= 0:
             cap = 0

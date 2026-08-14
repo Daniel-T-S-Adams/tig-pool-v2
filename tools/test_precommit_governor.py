@@ -31,11 +31,13 @@ def main() -> int:
         "profile_root_backlog_blocks",
         "should_block_precommit_create",
         "compute_idle_cpu_needs_work",
+        "compute_idle_gpu_needs_work",
     )
     should_block = ns["should_block_precommit_create"]
     compute_caps = ns["compute_profile_root_caps"]
     profile_blocks = ns["profile_root_backlog_blocks"]
     idle_needs = ns["compute_idle_cpu_needs_work"]
+    idle_gpu = ns["compute_idle_gpu_needs_work"]
 
     settings = {
         "enabled": True,
@@ -231,6 +233,23 @@ def main() -> int:
     ]
     for kwargs, expect, label in idle_cases:
         got = idle_needs(**kwargs)
+        ok = got is expect
+        print(f"{'pass' if ok else 'FAIL'}: {label} got={got}")
+        if not ok:
+            failed += 1
+
+    gpu_idle_cases = [
+        (dict(gpu_unassigned_claimable=0, online_idle_gpu_slaves=2), True, "idle GPUs and no claimable work"),
+        (dict(gpu_unassigned_claimable=4, online_idle_gpu_slaves=2), False, "enough GPU roots to absorb idle"),
+        (dict(gpu_unassigned_claimable=0, online_idle_gpu_slaves=0), False, "no idle GPUs"),
+        (
+            dict(gpu_unassigned_claimable=0, online_idle_gpu_slaves=2, gpu_profile_blocked=True),
+            False,
+            "blocked GPU profile does not request more creates",
+        ),
+    ]
+    for kwargs, expect, label in gpu_idle_cases:
+        got = idle_gpu(**kwargs)
         ok = got is expect
         print(f"{'pass' if ok else 'FAIL'}: {label} got={got}")
         if not ok:

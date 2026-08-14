@@ -362,8 +362,8 @@ Autopilot is expected to scale proportionally with fleet size:
   capacity-eligible GPU **slave headcount** both up and down (stepped on apply).
   They no longer ratchet to a historical high when GPUs leave. Targets stay at
   least as high as currently busy GPU slots and the configured `gpu_slot_floor`.
-  (C3 multi-GPU weighting is still future work; today one GPU slave name = one
-  unit.)
+  C3 dispatchers count as `num_workers` (or their route cap if telemetry is
+  missing), not as a single laptop GPU. Local single-GPU slaves stay 1 unit.
 - `c004`, `c005`, and `c006` caps should track proposed GPU slot capacity when GPU
   workers are active.
 - CPU challenge caps such as `c001`, `c002`, `c003`, `c007`, and `c008` should
@@ -696,13 +696,18 @@ raising `max_concurrent_benchmarks` and GPU per-challenge caps when this happens
 
 Possible causes:
 
-- Adaptive GPU warmup cap is too low.
+- Adaptive GPU warmup cap is too low. GPU `num_workers` is now a concurrent
+  floor (still bounded by the C3 route cap and `gpu_max_cap`).
 - `gpu_max_cap` is lower than C3 fleet size.
-- Route rule max is lower than desired C3 concurrency.
+- Route rule max is lower than desired C3 concurrency. Autopilot may raise a
+  C3 route toward reported worker units; set the C3 route at least as high as
+  `NUM_WORKERS` so 12 GPUs are not capped at 8.
 - C3 has not completed enough recent batches to earn a higher cap.
 
 For C3, a dedicated rule such as `^pool-gpu-.*-c3-.*$` may need a higher route cap
-than local laptop GPUs.
+than local laptop GPUs. One C3 slave name is many GPUs — if capacity still
+shows `active_gpu: 1` with `active_gpu_units: 1`, telemetry `num_workers` is
+not reaching the master.
 
 ### Proofs Are Slow
 

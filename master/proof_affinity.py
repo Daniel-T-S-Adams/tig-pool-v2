@@ -119,17 +119,31 @@ def ensure_slave_seen_table(execute: Callable) -> None:
     execute(
         "CREATE INDEX IF NOT EXISTS idx_slave_seen_last_seen ON slave_seen(last_seen)"
     )
+    execute("ALTER TABLE slave_seen ADD COLUMN IF NOT EXISTS num_workers INTEGER")
 
 
-def touch_slave_seen(execute: Callable, slave_name: str, now_ms: int) -> None:
+def touch_slave_seen(
+    execute: Callable,
+    slave_name: str,
+    now_ms: int,
+    num_workers: int | None = None,
+) -> None:
+    workers = None
+    if num_workers is not None:
+        try:
+            workers = int(num_workers) or None
+        except (TypeError, ValueError):
+            workers = None
     execute(
         """
-        INSERT INTO slave_seen (slave_name, last_seen)
-        VALUES (%s, %s)
+        INSERT INTO slave_seen (slave_name, last_seen, num_workers)
+        VALUES (%s, %s, %s)
         ON CONFLICT (slave_name)
-        DO UPDATE SET last_seen = EXCLUDED.last_seen
+        DO UPDATE SET
+            last_seen = EXCLUDED.last_seen,
+            num_workers = COALESCE(EXCLUDED.num_workers, slave_seen.num_workers)
         """,
-        (slave_name, int(now_ms)),
+        (slave_name, int(now_ms), workers),
     )
 
 
