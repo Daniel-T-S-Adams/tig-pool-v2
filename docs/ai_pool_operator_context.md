@@ -43,6 +43,9 @@ Important internal endpoints:
 - `http://master:3336/update-config`: update master config from trusted services.
 - `http://127.0.0.1:3336/get-config`: same config endpoint from the VPS.
 - `http://127.0.0.1:8081/get-batches`: local nginx/tunnel route for slave work.
+- `GET /api/admin/ops/hit-rate`: observe-only per-track max nonce quality vs
+  live TIG qualifier floor, `num_bundles`, wall-clock seconds, and blocks-to-proof.
+  CLI: `python3 admin.py hit-rate`.
 
 ## 2. TIG Benchmarking Lifecycle
 
@@ -399,9 +402,19 @@ Autopilot is expected to scale proportionally with fleet size:
   completing.
 - Unsafe reward funnel does not mean "no deterministic action is possible."
   If `workload_targets.actionable` includes `drain_root_backlog_pressure`,
-  explain that autopilot may reduce the affected track's `num_bundles` and the
-  affected challenge's `per_challenge_max_benchmarks` to stop adding more root
-  backlog while existing work drains.
+  explain that autopilot may reduce the affected challenge's
+  `per_challenge_max_benchmarks` to stop adding more root backlog while existing
+  work drains. On a pipeline-healthy track (proof conversion at/above target and
+  low unexpected stopped rate) it must **not** shrink `num_bundles`. Drain
+  backlog with fewer new jobs, not smaller jobs. Unrunnable / low-conversion
+  tracks can still lose bundles.
+- `hold_bundles_on_healthy_track` means apply-mode wanted to cut bundles for
+  backlog or time-to-proof and was blocked. That is expected, not a stall.
+- Hit-rate (`/admin/ops/hit-rate`) is the quality signal: `max_nonce_quality`
+  vs `qualifier_qualities_by_track` min (the live floor). `quality > 0` is not
+  a hit. Do not recommend raising every fast track to a large bundle count
+  from this report alone; use it to see whether more bundles actually clear
+  the floor in acceptable wall-clock / block time.
 - `workload_targets` are read-only strategy outputs. They show how the controller
   would adjust bundles, batch sizing, or weights when efficient miners join or
   leave, but they must remain recommendation-only until proven stable.

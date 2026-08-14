@@ -193,6 +193,31 @@
       </div>
 
       <div class="card" style="margin-bottom:22px;">
+        <h2 style="margin-bottom:10px;">Hit rate vs qualifier floor</h2>
+        <p class="ops-meta" id="hit-meta" style="margin-top:0;">Local max nonce quality vs live TIG cutoff, by track and bundle size.</p>
+        <div class="table-scroll">
+          <table class="data-table compact">
+            <thead>
+              <tr>
+                <th>Challenge / track</th>
+                <th>Bundles</th>
+                <th>Jobs</th>
+                <th>Hits</th>
+                <th>Best Q</th>
+                <th>Floor</th>
+                <th>Gap</th>
+                <th>p50 sec</th>
+                <th>p50 blk</th>
+              </tr>
+            </thead>
+            <tbody id="hit-body">
+              <tr><td colspan="9" class="loading">Loading…</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <div class="card" style="margin-bottom:22px;">
         <h2 style="margin-bottom:10px;">Fattest open jobs</h2>
         <div class="table-scroll">
           <table class="data-table compact">
@@ -279,8 +304,8 @@
       node.className = "ops-pill " + (kind || "");
     }
 
-    async function fetchMetrics() {
-      const res = await fetch("/api/admin/ops/metrics", {
+    async function fetchAdmin(path) {
+      const res = await fetch(path, {
         headers: { "X-Admin-Secret": secret },
         cache: "no-store",
       });
@@ -300,6 +325,14 @@
         throw new Error((text || ("HTTP " + res.status)).slice(0, 240));
       }
       return res.json();
+    }
+
+    async function fetchMetrics() {
+      return fetchAdmin("/api/admin/ops/metrics");
+    }
+
+    async function fetchHitRate() {
+      return fetchAdmin("/api/admin/ops/hit-rate");
     }
 
     function render(data) {
@@ -439,12 +472,57 @@
       }).join("") || `<tr><td colspan="6" style="color:var(--muted);">No slaves</td></tr>`;
     }
 
+    function signed(n) {
+      if (n === null || n === undefined || Number.isNaN(n)) return "—";
+      const v = Math.round(n);
+      return (v > 0 ? "+" : "") + String(v);
+    }
+
+    function renderHitRate(data) {
+      if (!data) return;
+      const windowMin = Math.round((data.window_ms || 0) / 60000);
+      const rate = data.hit_rate == null ? "—" : Math.round(data.hit_rate * 100) + "%";
+      el("hit-meta").textContent =
+        "Last " + windowMin + "m · block " + (data.block_height || "—") +
+        " · " + fmt(data.jobs_with_quality) + " jobs with quality · " +
+        fmt(data.hits) + "/" + fmt(data.jobs_vs_floor) + " over floor (" + rate + ")" +
+        (data.tig_error ? " · TIG warning: " + data.tig_error : "");
+      const tracks = data.tracks || [];
+      el("hit-body").innerHTML = tracks.length
+        ? tracks.map((r) => {
+            const gap = r.gap_best;
+            const gapColor = gap == null ? "" : (gap >= 0 ? "color:var(--cyan);" : "color:var(--orange);");
+            return `<tr>
+              <td>${r.challenge || "—"} <span style="color:var(--muted);">/</span> <span class="mono">${r.track || "—"}</span></td>
+              <td>${fmt(r.num_bundles)}</td>
+              <td>${fmt(r.jobs)}</td>
+              <td>${r.jobs_vs_floor ? fmt(r.hits) + "/" + fmt(r.jobs_vs_floor) : "—"}</td>
+              <td class="mono">${fmt(r.max_nonce_quality_best != null ? Math.round(r.max_nonce_quality_best) : null)}</td>
+              <td class="mono">${fmt(r.qualifier_floor)}</td>
+              <td class="mono" style="${gapColor}">${signed(gap)}</td>
+              <td>${fmt(r.wall_clock_sec_p50 != null ? Math.round(r.wall_clock_sec_p50) : null)}</td>
+              <td>${fmt(r.blocks_to_proof_p50 != null ? Math.round(r.blocks_to_proof_p50) : null)}</td>
+            </tr>`;
+          }).join("")
+        : `<tr><td colspan="9" style="color:var(--muted);">No jobs with solution_quality in this window</td></tr>`;
+    }
+
     async function tick() {
       try {
         const data = await fetchMetrics();
         showApp();
         render(data);
         el("creates-note").dataset.lastError = "";
+        try {
+          renderHitRate(await fetchHitRate());
+        } catch (hitErr) {
+          if (String(hitErr.message) !== "unauthorized") {
+            el("hit-meta").textContent = "Hit-rate API error: " + (hitErr.message || hitErr);
+            el("hit-body").innerHTML = `<tr><td colspan="9" style="color:var(--muted);">Unavailable</td></tr>`;
+          } else {
+            throw hitErr;
+          }
+        }
       } catch (err) {
         if (String(err.message) !== "unauthorized") {
           setPill(el("status-pill"), "error", "bad");

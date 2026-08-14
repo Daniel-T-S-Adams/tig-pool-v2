@@ -256,6 +256,8 @@ Common commands:
 ```bash
 python3 admin.py autopilot                            # Pool health + scale readiness report
 python3 admin.py autopilot --json                     # Same, machine-readable
+python3 admin.py hit-rate                             # Quality vs TIG qualifier floor, bundles, time
+python3 admin.py hit-rate --json                      # Same, machine-readable
 
 python3 admin.py members                              # List all registered members (with trust/preflight state)
 python3 admin.py fleets                               # List registered fleets

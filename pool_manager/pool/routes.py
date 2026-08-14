@@ -2,7 +2,7 @@
 Pool Manager HTTP Routes
 ========================
 Public routes:  /stats, /members, /member/{wallet}, /leaderboard, /worker-earnings
-Admin routes:   /admin/invite, /admin/members, /admin/ops/metrics (require X-Admin-Secret header)
+Admin routes:   /admin/invite, /admin/members, /admin/ops/metrics, /admin/ops/hit-rate (require X-Admin-Secret header)
 Registration:   /register (requires valid invite code)
 """
 import os
@@ -17,7 +17,7 @@ from decimal import Decimal
 from fastapi import APIRouter, HTTPException, Header
 from pydantic import BaseModel
 from . import database as db
-from . import autopilot, ai_optimizer, ops_metrics, worker_earnings
+from . import autopilot, ai_optimizer, hit_rate_report, ops_metrics, worker_earnings
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -1601,6 +1601,13 @@ def admin_ops_metrics(x_admin_secret: str = Header(None)):
     """Private observe-only ops metrics for the operator dashboard."""
     _check_admin(x_admin_secret)
     return ops_metrics.build_ops_metrics()
+
+
+@router.get("/admin/ops/hit-rate")
+def admin_ops_hit_rate(x_admin_secret: str = Header(None)):
+    """Observe-only per-track quality vs TIG qualifier floor, bundles, and time."""
+    _check_admin(x_admin_secret)
+    return hit_rate_report.build_hit_rate_report()
 
 
 @router.post("/admin/ai-optimizer/run")

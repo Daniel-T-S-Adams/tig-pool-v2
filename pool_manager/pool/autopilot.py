@@ -146,6 +146,17 @@ ROOT_BACKLOG_DRAIN_MIN_NOT_STARTED = int(os.environ.get("AUTOPILOT_ROOT_BACKLOG_
 ROOT_BACKLOG_DRAIN_MIN_AGE_MS = int(os.environ.get("AUTOPILOT_ROOT_BACKLOG_DRAIN_MIN_AGE_MS", str(20 * 60 * 1000)))
 ROOT_BACKLOG_DRAIN_MIN_BUNDLES = int(os.environ.get("AUTOPILOT_ROOT_BACKLOG_DRAIN_MIN_BUNDLES", "1"))
 ROOT_BACKLOG_DRAIN_MIN_PER_CHALLENGE = int(os.environ.get("AUTOPILOT_ROOT_BACKLOG_DRAIN_MIN_PER_CHALLENGE", "1"))
+# Pipeline-healthy tracks keep their current num_bundles. Backlog still drains
+# via fewer new jobs (per_challenge_max_benchmarks), not smaller jobs.
+HOLD_HEALTHY_TRACK_BUNDLES = os.environ.get(
+    "AUTOPILOT_HOLD_HEALTHY_TRACK_BUNDLES", "true"
+).lower() in ("1", "true", "yes", "on")
+BUNDLE_HOLD_ACTIONS = frozenset({
+    "drain_root_backlog_pressure",
+    "reduce_tail_time",
+    "reduce_workload_until_proofs_convert",
+    "reduce_workload_until_stopped_rate_recovers",
+})
 # Drain/hold global max_concurrent when too many *GPU* roots sit unfinished.
 # CPU backlog (knapsack/energy/etc.) must not yank max_concurrent — that is
 # handled by per-challenge workload drain + the master's precommit governor.
@@ -1890,6 +1901,57 @@ def _decrease_backlog_bundles(current: int) -> int:
     return max(floor, current - WORKLOAD_MAX_BUNDLE_STEP)
 
 
+def _pipeline_healthy_track(
+    funnel: dict,
+    min_proof_conversion: float,
+    max_stopped_rate: float,
+) -> bool:
+    """True when a track converts proofs and is not failing to start work.
+
+    Time-to-proof and root backlog are not part of this predicate. Those used
+    to shrink job size on otherwise healthy tracks and undo bundle experiments.
+    """
+    if int(funnel.get("unexpected_stopped_without_roots") or 0) > 0:
+        return False
+    if funnel.get("allowlist_blocked") or funnel.get("algorithm_pin_blocked"):
+        return False
+    proof = funnel.get("proof_conversion_rate")
+    if proof is not None and float(proof) < float(min_proof_conversion):
+        return False
+    stopped = funnel.get(
+        "unexpected_stopped_without_roots_rate",
+        funnel.get("unexpected_stopped_rate", funnel.get("stopped_rate")),
+    )
+    if stopped is not None and float(stopped) > float(max_stopped_rate):
+        return False
+    return True
+
+
+def _hold_healthy_track_bundles(
+    *,
+    enabled: bool,
+    pipeline_healthy: bool,
+    action: str,
+    current_bundles: int,
+    target_bundles: int,
+) -> tuple[int, bool, str | None]:
+    """Keep current num_bundles on a pipeline-healthy track.
+
+    Returns (bundles, held, reason).
+    """
+    if not enabled or not pipeline_healthy:
+        return int(target_bundles), False, None
+    if action not in BUNDLE_HOLD_ACTIONS:
+        return int(target_bundles), False, None
+    if int(target_bundles) >= int(current_bundles):
+        return int(target_bundles), False, None
+    return (
+        int(current_bundles),
+        True,
+        "pipeline-healthy track: hold num_bundles; drain via fewer new jobs if needed",
+    )
+
+
 def _workload_controller_targets(
     cfg: dict,
     track_economics: list[dict],
@@ -1958,6 +2020,8 @@ def _workload_controller_targets(
         current_per_challenge_cap = int((cfg.get("per_challenge_max_benchmarks") or {}).get(challenge_id, 0) or 0)
         target_per_challenge_cap = current_per_challenge_cap
         bundle_floor = WORKLOAD_MIN_BUNDLES
+        pipeline_healthy = False
+        held_healthy_track_bundles = False
 
         if current_bundles <= 0:
             action = "missing_bundle_config"
@@ -2044,6 +2108,29 @@ def _workload_controller_targets(
             else:
                 reasons.append("track is not clearly constrained or underloaded yet")
 
+            pipeline_healthy = _pipeline_healthy_track(
+                funnel,
+                FUNNEL_MIN_PROOF_CONVERSION_RATE,
+                FUNNEL_MAX_STOPPED_OR_EXPIRED_RATE,
+            )
+            target_bundles, held_healthy_track_bundles, hold_reason = _hold_healthy_track_bundles(
+                enabled=HOLD_HEALTHY_TRACK_BUNDLES,
+                pipeline_healthy=pipeline_healthy,
+                action=action,
+                current_bundles=current_bundles,
+                target_bundles=target_bundles,
+            )
+            if held_healthy_track_bundles and hold_reason:
+                reasons.append(hold_reason)
+                cap_still_drains = target_per_challenge_cap < current_per_challenge_cap
+                batch_still_shrinks = target_batch_size < current_batch_size
+                if action == "drain_root_backlog_pressure" and cap_still_drains:
+                    pass
+                elif action == "reduce_tail_time" and batch_still_shrinks:
+                    pass
+                else:
+                    action = "hold_bundles_on_healthy_track"
+
         estimated_target_batches = None
         if estimated_nonces_per_bundle is not None and target_batch_size > 0 and target_bundles > 0:
             estimated_target_batches = int(math.ceil(float(estimated_nonces_per_bundle) * target_bundles / target_batch_size))
@@ -2108,6 +2195,8 @@ def _workload_controller_targets(
                 "min_bundle_floor": bundle_floor,
                 "max_job_batches_margin_ok": max_job_batches_margin_ok,
                 "policy_posture": posture,
+                "pipeline_healthy": pipeline_healthy,
+                "held_healthy_track_bundles": held_healthy_track_bundles,
             },
             "confidence": confidence,
             "apply_now": False,
@@ -3771,6 +3860,17 @@ def _next_workload_change(
             continue
         current = row.get("current") or {}
         target = row.get("target") or {}
+        derived = row.get("derived") or {}
+        if (
+            HOLD_HEALTHY_TRACK_BUNDLES
+            and derived.get("pipeline_healthy")
+            and int(target.get("num_bundles") or current.get("num_bundles") or 0)
+            < int(current.get("num_bundles") or 0)
+        ):
+            target = dict(target)
+            target["num_bundles"] = current.get("num_bundles")
+            row = dict(row)
+            row["target"] = target
         reduces_work = (
             int(target.get("num_bundles") or current.get("num_bundles") or 0)
             < int(current.get("num_bundles") or 0)

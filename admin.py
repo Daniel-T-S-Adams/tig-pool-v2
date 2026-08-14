@@ -14,6 +14,7 @@ Usage:
   python3 admin.py clear-slave <slave>       # unassign unfinished batches
   python3 admin.py member-health <slave>     # show slave assignment health
   python3 admin.py autopilot [--json]        # read-only scheduler/scale readiness report
+  python3 admin.py hit-rate [--json]         # quality vs qualifier floor, bundles, time
   python3 admin.py ai-optimizer [--json]     # run read-only DeepSeek analyst
   python3 admin.py ai-decisions [N]          # show recent AI recommendations
   python3 admin.py compute-types [--apply]   # validate/add TIG 0.0.7 compute_type
@@ -448,6 +449,54 @@ def cmd_autopilot(args):
         print(f"  - {rec.get('key')}: {rec.get('current')} -> {rec.get('proposed')}")
         print(f"    {rec.get('reason')}")
 
+def cmd_hit_rate(args):
+    report = _get("/admin/ops/hit-rate")
+    if "--json" in args:
+        print(json.dumps(report, indent=2, sort_keys=True))
+        return
+
+    window_min = int((report.get("window_ms") or 0) / 60000)
+    print("Hit-rate report (observe-only)")
+    print(f"  window      : {window_min} min")
+    print(f"  block       : {report.get('block_height')}")
+    print(f"  jobs w/ qty : {report.get('jobs_with_quality')}")
+    print(f"  vs floor    : {report.get('jobs_vs_floor')}  hits={report.get('hits')}  rate={report.get('hit_rate')}")
+    if report.get("tig_error"):
+        print(f"  tig warning : {report['tig_error']}")
+
+    print()
+    print(
+        f"{'CHAL':<5} {'TRACK':<28} {'BND':>4} {'JOBS':>5} {'HIT':>5} "
+        f"{'BESTQ':>8} {'FLOOR':>8} {'GAP':>7} {'SEC':>6} {'BLK':>5}"
+    )
+    print("-" * 90)
+    for row in report.get("tracks") or []:
+        hit = row.get("hits")
+        judged = row.get("jobs_vs_floor")
+        hit_s = f"{hit}/{judged}" if judged else "—"
+        gap = row.get("gap_best")
+        gap_s = f"{int(gap):+d}" if gap is not None else "—"
+        sec = row.get("wall_clock_sec_p50")
+        sec_s = f"{int(round(sec))}" if sec is not None else "—"
+        blk = row.get("blocks_to_proof_p50")
+        blk_s = f"{int(round(blk))}" if blk is not None else "—"
+        best = row.get("max_nonce_quality_best")
+        floor = row.get("qualifier_floor")
+        print(
+            f"{str(row.get('challenge') or ''):<5} "
+            f"{str(row.get('track') or ''):<28} "
+            f"{str(row.get('num_bundles') if row.get('num_bundles') is not None else '—'):>4} "
+            f"{int(row.get('jobs') or 0):>5} "
+            f"{hit_s:>5} "
+            f"{str(int(best) if best is not None else '—'):>8} "
+            f"{str(int(floor) if floor is not None else '—'):>8} "
+            f"{gap_s:>7} "
+            f"{sec_s:>6} "
+            f"{blk_s:>5}"
+        )
+    if not (report.get("tracks") or []):
+        print("  No jobs with solution_quality in this window.")
+
 def cmd_ai_optimizer(args):
     result = _post("/admin/ai-optimizer/run", {})
     if "--json" in args:
@@ -611,6 +660,7 @@ COMMANDS = {
     "clear-slave": cmd_clear_slave,
     "member-health": cmd_member_health,
     "autopilot": cmd_autopilot,
+    "hit-rate": cmd_hit_rate,
     "ai-optimizer": cmd_ai_optimizer,
     "ai-decisions": cmd_ai_decisions,
     "compute-types": cmd_compute_types,
