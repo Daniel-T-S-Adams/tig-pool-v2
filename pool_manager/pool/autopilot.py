@@ -72,6 +72,42 @@ _CHALLENGE_MAX_BENCHMARK_ENV = {
 _GPU_CHALLENGE_IDS = frozenset({"c004", "c005", "c006"})
 
 
+def _env_track_key(track: str) -> str:
+    """n_queries=7000 -> N_QUERIES_7000; n_vars=10000,ratio=4267 -> N_VARS_10000_RATIO_4267."""
+    out = []
+    for ch in str(track or "").strip().upper():
+        out.append(ch if ch.isalnum() else "_")
+    key = "".join(out)
+    while "__" in key:
+        key = key.replace("__", "_")
+    return key.strip("_")
+
+
+def _min_bundles_for_track(
+    challenge_id: str,
+    track: str | None = None,
+    environ: dict | None = None,
+    default_floor: int | None = None,
+) -> int:
+    """Operator bundle floor: track env, then challenge env, then global min.
+
+    AUTOPILOT_MIN_BUNDLES_C004=12
+    AUTOPILOT_MIN_BUNDLES_C004_N_QUERIES_7000=16
+    """
+    env = environ if environ is not None else os.environ
+    floor = int(default_floor if default_floor is not None else WORKLOAD_MIN_BUNDLES)
+    cid = str(challenge_id or "").split("_", 1)[0].upper()
+    if cid:
+        raw = env.get(f"AUTOPILOT_MIN_BUNDLES_{cid}")
+        if raw is not None and str(raw).strip() != "":
+            floor = max(floor, int(raw))
+        if track:
+            raw = env.get(f"AUTOPILOT_MIN_BUNDLES_{cid}_{_env_track_key(track)}")
+            if raw is not None and str(raw).strip() != "":
+                floor = max(floor, int(raw))
+    return max(1, floor)
+
+
 def _max_challenge_benchmarks(challenge_id: str) -> int:
     """Autopilot ceiling for one challenge's per_challenge_max_benchmarks entry."""
     cid = str(challenge_id or "").split("_", 1)[0]
@@ -135,6 +171,8 @@ SOFT_CONVERSION_GRACE_SETTING = "autopilot_soft_conversion_grace_started_ms"
 FUNNEL_MAX_STOPPED_OR_EXPIRED_RATE = float(os.environ.get("AUTOPILOT_FUNNEL_MAX_STOPPED_OR_EXPIRED_RATE", "0.10"))
 FUNNEL_DRAIN_MIN_MAX_BENCHMARKS = int(os.environ.get("AUTOPILOT_FUNNEL_DRAIN_MIN_MAX_BENCHMARKS", "12"))
 WORKLOAD_MIN_BUNDLES = int(os.environ.get("AUTOPILOT_WORKLOAD_MIN_BUNDLES", "4"))
+# Optional tighter floors: AUTOPILOT_MIN_BUNDLES_C004=12 and
+# AUTOPILOT_MIN_BUNDLES_C004_N_QUERIES_7000=16. See _min_bundles_for_track.
 WORKLOAD_MIN_BATCH_SIZE = int(os.environ.get("AUTOPILOT_WORKLOAD_MIN_BATCH_SIZE", "8"))
 WORKLOAD_MIN_WEIGHT = int(os.environ.get("AUTOPILOT_WORKLOAD_MIN_WEIGHT", "1"))
 WORKLOAD_MAX_BUNDLE_STEP = int(os.environ.get("AUTOPILOT_WORKLOAD_MAX_BUNDLE_STEP", "1"))
@@ -1886,16 +1924,17 @@ def _workload_confidence(funnel: dict, observed: dict) -> dict:
     }
 
 
-def _decrease_bundles(current: int) -> int:
+def _decrease_bundles(current: int, floor: int | None = None) -> int:
+    floor = max(1, int(floor if floor is not None else WORKLOAD_MIN_BUNDLES))
     current = int(current or 0)
-    if current <= WORKLOAD_MIN_BUNDLES:
+    if current <= floor:
         return current
-    return max(WORKLOAD_MIN_BUNDLES, current - WORKLOAD_MAX_BUNDLE_STEP)
+    return max(floor, current - WORKLOAD_MAX_BUNDLE_STEP)
 
 
-def _decrease_backlog_bundles(current: int) -> int:
+def _decrease_backlog_bundles(current: int, floor: int | None = None) -> int:
     current = int(current or 0)
-    floor = max(1, ROOT_BACKLOG_DRAIN_MIN_BUNDLES)
+    floor = max(1, int(floor if floor is not None else ROOT_BACKLOG_DRAIN_MIN_BUNDLES))
     if current <= floor:
         return current
     return max(floor, current - WORKLOAD_MAX_BUNDLE_STEP)
@@ -2019,7 +2058,7 @@ def _workload_controller_targets(
         oldest_not_started_root_age_min = observed.get("oldest_not_started_root_age_min")
         current_per_challenge_cap = int((cfg.get("per_challenge_max_benchmarks") or {}).get(challenge_id, 0) or 0)
         target_per_challenge_cap = current_per_challenge_cap
-        bundle_floor = WORKLOAD_MIN_BUNDLES
+        bundle_floor = _min_bundles_for_track(challenge_id, track)
         pipeline_healthy = False
         held_healthy_track_bundles = False
 
@@ -2059,12 +2098,11 @@ def _workload_controller_targets(
             elif unexpected_stopped_without_roots:
                 action = "reduce_or_fix_unrunnable_track"
                 reasons.append("recent jobs stopped before root work; check max_job_batches/allowlist/TIG debt")
-                target_bundles = _decrease_bundles(current_bundles)
+                target_bundles = _decrease_bundles(current_bundles, bundle_floor)
             elif backlog_pressure:
                 action = "drain_root_backlog_pressure"
                 reasons.append("old not-started root batches are accumulating faster than workers can drain them")
-                target_bundles = _decrease_backlog_bundles(current_bundles)
-                bundle_floor = max(1, ROOT_BACKLOG_DRAIN_MIN_BUNDLES)
+                target_bundles = _decrease_bundles(current_bundles, bundle_floor)
                 if current_per_challenge_cap > ROOT_BACKLOG_DRAIN_MIN_PER_CHALLENGE:
                     target_per_challenge_cap = max(
                         ROOT_BACKLOG_DRAIN_MIN_PER_CHALLENGE,
@@ -2073,16 +2111,16 @@ def _workload_controller_targets(
             elif proof_unhealthy:
                 action = "reduce_workload_until_proofs_convert"
                 reasons.append("proof conversion is below target")
-                target_bundles = _decrease_bundles(current_bundles)
+                target_bundles = _decrease_bundles(current_bundles, bundle_floor)
                 target_weight = max(1, current_weight - 1) if current_weight > 1 else current_weight
             elif stopped_unhealthy:
                 action = "reduce_workload_until_stopped_rate_recovers"
                 reasons.append("stopped/expired benchmark rate is above target")
-                target_bundles = _decrease_bundles(current_bundles)
+                target_bundles = _decrease_bundles(current_bundles, bundle_floor)
             elif slow_to_proof:
                 action = "reduce_tail_time"
                 reasons.append("time-to-proof-submission is above target")
-                target_bundles = _decrease_bundles(current_bundles)
+                target_bundles = _decrease_bundles(current_bundles, bundle_floor)
                 if p95_root_runtime is not None and float(p95_root_runtime) > BUNDLE_TARGET_ROOT_RUNTIME_SEC:
                     target_batch_size = max(min_batch_size, _previous_power_of_two(current_batch_size // 2))
                     reasons.append("p95 root batch runtime is too high; smaller batches may reduce tail latency")
@@ -2152,6 +2190,19 @@ def _workload_controller_targets(
         elif target_batch_size < min_batch_size:
             target_batch_size = min_batch_size
             reasons.append(f"batch_size floor keeps AWS CPU jobs busy up to {min_batch_size} workers")
+        blocked_from_floor = action in {
+            "intentional_allowlist_stop",
+            "intentional_algorithm_pin_stop",
+            "missing_bundle_config",
+        }
+        if current_bundles > 0 and current_bundles < bundle_floor and not blocked_from_floor:
+            action = "enforce_min_bundles"
+            target_bundles = bundle_floor
+            reasons.append(
+                f"num_bundles {current_bundles} is below operator floor {bundle_floor}"
+            )
+        elif target_bundles > 0 and target_bundles < bundle_floor and not blocked_from_floor:
+            target_bundles = bundle_floor
 
         targets.append({
             "challenge_id": row.get("challenge_id"),
@@ -3769,6 +3820,11 @@ def _rollback_last_canary(
             continue
         current_value = settings.get(field)
         previous_value = int(change.get("current") or 0)
+        if field == "num_bundles":
+            previous_value = max(
+                previous_value,
+                _min_bundles_for_track(str(algorithm_id).split("_", 1)[0], track),
+            )
         if int(current_value or 0) != previous_value:
             settings[field] = previous_value
             rollback_changes[field] = {
@@ -3827,23 +3883,33 @@ def _next_workload_change(
     if not actionable:
         return None, None
 
+    floor_actions = {
+        "enforce_aws_cpu_batch_size_floor",
+        "enforce_min_bundles",
+    }
+    floor_changes = []
     for row in actionable:
-        if row.get("action") != "enforce_aws_cpu_batch_size_floor":
+        if row.get("action") not in floor_actions:
             continue
         change = _apply_workload_target(new_cfg, row)
         if change:
-            changes = [change]
-            for extra in actionable:
-                if extra is row or extra.get("action") != "enforce_aws_cpu_batch_size_floor":
-                    continue
-                extra_change = _apply_workload_target(new_cfg, extra)
-                if extra_change:
-                    changes.append(extra_change)
-            return {
-                "action": "enforce_aws_cpu_batch_size_floor",
-                "changes": changes,
-                "reasons": ["CPU track batch_size values were below the configured AWS CPU batch-size floor"],
-            }, None
+            floor_changes.append(change)
+    if floor_changes:
+        actions = {change.get("action") for change in floor_changes}
+        if actions == {"enforce_min_bundles"}:
+            action = "enforce_min_bundles"
+            reasons = ["num_bundles values were below the configured operator floor"]
+        elif actions == {"enforce_aws_cpu_batch_size_floor"}:
+            action = "enforce_aws_cpu_batch_size_floor"
+            reasons = ["CPU track batch_size values were below the configured AWS CPU batch-size floor"]
+        else:
+            action = "enforce_operator_floors"
+            reasons = ["configured operator floors were below current track settings"]
+        return {
+            "action": action,
+            "changes": floor_changes,
+            "reasons": reasons,
+        }, None
 
     safety_actions = {
         "drain_root_backlog_pressure",
@@ -4073,6 +4139,27 @@ def _plan_config_change(report: dict, cfg: dict, clean_windows: int) -> dict:
                 }
             }
             decision["config"] = new_cfg
+            return decision
+    floor_targets = [
+        row for row in ((report.get("workload_targets") or {}).get("actionable") or [])
+        if row.get("action") in {"enforce_min_bundles", "enforce_aws_cpu_batch_size_floor"}
+    ]
+    if floor_targets:
+        floor_cfg = json.loads(json.dumps(cfg))
+        floor_change, _ = _next_workload_change(
+            floor_cfg,
+            report,
+            {"actionable": floor_targets},
+            health,
+            funnel_safe,
+            policy_posture,
+            clean_windows,
+            allow_canary=False,
+        )
+        if floor_change:
+            decision["reason"] = "workload_safety_adjustment"
+            decision["changes"] = {"workload_controller": floor_change}
+            decision["config"] = floor_cfg
             return decision
     backlog_drain_targets = [
         row for row in ((report.get("workload_targets") or {}).get("actionable") or [])

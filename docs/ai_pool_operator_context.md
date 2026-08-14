@@ -407,7 +407,15 @@ Autopilot is expected to scale proportionally with fleet size:
   work drains. On a pipeline-healthy track (proof conversion at/above target and
   low unexpected stopped rate) it must **not** shrink `num_bundles`. Drain
   backlog with fewer new jobs, not smaller jobs. Unrunnable / low-conversion
-  tracks can still lose bundles.
+  tracks can still lose bundles, but never below `AUTOPILOT_MIN_BUNDLES_*` /
+  `AUTOPILOT_WORKLOAD_MIN_BUNDLES`.
+- Operator bundle floors: `AUTOPILOT_MIN_BUNDLES_C004=12` (challenge) and
+  `AUTOPILOT_MIN_BUNDLES_C004_N_QUERIES_7000=16` (track). Track wins over
+  challenge, challenge wins over the global `AUTOPILOT_WORKLOAD_MIN_BUNDLES`.
+  Autopilot must not cut below the floor. If live `num_bundles` is already
+  below it, apply-mode raises to the floor (`enforce_min_bundles`) without
+  waiting for aggressive canary. Clean/fast tracks can still step up above
+  the floor when compute and the reward funnel allow it.
 - `hold_bundles_on_healthy_track` means apply-mode wanted to cut bundles for
   backlog or time-to-proof and was blocked. That is expected, not a stall.
 - Hit-rate (`/admin/ops/hit-rate`) is the quality signal: `max_nonce_quality`
