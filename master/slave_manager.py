@@ -81,11 +81,16 @@ GET_BATCHES_FAST = os.environ.get(
     os.environ.get("GET_BATCHES_LIGHT", "1"),
 ).lower() in ("1", "true", "yes", "on")
 GET_BATCHES_LIGHT = GET_BATCHES_FAST  # legacy alias
-# Max concurrent assign handlers. Excess *busy* polls get memory-only
-# assignments. Idle slaves are never shed — that left 200+ unassigned roots
-# sitting while the fleet reported idle.
+# Max concurrent assign handlers. Excess busy polls get memory-only
+# assignments. Idle slaves get a few extra slots so ownerless roots
+# still get claimed without opening the whole fleet onto Postgres.
 GET_BATCHES_MAX_INFLIGHT = max(
     1, int(os.environ.get("GET_BATCHES_MAX_INFLIGHT", "8"))
+)
+# Extra concurrent assign slots for idle slaves only. Unbounded idle-through
+# exhausted the Postgres pool (affinity SQL + execute_many on every poll).
+GET_BATCHES_IDLE_EXTRA = max(
+    0, int(os.environ.get("GET_BATCHES_IDLE_EXTRA", "4"))
 )
 
 
@@ -94,16 +99,19 @@ def should_shed_get_batches_poll(
     inflight: int,
     max_inflight: int,
     assigned_count: int,
+    idle_extra: int | None = None,
 ) -> bool:
     """True when this poll may skip new assignment and return current work only.
 
-    Idle slaves (no current assignments) must never be shed. Raising the
-    inflight cap is what melted Postgres last time; this keeps the cap and
-    only exempts empty slaves so they can pick up ownerless roots.
+    Busy slaves shed at max_inflight. Idle slaves may use a few extra slots
+    so ownerless roots still get claimed, without opening the whole fleet
+    onto the DB at once.
     """
+    cap = max(1, int(max_inflight or 1))
+    extra = GET_BATCHES_IDLE_EXTRA if idle_extra is None else max(0, int(idle_extra))
     if int(assigned_count or 0) <= 0:
-        return False
-    return int(inflight or 0) >= max(1, int(max_inflight or 1))
+        return int(inflight or 0) >= (cap + extra)
+    return int(inflight or 0) >= cap
 
 
 def owner_idle_unlocks_sticky(active_count: int | None) -> bool:
@@ -385,49 +393,86 @@ class SlaveManager:
         until = int(self._slave_seen_touch_until.get(slave_name) or 0)
         if now_ms < until:
             return
-        self._ensure_slave_seen_table()
         if num_workers is None:
             try:
                 num_workers = int((self._slave_telemetry.get(slave_name) or {}).get("num_workers") or 0) or None
             except (TypeError, ValueError):
                 num_workers = None
-        touch_slave_seen(get_db_conn().execute, slave_name, now_ms, num_workers=num_workers)
-        self._slave_seen_touch_until[slave_name] = now_ms + self._slave_seen_touch_interval_ms
+        try:
+            self._ensure_slave_seen_table()
+            touch_slave_seen(get_db_conn().execute, slave_name, now_ms, num_workers=num_workers)
+            self._slave_seen_touch_until[slave_name] = now_ms + self._slave_seen_touch_interval_ms
+        except Exception as exc:
+            logger.warning("slave-seen touch failed for %s: %s", slave_name, exc)
 
-    def _online_slaves(self, now_ms: int) -> Set[str]:
+    def _online_slaves(self, now_ms: int, *, refresh: bool = False) -> Set[str]:
         cached = self._online_cache
-        if cached is not None:
-            slaves, until_ms = cached
-            if now_ms < until_ms:
-                return set(slaves)
-        self._ensure_slave_seen_table()
-        slaves = fetch_online_slaves(get_db_conn().fetch_all, now_ms)
-        self._online_cache = (set(slaves), now_ms + self._online_cache_ms)
-        return set(slaves)
+        if not refresh:
+            # Hot path: never block on SQL. Stale / empty online set is fine.
+            return set(cached[0]) if cached is not None else set()
+        try:
+            self._ensure_slave_seen_table()
+            slaves = fetch_online_slaves(get_db_conn().fetch_all, now_ms)
+            self._online_cache = (set(slaves), now_ms + self._online_cache_ms)
+            return set(slaves)
+        except Exception as exc:
+            logger.warning("online-slave refresh failed: %s", exc)
+            if cached is not None:
+                return set(cached[0])
+            return set()
 
-    def _root_affinity_map(self) -> Dict[str, str]:
-        """benchmark_id -> preferred root slave for sticky assignment."""
+    def _affinity_from_memory(self) -> Dict[str, str]:
+        scores: Dict[str, Dict[str, int]] = {}
+        for row in self.batches:
+            batch = row.get("batch") or {}
+            slave = row.get("slave")
+            bid = batch.get("benchmark_id")
+            if not slave or not bid or row.get("end_time") is not None:
+                continue
+            if batch.get("sampled_nonces") is not None:
+                continue
+            scores.setdefault(str(bid), {})[str(slave)] = (
+                scores.get(str(bid), {}).get(str(slave), 0) + 1
+            )
+        return {
+            bid: owner
+            for bid, slave_scores in scores.items()
+            if (owner := preferred_root_slave(slave_scores))
+        }
+
+    def _root_affinity_map(self, *, refresh: bool = False) -> Dict[str, str]:
+        """benchmark_id -> preferred root slave for sticky assignment.
+
+        get-batches must pass refresh=False (cache / memory only). SQL refresh
+        belongs in run() — a cache-miss stampede exhausted the Postgres pool.
+        """
         if not STICKY_ROOTS_ENABLED:
             return {}
         now_ms = int(time.time() * 1000)
         cached = self._affinity_cache
-        if cached is not None:
-            mapping, until_ms = cached
-            if now_ms < until_ms:
-                return dict(mapping)
-        rows = get_db_conn().fetch_all(
-            """
-            SELECT
-                benchmark_id,
-                slave,
-                COUNT(*) FILTER (WHERE ready = true) AS ready_n,
-                COUNT(*) FILTER (WHERE ready IS NULL AND slave IS NOT NULL) AS inflight_n
-            FROM root_batch
-            WHERE slave IS NOT NULL
-              AND (ready = true OR ready IS NULL)
-            GROUP BY benchmark_id, slave
-            """
-        ) or []
+        if cached is not None and not refresh:
+            return dict(cached[0])
+        if not refresh:
+            return self._affinity_from_memory()
+        try:
+            rows = get_db_conn().fetch_all(
+                """
+                SELECT
+                    benchmark_id,
+                    slave,
+                    COUNT(*) FILTER (WHERE ready = true) AS ready_n,
+                    COUNT(*) FILTER (WHERE ready IS NULL AND slave IS NOT NULL) AS inflight_n
+                FROM root_batch
+                WHERE slave IS NOT NULL
+                  AND (ready = true OR ready IS NULL)
+                GROUP BY benchmark_id, slave
+                """
+            ) or []
+        except Exception as exc:
+            logger.warning("root-affinity refresh failed: %s", exc)
+            if cached is not None:
+                return dict(cached[0])
+            return self._affinity_from_memory()
         scores: Dict[str, Dict[str, int]] = {}
         for row in rows:
             bid = row.get("benchmark_id")
@@ -473,19 +518,26 @@ class SlaveManager:
             if now_ms < until_ms:
                 return bool(ok)
 
-        row = get_db_conn().fetch_one(
-            """
-            SELECT 1
-            FROM pool_members
-            WHERE slave_name = %s
-              AND active = true
-            LIMIT 1
-            """,
-            (slave_name,)
-        )
-        ok = row is not None
-        self._auth_cache[slave_name] = (ok, now_ms + self._auth_cache_ms)
-        return ok
+        try:
+            row = get_db_conn().fetch_one(
+                """
+                SELECT 1
+                FROM pool_members
+                WHERE slave_name = %s
+                  AND active = true
+                LIMIT 1
+                """,
+                (slave_name,)
+            )
+            ok = row is not None
+            self._auth_cache[slave_name] = (ok, now_ms + self._auth_cache_ms)
+            return ok
+        except Exception as exc:
+            logger.warning("auth lookup failed for %s: %s", slave_name, exc)
+            if cached is not None:
+                return bool(cached[0])
+            # Regex already matched a configured slave route.
+            return True
 
     def _require_authorized_slave(self, slave_name: str):
         if not self._is_authorized_slave(slave_name):
@@ -1175,8 +1227,8 @@ class SlaveManager:
         """Unassign roots from heartbeating slaves that are not actually working.
 
         Uses live get-batches telemetry (active_batches=0) plus the shared shed
-        rules in job_manager.should_shed_slave_roots. Throttled — safe on the
-        poll path. Proofs are never touched.
+        rules in job_manager.should_shed_slave_roots. Runs from slave_manager.run()
+        only — never on the get-batches poll path. Proofs are never touched.
         """
         if not STUCK_SLAVE_SHED_ENABLED:
             return
@@ -1752,6 +1804,15 @@ class SlaveManager:
         with self.lock:
             self.batches = pending_batches
         logger.debug(f"Refreshed pending batches. Got {len(self.batches)}")
+        now_ms = int(time.time() * 1000)
+        try:
+            self._root_affinity_map(refresh=True)
+        except Exception as exc:
+            logger.warning("affinity refresh failed: %s", exc)
+        try:
+            self._maybe_shed_zombie_owners(now_ms)
+        except Exception as exc:
+            logger.warning("zombie root shed failed: %s", exc)
         # Smart policy for get-batches — NEVER on the poll path.
         try:
             self._refresh_assign_views()
@@ -1859,7 +1920,7 @@ class SlaveManager:
         except Exception as exc:
             logger.warning("capability views in assign refresh failed: %s", exc)
 
-        online = self._online_slaves(now_ms)
+        online = self._online_slaves(now_ms, refresh=True)
         # Bound work: adaptive SQL is cached; only touch currently-online slaves.
         for slave_name in list(online)[:250]:
             route = self._route_cap_for_slave(slave_name)
@@ -2275,14 +2336,9 @@ class SlaveManager:
             if telemetry:
                 self._remember_slave_telemetry(slave_name, telemetry, int(now))
             self._touch_slave_seen(slave_name, int(now))
-            # Heartbeating-but-idle / stuck root reclaim (throttled fleet scan).
-            try:
-                self._maybe_shed_zombie_owners(int(now))
-            except Exception as exc:
-                logger.warning("zombie root shed failed: %s", exc)
 
-            # Load-shed busy slaves only. Idle slaves must still take new work
-            # or ownerless roots sit unassigned while the herd reports idle.
+            # Busy slaves shed at max_inflight. Idle slaves get a few extra
+            # assign slots so ownerless roots still get claimed.
             assigned_now = self._memory_assigned_batches(slave_name)
             shed_only = False
             with self._get_batches_inflight_lock:
@@ -2309,6 +2365,11 @@ class SlaveManager:
                     if updates:
                         get_db_conn().execute_many(*updates)
                     return JSONResponse(content=jsonable_encoder(concurrent))
+                except Exception as exc:
+                    logger.warning("get-batches fast failed for %s: %s", slave_name, exc)
+                    return JSONResponse(
+                        content=jsonable_encoder(self._memory_assigned_batches(slave_name))
+                    )
                 finally:
                     with self._get_batches_inflight_lock:
                         self._get_batches_inflight = max(0, self._get_batches_inflight - 1)
