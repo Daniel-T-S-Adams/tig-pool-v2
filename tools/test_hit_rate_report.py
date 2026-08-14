@@ -25,6 +25,8 @@ def _load_fns():
         "_canonical_challenge",
         "_lookup_floor",
         "_challenge_id_from_algorithm",
+        "_derive_bundles",
+        "_nonces_per_bundle_from_precommits",
     }
     nodes = [
         node
@@ -140,6 +142,38 @@ def main() -> int:
     )
     check(named_job["challenge"] == "c004", "canonicalizes vector -> c004")
     check(named_job["hit"] is True and named_job["gap"] == 77769 - 77649, "name-keyed job hits floor")
+    stale = ns["annotate_job"](
+        {
+            "benchmark_id": "old",
+            "challenge": "c004",
+            "algorithm_id": "c004_a100",
+            "track": "n_queries=15000",
+            "num_nonces": 120,
+            "solution_quality": [77000],
+            "start_time": 1,
+            "end_time": 7_081_000,
+        },
+        floors=floors,
+        configured={("c004_a100", "n_queries=15000"): 16},
+        precommits={},
+        proofs={},
+        nonces_per_bundle={("c004", "n_queries=15000"): 30},
+    )
+    check(stale["num_bundles"] == 4, "derives historical bundles from num_nonces, not live config")
+    unlabeled = ns["annotate_job"](
+        {
+            "benchmark_id": "unk",
+            "challenge": "c004",
+            "algorithm_id": "c004_a100",
+            "track": "n_queries=15000",
+            "solution_quality": [77000],
+        },
+        floors=floors,
+        configured={("c004_a100", "n_queries=15000"): 16},
+        precommits={},
+        proofs={},
+    )
+    check(unlabeled["num_bundles"] is None, "does not stamp live config onto unknown jobs")
     check(job["hit"] is False and job["gap"] == 77507 - 77649, "below-floor job is a miss")
     check(job["blocks_to_proof"] == 14, "blocks to proof from confirmed-start")
     check(abs(job["wall_clock_sec"] - 42.0) < 0.01, "wall clock from start/end")

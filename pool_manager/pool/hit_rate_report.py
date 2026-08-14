@@ -76,6 +76,7 @@ def _max_quality(raw) -> int | None:
 
 
 def _configured_bundles(cfg: dict) -> dict[tuple[str, str], int]:
+    """Current config only. Do not use this to label historical jobs."""
     out: dict[tuple[str, str], int] = {}
     for algo in cfg.get("algo_selection") or []:
         algorithm_id = algo.get("algorithm_id")
@@ -87,6 +88,36 @@ def _configured_bundles(cfg: dict) -> dict[tuple[str, str], int]:
             if algorithm_id and track and bundles > 0:
                 out[(str(algorithm_id), str(track))] = bundles
     return out
+
+
+def _nonces_per_bundle_from_precommits(precommits) -> dict[tuple[str, str], int]:
+    samples: dict[tuple[str, str], list[int]] = defaultdict(list)
+    for pc in _as_list(precommits):
+        if not isinstance(pc, dict):
+            continue
+        settings = pc.get("settings") or {}
+        details = pc.get("details") or {}
+        chal = settings.get("challenge_id")
+        track = settings.get("track_id")
+        try:
+            bundles = int(details.get("num_bundles") or 0)
+            nonces = int(details.get("num_nonces") or 0)
+        except (TypeError, ValueError):
+            continue
+        if chal and track and bundles > 0 and nonces > 0 and nonces % bundles == 0:
+            samples[(str(chal), str(track))].append(nonces // bundles)
+    return {key: int(statistics.median(vals)) for key, vals in samples.items() if vals}
+
+
+def _derive_bundles(num_nonces, nonces_per_bundle) -> int | None:
+    try:
+        nonces = int(num_nonces)
+        npp = int(nonces_per_bundle)
+    except (TypeError, ValueError):
+        return None
+    if nonces <= 0 or npp <= 0 or nonces % npp != 0:
+        return None
+    return nonces // npp
 
 
 CHALLENGE_NAME_TO_ID = {
@@ -296,6 +327,7 @@ def annotate_job(
     configured: dict[tuple[str, str], int],
     precommits: dict,
     proofs: dict,
+    nonces_per_bundle: dict[tuple[str, str], int] | None = None,
 ) -> dict:
     bid = str(row.get("benchmark_id") or "")
     algorithm_id = str(row.get("algorithm_id") or row.get("algorithm") or "")
@@ -311,7 +343,9 @@ def annotate_job(
     pre_details = pre.get("details") or {}
     bundles = pre_details.get("num_bundles")
     if bundles is None:
-        bundles = configured.get((algorithm_id, track))
+        npp = (nonces_per_bundle or {}).get((challenge, track))
+        bundles = _derive_bundles(row.get("num_nonces"), npp)
+    # Never fall back to live config — that relabels old jobs after a bundle change.
     proof = proofs.get(bid) or {}
     proof_state = proof.get("state") or {}
     proof_details = proof.get("details") or {}
@@ -370,7 +404,15 @@ def aggregate_rows(jobs: list[dict]) -> list[dict]:
     for (challenge, algorithm_id, track, bundles), rows in groups.items():
         maxqs = [r["max_nonce_quality"] for r in rows if r.get("max_nonce_quality") is not None]
         gaps = [r["gap"] for r in rows if r.get("gap") is not None]
-        walls = [r["wall_clock_sec"] for r in rows if r.get("wall_clock_sec") is not None]
+        proved = [
+            r for r in rows
+            if r.get("blocks_to_proof") is not None or r.get("proof_submitted")
+        ]
+        walls = [
+            r["proof_wall_clock_sec"] or r["wall_clock_sec"]
+            for r in proved
+            if (r.get("proof_wall_clock_sec") or r.get("wall_clock_sec")) is not None
+        ]
         proofs = [r["proof_wall_clock_sec"] for r in rows if r.get("proof_wall_clock_sec") is not None]
         blocks = [r["blocks_to_proof"] for r in rows if r.get("blocks_to_proof") is not None]
         judged = [r for r in rows if r.get("hit") is not None]
@@ -417,6 +459,7 @@ def build_hit_rate_report(window_ms: int | None = None) -> dict:
     configured = _configured_bundles(tig.get("config") or {})
     precommits = _index_by_benchmark_id(latest.get("precommits"), "benchmark_id")
     proofs = _index_by_benchmark_id(latest.get("proofs"), "benchmark_id")
+    nonces_per_bundle = _nonces_per_bundle_from_precommits(latest.get("precommits"))
     raw_jobs = _job_rows(cutoff_ms)
     jobs = [
         annotate_job(
@@ -425,6 +468,7 @@ def build_hit_rate_report(window_ms: int | None = None) -> dict:
             configured=configured,
             precommits=precommits,
             proofs=proofs,
+            nonces_per_bundle=nonces_per_bundle,
         )
         for row in raw_jobs
     ]
