@@ -89,21 +89,90 @@ def _configured_bundles(cfg: dict) -> dict[tuple[str, str], int]:
     return out
 
 
+CHALLENGE_NAME_TO_ID = {
+    "satisfiability": "c001",
+    "vehicle_routing": "c002",
+    "vehicle": "c002",
+    "knapsack": "c003",
+    "vector_search": "c004",
+    "vector": "c004",
+    "hypergraph": "c005",
+    "neuralnet_optimizer": "c006",
+    "neuralnet": "c006",
+    "job_scheduling": "c007",
+    "job": "c007",
+    "energy": "c008",
+}
+
+
+def _challenge_id_from_algorithm(algorithm_id: str | None) -> str | None:
+    prefix = str(algorithm_id or "").split("_", 1)[0]
+    if prefix.startswith("c") and prefix[1:].isdigit():
+        return prefix
+    return None
+
+
+def _canonical_challenge(*values: str | None) -> str:
+    for raw in values:
+        text = str(raw or "").strip()
+        if not text:
+            continue
+        if text.startswith("c") and len(text) >= 4 and text[1:4].isdigit():
+            return text[:4]
+        mapped = CHALLENGE_NAME_TO_ID.get(text.lower()) or CHALLENGE_NAME_TO_ID.get(text.split("_", 1)[0].lower())
+        if mapped:
+            return mapped
+    return str(next((v for v in values if v), "") or "")
+
+
 def _qualifier_floors(challenges) -> dict[tuple[str, str], int]:
     floors: dict[tuple[str, str], int] = {}
     for challenge in _as_list(challenges):
         if not isinstance(challenge, dict):
             continue
         cid = challenge.get("id") or challenge.get("challenge_id")
+        cfg = challenge.get("config") or {}
+        name = cfg.get("name") or challenge.get("name")
+        aliases = {str(cid)} if cid else set()
+        if name:
+            aliases.add(str(name))
+            aliases.add(str(name).split("_", 1)[0])
+        canonical = _canonical_challenge(cid, name)
+        if canonical:
+            aliases.add(canonical)
         block_data = challenge.get("block_data") or {}
         qualities = block_data.get("qualifier_qualities_by_track") or {}
         if not isinstance(qualities, dict):
             continue
         for track, vals in qualities.items():
             nums = [int(x) for x in (vals or []) if isinstance(x, (int, float))]
-            if cid and track and nums:
-                floors[(str(cid), str(track))] = min(nums)
+            if not track or not nums:
+                continue
+            floor = min(nums)
+            for alias in aliases:
+                if alias:
+                    floors[(str(alias), str(track))] = floor
     return floors
+
+
+def _lookup_floor(
+    floors: dict[tuple[str, str], int],
+    challenge: str,
+    track: str,
+    algorithm_id: str | None = None,
+) -> int | None:
+    candidates = [
+        challenge,
+        _canonical_challenge(challenge, algorithm_id, _challenge_id_from_algorithm(algorithm_id)),
+        _challenge_id_from_algorithm(algorithm_id),
+    ]
+    for cid in candidates:
+        if cid and (cid, track) in floors:
+            return floors[(cid, track)]
+    matches = [v for (cid, t), v in floors.items() if t == track]
+    if matches and len(set(matches)) == 1:
+        return matches[0]
+    return None
 
 
 def _index_by_benchmark_id(items, id_key: str) -> dict:
@@ -199,6 +268,7 @@ def _job_rows(cutoff_ms: int) -> list[dict]:
             j.algorithm,
             j.settings->>'track_id' AS track,
             j.settings->>'algorithm_id' AS algorithm_id,
+            j.settings->>'challenge_id' AS challenge_id,
             j.num_nonces,
             j.block_started,
             j.start_time,
@@ -228,11 +298,15 @@ def annotate_job(
     proofs: dict,
 ) -> dict:
     bid = str(row.get("benchmark_id") or "")
-    challenge = str(row.get("challenge") or "").split("_", 1)[0]
     algorithm_id = str(row.get("algorithm_id") or row.get("algorithm") or "")
     track = str(row.get("track") or "")
+    challenge = _canonical_challenge(
+        row.get("challenge_id"),
+        algorithm_id,
+        row.get("challenge"),
+    )
     max_q = _max_quality(row.get("solution_quality"))
-    floor = floors.get((challenge, track))
+    floor = _lookup_floor(floors, challenge, track, algorithm_id)
     pre = precommits.get(bid) or {}
     pre_details = pre.get("details") or {}
     bundles = pre_details.get("num_bundles")

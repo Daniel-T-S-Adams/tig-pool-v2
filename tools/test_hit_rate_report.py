@@ -22,6 +22,9 @@ def _load_fns():
         "_as_list",
         "_configured_bundles",
         "_index_by_benchmark_id",
+        "_canonical_challenge",
+        "_lookup_floor",
+        "_challenge_id_from_algorithm",
     }
     nodes = [
         node
@@ -35,6 +38,20 @@ def _load_fns():
         "defaultdict": __import__("collections").defaultdict,
         "json": __import__("json"),
         "statistics": __import__("statistics"),
+        "CHALLENGE_NAME_TO_ID": {
+            "satisfiability": "c001",
+            "vehicle_routing": "c002",
+            "vehicle": "c002",
+            "knapsack": "c003",
+            "vector_search": "c004",
+            "vector": "c004",
+            "hypergraph": "c005",
+            "neuralnet_optimizer": "c006",
+            "neuralnet": "c006",
+            "job_scheduling": "c007",
+            "job": "c007",
+            "energy": "c008",
+        },
     }
     exec(compile(ast.Module(body=nodes, type_ignores=[]), str(path), "exec"), ns, ns)
     return ns
@@ -66,6 +83,25 @@ def main() -> int:
         ]
     )
     check(floors[("c004", "n_queries=15000")] == 77649, "floor is min qualifier quality", floors)
+    named = ns["_qualifier_floors"](
+        [
+            {
+                "id": "c004",
+                "config": {"name": "vector_search"},
+                "block_data": {
+                    "qualifier_qualities_by_track": {
+                        "n_queries=15000": [77649, 77675],
+                    }
+                },
+            }
+        ]
+    )
+    check(named[("vector", "n_queries=15000")] == 77649, "floor also keyed by challenge name")
+    check(ns["_canonical_challenge"]("vector", "c004_a100") == "c004", "name+algo maps to challenge id")
+    check(
+        ns["_lookup_floor"](floors, "vector", "n_queries=15000", "c004_a100") == 77649,
+        "lookup by job challenge name",
+    )
 
     job = ns["annotate_job"](
         {
@@ -87,6 +123,23 @@ def main() -> int:
     check(job["num_bundles"] == 6, "prefers TIG precommit bundles", job["num_bundles"])
     check(job["max_nonce_quality"] == 77507, "max nonce quality")
     check(job["qualifier_floor"] == 77649, "joins live floor")
+    named_job = ns["annotate_job"](
+        {
+            "benchmark_id": "def",
+            "challenge": "vector",
+            "algorithm_id": "c004_a100",
+            "track": "n_queries=15000",
+            "solution_quality": [77769],
+            "start_time": 1,
+            "end_time": 2,
+        },
+        floors=floors,
+        configured={},
+        precommits={},
+        proofs={},
+    )
+    check(named_job["challenge"] == "c004", "canonicalizes vector -> c004")
+    check(named_job["hit"] is True and named_job["gap"] == 77769 - 77649, "name-keyed job hits floor")
     check(job["hit"] is False and job["gap"] == 77507 - 77649, "below-floor job is a miss")
     check(job["blocks_to_proof"] == 14, "blocks to proof from confirmed-start")
     check(abs(job["wall_clock_sec"] - 42.0) < 0.01, "wall clock from start/end")
