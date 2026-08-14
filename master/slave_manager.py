@@ -81,10 +81,36 @@ GET_BATCHES_FAST = os.environ.get(
     os.environ.get("GET_BATCHES_LIGHT", "1"),
 ).lower() in ("1", "true", "yes", "on")
 GET_BATCHES_LIGHT = GET_BATCHES_FAST  # legacy alias
-# Max concurrent assign handlers. Excess polls get memory-only assignments.
+# Max concurrent assign handlers. Excess *busy* polls get memory-only
+# assignments. Idle slaves are never shed — that left 200+ unassigned roots
+# sitting while the fleet reported idle.
 GET_BATCHES_MAX_INFLIGHT = max(
     1, int(os.environ.get("GET_BATCHES_MAX_INFLIGHT", "8"))
 )
+
+
+def should_shed_get_batches_poll(
+    *,
+    inflight: int,
+    max_inflight: int,
+    assigned_count: int,
+) -> bool:
+    """True when this poll may skip new assignment and return current work only.
+
+    Idle slaves (no current assignments) must never be shed. Raising the
+    inflight cap is what melted Postgres last time; this keeps the cap and
+    only exempts empty slaves so they can pick up ownerless roots.
+    """
+    if int(assigned_count or 0) <= 0:
+        return False
+    return int(inflight or 0) >= max(1, int(max_inflight or 1))
+
+
+def owner_idle_unlocks_sticky(active_count: int | None) -> bool:
+    """Fully-idle preferred owners must not warehouse leftover roots."""
+    return int(active_count or 0) <= 0
+
+
 # When the sticky preferred owner is online but already at its adaptive cap,
 # allow other live CPUs to take unassigned roots. Without this, pending root
 # batches sit locked to a full owner while the rest of the fleet idles.
@@ -1635,26 +1661,27 @@ class SlaveManager:
         return len(ready_ids)
 
     def run(self):
-        with self.lock:
-            get_db_conn().execute(
-                """
-                UPDATE proofs_batch P
-                SET slave = NULL,
-                    start_time = NULL,
-                    end_time = NULL
-                WHERE P.ready IS NULL
-                  AND P.slave IS NOT NULL
-                  AND NOT EXISTS (
-                    SELECT 1
-                    FROM root_batch R
-                    WHERE R.benchmark_id = P.benchmark_id
-                      AND R.batch_idx = P.batch_idx
-                      AND R.slave = P.slave
-                      AND R.ready = true
-                  )
-                """
-            )
-            self.batches = get_db_conn().fetch_all(
+        get_db_conn().execute(
+            """
+            UPDATE proofs_batch P
+            SET slave = NULL,
+                start_time = NULL,
+                end_time = NULL
+            WHERE P.ready IS NULL
+              AND P.slave IS NOT NULL
+              AND NOT EXISTS (
+                SELECT 1
+                FROM root_batch R
+                WHERE R.benchmark_id = P.benchmark_id
+                  AND R.batch_idx = P.batch_idx
+                  AND R.slave = P.slave
+                  AND R.ready = true
+              )
+            """
+        )
+        # Fetch outside the assign lock. Holding the lock across this query
+        # kept get-batches inflight slots occupied and shed idle slaves.
+        pending_batches = get_db_conn().fetch_all(
                 """
                 SELECT * FROM (
                     SELECT
@@ -1721,8 +1748,10 @@ class SlaveManager:
                     ORDER BY B.block_started, A.benchmark_id, A.batch_idx
                 )
                 """
-            )
-            logger.debug(f"Refreshed pending batches. Got {len(self.batches)}")
+        )
+        with self.lock:
+            self.batches = pending_batches
+        logger.debug(f"Refreshed pending batches. Got {len(self.batches)}")
         # Smart policy for get-batches — NEVER on the poll path.
         try:
             self._refresh_assign_views()
@@ -1953,6 +1982,10 @@ class SlaveManager:
                     unassigned_job_age[bid] = job_age
                     unassigned_pref[bid] = preferred
             for bid, preferred in unassigned_pref.items():
+                if owner_idle_unlocks_sticky(active_by_slave.get(preferred)):
+                    overflow_benchmark_ids.add(bid)
+                    preferred_at_cap.add(preferred)
+                    continue
                 eff_idle_ms = int(STICKY_OVERFLOW_IDLE_MS)
                 if (
                     STICKY_OVERFLOW_OWNER_IDLE_MS > 0
@@ -2189,6 +2222,8 @@ class SlaveManager:
                     concurrent_by_bench[bid] = concurrent_by_bench.get(bid, 0) + 1
                     if not is_proof:
                         concurrent_roots += 1
+        if not concurrent:
+            logger.debug("no batches available for %s (fast)", slave_name)
         return concurrent, updates
 
     def _get_batches_light(self, slave_name: str, slave: dict, now: float):
@@ -2246,16 +2281,28 @@ class SlaveManager:
             except Exception as exc:
                 logger.warning("zombie root shed failed: %s", exc)
 
-            # Load-shed: excess concurrent polls get memory snapshot only.
+            # Load-shed busy slaves only. Idle slaves must still take new work
+            # or ownerless roots sit unassigned while the herd reports idle.
+            assigned_now = self._memory_assigned_batches(slave_name)
             shed_only = False
             with self._get_batches_inflight_lock:
-                if self._get_batches_inflight >= self._get_batches_max_inflight:
+                if should_shed_get_batches_poll(
+                    inflight=self._get_batches_inflight,
+                    max_inflight=self._get_batches_max_inflight,
+                    assigned_count=len(assigned_now),
+                ):
                     shed_only = True
                 else:
                     self._get_batches_inflight += 1
             if shed_only:
-                shed = self._memory_assigned_batches(slave_name)
-                return JSONResponse(content=jsonable_encoder(shed))
+                logger.debug(
+                    "get-batches shed busy slave=%s assigned=%s inflight=%s/%s",
+                    slave_name,
+                    len(assigned_now),
+                    self._get_batches_inflight,
+                    self._get_batches_max_inflight,
+                )
+                return JSONResponse(content=jsonable_encoder(assigned_now))
             if GET_BATCHES_FAST:
                 try:
                     concurrent, updates = self._get_batches_fast(slave_name, slave, now)
@@ -2349,8 +2396,13 @@ class SlaveManager:
                         unassigned_job_age[bid] = job_age
                         unassigned_pref[bid] = preferred
                 for bid, preferred in unassigned_pref.items():
-                    # Fully-idle preferred → unlock sooner so between-job gaps
-                    # do not warehouse leftovers for the full idle_ms window.
+                    # Fully-idle preferred → unlock immediately so between-job
+                    # gaps do not warehouse leftovers while the fleet sits empty.
+                    if owner_idle_unlocks_sticky(active_by_slave.get(preferred)):
+                        overflow_benchmark_ids.add(bid)
+                        if preferred not in preferred_at_cap:
+                            preferred_at_cap.add(preferred)
+                        continue
                     eff_idle_ms = int(STICKY_OVERFLOW_IDLE_MS)
                     if (
                         STICKY_OVERFLOW_OWNER_IDLE_MS > 0
