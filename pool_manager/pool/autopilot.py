@@ -2811,8 +2811,12 @@ def _root_backlog_pressure(funnel_summary: dict | None) -> dict | None:
     reasons = []
     if gpu_roots_pending >= ROOT_PENDING_MAX_CONCURRENT_DRAIN:
         reasons.append("gpu_roots_pending_above_drain_threshold")
+    # Global root_ready_rate is CPU+GPU. A knapsack 137 pile can drop it to
+    # 0.27 while a handful of GPU roots are still pending — that must not
+    # yank max_concurrent to the drain floor (12).
     if (
         gpu_roots_pending > 0
+        and gpu_roots_pending > cpu_roots_pending
         and seen >= 5
         and root_ready_rate is not None
         and float(root_ready_rate) < ROOT_READY_RATE_MIN_FOR_UPSCALE

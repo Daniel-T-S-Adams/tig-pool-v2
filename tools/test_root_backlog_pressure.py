@@ -61,8 +61,30 @@ def main() -> int:
                 "root_ready_rate": 0.31,
                 "benchmarks_seen": 80,
             },
+            None,
+            "low global ready rate with mixed pending does not drain",
+        ),
+        (
+            {
+                "roots_pending": 153,
+                "cpu_roots_pending": 140,
+                "gpu_roots_pending": 13,
+                "root_ready_rate": 0.275,
+                "benchmarks_seen": 80,
+            },
+            None,
+            "cpu 137 pile plus a few GPU roots does not drain max_concurrent",
+        ),
+        (
+            {
+                "roots_pending": 90,
+                "cpu_roots_pending": 10,
+                "gpu_roots_pending": 80,
+                "root_ready_rate": 0.31,
+                "benchmarks_seen": 80,
+            },
             "low_root_ready_rate_with_pending_gpu_roots",
-            "low ready rate with gpu pending drains",
+            "low ready rate with GPU-majority pending drains",
         ),
         (
             {
