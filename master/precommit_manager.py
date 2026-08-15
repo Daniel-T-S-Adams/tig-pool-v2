@@ -81,7 +81,19 @@ def _governor_settings():
         "max_cpu_unassigned_roots": int(
             gov.get(
                 "max_cpu_unassigned_roots",
-                os.environ.get("PRECOMMIT_GOVERNOR_MAX_CPU_UNASSIGNED_ROOTS", "64"),
+                os.environ.get("PRECOMMIT_GOVERNOR_MAX_CPU_UNASSIGNED_ROOTS", "512"),
+            )
+        ),
+        "cpu_unassigned_per_online": int(
+            gov.get(
+                "cpu_unassigned_per_online",
+                os.environ.get("PRECOMMIT_GOVERNOR_CPU_UNASSIGNED_PER_ONLINE", "8"),
+            )
+        ),
+        "max_cpu_unassigned_roots_ceiling": int(
+            gov.get(
+                "max_cpu_unassigned_roots_ceiling",
+                os.environ.get("PRECOMMIT_GOVERNOR_MAX_CPU_UNASSIGNED_ROOTS_CEILING", "768"),
             )
         ),
         "max_gpu_unassigned_roots": int(
@@ -134,10 +146,29 @@ def _clamp_int(value: int, lo: int, hi: int) -> int:
     return max(int(lo), min(int(hi), int(value)))
 
 
+def compute_cpu_unassigned_cap(
+    settings: dict | None,
+    online_cpu: int = 0,
+) -> int:
+    """Claimable-unassigned ceiling: at least the configured floor, grows with fleet.
+
+    A create burst can emit many root rows before assign catches up. The old
+    256 cap stopped minting while new boxes were still empty. Ceiling stops
+    another leftover pile.
+    """
+    settings = settings or {}
+    configured = max(1, int(settings.get("max_cpu_unassigned_roots") or 512))
+    per = max(1, int(settings.get("cpu_unassigned_per_online") or 8))
+    ceiling = max(configured, int(settings.get("max_cpu_unassigned_roots_ceiling") or 768))
+    adaptive = max(configured, int(online_cpu or 0) * per)
+    return min(ceiling, adaptive)
+
+
 def compute_profile_root_caps(
     settings: dict | None,
     cpu_create_target: int,
     gpu_slots_total: int,
+    online_cpu: int = 0,
 ) -> dict:
     """Adaptive per-profile pending-root ceilings from live create capacity."""
     settings = settings or _governor_settings()
@@ -156,7 +187,7 @@ def compute_profile_root_caps(
     return {
         "cpu_pending_cap": cpu_cap,
         "gpu_pending_cap": gpu_cap,
-        "cpu_unassigned_cap": max(1, int(settings.get("max_cpu_unassigned_roots") or 64)),
+        "cpu_unassigned_cap": compute_cpu_unassigned_cap(settings, online_cpu),
         "gpu_unassigned_cap": max(1, int(settings.get("max_gpu_unassigned_roots") or 32)),
     }
 
@@ -592,6 +623,17 @@ class PrecommitManager:
         snap["cpu_slots"] = cpu_slots
         snap["cpu_create_target"] = cpu_create_target
         snap["online_cpu_slaves"] = online_cpu
+        caps = dict(snap.get("profile_caps") or {})
+        if caps:
+            caps["cpu_unassigned_cap"] = compute_cpu_unassigned_cap(settings, online_cpu)
+            snap["profile_caps"] = caps
+            snap["profile_blocks"] = profile_root_backlog_blocks(
+                int(snap.get("cpu_roots_pending") or 0),
+                int(snap.get("gpu_roots_pending") or 0),
+                int(snap.get("cpu_unassigned_claimable") or 0),
+                int(snap.get("gpu_unassigned_claimable") or 0),
+                caps,
+            )
         profile_blocks = snap.get("profile_blocks") or {"cpu": False, "gpu": False}
         idle_cpu_needs_work = compute_idle_cpu_needs_work(
             idle_cpu_override=bool(settings.get("idle_cpu_override", True)),
@@ -849,7 +891,10 @@ class PrecommitManager:
             online_idle_gpu_slaves = int(row.get("online_idle_gpu_slaves") or 0)
             gpu_floor = _gpu_slot_floor_total()
             profile_caps = compute_profile_root_caps(
-                settings, cpu_create_target, gpu_slots_total
+                settings,
+                cpu_create_target,
+                gpu_slots_total,
+                online_cpu=int(idle_win.get("online") or 0),
             )
             profile_blocks = profile_root_backlog_blocks(
                 cpu_roots_pending,

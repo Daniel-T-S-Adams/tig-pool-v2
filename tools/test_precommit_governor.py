@@ -28,6 +28,7 @@ def main() -> int:
     ns = _load_fns(
         "_clamp_int",
         "compute_profile_root_caps",
+        "compute_cpu_unassigned_cap",
         "profile_root_backlog_blocks",
         "should_block_precommit_create",
         "compute_idle_cpu_needs_work",
@@ -39,6 +40,7 @@ def main() -> int:
     )
     should_block = ns["should_block_precommit_create"]
     compute_caps = ns["compute_profile_root_caps"]
+    unassigned_cap = ns["compute_cpu_unassigned_cap"]
     profile_blocks = ns["profile_root_backlog_blocks"]
     idle_needs = ns["compute_idle_cpu_needs_work"]
     idle_gpu = ns["compute_idle_gpu_needs_work"]
@@ -351,6 +353,43 @@ def main() -> int:
         cooldown_ms=30_000,
     ) is False
     print(f"{'pass' if ok else 'FAIL'}: idle-GPU create respects cooldown")
+    if not ok:
+        failed += 1
+
+    got = unassigned_cap(
+        {
+            "max_cpu_unassigned_roots": 256,
+            "cpu_unassigned_per_online": 8,
+            "max_cpu_unassigned_roots_ceiling": 768,
+        },
+        61,
+    )
+    ok = got == 488
+    print(f"{'pass' if ok else 'FAIL'}: 61 CPUs raise unassigned cap 256 -> 488 got={got}")
+    if not ok:
+        failed += 1
+    got = unassigned_cap(
+        {
+            "max_cpu_unassigned_roots": 512,
+            "cpu_unassigned_per_online": 8,
+            "max_cpu_unassigned_roots_ceiling": 768,
+        },
+        20,
+    )
+    ok = got == 512
+    print(f"{'pass' if ok else 'FAIL'}: small fleet keeps 512 floor got={got}")
+    if not ok:
+        failed += 1
+    got = unassigned_cap(
+        {
+            "max_cpu_unassigned_roots": 512,
+            "cpu_unassigned_per_online": 8,
+            "max_cpu_unassigned_roots_ceiling": 768,
+        },
+        200,
+    )
+    ok = got == 768
+    print(f"{'pass' if ok else 'FAIL'}: huge fleet hits 768 ceiling got={got}")
     if not ok:
         failed += 1
 
