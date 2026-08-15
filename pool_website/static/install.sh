@@ -433,10 +433,15 @@ start_stack() {
   reclaim_challenge_containers "$dest" "$wtype"
   (
     cd "$dest"
-    # shellcheck disable=SC2086
-    $dcmd compose up -d --build --force-recreate $services
-    # shellcheck disable=SC2086
-    $dcmd compose ps -q $services | xargs -r $dcmd update --restart unless-stopped || true
+    chmod +x scripts/start-fresh.sh 2>/dev/null || true
+    if [[ -x scripts/start-fresh.sh ]]; then
+      ./scripts/start-fresh.sh "$wtype"
+    else
+      # shellcheck disable=SC2086
+      $dcmd compose pull $services || true
+      # shellcheck disable=SC2086
+      $dcmd compose up -d --build --force-recreate --pull always $services
+    fi
     local dash_port
     dash_port="$(grep -E '^DASHBOARD_HOST_PORT=' .env | cut -d= -f2-)"
     echo
@@ -444,6 +449,41 @@ start_stack() {
     echo "View logs:"
     echo "  cd $dest && sudo docker compose logs -f slave"
   )
+  install_boot_unit "$dest" "$wtype"
+}
+
+install_boot_unit() {
+  # After a crash, dockerd must not start torn local containers. restart: "no"
+  # in compose, then this unit pulls and force-recreates on boot.
+  local dest="$1"
+  local wtype="$2"
+  local unit="innopool-slave-${wtype}.service"
+  local start_script="${dest}/scripts/start-fresh.sh"
+  if [[ ! -x "$start_script" ]]; then
+    echo "No start-fresh.sh; skip systemd boot unit."
+    return 0
+  fi
+  $SUDO tee "/etc/systemd/system/${unit}" >/dev/null <<EOF
+[Unit]
+Description=InnoPool ${wtype} slave (pull images, then start)
+After=docker.service network-online.target
+Wants=network-online.target
+Requires=docker.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+WorkingDirectory=${dest}
+TimeoutStartSec=900
+ExecStart=${start_script} ${wtype}
+ExecStop=/bin/bash -lc 'cd ${dest} && (docker compose stop || sudo docker compose stop)'
+
+[Install]
+WantedBy=multi-user.target
+EOF
+  $SUDO systemctl daemon-reload
+  $SUDO systemctl enable "$unit"
+  echo "Enabled ${unit} (pull + recreate on boot)."
 }
 
 install_one() {
