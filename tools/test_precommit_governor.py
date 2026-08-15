@@ -8,8 +8,8 @@ import pathlib
 import sys
 
 
-def _load_fns(*names: str):
-    path = pathlib.Path(__file__).resolve().parents[1] / "master" / "precommit_manager.py"
+def _load_fns(*names: str, rel: str = "master/precommit_manager.py"):
+    path = pathlib.Path(__file__).resolve().parents[1] / rel
     source = path.read_text(encoding="utf-8")
     module = ast.parse(source)
     keep = []
@@ -18,7 +18,7 @@ def _load_fns(*names: str):
             keep.append(node)
     if len(keep) != len(names):
         found = {n.name for n in keep}
-        raise RuntimeError(f"missing functions: {set(names) - found}")
+        raise RuntimeError(f"missing functions in {rel}: {set(names) - found}")
     ns = {}
     exec(compile(ast.Module(body=keep, type_ignores=[]), str(path), "exec"), ns, ns)
     return ns
@@ -390,6 +390,23 @@ def main() -> int:
     )
     ok = got == 768
     print(f"{'pass' if ok else 'FAIL'}: huge fleet hits 768 ceiling got={got}")
+    if not ok:
+        failed += 1
+
+    ops_cap = _load_fns(
+        "compute_cpu_unassigned_cap",
+        rel="pool_manager/pool/ops_metrics.py",
+    )["compute_cpu_unassigned_cap"]
+    settings_256 = {
+        "max_cpu_unassigned_roots": 256,
+        "cpu_unassigned_per_online": 8,
+        "max_cpu_unassigned_roots_ceiling": 768,
+    }
+    ok = ops_cap(settings_256, 66) == unassigned_cap(settings_256, 66) == 528
+    print(
+        f"{'pass' if ok else 'FAIL'}: ops unassigned cap matches master "
+        f"ops={ops_cap(settings_256, 66)} master={unassigned_cap(settings_256, 66)}"
+    )
     if not ok:
         failed += 1
 

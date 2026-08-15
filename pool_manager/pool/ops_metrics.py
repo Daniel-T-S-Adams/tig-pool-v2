@@ -29,7 +29,9 @@ GPU_CHALLENGE_IDS = ("c004", "c005", "c006")
 # Soft governor defaults (mirror master/precommit_manager.py env fallbacks).
 _GOV_DEFAULTS = {
     "enabled": True,
-    "max_cpu_unassigned_roots": 64,
+    "max_cpu_unassigned_roots": 512,
+    "cpu_unassigned_per_online": 8,
+    "max_cpu_unassigned_roots_ceiling": 768,
     "max_gpu_unassigned_roots": 32,
     "min_cpu_roots_pending": 128,
     "max_cpu_roots_pending": 1024,
@@ -58,6 +60,19 @@ def _clamp_int(value: int, lo: int, hi: int) -> int:
     return max(lo, min(hi, int(value)))
 
 
+def compute_cpu_unassigned_cap(
+    settings: dict | None,
+    online_cpu: int = 0,
+) -> int:
+    """Same live CPU unassigned ceiling as master/precommit_manager.py."""
+    settings = settings or {}
+    configured = max(1, int(settings.get("max_cpu_unassigned_roots") or 512))
+    per = max(1, int(settings.get("cpu_unassigned_per_online") or 8))
+    ceiling = max(configured, int(settings.get("max_cpu_unassigned_roots_ceiling") or 768))
+    adaptive = max(configured, int(online_cpu or 0) * per)
+    return min(ceiling, adaptive)
+
+
 def _gov_settings(cfg: dict) -> dict:
     gov = (cfg or {}).get("precommit_governor") or {}
     out = dict(_GOV_DEFAULTS)
@@ -68,6 +83,11 @@ def _gov_settings(cfg: dict) -> dict:
     env_map = {
         "enabled": ("PRECOMMIT_GOVERNOR_ENABLED", lambda v: str(v).lower() in ("1", "true", "yes", "on")),
         "max_cpu_unassigned_roots": ("PRECOMMIT_GOVERNOR_MAX_CPU_UNASSIGNED_ROOTS", int),
+        "cpu_unassigned_per_online": ("PRECOMMIT_GOVERNOR_CPU_UNASSIGNED_PER_ONLINE", int),
+        "max_cpu_unassigned_roots_ceiling": (
+            "PRECOMMIT_GOVERNOR_MAX_CPU_UNASSIGNED_ROOTS_CEILING",
+            int,
+        ),
         "max_gpu_unassigned_roots": ("PRECOMMIT_GOVERNOR_MAX_GPU_UNASSIGNED_ROOTS", int),
         "min_cpu_roots_pending": ("PRECOMMIT_GOVERNOR_MIN_CPU_ROOTS_PENDING", int),
         "max_cpu_roots_pending": ("PRECOMMIT_GOVERNOR_MAX_CPU_ROOTS_PENDING", int),
@@ -155,6 +175,7 @@ def _governor_view(
     now_ms: int,
     online_idle_cpu_slaves: int = 0,
     decision_idle_cpu_slaves: int | None = None,
+    online_cpu_slaves: int = 0,
 ) -> dict:
     settings = _gov_settings(cfg)
     if not settings.get("enabled", True):
@@ -328,7 +349,7 @@ def _governor_view(
     caps = {
         "cpu_pending_cap": cpu_pending_cap,
         "gpu_pending_cap": gpu_pending_cap,
-        "cpu_unassigned_cap": max(1, int(settings["max_cpu_unassigned_roots"])),
+        "cpu_unassigned_cap": compute_cpu_unassigned_cap(settings, online_cpu_slaves),
         "gpu_unassigned_cap": max(1, int(settings["max_gpu_unassigned_roots"])),
     }
 
@@ -758,6 +779,11 @@ def build_ops_metrics() -> dict:
     if cfg:
         # Instant for display; sustained for create-bias mirror (matches master).
         idle_cpu_n = int((by_profile.get("cpu") or {}).get("idle") or 0)
+        online_cpu_n = int(
+            cpu_idle_win.get("online")
+            or (by_profile.get("cpu") or {}).get("online")
+            or 0
+        )
         sustained_cpu_n = int(
             cpu_idle_win.get("sustained_idle")
             if win.get("enabled", True)
@@ -768,6 +794,7 @@ def build_ops_metrics() -> dict:
             now_ms,
             online_idle_cpu_slaves=idle_cpu_n,
             decision_idle_cpu_slaves=sustained_cpu_n,
+            online_cpu_slaves=online_cpu_n,
         )
         governor["idle_window"] = cpu_idle_win
 
