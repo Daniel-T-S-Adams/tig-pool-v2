@@ -33,6 +33,7 @@ def main() -> int:
         "should_block_precommit_create",
         "compute_idle_cpu_needs_work",
         "compute_idle_gpu_needs_work",
+        "idle_decision_count",
         "idle_create_burst",
         "challenge_under_create_cap",
         "should_force_cpu_only",
@@ -45,6 +46,7 @@ def main() -> int:
     profile_blocks = ns["profile_root_backlog_blocks"]
     idle_needs = ns["compute_idle_cpu_needs_work"]
     idle_gpu = ns["compute_idle_gpu_needs_work"]
+    decision = ns["idle_decision_count"]
     burst = ns["idle_create_burst"]
     under_cap = ns["challenge_under_create_cap"]
     force_cpu = ns["should_force_cpu_only"]
@@ -436,6 +438,18 @@ def main() -> int:
     )
     if not ok:
         failed += 1
+
+    decision_cases = [
+        (decision(0, 23), 23, "instant empty boxes count when sustained is 0"),
+        (decision(5, 23), 23, "instant wins when larger than sustained"),
+        (decision(8, 3), 8, "sustained wins when larger than instant"),
+        (decision(0, 0), 0, "both zero stays zero"),
+    ]
+    for got, expect, label in decision_cases:
+        ok = got == expect
+        print(f"{'pass' if ok else 'FAIL'}: {label} got={got} expect={expect}")
+        if not ok:
+            failed += 1
 
     burst_cases = [
         (

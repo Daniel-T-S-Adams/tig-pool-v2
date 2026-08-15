@@ -297,8 +297,9 @@ def compute_idle_cpu_needs_work(
     fleet. A handful of claimable batches must not disable the CPU weight boost
     while many online CPU slaves sit empty (create/claimable oscillation).
 
-    ``online_idle_cpu_slaves`` should be the *decision* idle count — preferably
-    sustained/windowed idle from IdleWindowTracker, not a single point sample.
+    ``online_idle_cpu_slaves`` is the decision idle count from
+    ``idle_decision_count`` (max of sustained and instant). Instant empty
+    boxes must be able to pull creates when claimable roots cannot feed them.
     """
     if not idle_cpu_override:
         return False
@@ -315,6 +316,16 @@ def compute_idle_cpu_needs_work(
     if int(cpu_jobs_needing_roots or 0) >= max(1, int(cpu_create_target or 0)):
         return False
     return claimable == 0
+
+
+def idle_decision_count(sustained: int = 0, instant: int = 0) -> int:
+    """Idle boxes that should drive create burst and CPU override.
+
+    Sustained-only ignored machines that just finished a wave (dashboard
+    idle=23, sustained=0). Instant-only would flicker. Use the larger so
+    empty boxes get work without waiting out the 2-minute window.
+    """
+    return max(0, int(sustained or 0), int(instant or 0))
 
 
 def idle_create_burst(
@@ -622,7 +633,7 @@ class PrecommitManager:
         )
         if not idle_win.get("enabled", True):
             sustained = instant
-        decision_idle = sustained
+        decision_idle = idle_decision_count(sustained, instant)
         online_cpu = int(idle_win.get("online") or 0)
         cpu_slots = max(int(snap.get("cpu_slots") or 0), online_cpu)
         cpu_create_target = (
@@ -657,6 +668,7 @@ class PrecommitManager:
         snap["online_idle_cpu_slaves"] = instant
         snap["online_idle_cpu_slaves_instant"] = instant
         snap["sustained_idle_cpu_slaves"] = sustained
+        snap["decision_idle_cpu_slaves"] = decision_idle
         snap["idle_window"] = idle_win
         snap["idle_cpu_needs_work"] = idle_cpu_needs_work
         return snap
@@ -988,9 +1000,11 @@ class PrecommitManager:
             idle_cpu_needs_work=idle_cpu_needs_work,
             idle_gpu_needs_work=idle_gpu_needs_work,
             idle_cpu=int(
-                governor.get("sustained_idle_cpu_slaves")
-                or governor.get("online_idle_cpu_slaves")
-                or 0
+                governor.get("decision_idle_cpu_slaves")
+                or idle_decision_count(
+                    governor.get("sustained_idle_cpu_slaves"),
+                    governor.get("online_idle_cpu_slaves"),
+                )
             ),
             claimable_cpu=int(governor.get("cpu_unassigned_claimable") or 0),
             idle_gpu=int(governor.get("online_idle_gpu_slaves") or 0),
@@ -1008,6 +1022,19 @@ class PrecommitManager:
                 - int(governor.get("gpu_unassigned_claimable") or 0),
             ),
         )
+        if self.last_idle_burst > 1:
+            logger.info(
+                "idle create sized burst=%s instant_cpu=%s sustained_cpu=%s "
+                "decision_cpu=%s claimable_cpu=%s idle_gpu=%s claimable_gpu=%s",
+                self.last_idle_burst,
+                governor.get("online_idle_cpu_slaves_instant")
+                or governor.get("online_idle_cpu_slaves"),
+                governor.get("sustained_idle_cpu_slaves"),
+                governor.get("decision_idle_cpu_slaves"),
+                governor.get("cpu_unassigned_claimable"),
+                governor.get("online_idle_gpu_slaves"),
+                governor.get("gpu_unassigned_claimable"),
+            )
         governor_reason = ""
         profile_blocks = governor.get("profile_blocks") or {"cpu": False, "gpu": False}
         if governor.get("enabled"):

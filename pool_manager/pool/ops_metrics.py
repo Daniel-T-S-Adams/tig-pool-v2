@@ -777,7 +777,8 @@ def build_ops_metrics() -> dict:
 
     governor = {"enabled": False, "block_reasons": [], "counts": {}}
     if cfg:
-        # Instant for display; sustained for create-bias mirror (matches master).
+        # Instant for display; decision idle is max(sustained, instant) so
+        # empty boxes still pull creates (matches master idle_decision_count).
         idle_cpu_n = int((by_profile.get("cpu") or {}).get("idle") or 0)
         online_cpu_n = int(
             cpu_idle_win.get("online")
@@ -789,11 +790,12 @@ def build_ops_metrics() -> dict:
             if win.get("enabled", True)
             else idle_cpu_n
         )
+        decision_cpu_n = max(0, sustained_cpu_n, idle_cpu_n)
         governor = _governor_view(
             cfg,
             now_ms,
             online_idle_cpu_slaves=idle_cpu_n,
-            decision_idle_cpu_slaves=sustained_cpu_n,
+            decision_idle_cpu_slaves=decision_cpu_n,
             online_cpu_slaves=online_cpu_n,
         )
         governor["idle_window"] = cpu_idle_win
