@@ -157,6 +157,40 @@ gpu_services() {
   echo "slave vector_search hypergraph neuralnet_optimizer"
 }
 
+challenge_container_names() {
+  local wtype="$1"
+  if [[ "$wtype" == "gpu" ]]; then
+    echo "vector_search hypergraph neuralnet_optimizer"
+  else
+    echo "satisfiability vehicle_routing knapsack job_scheduling energy_arbitrage"
+  fi
+}
+
+reclaim_challenge_containers() {
+  # InnoPool compose uses fixed names (satisfiability, knapsack, ...). Official
+  # TIG pool / tig-benchmarker uses the same names, so a second install fails
+  # with "The container name is already in use". Remove foreign containers
+  # before compose up. Keep containers that already belong to this project.
+  local dest="$1"
+  local wtype="$2"
+  local dcmd project name proj
+  dcmd="$(docker_bin)"
+  project="$(basename "$dest")"
+  echo "==> Reclaiming challenge container names for ${wtype} (TIG pool leftovers OK to remove)"
+  for name in $(challenge_container_names "$wtype"); do
+    if ! $dcmd inspect "$name" >/dev/null 2>&1; then
+      continue
+    fi
+    proj="$($dcmd inspect -f '{{index .Config.Labels "com.docker.compose.project"}}' "$name" 2>/dev/null || true)"
+    if [[ "$proj" == "$project" ]]; then
+      echo "  keep /$name (this install: ${project})"
+      continue
+    fi
+    echo "  removing /$name (was: ${proj:-tig-pool / unnamed})"
+    $dcmd rm -f "$name"
+  done
+}
+
 nvidia_smi_ok() {
   if need_cmd nvidia-smi && nvidia-smi >/dev/null 2>&1; then
     return 0
@@ -396,6 +430,7 @@ start_stack() {
   else
     services="$(cpu_services)"
   fi
+  reclaim_challenge_containers "$dest" "$wtype"
   (
     cd "$dest"
     # shellcheck disable=SC2086
