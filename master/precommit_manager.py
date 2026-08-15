@@ -439,6 +439,16 @@ def should_reserve_idle_gpu_create(
     return True
 
 
+def has_positive_weight_for_profile(eligible, challenge_ids) -> bool:
+    """True when at least one eligible algo in this profile has weight > 0."""
+    ids = set(challenge_ids or ())
+    for item in eligible or []:
+        cid = str((item or {}).get("algorithm_id") or "")[:4]
+        if cid in ids and int((item or {}).get("weight") or 0) > 0:
+            return True
+    return False
+
+
 def should_block_precommit_create(
     roots_pending,
     benchmarks_seen,
@@ -1160,7 +1170,9 @@ class PrecommitManager:
                 x for x in eligible
                 if x["algorithm_id"][:4] in GPU_CHALLENGE_IDS
             ]
-            if gpu_eligible:
+            if gpu_eligible and has_positive_weight_for_profile(
+                gpu_eligible, GPU_CHALLENGE_IDS
+            ):
                 eligible = gpu_eligible
                 force_cpu_only = False
                 logger.info(
@@ -1170,6 +1182,11 @@ class PrecommitManager:
                     {cid: per_challenge_counts.get(cid, 0) for cid in GPU_CHALLENGE_IDS},
                 )
             else:
+                if gpu_eligible:
+                    logger.info(
+                        "precommit governor skipped GPU reserve: idle GPUs need "
+                        "work but GPU algorithm weights are 0; keeping CPU algorithms"
+                    )
                 reserve_gpu = False
         if force_cpu_only:
             cpu_eligible = [
@@ -1262,9 +1279,12 @@ class PrecommitManager:
             weighted_eligible.append(x)
             weights.append(weight)
         if not weighted_eligible:
-            logger.debug(
-                "All eligible algorithms have zero weight: %s",
+            logger.info(
+                "precommit create skipped: no positive-weight algorithms after "
+                "filters (eligible=%s reserve_gpu=%s force_cpu_only=%s)",
                 [(x.get("algorithm_id"), x.get("weight")) for x in eligible],
+                reserve_gpu,
+                force_cpu_only,
             )
             return
 

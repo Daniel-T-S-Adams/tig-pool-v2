@@ -37,6 +37,7 @@ def main() -> int:
         "challenge_under_create_cap",
         "should_force_cpu_only",
         "should_reserve_idle_gpu_create",
+        "has_positive_weight_for_profile",
     )
     should_block = ns["should_block_precommit_create"]
     compute_caps = ns["compute_profile_root_caps"]
@@ -48,6 +49,7 @@ def main() -> int:
     under_cap = ns["challenge_under_create_cap"]
     force_cpu = ns["should_force_cpu_only"]
     reserve_gpu = ns["should_reserve_idle_gpu_create"]
+    has_weighted = ns["has_positive_weight_for_profile"]
 
     settings = {
         "enabled": True,
@@ -353,6 +355,31 @@ def main() -> int:
         cooldown_ms=30_000,
     ) is False
     print(f"{'pass' if ok else 'FAIL'}: idle-GPU create respects cooldown")
+    if not ok:
+        failed += 1
+
+    gpu_ids = ("c004", "c005", "c006")
+    ok = has_weighted(
+        [
+            {"algorithm_id": "c003_a137", "weight": 1},
+            {"algorithm_id": "c004_a100", "weight": 0},
+            {"algorithm_id": "c005_a025", "weight": 0},
+            {"algorithm_id": "c006_a036", "weight": 0},
+        ],
+        gpu_ids,
+    ) is False
+    print(f"{'pass' if ok else 'FAIL'}: GPU reserve has no weighted algo when only CPU has weight")
+    if not ok:
+        failed += 1
+
+    ok = has_weighted(
+        [
+            {"algorithm_id": "c003_a137", "weight": 1},
+            {"algorithm_id": "c004_a100", "weight": 1},
+        ],
+        gpu_ids,
+    ) is True
+    print(f"{'pass' if ok else 'FAIL'}: GPU reserve sees a positive GPU weight")
     if not ok:
         failed += 1
 
