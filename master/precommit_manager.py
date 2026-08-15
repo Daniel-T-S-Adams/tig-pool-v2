@@ -275,14 +275,60 @@ def compute_idle_cpu_needs_work(
         return False
     if cpu_profile_blocked:
         return False
-    if int(cpu_jobs_needing_roots or 0) >= max(1, int(cpu_create_target or 0)):
-        return False
     claimable = max(0, int(cpu_unassigned_claimable or 0))
     idle = max(0, int(online_idle_cpu_slaves or 0))
-    if idle <= 0:
-        # No observed idle CPUs: keep legacy "zero claimable" gate.
-        return claimable == 0
-    return claimable < idle
+    if idle > 0:
+        # Live idle boxes beat the configured slot target. New machines must
+        # get work even when resource_slots.cpu still matches the old fleet.
+        return claimable < idle
+    if int(cpu_jobs_needing_roots or 0) >= max(1, int(cpu_create_target or 0)):
+        return False
+    return claimable == 0
+
+
+def idle_create_burst(
+    *,
+    idle_cpu_needs_work: bool = False,
+    idle_gpu_needs_work: bool = False,
+    idle_cpu: int = 0,
+    claimable_cpu: int = 0,
+    idle_gpu: int = 0,
+    claimable_gpu: int = 0,
+    base_burst: int = 4,
+    max_burst: int = 16,
+    cpu_unassigned_remaining: int = 256,
+    gpu_unassigned_remaining: int = 32,
+) -> int:
+    """How many precommits to attempt this tick (including the first).
+
+    1 = normal single create. More only while idle machines have fewer
+    claimable roots than they can absorb. Caps at remaining unassigned
+    room so this cannot rebuild a leftover pile.
+    """
+    hi = max(1, int(max_burst or 1), int(base_burst or 1))
+    if not idle_cpu_needs_work and not idle_gpu_needs_work:
+        return 1
+    cpu_def = (
+        max(0, int(idle_cpu or 0) - int(claimable_cpu or 0))
+        if idle_cpu_needs_work
+        else 0
+    )
+    gpu_def = (
+        max(0, int(idle_gpu or 0) - int(claimable_gpu or 0))
+        if idle_gpu_needs_work
+        else 0
+    )
+    deficit = cpu_def + gpu_def
+    if deficit <= 0:
+        return 1
+    room = 0
+    if idle_cpu_needs_work:
+        room += max(0, int(cpu_unassigned_remaining or 0))
+    if idle_gpu_needs_work:
+        room += max(0, int(gpu_unassigned_remaining or 0))
+    if room <= 0:
+        return 1
+    return max(1, min(hi, deficit, room))
 
 
 def compute_idle_gpu_needs_work(
@@ -414,6 +460,8 @@ class PrecommitManager:
         self._governor_cache_until_ms = 0
         # Read by master/main.py idle-burst loop.
         self.last_idle_cpu_needs_work = False
+        self.last_idle_gpu_needs_work = False
+        self.last_idle_burst = 1
         self.last_idle_window = {}
         self._idle_gpu_create_ms = 0
 
@@ -534,13 +582,23 @@ class PrecommitManager:
         if not idle_win.get("enabled", True):
             sustained = instant
         decision_idle = sustained
+        online_cpu = int(idle_win.get("online") or 0)
+        cpu_slots = max(int(snap.get("cpu_slots") or 0), online_cpu)
+        cpu_create_target = (
+            _cpu_create_target(cpu_slots)
+            if cpu_slots > 0
+            else int(snap.get("cpu_create_target") or 0)
+        )
+        snap["cpu_slots"] = cpu_slots
+        snap["cpu_create_target"] = cpu_create_target
+        snap["online_cpu_slaves"] = online_cpu
         profile_blocks = snap.get("profile_blocks") or {"cpu": False, "gpu": False}
         idle_cpu_needs_work = compute_idle_cpu_needs_work(
             idle_cpu_override=bool(settings.get("idle_cpu_override", True)),
-            cpu_slots=int(snap.get("cpu_slots") or 0),
+            cpu_slots=cpu_slots,
             cpu_unassigned_claimable=int(snap.get("cpu_unassigned_claimable") or 0),
             cpu_jobs_needing_roots=int(snap.get("cpu_jobs_needing_roots") or 0),
-            cpu_create_target=int(snap.get("cpu_create_target") or 0),
+            cpu_create_target=cpu_create_target,
             cpu_profile_blocked=bool(profile_blocks.get("cpu")),
             online_idle_cpu_slaves=decision_idle,
         )
@@ -861,11 +919,40 @@ class PrecommitManager:
         if  num_pending_benchmarks >= CONFIG["max_concurrent_benchmarks"]:
             logger.debug(f"number of pending benchmarks has reached max of {CONFIG['max_concurrent_benchmarks']}")
             self.last_idle_cpu_needs_work = False
+            self.last_idle_gpu_needs_work = False
+            self.last_idle_burst = 1
             return
 
         governor = self._governor_snapshot()
         idle_cpu_needs_work = bool(governor.get("idle_cpu_needs_work"))
+        idle_gpu_needs_work = bool(governor.get("idle_gpu_needs_work"))
         self.last_idle_cpu_needs_work = idle_cpu_needs_work
+        self.last_idle_gpu_needs_work = idle_gpu_needs_work
+        caps = governor.get("profile_caps") or {}
+        self.last_idle_burst = idle_create_burst(
+            idle_cpu_needs_work=idle_cpu_needs_work,
+            idle_gpu_needs_work=idle_gpu_needs_work,
+            idle_cpu=int(
+                governor.get("sustained_idle_cpu_slaves")
+                or governor.get("online_idle_cpu_slaves")
+                or 0
+            ),
+            claimable_cpu=int(governor.get("cpu_unassigned_claimable") or 0),
+            idle_gpu=int(governor.get("online_idle_gpu_slaves") or 0),
+            claimable_gpu=int(governor.get("gpu_unassigned_claimable") or 0),
+            base_burst=int(os.environ.get("PRECOMMIT_IDLE_BURST", "4")),
+            max_burst=int(os.environ.get("PRECOMMIT_IDLE_BURST_MAX", "16")),
+            cpu_unassigned_remaining=max(
+                0,
+                int(caps.get("cpu_unassigned_cap") or 0)
+                - int(governor.get("cpu_unassigned_claimable") or 0),
+            ),
+            gpu_unassigned_remaining=max(
+                0,
+                int(caps.get("gpu_unassigned_cap") or 0)
+                - int(governor.get("gpu_unassigned_claimable") or 0),
+            ),
+        )
         governor_reason = ""
         profile_blocks = governor.get("profile_blocks") or {"cpu": False, "gpu": False}
         if governor.get("enabled"):
@@ -879,6 +966,8 @@ class PrecommitManager:
             if block:
                 logger.info("precommit governor blocked create: %s", governor_reason)
                 self.last_idle_cpu_needs_work = False
+                self.last_idle_gpu_needs_work = False
+                self.last_idle_burst = 1
                 return
             if governor_reason.startswith("idle_cpu_override:"):
                 logger.info(

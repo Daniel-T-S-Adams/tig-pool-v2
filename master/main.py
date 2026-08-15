@@ -10,9 +10,13 @@ from master.client_manager import *
 
 logger = logging.getLogger(os.path.splitext(os.path.basename(__file__))[0])
 
-# When the CPU fleet is underfed, submit more than one precommit per 5s tick.
-# Default 4 ⇒ up to ~48 creates/min theoretical vs ~12 without burst.
+# When the CPU/GPU fleet is underfed, submit more than one precommit per 5s tick.
+# Burst size is min(deficit, PRECOMMIT_IDLE_BURST_MAX, remaining unassigned cap).
 PRECOMMIT_IDLE_BURST = max(1, int(os.environ.get("PRECOMMIT_IDLE_BURST", "4")))
+PRECOMMIT_IDLE_BURST_MAX = max(
+    PRECOMMIT_IDLE_BURST,
+    int(os.environ.get("PRECOMMIT_IDLE_BURST_MAX", "16")),
+)
 
 
 def main():
@@ -47,13 +51,27 @@ def main():
             job_manager.run()
             submit_precommit_req = precommit_manager.run()
             submissions_manager.run(submit_precommit_req)
-            # Burst creates only while idle CPUs still need work.
-            if (
-                PRECOMMIT_IDLE_BURST > 1
-                and getattr(precommit_manager, "last_idle_cpu_needs_work", False)
+            # Burst creates while idle CPUs/GPUs still have no claimable work.
+            extra = max(
+                0,
+                int(getattr(precommit_manager, "last_idle_burst", 1) or 1) - 1,
+            )
+            extra = min(extra, PRECOMMIT_IDLE_BURST_MAX)
+            if extra > 0 and (
+                getattr(precommit_manager, "last_idle_cpu_needs_work", False)
+                or getattr(precommit_manager, "last_idle_gpu_needs_work", False)
             ):
-                for _ in range(PRECOMMIT_IDLE_BURST - 1):
-                    if not getattr(precommit_manager, "last_idle_cpu_needs_work", False):
+                logger.info(
+                    "idle create burst extra=%s cpu_need=%s gpu_need=%s",
+                    extra,
+                    getattr(precommit_manager, "last_idle_cpu_needs_work", False),
+                    getattr(precommit_manager, "last_idle_gpu_needs_work", False),
+                )
+                for _ in range(extra):
+                    if not (
+                        getattr(precommit_manager, "last_idle_cpu_needs_work", False)
+                        or getattr(precommit_manager, "last_idle_gpu_needs_work", False)
+                    ):
                         break
                     req = precommit_manager.run()
                     if not req:

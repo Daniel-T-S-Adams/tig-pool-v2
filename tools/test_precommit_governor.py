@@ -32,6 +32,7 @@ def main() -> int:
         "should_block_precommit_create",
         "compute_idle_cpu_needs_work",
         "compute_idle_gpu_needs_work",
+        "idle_create_burst",
         "challenge_under_create_cap",
         "should_force_cpu_only",
         "should_reserve_idle_gpu_create",
@@ -41,6 +42,7 @@ def main() -> int:
     profile_blocks = ns["profile_root_backlog_blocks"]
     idle_needs = ns["compute_idle_cpu_needs_work"]
     idle_gpu = ns["compute_idle_gpu_needs_work"]
+    burst = ns["idle_create_burst"]
     under_cap = ns["challenge_under_create_cap"]
     force_cpu = ns["should_force_cpu_only"]
     reserve_gpu = ns["should_reserve_idle_gpu_create"]
@@ -236,6 +238,19 @@ def main() -> int:
             True,
             "no idle CPUs + zero claimable => legacy on",
         ),
+        (
+            dict(
+                idle_cpu_override=True,
+                cpu_slots=16,
+                cpu_unassigned_claimable=0,
+                cpu_jobs_needing_roots=16,
+                cpu_create_target=16,
+                cpu_profile_blocked=False,
+                online_idle_cpu_slaves=48,
+            ),
+            True,
+            "new idle boxes still need work after configured slot target is full",
+        ),
     ]
     for kwargs, expect, label in idle_cases:
         got = idle_needs(**kwargs)
@@ -338,6 +353,62 @@ def main() -> int:
     print(f"{'pass' if ok else 'FAIL'}: idle-GPU create respects cooldown")
     if not ok:
         failed += 1
+
+    burst_cases = [
+        (
+            burst(idle_cpu_needs_work=False, idle_cpu=48, claimable_cpu=0),
+            1,
+            "no idle flag => single create",
+        ),
+        (
+            burst(
+                idle_cpu_needs_work=True,
+                idle_cpu=48,
+                claimable_cpu=0,
+                max_burst=16,
+                cpu_unassigned_remaining=256,
+            ),
+            16,
+            "48 idle / 0 claimable => burst to max 16",
+        ),
+        (
+            burst(
+                idle_cpu_needs_work=True,
+                idle_cpu=3,
+                claimable_cpu=0,
+                max_burst=16,
+                cpu_unassigned_remaining=256,
+            ),
+            3,
+            "small deficit bursts only the deficit",
+        ),
+        (
+            burst(
+                idle_cpu_needs_work=True,
+                idle_cpu=48,
+                claimable_cpu=0,
+                max_burst=16,
+                cpu_unassigned_remaining=2,
+            ),
+            2,
+            "burst cannot exceed remaining unassigned cap",
+        ),
+        (
+            burst(
+                idle_cpu_needs_work=True,
+                idle_cpu=21,
+                claimable_cpu=25,
+                max_burst=16,
+            ),
+            1,
+            "claimable already covers idle => no burst",
+        ),
+    ]
+    for got, expect, label in burst_cases:
+        ok = got == expect
+        print(f"{'pass' if ok else 'FAIL'}: {label} got={got} expect={expect}")
+        if not ok:
+            failed += 1
 
     return 2 if failed else 0
 
