@@ -343,6 +343,34 @@ def main() -> int:
             is False,
             "idle GPU override does not lift CPU caps",
         ),
+        (
+            under_cap(
+                "c004",
+                pending_counts={"c004": 8},
+                root_phase_counts={"c004": 6},
+                submitted={},
+                per_challenge_max={"c004": 6},
+                idle_gpu_needs_work=True,
+                gpu_spare_jobs=2,
+                idle_gpu_slaves=3,
+            )
+            is True,
+            "idle GPUs lift GPU cap so spare creates are not forced onto CPU",
+        ),
+        (
+            under_cap(
+                "c004",
+                pending_counts={"c004": 12},
+                root_phase_counts={"c004": 10},
+                submitted={},
+                per_challenge_max={"c004": 6},
+                idle_gpu_needs_work=True,
+                gpu_spare_jobs=2,
+                idle_gpu_slaves=3,
+            )
+            is False,
+            "idle GPU cap lift is still bounded",
+        ),
     ]
     for ok, label in cap_cases:
         print(f"{'pass' if ok else 'FAIL'}: {label}")
