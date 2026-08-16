@@ -1,6 +1,6 @@
 {
   "name": "max_concurrent_clamps_below_tig_unresolved_limit",
-  "lesson": "Autopilot must immediately clamp max_concurrent_benchmarks below TIG's upstream unresolved-benchmark rejection threshold, even if a previous capacity recommendation left live config too high.",
+  "lesson": "Autopilot clamps max_concurrent_benchmarks to the operator ceiling (AUTOPILOT_MAX_MAX_BENCHMARKS / UPSTREAM_SAFE), not a mythical TIG-100 protocol limit. Live pools have run above 100.",
   "clean_windows": 0,
   "assertions": [
     {
@@ -13,11 +13,11 @@
       "expect_max_direction": "down"
     },
     {
-      "expect_config_max_concurrent_benchmarks": 90
+      "expect_config_max_concurrent_benchmarks": 192
     }
   ],
   "config": {
-    "max_concurrent_benchmarks": 128,
+    "max_concurrent_benchmarks": 250,
     "max_job_batches": 1024,
     "resource_slots": {
       "slots": {
@@ -48,7 +48,7 @@
     "mode": "read_only",
     "master_config_error": null,
     "current_config": {
-      "max_concurrent_benchmarks": 128,
+      "max_concurrent_benchmarks": 250,
       "slaves": []
     },
     "slaves": [

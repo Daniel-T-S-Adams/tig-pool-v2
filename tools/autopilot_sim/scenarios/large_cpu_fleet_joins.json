@@ -4,7 +4,10 @@
   "clean_windows": 3,
   "assertions": [
     {
-      "expect_reason": "ready_to_apply"
+      "expect_reason_in": [
+        "ready_to_apply",
+        "idle_cpu_max_concurrent_scale"
+      ]
     },
     {
       "expect_change_key": "max_concurrent_benchmarks"

@@ -30,20 +30,25 @@ METRIC_WINDOW_MS = int(os.environ.get("AUTOPILOT_METRIC_WINDOW_MS", str(30 * 60 
 STALE_ROOT_MS = int(os.environ.get("AUTOPILOT_STALE_ROOT_MS", str(45 * 60 * 1000)))
 STALE_PROOF_MS = int(os.environ.get("AUTOPILOT_STALE_PROOF_MS", str(20 * 60 * 1000)))
 MIN_MAX_BENCHMARKS = int(os.environ.get("AUTOPILOT_MIN_MAX_BENCHMARKS", "3"))
-MAX_MAX_BENCHMARKS = int(os.environ.get("AUTOPILOT_MAX_MAX_BENCHMARKS", "96"))
-TIG_UNRESOLVED_BENCHMARK_LIMIT = int(os.environ.get("AUTOPILOT_TIG_UNRESOLVED_BENCHMARK_LIMIT", "100"))
+MAX_MAX_BENCHMARKS = int(os.environ.get("AUTOPILOT_MAX_MAX_BENCHMARKS", "192"))
+# Not a TIG protocol constant. Added 2026-07-18 as an InnoPool safety guess
+# after a suspected upstream reject. Live pools have run above 100 (e.g. 116).
+# Honor it only when the operator sets the env explicitly.
+_TIG_UNRESOLVED_LIMIT_RAW = os.environ.get("AUTOPILOT_TIG_UNRESOLVED_BENCHMARK_LIMIT")
+TIG_UNRESOLVED_BENCHMARK_LIMIT = (
+    int(_TIG_UNRESOLVED_LIMIT_RAW) if _TIG_UNRESOLVED_LIMIT_RAW not in (None, "") else 0
+)
 TIG_UNRESOLVED_BENCHMARK_HEADROOM = int(os.environ.get("AUTOPILOT_TIG_UNRESOLVED_BENCHMARK_HEADROOM", "10"))
+_UPSTREAM_SAFE_RAW = os.environ.get("AUTOPILOT_UPSTREAM_SAFE_MAX_BENCHMARKS")
+if _UPSTREAM_SAFE_RAW not in (None, ""):
+    _UPSTREAM_SAFE_DEFAULT = int(_UPSTREAM_SAFE_RAW)
+elif TIG_UNRESOLVED_BENCHMARK_LIMIT > 0:
+    _UPSTREAM_SAFE_DEFAULT = TIG_UNRESOLVED_BENCHMARK_LIMIT - TIG_UNRESOLVED_BENCHMARK_HEADROOM
+else:
+    _UPSTREAM_SAFE_DEFAULT = MAX_MAX_BENCHMARKS
 UPSTREAM_SAFE_MAX_BENCHMARKS = max(
     MIN_MAX_BENCHMARKS,
-    min(
-        MAX_MAX_BENCHMARKS,
-        int(
-            os.environ.get(
-                "AUTOPILOT_UPSTREAM_SAFE_MAX_BENCHMARKS",
-                str(TIG_UNRESOLVED_BENCHMARK_LIMIT - TIG_UNRESOLVED_BENCHMARK_HEADROOM),
-            )
-        ),
-    ),
+    min(MAX_MAX_BENCHMARKS, _UPSTREAM_SAFE_DEFAULT),
 )
 APPLY_MIN_CLEAN_WINDOWS = int(os.environ.get("AUTOPILOT_APPLY_MIN_CLEAN_WINDOWS", "2"))
 MAX_BENCHMARK_STEP = int(os.environ.get("AUTOPILOT_MAX_BENCHMARK_STEP", "2"))
@@ -52,8 +57,11 @@ MAX_BENCHMARK_DOWN_STEP = int(os.environ.get("AUTOPILOT_MAX_BENCHMARK_DOWN_STEP"
 SLOT_STEP = int(os.environ.get("AUTOPILOT_SLOT_STEP", "1"))
 SLOT_UP_STEP = int(os.environ.get("AUTOPILOT_SLOT_UP_STEP", str(SLOT_STEP)))
 SLOT_DOWN_STEP = int(os.environ.get("AUTOPILOT_SLOT_DOWN_STEP", str(SLOT_STEP)))
-MAX_CPU_SLOTS = int(os.environ.get("AUTOPILOT_MAX_CPU_SLOTS", "64"))
-MAX_GPU_SLOTS_PER_TYPE = int(os.environ.get("AUTOPILOT_MAX_GPU_SLOTS_PER_TYPE", "6"))
+MAX_CPU_SLOTS = int(os.environ.get("AUTOPILOT_MAX_CPU_SLOTS", "128"))
+MAX_GPU_SLOTS_PER_TYPE = int(os.environ.get("AUTOPILOT_MAX_GPU_SLOTS_PER_TYPE", "16"))
+# How many GPU workers one open GPU benchmark should feed via root-batch fan-out.
+# 50 GPUs / 4 = 13 jobs, not 50. A 12-GPU C3 box is 3 jobs, not 12.
+GPU_UNITS_PER_JOB = max(1, int(os.environ.get("AUTOPILOT_GPU_UNITS_PER_JOB", "4")))
 MAX_CPU_CHALLENGE_BENCHMARKS = int(os.environ.get("AUTOPILOT_MAX_CPU_CHALLENGE_BENCHMARKS", "16"))
 MAX_GPU_CHALLENGE_BENCHMARKS = int(os.environ.get("AUTOPILOT_MAX_GPU_CHALLENGE_BENCHMARKS", "12"))
 # Optional per-challenge ceilings. Unset keys fall back to the CPU/GPU family max.
@@ -457,8 +465,8 @@ def _is_c3_slave(slave_name: str) -> bool:
 def _gpu_units(slave: dict, cfg: dict | None = None) -> int:
     """How many parallel GPU workers one slave name represents.
 
-    Used for C3 route/batch concurrency only. Do not turn this into a
-    benchmark-job target — 12 C3 GPUs share roots on a few jobs.
+    Used for route/batch concurrency and for GPU *job* fan-out
+    (`ceil(units / GPU_UNITS_PER_JOB)`), not one benchmark per GPU.
     """
     name = str(slave.get("slave_name") or "")
     if (slave.get("profile") or _slave_profile(name)) != "gpu":
@@ -510,6 +518,26 @@ def _ensure_member_hardening_schema():
         _member_hardening_schema_ready = True
     except Exception as exc:
         logger.warning("member hardening schema check failed: %s", exc)
+
+
+def _gpu_trust_blocked(slave: dict) -> bool:
+    trust_state = str(slave.get("trust_state") or "probation").lower()
+    return trust_state in {"disabled", "quarantined", "blocked"}
+
+
+def _gpu_online_registered(slave: dict) -> bool:
+    """Online GPU that may receive work, including public probation joiners."""
+    name = slave.get("slave_name") or ""
+    profile = slave.get("profile") or _slave_profile(name)
+    if profile != "gpu":
+        return False
+    if not slave.get("active_now"):
+        return False
+    if _gpu_trust_blocked(slave):
+        return False
+    if _is_public_member_slave(name) and not slave.get("registered_active"):
+        return False
+    return True
 
 
 def _counts_for_capacity(slave: dict) -> bool:
@@ -2417,7 +2445,9 @@ def _fleet_capacity(
     stale_totals: dict | None = None,
 ) -> dict:
     active_cpu = [s for s in slaves if s["profile"] == "cpu" and _counts_for_capacity(s)]
-    active_gpu = [s for s in slaves if s["profile"] == "gpu" and _counts_for_capacity(s)]
+    online_gpu = [s for s in slaves if _gpu_online_registered(s)]
+    active_gpu = [s for s in online_gpu if _counts_for_capacity(s)]
+    warmup_gpu = [s for s in online_gpu if not _counts_for_capacity(s)]
     if stale_totals is None:
         stale_roots = max(
             sum(int(s.get("stale_roots") or 0) for s in slaves),
@@ -2459,12 +2489,22 @@ def _fleet_capacity(
         if int(s.get("completed_recent") or 0) > 0 and int(s.get("active_unfinished") or 0) == 0
     ]
     active_gpu_units = sum(_gpu_units(s, cfg) for s in active_gpu)
+    warmup_gpu_units = sum(_gpu_units(s, cfg) for s in warmup_gpu)
+    sizing_gpu_units = max(len(online_gpu), int(active_gpu_units or 0) + int(warmup_gpu_units or 0))
+    largest_gpu_units = 0
+    for row in online_gpu:
+        largest_gpu_units = max(largest_gpu_units, _gpu_units(row, cfg))
+    productive_idle_gpu_units = sum(_gpu_units(s, cfg) for s in productive_idle_gpu)
     return {
         "active_cpu": len(active_cpu),
         "active_gpu": len(active_gpu),
         "active_gpu_units": max(len(active_gpu), int(active_gpu_units or 0)),
+        "warmup_gpu_units": int(warmup_gpu_units or 0),
+        "sizing_gpu_units": int(sizing_gpu_units or 0),
+        "largest_gpu_units": int(largest_gpu_units or 0),
         "productive_idle_cpu": len(productive_idle_cpu),
         "productive_idle_gpu": len(productive_idle_gpu),
+        "productive_idle_gpu_units": int(productive_idle_gpu_units or 0),
         "cpu_pressure": cpu_pressure,
         "gpu_pressure": gpu_pressure,
         "stale_roots": stale_roots,
@@ -2491,6 +2531,58 @@ def _fleet_capacity(
     }
 
 
+def _gpu_job_target(capacity: dict) -> int:
+    """Open GPU benchmarks from connected GPU *units*, not slave names.
+
+    One job feeds several GPUs through root-batch fan-out. Hold the current
+    job count while the live fleet still covers it; drop only after units
+    leave. Never go below busy occupancy or the operator floor.
+    """
+    units = int(capacity.get("sizing_gpu_units") or capacity.get("active_gpu_units") or 0)
+    names = int(capacity.get("active_gpu") or 0)
+    warmup = int(capacity.get("warmup_gpu_units") or 0)
+    units = max(units, names, warmup)
+    if units <= 0 and names <= 0:
+        return 0
+
+    per = max(1, int(GPU_UNITS_PER_JOB))
+    from_units = (units + per - 1) // per
+    min_parallel = 1 if units <= 1 else min(len(GPU_SLOT_TYPES), units)
+    current_total = sum(
+        int((capacity.get("current_slots") or {}).get(slot_type, 0) or 0)
+        for slot_type in GPU_SLOT_TYPES
+    )
+    busy_total = sum(
+        int((capacity.get("slot_busy") or {}).get(slot_type, 0) or 0)
+        for slot_type in GPU_SLOT_TYPES
+    )
+    floor_total = sum(
+        int((capacity.get("gpu_slot_floor") or {}).get(slot_type, 0) or 0)
+        for slot_type in GPU_SLOT_TYPES
+    )
+    have_slot_telemetry = busy_total > 0 or any(
+        int((capacity.get("slot_counts") or {}).get(slot_type, 0) or 0)
+        for slot_type in GPU_SLOT_TYPES
+    )
+    # Empty slot tables must not ghost-downscale a live GPU fleet.
+    hold = current_total if (units > 0 and not have_slot_telemetry) else min(current_total, units)
+    pressure = int(capacity.get("gpu_pressure") or 0)
+    target = max(min_parallel, from_units, hold, busy_total, floor_total, pressure, 1)
+
+    cpu_slots = int((capacity.get("current_slots") or {}).get(CPU_SLOT_TYPE, 0) or 0)
+    busy_cpu = int((capacity.get("slot_busy") or {}).get(CPU_SLOT_TYPE, 0) or 0)
+    cpu_need = max(
+        int(capacity.get("aws_cpu_jobs") or 0),
+        min(cpu_slots, max(int(capacity.get("active_cpu") or 0), busy_cpu)),
+    )
+    room = UPSTREAM_SAFE_MAX_BENCHMARKS - cpu_need - BENCHMARK_BUFFER
+    hard_cap = MAX_GPU_SLOTS_PER_TYPE * len(GPU_SLOT_TYPES)
+    target = min(target, hard_cap)
+    if room > 0:
+        target = min(target, max(floor_total, busy_total, 1, room))
+    return max(1, int(target))
+
+
 def _target_resource_slots(capacity: dict) -> dict:
     current_slots = capacity["current_slots"]
     slot_counts = capacity["slot_counts"]
@@ -2500,11 +2592,20 @@ def _target_resource_slots(capacity: dict) -> dict:
 
     current_cpu = int(current_slots.get(CPU_SLOT_TYPE, slot_counts.get(CPU_SLOT_TYPE, 0)) or 0)
     aws_jobs = int(capacity.get("aws_cpu_jobs") or 0)
-    if aws_jobs > 0:
-        proposed[CPU_SLOT_TYPE] = min(MAX_CPU_SLOTS, max(current_cpu, aws_jobs))
-    elif capacity["active_cpu"]:
-        active_floor = max(2, (capacity["active_cpu"] + PRODUCTIVE_IDLE_CPU_PER_SLOT - 1) // max(1, PRODUCTIVE_IDLE_CPU_PER_SLOT))
-        target_cpu = max(current_cpu, min(MAX_CPU_SLOTS, active_floor))
+    busy_cpu = int(slot_busy.get(CPU_SLOT_TYPE, 0) or 0)
+    if aws_jobs > 0 or capacity["active_cpu"]:
+        active_floor = 0
+        if capacity["active_cpu"]:
+            active_floor = max(
+                2,
+                (capacity["active_cpu"] + PRODUCTIVE_IDLE_CPU_PER_SLOT - 1)
+                // max(1, PRODUCTIVE_IDLE_CPU_PER_SLOT),
+            )
+        cpu_pressure = int(capacity.get("cpu_pressure") or 0)
+        have_cpu_telemetry = busy_cpu > 0 or int(slot_counts.get(CPU_SLOT_TYPE, 0) or 0) > 0
+        target_cpu = max(aws_jobs, busy_cpu, active_floor, cpu_pressure)
+        if not have_cpu_telemetry and capacity["active_cpu"]:
+            target_cpu = max(target_cpu, min(current_cpu, max(cpu_pressure, active_floor)))
         if capacity["productive_idle_cpu"] >= PRODUCTIVE_IDLE_CPU_SCALE_MIN:
             extra_slots = max(
                 1,
@@ -2517,7 +2618,7 @@ def _target_resource_slots(capacity: dict) -> dict:
             and capacity["productive_idle_cpu"] == 0
             and slot_idle.get(CPU_SLOT_TYPE, 0) > 0
         ):
-            target_cpu = max(2, current_cpu - 1)
+            target_cpu = max(aws_jobs, busy_cpu, 2, current_cpu - 1)
         elif slot_idle.get(CPU_SLOT_TYPE, 0) == 0 and capacity["cpu_pressure"] >= max(1, current_cpu):
             target_cpu = max(target_cpu, current_cpu + 2)
         proposed[CPU_SLOT_TYPE] = min(target_cpu, MAX_CPU_SLOTS)
@@ -2531,44 +2632,42 @@ def _target_resource_slots(capacity: dict) -> dict:
     gpu_slot_floor = capacity.get("gpu_slot_floor") or {}
     adaptive_caps = capacity.get("current_adaptive_caps") or {}
     gpu_floor_total = sum(int(gpu_slot_floor.get(slot_type, 0) or 0) for slot_type in GPU_SLOT_TYPES)
-    # Single-GPU / broken adaptive-cap recovery: honor operator floor only.
-    if gpu_floor_total > 0 and int(adaptive_caps.get("gpu_max_cap") or 0) <= 1:
-        for slot_type in GPU_SLOT_TYPES:
-            proposed[slot_type] = int(gpu_slot_floor.get(slot_type, 0) or 0)
-        return proposed
-
     busy_gpu_slots = {
         slot_type: int(slot_busy.get(slot_type, 0) or 0)
         for slot_type in GPU_SLOT_TYPES
     }
+    # Single-GPU / broken adaptive-cap recovery: honor operator floor only.
+    # Do not pin a multi-GPU join to the floor just because gpu_max_cap is still 1.
+    if (
+        gpu_floor_total > 0
+        and int(adaptive_caps.get("gpu_max_cap") or 0) <= 1
+        and int(capacity.get("sizing_gpu_units") or capacity.get("active_gpu_units") or 0) <= 1
+        and int(capacity.get("active_gpu") or 0) <= 1
+    ):
+        for slot_type in GPU_SLOT_TYPES:
+            proposed[slot_type] = max(
+                int(gpu_slot_floor.get(slot_type, 0) or 0),
+                int(busy_gpu_slots.get(slot_type, 0) or 0),
+            )
+        return proposed
 
-    # Parity with CPU headcount sizing: GPU slots track live eligible GPU slaves
-    # up and down (stepped on apply). Do not ratchet to the historical high.
-    if not capacity["active_gpu"]:
+    # GPU jobs follow connected GPU units (join/leave). Slave names are not
+    # 1:1 with jobs — a 12-GPU box shares a few benchmarks.
+    sizing_units = int(capacity.get("sizing_gpu_units") or capacity.get("active_gpu_units") or 0)
+    if not capacity["active_gpu"] and sizing_units <= 0:
         for slot_type in GPU_SLOT_TYPES:
             proposed[slot_type] = int(gpu_slot_floor.get(slot_type, 0) or 0)
         return proposed
 
-    # Job/slot count follows GPU slave names, not C3 worker count. Twelve C3
-    # GPUs share root batches on a few benchmarks; they do not need 12 jobs.
-    active_gpu = max(1, int(capacity.get("active_gpu") or 0))
-    gpu_target_total = active_gpu
-    if capacity["productive_idle_gpu"] >= PRODUCTIVE_IDLE_GPU_SCALE_MIN:
-        extra_slots = max(
-            1,
-            (capacity["productive_idle_gpu"] + PRODUCTIVE_IDLE_GPU_PER_SLOT - 1)
-            // max(1, PRODUCTIVE_IDLE_GPU_PER_SLOT),
-        )
-        gpu_target_total += extra_slots
-    elif (
-        capacity["gpu_pressure"] > gpu_target_total
+    gpu_target_total = _gpu_job_target(capacity)
+    if (
+        capacity.get("gpu_pressure", 0) > gpu_target_total
         and sum(busy_gpu_slots.values()) >= gpu_target_total
     ):
         gpu_target_total += 1
 
     busy_total = sum(busy_gpu_slots.values())
     floor_total = sum(int(gpu_slot_floor.get(slot_type, 0) or 0) for slot_type in GPU_SLOT_TYPES)
-    # Never propose below currently busy occupancy or the operator floor.
     gpu_target_total = max(gpu_target_total, busy_total, floor_total, 1)
     gpu_target_total = min(gpu_target_total, MAX_GPU_SLOTS_PER_TYPE * len(GPU_SLOT_TYPES))
 
@@ -2645,7 +2744,8 @@ def _live_worker_floor_max_concurrent(capacity: dict) -> int:
     # Prefer observed in-flight work / AWS batch jobs over raw slave counts so a
     # single multi-machine CPU slave still opens enough precommits to stay busy.
     cpu_floor = max(aws_cpu_jobs, min(cpu_pressure, aws_cpu_jobs or cpu_pressure), active_cpu)
-    gpu_floor = max(active_gpu, min(gpu_pressure, active_gpu or gpu_pressure))
+    gpu_jobs = _gpu_job_target(capacity) if (active_gpu or int(capacity.get("sizing_gpu_units") or 0)) else 0
+    gpu_floor = min(gpu_jobs, max(active_gpu, gpu_pressure, gpu_jobs))
     buffer = BENCHMARK_BUFFER if (cpu_floor or gpu_floor) else 0
     return _clamp(cpu_floor + gpu_floor + buffer, MIN_MAX_BENCHMARKS, UPSTREAM_SAFE_MAX_BENCHMARKS)
 
@@ -2745,8 +2845,10 @@ def _capacity_floor_max_concurrent(capacity: dict, proposed_slots: dict | None =
     cpu_floor = max(aws_cpu_jobs, cpu_slots if active_cpu else 0)
 
     gpu_slots = sum(int(proposed_slots.get(k, 0) or 0) for k in GPU_SLOT_TYPES)
-    active_gpu = int(capacity.get("active_gpu") or 0)
-    gpu_floor = max(active_gpu, min(gpu_slots, active_gpu or gpu_slots))
+    gpu_jobs = _gpu_job_target(capacity) if (
+        int(capacity.get("active_gpu") or 0) or int(capacity.get("sizing_gpu_units") or 0)
+    ) else 0
+    gpu_floor = max(gpu_jobs, min(gpu_slots, gpu_jobs or gpu_slots))
 
     buffer = BENCHMARK_BUFFER if (cpu_floor or gpu_floor) else 0
     return _clamp(cpu_floor + gpu_floor + buffer, MIN_MAX_BENCHMARKS, UPSTREAM_SAFE_MAX_BENCHMARKS)
@@ -2760,9 +2862,12 @@ def _funnel_drain_floor(capacity_model: dict | None = None) -> int:
     Keep a small GPU reserve so focused GPU work is not starved during CPU drain.
     """
     floor = max(MIN_MAX_BENCHMARKS, FUNNEL_DRAIN_MIN_MAX_BENCHMARKS)
-    active_gpu = int((capacity_model or {}).get("active_gpu") or 0)
-    if active_gpu > 0:
-        floor = max(floor, min(active_gpu + BENCHMARK_BUFFER, UPSTREAM_SAFE_MAX_BENCHMARKS))
+    gpu_jobs = 0
+    if capacity_model:
+        if int(capacity_model.get("active_gpu") or 0) or int(capacity_model.get("sizing_gpu_units") or 0):
+            gpu_jobs = _gpu_job_target(capacity_model)
+    if gpu_jobs > 0:
+        floor = max(floor, min(gpu_jobs + BENCHMARK_BUFFER, UPSTREAM_SAFE_MAX_BENCHMARKS))
     return floor
 
 
@@ -3163,8 +3268,11 @@ def _target_adaptive_slave_caps(capacity: dict) -> dict:
 
     if gpu_max > gpu_ceiling:
         proposed["gpu_max_cap"] = gpu_ceiling
-    elif capacity["active_gpu"] and gpu_max:
-        if capacity["productive_idle_gpu"] >= PRODUCTIVE_IDLE_GPU_SCALE_MIN:
+    elif (capacity["active_gpu"] or int(capacity.get("sizing_gpu_units") or 0)) and gpu_max:
+        largest = int(capacity.get("largest_gpu_units") or 0)
+        if largest > gpu_max:
+            proposed["gpu_max_cap"] = _clamp_gpu_slave_cap(max(gpu_max + 1, min(largest, gpu_max + 4)))
+        elif capacity["productive_idle_gpu"] >= PRODUCTIVE_IDLE_GPU_SCALE_MIN:
             proposed["gpu_max_cap"] = _clamp_gpu_slave_cap(gpu_max + 1)
         elif (
             capacity["gpu_completed_recent"] >= CAP_SCALE_COMPLETIONS_PER_STEP
@@ -3258,21 +3366,38 @@ def _target_slave_route_caps(cfg: dict, capacity: dict, slaves: list[dict] | Non
 
         if profile == "gpu" and _route_is_manual_gpu(route):
             name_regex = str(route.get("name_regex") or "").lower()
-            if "c3" in name_regex:
-                c3_units = sum(
-                    _gpu_units(row, cfg)
-                    for row in (slaves or [])
-                    if _route_matches_slave(route, str(row.get("slave_name") or ""))
-                    and _counts_for_capacity(row)
+            local_static = "pool-gpu-local" in name_regex or "^local" in name_regex
+            if local_static:
+                signals["skipped"] = "manual_gpu_route"
+            else:
+                route_units = max(
+                    (
+                        _gpu_units(row, cfg)
+                        for row in (slaves or [])
+                        if _route_matches_slave(route, str(row.get("slave_name") or ""))
+                        and (_counts_for_capacity(row) or _gpu_online_registered(row))
+                    ),
+                    default=0,
                 )
-                if c3_units > current:
-                    target = max(target, min(int(MAX_GPU_SLAVE_CAP), int(c3_units)))
-                    reasons.append("c3_worker_units")
+                if route_units > current:
+                    target = max(target, min(int(MAX_GPU_SLAVE_CAP), int(route_units)))
+                    reasons.append("gpu_worker_units")
                 else:
                     signals["skipped"] = "manual_gpu_route"
-            else:
-                signals["skipped"] = "manual_gpu_route"
         else:
+            if profile == "gpu":
+                route_units = max(
+                    (
+                        _gpu_units(row, cfg)
+                        for row in (slaves or [])
+                        if _route_matches_slave(route, str(row.get("slave_name") or ""))
+                        and (_counts_for_capacity(row) or _gpu_online_registered(row))
+                    ),
+                    default=0,
+                )
+                if route_units > current:
+                    target = max(target, min(int(MAX_GPU_SLAVE_CAP), int(route_units)))
+                    reasons.append("gpu_worker_units")
             ready, reason = _route_cap_ready(profile, current, signals)
             signals["route_cap_ready"] = ready
             signals["route_cap_reason"] = reason
@@ -3360,9 +3485,9 @@ def _recommendations(
                 "current": current_slots,
                 "proposed": proposed_slots,
                 "reason": (
-                    "Resource slots are sized from active fleet capacity (CPU and GPU headcount), "
-                    "productive idle workers, slot pressure, GPU floor/busy floors, and stale-work "
-                    "guardrails. GPU slots may step down when eligible GPU workers leave."
+                    "Resource slots follow connected fleet capacity: CPU headcount up and down, "
+                    "GPU jobs from live GPU units (fan-out, not one job per GPU), busy/floor "
+                    "guards, and stale-work guardrails. Slots step down when workers leave."
                 ),
                 "signals": capacity,
                 "apply_now": False,
@@ -4205,7 +4330,8 @@ def _plan_config_change(report: dict, cfg: dict, clean_windows: int) -> dict:
                     "current": current_max_for_upstream,
                     "target": UPSTREAM_SAFE_MAX_BENCHMARKS,
                     "next": UPSTREAM_SAFE_MAX_BENCHMARKS,
-                    "upstream_unresolved_benchmark_limit": TIG_UNRESOLVED_BENCHMARK_LIMIT,
+                    "upstream_unresolved_benchmark_limit": TIG_UNRESOLVED_BENCHMARK_LIMIT or None,
+                    "operator_ceiling": MAX_MAX_BENCHMARKS,
                     "headroom": TIG_UNRESOLVED_BENCHMARK_HEADROOM,
                     "issues": funnel_summary.get("issues", []),
                     "safe_to_scale_workload": funnel_safe,
@@ -4392,12 +4518,16 @@ def _plan_config_change(report: dict, cfg: dict, clean_windows: int) -> dict:
         stranded_count = len(health["unserved_stranded_benchmarks"])
         productive_jobs = max(0, active_jobs - stranded_count)
         gpu_slot_total, _ = _gpu_slot_counts(report)
-        active_gpu_reserve = max(
-            _active_gpu_slave_count(report),
-            int((health.get("live_by_profile") or {}).get("gpu") or 0),
-        )
-        gpu_reserve = min(gpu_slot_total, active_gpu_reserve) if gpu_slot_total else active_gpu_reserve
         capacity_model = report.get("capacity_model") or {}
+        gpu_job_reserve = 0
+        if capacity_model and (
+            int(capacity_model.get("active_gpu") or 0)
+            or int(capacity_model.get("sizing_gpu_units") or 0)
+        ):
+            gpu_job_reserve = _gpu_job_target(capacity_model)
+        live_gpu = int((health.get("live_by_profile") or {}).get("gpu") or 0)
+        active_gpu_reserve = gpu_job_reserve or min(live_gpu, gpu_slot_total or live_gpu)
+        gpu_reserve = min(gpu_slot_total, active_gpu_reserve) if gpu_slot_total else active_gpu_reserve
         target_slots = _target_resource_slots(capacity_model) if capacity_model else {}
         capacity_floor = _capacity_floor_max_concurrent(capacity_model, target_slots) if capacity_model else MIN_MAX_BENCHMARKS
         drain_target = _clamp(

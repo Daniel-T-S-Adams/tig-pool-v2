@@ -18,6 +18,7 @@ def _load_fns():
     source = path.read_text(encoding="utf-8")
     module = ast.parse(source)
     wanted = {
+        "_gpu_job_target",
         "_target_resource_slots",
         "_target_per_challenge_caps",
         "_challenge_ids_by_profile",
@@ -36,7 +37,10 @@ def _load_fns():
         "CPU_SLOT_TYPE": "vehicle_routing",
         "GPU_SLOT_TYPES": ("vector_search", "hypergraph", "neuralnet_optimizer"),
         "MAX_CPU_SLOTS": 96,
-        "MAX_GPU_SLOTS_PER_TYPE": 6,
+        "MAX_GPU_SLOTS_PER_TYPE": 16,
+        "GPU_UNITS_PER_JOB": 4,
+        "UPSTREAM_SAFE_MAX_BENCHMARKS": 192,
+        "BENCHMARK_BUFFER": 2,
         "PRODUCTIVE_IDLE_CPU_SCALE_MIN": 5,
         "PRODUCTIVE_IDLE_CPU_PER_SLOT": 4,
         "PRODUCTIVE_IDLE_GPU_SCALE_MIN": 1,
@@ -178,15 +182,66 @@ def main() -> int:
     print(f"{'pass' if ok else 'FAIL'}: challenge caps follow slots down -> {caps}")
     failed += 0 if ok else 1
 
-    # C3 worker count must not open one benchmark per GPU.
-    headcount = target_slots(_capacity(active_gpu=2))
-    with_units = target_slots(_capacity(active_gpu=2, active_gpu_units=13))
     keys = ("vector_search", "hypergraph", "neuralnet_optimizer")
-    ok = all(int(headcount[k]) == int(with_units[k]) for k in keys)
-    print(
-        f"{'pass' if ok else 'FAIL'}: C3 worker units do not inflate GPU job slots "
-        f"-> headcount={[headcount[k] for k in keys]} units={[with_units[k] for k in keys]}"
+
+    def _gpu_sum(proposed):
+        return sum(int(proposed[k]) for k in keys)
+
+    # C3 worker count opens a few shared jobs, not one benchmark per GPU.
+    headcount = target_slots(_capacity(active_gpu=2, active_gpu_units=2, sizing_gpu_units=2))
+    with_units = target_slots(
+        _capacity(active_gpu=2, active_gpu_units=13, sizing_gpu_units=13)
     )
+    headcount_total = _gpu_sum(headcount)
+    units_total = _gpu_sum(with_units)
+    ok = units_total > headcount_total and units_total < 13
+    print(
+        f"{'pass' if ok else 'FAIL'}: C3 units raise GPU jobs without 1:1 "
+        f"-> headcount={headcount_total} units={units_total}"
+    )
+    failed += 0 if ok else 1
+
+    # 50 GPU workers → ~13 jobs (units/4), not 50, and not stuck at the old 6*3 cap.
+    fifty = target_slots(
+        _capacity(
+            active_gpu=50,
+            active_gpu_units=50,
+            sizing_gpu_units=50,
+            current_slots={
+                "vehicle_routing": 40,
+                "vector_search": 4,
+                "hypergraph": 4,
+                "neuralnet_optimizer": 4,
+            },
+            slot_busy={
+                "vehicle_routing": 35,
+                "vector_search": 2,
+                "hypergraph": 1,
+                "neuralnet_optimizer": 1,
+            },
+        )
+    )
+    fifty_total = _gpu_sum(fifty)
+    ok = 12 <= fifty_total <= 16
+    print(f"{'pass' if ok else 'FAIL'}: 50 GPU units fan-out to ~13 jobs -> total={fifty_total}")
+    failed += 0 if ok else 1
+
+    # CPU slots follow headcount down instead of ratcheting at the old high.
+    cpu_down = target_slots(
+        _capacity(
+            active_cpu=8,
+            cpu_pressure=8,
+            productive_idle_cpu=0,
+            slot_busy={
+                "vehicle_routing": 8,
+                "vector_search": 2,
+                "hypergraph": 1,
+                "neuralnet_optimizer": 1,
+            },
+        )
+    )
+    ok = int(cpu_down["vehicle_routing"]) <= 12
+    print(f"{'pass' if ok else 'FAIL'}: CPU slots follow fleet down -> cpu={cpu_down['vehicle_routing']}")
     failed += 0 if ok else 1
 
     return 2 if failed else 0
