@@ -102,6 +102,14 @@ def _governor_settings():
                 os.environ.get("PRECOMMIT_GOVERNOR_MAX_GPU_UNASSIGNED_ROOTS", "32"),
             )
         ),
+        # Keep this many unowned GPU root jobs ready so a finishing GPU does
+        # not wait a full TIG precommit (~2 min) before the next job.
+        "gpu_spare_jobs": int(
+            gov.get(
+                "gpu_spare_jobs",
+                os.environ.get("PRECOMMIT_GOVERNOR_GPU_SPARE_JOBS", "2"),
+            )
+        ),
         "min_root_ready_rate": float(
             gov.get(
                 "min_root_ready_rate",
@@ -378,14 +386,25 @@ def compute_idle_gpu_needs_work(
     gpu_unassigned_claimable: int = 0,
     online_idle_gpu_slaves: int = 0,
     gpu_profile_blocked: bool = False,
+    unowned_gpu_root_jobs: int = 0,
+    gpu_spare_jobs: int = 0,
 ) -> bool:
-    """True when online GPUs are empty and there is not enough claimable GPU work."""
+    """True when GPUs need more claimable work, including a keep-ahead spare.
+
+    Reactive: idle GPUs and not enough unowned roots.
+    Keep-ahead: create spare unowned GPU jobs *before* anyone goes idle so
+    the next card does not wait for a TIG precommit.
+    """
     if gpu_profile_blocked:
         return False
     idle = max(0, int(online_idle_gpu_slaves or 0))
-    if idle <= 0:
-        return False
-    return int(gpu_unassigned_claimable or 0) < idle
+    claimable = int(gpu_unassigned_claimable or 0)
+    if idle > 0 and claimable < idle:
+        return True
+    spare = max(0, int(gpu_spare_jobs or 0))
+    if spare > 0 and int(unowned_gpu_root_jobs or 0) < spare:
+        return True
+    return False
 
 
 def challenge_under_create_cap(
@@ -776,6 +795,22 @@ class PrecommitManager:
                           AND j.settings->>'challenge_id' IN %s
                     ) AS gpu_active_jobs,
                     (
+                        -- Root-phase GPU jobs that no slave has touched yet.
+                        -- These are the keep-ahead buffer idle GPUs can take.
+                        SELECT COUNT(*)
+                        FROM job j
+                        WHERE j.stopped IS NULL
+                          AND j.end_time IS NULL
+                          AND j.merkle_root_ready IS NULL
+                          AND j.settings->>'challenge_id' IN %s
+                          AND NOT EXISTS (
+                            SELECT 1
+                            FROM root_batch rb
+                            WHERE rb.benchmark_id = j.benchmark_id
+                              AND rb.slave IS NOT NULL
+                          )
+                    ) AS unowned_gpu_root_jobs,
+                    (
                         SELECT COUNT(*)
                         FROM root_batch rb
                         JOIN job j ON j.benchmark_id = rb.benchmark_id
@@ -886,6 +921,7 @@ class PrecommitManager:
                     CPU_CHALLENGE_IDS,
                     CPU_CHALLENGE_IDS,
                     GPU_CHALLENGE_IDS,
+                    GPU_CHALLENGE_IDS,
                     CPU_CHALLENGE_IDS,
                     GPU_CHALLENGE_IDS,
                     CPU_CHALLENGE_IDS,
@@ -903,6 +939,7 @@ class PrecommitManager:
             cpu_jobs_needing_roots = int(row.get("cpu_jobs_needing_roots") or 0)
             cpu_jobs_in_proof_phase = int(row.get("cpu_jobs_in_proof_phase") or 0)
             gpu_active_jobs = int(row.get("gpu_active_jobs") or 0)
+            unowned_gpu_root_jobs = int(row.get("unowned_gpu_root_jobs") or 0)
             cpu_roots_pending = int(row.get("cpu_roots_pending") or 0)
             gpu_roots_pending = int(row.get("gpu_roots_pending") or 0)
             cpu_unassigned_roots = int(row.get("cpu_unassigned_roots") or 0)
@@ -941,6 +978,7 @@ class PrecommitManager:
                 "cpu_jobs_needing_roots": cpu_jobs_needing_roots,
                 "cpu_jobs_in_proof_phase": cpu_jobs_in_proof_phase,
                 "gpu_active_jobs": gpu_active_jobs,
+                "unowned_gpu_root_jobs": unowned_gpu_root_jobs,
                 "gpu_slot_floor": gpu_floor,
                 "cpu_unassigned_roots": cpu_unassigned_roots,
                 "gpu_unassigned_roots": gpu_unassigned_roots,
@@ -955,6 +993,8 @@ class PrecommitManager:
                     gpu_unassigned_claimable=gpu_unassigned_claimable,
                     online_idle_gpu_slaves=online_idle_gpu_slaves,
                     gpu_profile_blocked=bool(profile_blocks.get("gpu")),
+                    unowned_gpu_root_jobs=unowned_gpu_root_jobs,
+                    gpu_spare_jobs=int(settings.get("gpu_spare_jobs") or 0),
                 ),
             }
         except Exception as exc:

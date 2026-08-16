@@ -40,6 +40,7 @@ from master.proof_affinity import (
     ensure_slave_seen_table,
     fetch_online_slaves,
     preferred_root_slave,
+    should_hold_unowned_gpu_for_idle,
     should_skip_root_for_slave,
     should_sticky_idle_overflow,
     touch_slave_seen,
@@ -278,6 +279,17 @@ def _slave_profile(slave_name: str) -> str:
     if slave_name.startswith("pool-gpu-") or slave_name.startswith("c3-slave-"):
         return "gpu"
     return "cpu"
+
+
+def _slave_gpu_inflight(
+    slave_name: str,
+    active_by_slave: Dict[str, int],
+    slaves_with_proof_work: Set[str],
+) -> int:
+    n = int((active_by_slave or {}).get(slave_name) or 0)
+    if slave_name in (slaves_with_proof_work or set()):
+        return max(n, 1)
+    return n
 
 
 class SlaveManager:
@@ -2244,6 +2256,14 @@ class SlaveManager:
                             # Allow overflow-unlocked leftovers.
                             if bid not in overflow_benchmark_ids:
                                 continue
+                        if should_hold_unowned_gpu_for_idle(
+                            algorithm_id=batch["settings"]["algorithm_id"],
+                            preferred_slave=preferred,
+                            slave_inflight=_slave_gpu_inflight(
+                                slave_name, active_by_slave, slaves_with_proof_work
+                            ),
+                        ):
+                            continue
                         if concurrent_by_bench.get(bid, 0) >= per_bench_cap:
                             continue
                     if not batch_owner_stealable(
@@ -2772,6 +2792,14 @@ class SlaveManager:
                             ),
                         ):
                             continue
+                        if should_hold_unowned_gpu_for_idle(
+                            algorithm_id=batch["settings"]["algorithm_id"],
+                            preferred_slave=preferred,
+                            slave_inflight=_slave_gpu_inflight(
+                                slave_name, active_by_slave, slaves_with_proof_work
+                            ),
+                        ):
+                            continue
                         _, _, hardness, _, job_age_ms, _ = _batch_meta(batch)
                         if hardness < min_hardness or job_age_ms >= cap_settings["age_out_ms"]:
                             return True
@@ -2802,6 +2830,14 @@ class SlaveManager:
                             online_slaves,
                             preferred_at_cap=bool(
                                 preferred and preferred in preferred_at_cap
+                            ),
+                        ):
+                            continue
+                        if (not is_proof) and should_hold_unowned_gpu_for_idle(
+                            algorithm_id=batch["settings"]["algorithm_id"],
+                            preferred_slave=preferred,
+                            slave_inflight=_slave_gpu_inflight(
+                                slave_name, active_by_slave, slaves_with_proof_work
                             ),
                         ):
                             continue

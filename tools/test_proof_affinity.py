@@ -13,6 +13,7 @@ sys.path.insert(0, str(ROOT))
 from master.proof_affinity import (  # noqa: E402
     offline_owners,
     preferred_root_slave,
+    should_hold_unowned_gpu_for_idle,
     should_skip_root_for_slave,
 )
 
@@ -104,6 +105,50 @@ def main() -> int:
         (
             offline_owners(["pool-cpu-a", ""], online) == [],
             "blank owners ignored",
+        )
+    )
+    cases.append(
+        (
+            should_hold_unowned_gpu_for_idle(
+                algorithm_id="c006_a1",
+                preferred_slave=None,
+                slave_inflight=3,
+            )
+            is True,
+            "busy GPU cannot take unowned GPU job",
+        )
+    )
+    cases.append(
+        (
+            should_hold_unowned_gpu_for_idle(
+                algorithm_id="c006_a1",
+                preferred_slave=None,
+                slave_inflight=0,
+            )
+            is False,
+            "idle GPU may take unowned GPU job",
+        )
+    )
+    cases.append(
+        (
+            should_hold_unowned_gpu_for_idle(
+                algorithm_id="c006_a1",
+                preferred_slave="pool-gpu-a",
+                slave_inflight=3,
+            )
+            is False,
+            "owned GPU jobs stay on sticky path",
+        )
+    )
+    cases.append(
+        (
+            should_hold_unowned_gpu_for_idle(
+                algorithm_id="c001_a1",
+                preferred_slave=None,
+                slave_inflight=3,
+            )
+            is False,
+            "CPU jobs are not held for idle GPUs",
         )
     )
 

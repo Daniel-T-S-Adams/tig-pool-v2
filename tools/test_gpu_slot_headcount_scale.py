@@ -39,6 +39,7 @@ def _load_fns():
         "MAX_CPU_SLOTS": 96,
         "MAX_GPU_SLOTS_PER_TYPE": 16,
         "GPU_UNITS_PER_JOB": 4,
+        "GPU_JOB_SPARE": 0,
         "UPSTREAM_SAFE_MAX_BENCHMARKS": 192,
         "BENCHMARK_BUFFER": 2,
         "PRODUCTIVE_IDLE_CPU_SCALE_MIN": 5,
@@ -243,6 +244,14 @@ def main() -> int:
     ok = int(cpu_down["vehicle_routing"]) <= 12
     print(f"{'pass' if ok else 'FAIL'}: CPU slots follow fleet down -> cpu={cpu_down['vehicle_routing']}")
     failed += 0 if ok else 1
+
+    ns["GPU_JOB_SPARE"] = 2
+    spare_slots = target_slots(_capacity(active_gpu=4))
+    spare_total = _gpu_sum(spare_slots)
+    ok = spare_total >= 6
+    print(f"{'pass' if ok else 'FAIL'}: GPU spare adds headroom above busy -> total={spare_total}")
+    failed += 0 if ok else 1
+    ns["GPU_JOB_SPARE"] = 0
 
     return 2 if failed else 0
 

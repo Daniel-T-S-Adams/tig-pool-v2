@@ -62,6 +62,9 @@ MAX_GPU_SLOTS_PER_TYPE = int(os.environ.get("AUTOPILOT_MAX_GPU_SLOTS_PER_TYPE", 
 # How many GPU workers one open GPU benchmark should feed via root-batch fan-out.
 # 50 GPUs / 4 = 13 jobs, not 50. A 12-GPU C3 box is 3 jobs, not 12.
 GPU_UNITS_PER_JOB = max(1, int(os.environ.get("AUTOPILOT_GPU_UNITS_PER_JOB", "4")))
+# Extra GPU slots/jobs kept unowned so a finishing GPU has work waiting.
+# Sticky blocks fan-out, so this buffer hides TIG precommit latency.
+GPU_JOB_SPARE = max(0, int(os.environ.get("AUTOPILOT_GPU_JOB_SPARE", "2")))
 MAX_CPU_CHALLENGE_BENCHMARKS = int(os.environ.get("AUTOPILOT_MAX_CPU_CHALLENGE_BENCHMARKS", "16"))
 MAX_GPU_CHALLENGE_BENCHMARKS = int(os.environ.get("AUTOPILOT_MAX_GPU_CHALLENGE_BENCHMARKS", "12"))
 # Optional per-challenge ceilings. Unset keys fall back to the CPU/GPU family max.
@@ -2567,7 +2570,16 @@ def _gpu_job_target(capacity: dict) -> int:
     # Empty slot tables must not ghost-downscale a live GPU fleet.
     hold = current_total if (units > 0 and not have_slot_telemetry) else min(current_total, units)
     pressure = int(capacity.get("gpu_pressure") or 0)
-    target = max(min_parallel, from_units, hold, busy_total, floor_total, pressure, 1)
+    spare = max(0, int(GPU_JOB_SPARE))
+    target = max(
+        min_parallel,
+        from_units,
+        hold,
+        busy_total + spare,
+        floor_total,
+        pressure,
+        1,
+    )
 
     cpu_slots = int((capacity.get("current_slots") or {}).get(CPU_SLOT_TYPE, 0) or 0)
     busy_cpu = int((capacity.get("slot_busy") or {}).get(CPU_SLOT_TYPE, 0) or 0)

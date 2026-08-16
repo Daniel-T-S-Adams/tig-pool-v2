@@ -78,6 +78,29 @@ def should_sticky_idle_overflow(
     return int(job_age_ms) >= int(idle_ms)
 
 
+GPU_CHALLENGE_PREFIXES = frozenset({"c004", "c005", "c006"})
+
+
+def should_hold_unowned_gpu_for_idle(
+    *,
+    algorithm_id: str,
+    preferred_slave: Optional[str],
+    slave_inflight: int,
+) -> bool:
+    """True when a busy GPU must not take a spare unowned GPU job.
+
+    Sticky keeps owned jobs on their owner. A new GPU job has no owner; if a
+    busy card takes the first root, idle cards wait for another TIG precommit
+    (often ~2 min). Hold unowned GPU work for a slave with no inflight work.
+    """
+    cid = str(algorithm_id or "")[:4]
+    if cid not in GPU_CHALLENGE_PREFIXES:
+        return False
+    if preferred_slave:
+        return False
+    return int(slave_inflight or 0) > 0
+
+
 def should_skip_root_for_slave(
     slave_name: str,
     preferred_slave: Optional[str],

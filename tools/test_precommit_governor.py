@@ -268,7 +268,31 @@ def main() -> int:
     gpu_idle_cases = [
         (dict(gpu_unassigned_claimable=0, online_idle_gpu_slaves=2), True, "idle GPUs and no claimable work"),
         (dict(gpu_unassigned_claimable=4, online_idle_gpu_slaves=2), False, "enough GPU roots to absorb idle"),
-        (dict(gpu_unassigned_claimable=0, online_idle_gpu_slaves=0), False, "no idle GPUs"),
+        (
+            dict(gpu_unassigned_claimable=0, online_idle_gpu_slaves=0, gpu_spare_jobs=0),
+            False,
+            "no idle GPUs and spare disabled",
+        ),
+        (
+            dict(
+                gpu_unassigned_claimable=0,
+                online_idle_gpu_slaves=0,
+                unowned_gpu_root_jobs=0,
+                gpu_spare_jobs=2,
+            ),
+            True,
+            "keep-ahead creates spare GPU jobs before anyone is idle",
+        ),
+        (
+            dict(
+                gpu_unassigned_claimable=0,
+                online_idle_gpu_slaves=0,
+                unowned_gpu_root_jobs=2,
+                gpu_spare_jobs=2,
+            ),
+            False,
+            "spare GPU jobs already waiting",
+        ),
         (
             dict(gpu_unassigned_claimable=0, online_idle_gpu_slaves=2, gpu_profile_blocked=True),
             False,
