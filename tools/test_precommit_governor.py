@@ -32,6 +32,8 @@ def main() -> int:
         "profile_root_backlog_blocks",
         "should_block_precommit_create",
         "compute_idle_cpu_needs_work",
+        "compute_idle_gpu_starved",
+        "compute_gpu_keep_ahead",
         "compute_idle_gpu_needs_work",
         "idle_decision_count",
         "idle_create_burst",
@@ -45,6 +47,8 @@ def main() -> int:
     unassigned_cap = ns["compute_cpu_unassigned_cap"]
     profile_blocks = ns["profile_root_backlog_blocks"]
     idle_needs = ns["compute_idle_cpu_needs_work"]
+    idle_gpu_starved_fn = ns["compute_idle_gpu_starved"]
+    gpu_keep_ahead_fn = ns["compute_gpu_keep_ahead"]
     idle_gpu = ns["compute_idle_gpu_needs_work"]
     decision = ns["idle_decision_count"]
     burst = ns["idle_create_burst"]
@@ -306,6 +310,27 @@ def main() -> int:
         if not ok:
             failed += 1
 
+    ok = idle_gpu_starved_fn(
+        gpu_unassigned_claimable=0, online_idle_gpu_slaves=0
+    ) is False
+    print(f"{'pass' if ok else 'FAIL'}: keep-ahead is not GPU-card starvation")
+    if not ok:
+        failed += 1
+    ok = idle_gpu_starved_fn(
+        gpu_unassigned_claimable=0, online_idle_gpu_slaves=2
+    ) is True
+    print(f"{'pass' if ok else 'FAIL'}: empty GPU cards are starved")
+    if not ok:
+        failed += 1
+    ok = gpu_keep_ahead_fn(unowned_gpu_root_jobs=0, gpu_spare_jobs=2) is True
+    print(f"{'pass' if ok else 'FAIL'}: spare pile short requests keep-ahead")
+    if not ok:
+        failed += 1
+    ok = gpu_keep_ahead_fn(unowned_gpu_root_jobs=2, gpu_spare_jobs=2) is False
+    print(f"{'pass' if ok else 'FAIL'}: full spare pile stops keep-ahead")
+    if not ok:
+        failed += 1
+
     cap_cases = [
         (
             under_cap(
@@ -371,6 +396,36 @@ def main() -> int:
             is False,
             "idle GPU cap lift is still bounded",
         ),
+        (
+            under_cap(
+                "c004",
+                pending_counts={"c004": 10},
+                root_phase_counts={"c004": 2},
+                submitted={},
+                per_challenge_max={"c004": 6},
+                idle_gpu_starved=False,
+                gpu_keep_ahead=True,
+                gpu_spare_jobs=2,
+                idle_gpu_slaves=0,
+            )
+            is False,
+            "keep-ahead does not ignore proof-phase GPU jobs",
+        ),
+        (
+            under_cap(
+                "c004",
+                pending_counts={"c004": 7},
+                root_phase_counts={"c004": 7},
+                submitted={},
+                per_challenge_max={"c004": 6},
+                idle_gpu_starved=False,
+                gpu_keep_ahead=True,
+                gpu_spare_jobs=2,
+                idle_gpu_slaves=0,
+            )
+            is True,
+            "keep-ahead may exceed cap by the spare count only",
+        ),
     ]
     for ok, label in cap_cases:
         print(f"{'pass' if ok else 'FAIL'}: {label}")
@@ -390,10 +445,21 @@ def main() -> int:
     ok = force_cpu(
         idle_cpu_needs_work=True,
         gpu_starved=False,
-        idle_gpu_needs_work=True,
+        idle_gpu_starved=True,
         cpu_profile_blocked=False,
     ) is False
-    print(f"{'pass' if ok else 'FAIL'}: do not force CPU while idle GPUs need work")
+    print(f"{'pass' if ok else 'FAIL'}: do not force CPU while GPU cards are empty")
+    if not ok:
+        failed += 1
+
+    ok = force_cpu(
+        idle_cpu_needs_work=True,
+        gpu_starved=False,
+        idle_gpu_starved=False,
+        idle_gpu_needs_work=True,
+        cpu_profile_blocked=False,
+    ) is True
+    print(f"{'pass' if ok else 'FAIL'}: keep-ahead spare does not block idle CPU creates")
     if not ok:
         failed += 1
 

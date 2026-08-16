@@ -381,6 +381,32 @@ def idle_create_burst(
     return max(1, min(hi, deficit, room))
 
 
+def compute_idle_gpu_starved(
+    *,
+    gpu_unassigned_claimable: int = 0,
+    online_idle_gpu_slaves: int = 0,
+    gpu_profile_blocked: bool = False,
+) -> bool:
+    """True only when live GPU cards are empty and have nothing to claim."""
+    if gpu_profile_blocked:
+        return False
+    idle = max(0, int(online_idle_gpu_slaves or 0))
+    return idle > 0 and int(gpu_unassigned_claimable or 0) < idle
+
+
+def compute_gpu_keep_ahead(
+    *,
+    unowned_gpu_root_jobs: int = 0,
+    gpu_spare_jobs: int = 0,
+    gpu_profile_blocked: bool = False,
+) -> bool:
+    """True when the unowned GPU spare pile is short. GPUs may all be busy."""
+    if gpu_profile_blocked:
+        return False
+    spare = max(0, int(gpu_spare_jobs or 0))
+    return spare > 0 and int(unowned_gpu_root_jobs or 0) < spare
+
+
 def compute_idle_gpu_needs_work(
     *,
     gpu_unassigned_claimable: int = 0,
@@ -394,17 +420,18 @@ def compute_idle_gpu_needs_work(
     Reactive: idle GPUs and not enough unowned roots.
     Keep-ahead: create spare unowned GPU jobs *before* anyone goes idle so
     the next card does not wait for a TIG precommit.
+    Keep-ahead must not lock the create lottery to GPU — that turns an idle
+    CPU burst into a pile of extra GPU jobs.
     """
-    if gpu_profile_blocked:
-        return False
-    idle = max(0, int(online_idle_gpu_slaves or 0))
-    claimable = int(gpu_unassigned_claimable or 0)
-    if idle > 0 and claimable < idle:
-        return True
-    spare = max(0, int(gpu_spare_jobs or 0))
-    if spare > 0 and int(unowned_gpu_root_jobs or 0) < spare:
-        return True
-    return False
+    return compute_idle_gpu_starved(
+        gpu_unassigned_claimable=gpu_unassigned_claimable,
+        online_idle_gpu_slaves=online_idle_gpu_slaves,
+        gpu_profile_blocked=gpu_profile_blocked,
+    ) or compute_gpu_keep_ahead(
+        unowned_gpu_root_jobs=unowned_gpu_root_jobs,
+        gpu_spare_jobs=gpu_spare_jobs,
+        gpu_profile_blocked=gpu_profile_blocked,
+    )
 
 
 def challenge_under_create_cap(
@@ -415,6 +442,8 @@ def challenge_under_create_cap(
     submitted: dict,
     per_challenge_max: dict,
     idle_gpu_needs_work: bool = False,
+    idle_gpu_starved: bool = False,
+    gpu_keep_ahead: bool = False,
     gpu_ids: tuple = ("c004", "c005", "c006"),
     gpu_spare_jobs: int = 0,
     idle_gpu_slaves: int = 0,
@@ -426,20 +455,27 @@ def challenge_under_create_cap(
     against the GPU per-challenge cap so a new root job can start.
     If every GPU challenge is already at that cap, lift it by the idle/spare
     count so creates do not fall through to CPU while cards sit empty.
+    Keep-ahead only lifts by the spare count against pending jobs — it must
+    not ignore proof-phase work or copy the idle-card lift.
     """
     cid = str(challenge_id or "")[:4]
     cap = per_challenge_max.get(cid)
     if cap is None:
         return True
+    starved = bool(idle_gpu_starved) or (
+        bool(idle_gpu_needs_work) and not bool(gpu_keep_ahead)
+    )
     counts = (
         root_phase_counts
-        if idle_gpu_needs_work and cid in gpu_ids
+        if starved and cid in gpu_ids
         else pending_counts
     )
     used = int((counts or {}).get(cid, 0) or 0) + int((submitted or {}).get(cid, 0) or 0)
     extra = 0
-    if idle_gpu_needs_work and cid in gpu_ids:
+    if starved and cid in gpu_ids:
         extra = max(int(gpu_spare_jobs or 0), int(idle_gpu_slaves or 0), 1)
+    elif gpu_keep_ahead and cid in gpu_ids:
+        extra = max(int(gpu_spare_jobs or 0), 1)
     return used < int(cap) + extra
 
 
@@ -447,14 +483,15 @@ def should_force_cpu_only(
     *,
     idle_cpu_needs_work: bool,
     gpu_starved: bool,
-    idle_gpu_needs_work: bool,
+    idle_gpu_starved: bool = False,
+    idle_gpu_needs_work: bool = False,
     cpu_profile_blocked: bool,
 ) -> bool:
-    """Hard CPU filter. Idle GPUs with no claimable work stay in the lottery."""
+    """Hard CPU filter. Empty GPU cards stay in the lottery; keep-ahead does not."""
     return bool(
         idle_cpu_needs_work
         and (not gpu_starved)
-        and (not idle_gpu_needs_work)
+        and (not idle_gpu_starved)
         and (not cpu_profile_blocked)
     )
 
@@ -996,6 +1033,16 @@ class PrecommitManager:
                 "profile_caps": profile_caps,
                 "profile_blocks": profile_blocks,
                 "idle_cpu_needs_work": False,
+                "idle_gpu_starved": compute_idle_gpu_starved(
+                    gpu_unassigned_claimable=gpu_unassigned_claimable,
+                    online_idle_gpu_slaves=online_idle_gpu_slaves,
+                    gpu_profile_blocked=bool(profile_blocks.get("gpu")),
+                ),
+                "gpu_keep_ahead": compute_gpu_keep_ahead(
+                    unowned_gpu_root_jobs=unowned_gpu_root_jobs,
+                    gpu_spare_jobs=int(settings.get("gpu_spare_jobs") or 0),
+                    gpu_profile_blocked=bool(profile_blocks.get("gpu")),
+                ),
                 "idle_gpu_needs_work": compute_idle_gpu_needs_work(
                     gpu_unassigned_claimable=gpu_unassigned_claimable,
                     online_idle_gpu_slaves=online_idle_gpu_slaves,
@@ -1156,12 +1203,15 @@ class PrecommitManager:
 
         per_challenge_max = CONFIG.get("per_challenge_max_benchmarks", {})
         idle_gpu_needs_work = bool(governor.get("idle_gpu_needs_work"))
+        idle_gpu_starved = bool(governor.get("idle_gpu_starved"))
+        gpu_keep_ahead = bool(governor.get("gpu_keep_ahead"))
         idle_gpu_slaves = int(governor.get("online_idle_gpu_slaves") or 0)
         gpu_spare_jobs = int((governor.get("settings") or {}).get("gpu_spare_jobs") or 0)
 
         # Filter eligible algorithms (not over their per-challenge limit).
-        # Idle GPUs: proof-phase jobs do not count against GPU caps, and the
-        # cap itself lifts so spare creates are not forced onto CPU.
+        # Empty GPU cards: proof-phase jobs do not count against GPU caps, and
+        # the cap lifts so those cards are not starved onto CPU. Keep-ahead
+        # only adds the spare count — it must not copy the idle-card lift.
         eligible = [
             x for x in algo_selection
             if challenge_under_create_cap(
@@ -1170,7 +1220,8 @@ class PrecommitManager:
                 root_phase_counts=root_phase_counts,
                 submitted=self.per_challenge_precommits_submitted,
                 per_challenge_max=per_challenge_max,
-                idle_gpu_needs_work=idle_gpu_needs_work,
+                idle_gpu_starved=idle_gpu_starved,
+                gpu_keep_ahead=gpu_keep_ahead,
                 gpu_spare_jobs=gpu_spare_jobs,
                 idle_gpu_slaves=idle_gpu_slaves,
             )
@@ -1241,7 +1292,7 @@ class PrecommitManager:
         force_cpu_only = should_force_cpu_only(
             idle_cpu_needs_work=idle_cpu_needs_work,
             gpu_starved=gpu_starved,
-            idle_gpu_needs_work=idle_gpu_needs_work,
+            idle_gpu_starved=idle_gpu_starved,
             cpu_profile_blocked=bool(profile_blocks.get("cpu")),
         )
         if reserve_gpu:
@@ -1267,7 +1318,12 @@ class PrecommitManager:
                         "work but GPU algorithm weights are 0; keeping CPU algorithms"
                     )
                 reserve_gpu = False
-        if idle_gpu_needs_work:
+        # Empty GPU cards: if no GPU algo is eligible even after the cap lift,
+        # do not dump the tick onto CPU. Do NOT lock the whole lottery to GPU
+        # — idle CPU burst would become a pile of extra GPU jobs. One GPU
+        # create per cooldown is handled by reserve_gpu above.
+        # Keep-ahead must never block CPU creates.
+        if idle_gpu_starved:
             gpu_left = [
                 x for x in eligible
                 if x["algorithm_id"][:4] in GPU_CHALLENGE_IDS
@@ -1282,7 +1338,6 @@ class PrecommitManager:
                     {cid: per_challenge_counts.get(cid, 0) for cid in GPU_CHALLENGE_IDS},
                 )
                 return
-            eligible = gpu_left
             force_cpu_only = False
         if force_cpu_only:
             cpu_eligible = [
@@ -1328,7 +1383,7 @@ class PrecommitManager:
             if idle_cpu_needs_work and not force_cpu_only:
                 if x["algorithm_id"][:4] in CPU_CHALLENGE_IDS:
                     weight = max(1, int(round(weight * idle_mult)))
-            if (gpu_starved or idle_gpu_needs_work) and x["algorithm_id"][:4] in GPU_CHALLENGE_IDS:
+            if (gpu_starved or idle_gpu_starved) and x["algorithm_id"][:4] in GPU_CHALLENGE_IDS:
                 weight = max(1, int(round(weight * idle_mult)))
             if cap_settings.get("enabled"):
                 cid = x["algorithm_id"][:4]
