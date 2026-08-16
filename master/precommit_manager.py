@@ -298,6 +298,7 @@ def compute_idle_cpu_needs_work(
     cpu_create_target: int = 0,
     cpu_profile_blocked: bool = False,
     online_idle_cpu_slaves: int = 0,
+    cpu_jobs_in_proof_phase: int = 0,
 ) -> bool:
     """True when precommit should bias toward CPU work for an underfed fleet.
 
@@ -317,10 +318,16 @@ def compute_idle_cpu_needs_work(
         return False
     claimable = max(0, int(cpu_unassigned_claimable or 0))
     idle = max(0, int(online_idle_cpu_slaves or 0))
+    proving = max(0, int(cpu_jobs_in_proof_phase or 0))
     if idle > 0:
         # Live idle boxes beat the configured slot target. New machines must
         # get work even when resource_slots.cpu still matches the old fleet.
         return claimable < idle
+    # Proof-phase jobs still count as busy, but they stop feeding root
+    # workers. Start replacements now — TIG precommit is ~1-2 min, which is
+    # the idle spike if we wait until proofs finish.
+    if proving > 0 and claimable < proving:
+        return True
     if int(cpu_jobs_needing_roots or 0) >= max(1, int(cpu_create_target or 0)):
         return False
     return claimable == 0
@@ -399,12 +406,20 @@ def compute_gpu_keep_ahead(
     unowned_gpu_root_jobs: int = 0,
     gpu_spare_jobs: int = 0,
     gpu_profile_blocked: bool = False,
+    gpu_jobs_in_proof_phase: int = 0,
+    keep_ahead_cap: int = 8,
 ) -> bool:
-    """True when the unowned GPU spare pile is short. GPUs may all be busy."""
+    """True when the unowned GPU spare pile is short. GPUs may all be busy.
+
+    Also request replacements for GPU jobs already in proof — those cards
+    go idle when proofs finish, and a TIG precommit started then is 1-2 min late.
+    """
     if gpu_profile_blocked:
         return False
     spare = max(0, int(gpu_spare_jobs or 0))
-    return spare > 0 and int(unowned_gpu_root_jobs or 0) < spare
+    proving = max(0, int(gpu_jobs_in_proof_phase or 0))
+    want = max(spare, min(max(0, int(keep_ahead_cap or 0)), proving))
+    return want > 0 and int(unowned_gpu_root_jobs or 0) < want
 
 
 def compute_idle_gpu_needs_work(
@@ -414,6 +429,7 @@ def compute_idle_gpu_needs_work(
     gpu_profile_blocked: bool = False,
     unowned_gpu_root_jobs: int = 0,
     gpu_spare_jobs: int = 0,
+    gpu_jobs_in_proof_phase: int = 0,
 ) -> bool:
     """True when GPUs need more claimable work, including a keep-ahead spare.
 
@@ -431,7 +447,35 @@ def compute_idle_gpu_needs_work(
         unowned_gpu_root_jobs=unowned_gpu_root_jobs,
         gpu_spare_jobs=gpu_spare_jobs,
         gpu_profile_blocked=gpu_profile_blocked,
+        gpu_jobs_in_proof_phase=gpu_jobs_in_proof_phase,
     )
+
+
+def concurrent_create_allowed(
+    *,
+    root_phase_jobs: int = 0,
+    proof_phase_jobs: int = 0,
+    submitted: int = 0,
+    max_concurrent: int = 0,
+    overlap_cap: int = 8,
+) -> bool:
+    """True when another precommit may start.
+
+    Proof-phase jobs still occupy runtime, but they no longer feed idle root
+    workers. Allow a bounded overlap so the next wave is already submitting
+    while the current wave proves — otherwise idle spikes for the ~1-2 min
+    TIG precommit after proofs finish.
+    """
+    cap = int(max_concurrent or 0)
+    if cap <= 0:
+        return True
+    root = max(0, int(root_phase_jobs or 0))
+    proof = max(0, int(proof_phase_jobs or 0))
+    inflight = max(0, int(submitted or 0))
+    overlap = min(proof, max(0, int(overlap_cap or 0)))
+    if root + proof + inflight >= cap + overlap:
+        return False
+    return root + inflight < cap
 
 
 def challenge_under_create_cap(
@@ -727,6 +771,7 @@ class PrecommitManager:
             cpu_create_target=cpu_create_target,
             cpu_profile_blocked=bool(profile_blocks.get("cpu")),
             online_idle_cpu_slaves=decision_idle,
+            cpu_jobs_in_proof_phase=int(snap.get("cpu_jobs_in_proof_phase") or 0),
         )
         snap["online_idle_cpu_slaves"] = instant
         snap["online_idle_cpu_slaves_instant"] = instant
@@ -838,6 +883,15 @@ class PrecommitManager:
                           AND j.end_time IS NULL
                           AND j.settings->>'challenge_id' IN %s
                     ) AS gpu_active_jobs,
+                    (
+                        SELECT COUNT(*)
+                        FROM job j
+                        WHERE j.stopped IS NULL
+                          AND j.end_time IS NULL
+                          AND j.merkle_root_ready = true
+                          AND j.merkle_proofs_ready IS NULL
+                          AND j.settings->>'challenge_id' IN %s
+                    ) AS gpu_jobs_in_proof_phase,
                     (
                         -- Root-phase GPU jobs that no slave has touched yet.
                         -- These are the keep-ahead buffer idle GPUs can take.
@@ -966,6 +1020,7 @@ class PrecommitManager:
                     CPU_CHALLENGE_IDS,
                     GPU_CHALLENGE_IDS,
                     GPU_CHALLENGE_IDS,
+                    GPU_CHALLENGE_IDS,
                     CPU_CHALLENGE_IDS,
                     GPU_CHALLENGE_IDS,
                     CPU_CHALLENGE_IDS,
@@ -983,6 +1038,7 @@ class PrecommitManager:
             cpu_jobs_needing_roots = int(row.get("cpu_jobs_needing_roots") or 0)
             cpu_jobs_in_proof_phase = int(row.get("cpu_jobs_in_proof_phase") or 0)
             gpu_active_jobs = int(row.get("gpu_active_jobs") or 0)
+            gpu_jobs_in_proof_phase = int(row.get("gpu_jobs_in_proof_phase") or 0)
             unowned_gpu_root_jobs = int(row.get("unowned_gpu_root_jobs") or 0)
             cpu_roots_pending = int(row.get("cpu_roots_pending") or 0)
             gpu_roots_pending = int(row.get("gpu_roots_pending") or 0)
@@ -1022,6 +1078,7 @@ class PrecommitManager:
                 "cpu_jobs_needing_roots": cpu_jobs_needing_roots,
                 "cpu_jobs_in_proof_phase": cpu_jobs_in_proof_phase,
                 "gpu_active_jobs": gpu_active_jobs,
+                "gpu_jobs_in_proof_phase": gpu_jobs_in_proof_phase,
                 "unowned_gpu_root_jobs": unowned_gpu_root_jobs,
                 "gpu_slot_floor": gpu_floor,
                 "cpu_unassigned_roots": cpu_unassigned_roots,
@@ -1042,6 +1099,7 @@ class PrecommitManager:
                     unowned_gpu_root_jobs=unowned_gpu_root_jobs,
                     gpu_spare_jobs=int(settings.get("gpu_spare_jobs") or 0),
                     gpu_profile_blocked=bool(profile_blocks.get("gpu")),
+                    gpu_jobs_in_proof_phase=gpu_jobs_in_proof_phase,
                 ),
                 "idle_gpu_needs_work": compute_idle_gpu_needs_work(
                     gpu_unassigned_claimable=gpu_unassigned_claimable,
@@ -1049,6 +1107,7 @@ class PrecommitManager:
                     gpu_profile_blocked=bool(profile_blocks.get("gpu")),
                     unowned_gpu_root_jobs=unowned_gpu_root_jobs,
                     gpu_spare_jobs=int(settings.get("gpu_spare_jobs") or 0),
+                    gpu_jobs_in_proof_phase=gpu_jobs_in_proof_phase,
                 ),
             }
         except Exception as exc:
@@ -1065,20 +1124,41 @@ class PrecommitManager:
         return snapshot
 
     def run(self) -> SubmitPrecommitRequest:
-        num_pending_jobs = get_db_conn().fetch_one(
+        pending_row = get_db_conn().fetch_one(
             """
-            SELECT COUNT(*) 
+            SELECT
+                COUNT(*) FILTER (WHERE merkle_root_ready IS NULL) AS root_phase,
+                COUNT(*) FILTER (WHERE merkle_root_ready IS NOT NULL) AS proof_phase,
+                COUNT(*) AS pending
             FROM job
             WHERE merkle_proofs_ready IS NULL
                 AND stopped IS NULL
             """
-        )["count"]
+        ) or {}
+        num_pending_jobs = int(pending_row.get("pending") or 0)
+        root_phase_jobs = int(pending_row.get("root_phase") or 0)
+        proof_phase_jobs = int(pending_row.get("proof_phase") or 0)
 
         algo_selection = CONFIG["algo_selection"]
 
-        num_pending_benchmarks = num_pending_jobs + self.num_precommits_submitted
-        if  num_pending_benchmarks >= CONFIG["max_concurrent_benchmarks"]:
-            logger.debug(f"number of pending benchmarks has reached max of {CONFIG['max_concurrent_benchmarks']}")
+        overlap_cap = int(os.environ.get("PRECOMMIT_PROOF_OVERLAP", "8"))
+        if not concurrent_create_allowed(
+            root_phase_jobs=root_phase_jobs,
+            proof_phase_jobs=proof_phase_jobs,
+            submitted=self.num_precommits_submitted,
+            max_concurrent=int(CONFIG.get("max_concurrent_benchmarks") or 0),
+            overlap_cap=overlap_cap,
+        ):
+            logger.debug(
+                "pending benchmarks at cap (pending=%s root=%s proof=%s "
+                "submitted=%s max=%s overlap=%s)",
+                num_pending_jobs,
+                root_phase_jobs,
+                proof_phase_jobs,
+                self.num_precommits_submitted,
+                CONFIG.get("max_concurrent_benchmarks"),
+                overlap_cap,
+            )
             self.last_idle_cpu_needs_work = False
             self.last_idle_gpu_needs_work = False
             self.last_idle_burst = 1

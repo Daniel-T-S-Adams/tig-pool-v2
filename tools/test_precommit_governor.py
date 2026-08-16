@@ -35,6 +35,7 @@ def main() -> int:
         "compute_idle_gpu_starved",
         "compute_gpu_keep_ahead",
         "compute_idle_gpu_needs_work",
+        "concurrent_create_allowed",
         "idle_decision_count",
         "idle_create_burst",
         "challenge_under_create_cap",
@@ -50,6 +51,7 @@ def main() -> int:
     idle_gpu_starved_fn = ns["compute_idle_gpu_starved"]
     gpu_keep_ahead_fn = ns["compute_gpu_keep_ahead"]
     idle_gpu = ns["compute_idle_gpu_needs_work"]
+    create_ok = ns["concurrent_create_allowed"]
     decision = ns["idle_decision_count"]
     burst = ns["idle_create_burst"]
     under_cap = ns["challenge_under_create_cap"]
@@ -261,6 +263,34 @@ def main() -> int:
             True,
             "new idle boxes still need work after configured slot target is full",
         ),
+        (
+            dict(
+                idle_cpu_override=True,
+                cpu_slots=16,
+                cpu_unassigned_claimable=0,
+                cpu_jobs_needing_roots=16,
+                cpu_create_target=16,
+                cpu_profile_blocked=False,
+                online_idle_cpu_slaves=0,
+                cpu_jobs_in_proof_phase=8,
+            ),
+            True,
+            "proof-phase jobs start CPU replacements before the idle wave",
+        ),
+        (
+            dict(
+                idle_cpu_override=True,
+                cpu_slots=16,
+                cpu_unassigned_claimable=10,
+                cpu_jobs_needing_roots=16,
+                cpu_create_target=16,
+                cpu_profile_blocked=False,
+                online_idle_cpu_slaves=0,
+                cpu_jobs_in_proof_phase=8,
+            ),
+            False,
+            "claimable roots already cover the proving wave",
+        ),
     ]
     for kwargs, expect, label in idle_cases:
         got = idle_needs(**kwargs)
@@ -330,6 +360,36 @@ def main() -> int:
     print(f"{'pass' if ok else 'FAIL'}: full spare pile stops keep-ahead")
     if not ok:
         failed += 1
+    ok = gpu_keep_ahead_fn(
+        unowned_gpu_root_jobs=2,
+        gpu_spare_jobs=2,
+        gpu_jobs_in_proof_phase=6,
+    ) is True
+    print(f"{'pass' if ok else 'FAIL'}: proving GPU jobs raise keep-ahead above spare")
+    if not ok:
+        failed += 1
+    ok = gpu_keep_ahead_fn(
+        unowned_gpu_root_jobs=6,
+        gpu_spare_jobs=2,
+        gpu_jobs_in_proof_phase=6,
+    ) is False
+    print(f"{'pass' if ok else 'FAIL'}: proving GPU keep-ahead stops once replacements exist")
+    if not ok:
+        failed += 1
+
+    create_cases = [
+        (dict(root_phase_jobs=18, proof_phase_jobs=0, max_concurrent=18), False, "root-phase at cap blocks"),
+        (dict(root_phase_jobs=10, proof_phase_jobs=8, max_concurrent=18, overlap_cap=8), True, "proof overlap allows next wave"),
+        (dict(root_phase_jobs=18, proof_phase_jobs=8, max_concurrent=18, overlap_cap=8), False, "root-phase at cap still blocks"),
+        (dict(root_phase_jobs=12, proof_phase_jobs=20, max_concurrent=18, overlap_cap=8), False, "overlap hard ceiling"),
+        (dict(root_phase_jobs=10, proof_phase_jobs=8, submitted=8, max_concurrent=18, overlap_cap=8), False, "in-flight precommits consume root budget"),
+    ]
+    for kwargs, expect, label in create_cases:
+        got = create_ok(**kwargs)
+        ok = got is expect
+        print(f"{'pass' if ok else 'FAIL'}: {label} got={got}")
+        if not ok:
+            failed += 1
 
     cap_cases = [
         (
