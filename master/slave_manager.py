@@ -691,7 +691,7 @@ class SlaveManager:
             ):
                 continue
             overflow_benchmark_ids.add(bid)
-            logger.info(
+            logger.debug(
                 "sticky leftover fanout preferred=%s bid=%s unassigned=%s "
                 "idle_peers=%s keep=%s",
                 preferred,
