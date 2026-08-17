@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""get-batches shed: busy at cap, idle only through a small extra window."""
+"""get-batches shed: busy at cap, idle never shed."""
 
 from __future__ import annotations
 
@@ -39,12 +39,12 @@ def main() -> int:
             "idle slave is not shed inside idle extra window",
         ),
         (
-            should_shed(inflight=12, max_inflight=8, assigned_count=0, idle_extra=extra) is True,
-            "idle slave is shed at cap plus idle extra",
+            should_shed(inflight=12, max_inflight=8, assigned_count=0, idle_extra=extra) is False,
+            "idle slave is never shed at cap plus idle extra",
         ),
         (
-            should_shed(inflight=32, max_inflight=8, assigned_count=0, idle_extra=extra) is True,
-            "idle slave is shed far above inflight cap",
+            should_shed(inflight=32, max_inflight=8, assigned_count=0, idle_extra=extra) is False,
+            "idle slave is never shed far above inflight cap",
         ),
         (
             should_shed(inflight=8, max_inflight=8, assigned_count=1, idle_extra=extra) is True,

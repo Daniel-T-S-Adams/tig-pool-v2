@@ -105,15 +105,14 @@ def should_shed_get_batches_poll(
 ) -> bool:
     """True when this poll may skip new assignment and return current work only.
 
-    Busy slaves shed at max_inflight. Idle slaves may use a few extra slots
-    so ownerless roots still get claimed, without opening the whole fleet
-    onto the DB at once.
+    Busy slaves shed at max_inflight. Idle slaves are never shed: the fast
+    path is in-memory, and a 4-slot idle window left 40+ empty boxes returning
+    no work while leftovers sat on a few owners.
     """
-    cap = max(1, int(max_inflight or 1))
-    extra = GET_BATCHES_IDLE_EXTRA if idle_extra is None else max(0, int(idle_extra))
+    del idle_extra
     if int(assigned_count or 0) <= 0:
-        return int(inflight or 0) >= (cap + extra)
-    return int(inflight or 0) >= cap
+        return False
+    return int(inflight or 0) >= max(1, int(max_inflight or 1))
 
 
 def owner_idle_unlocks_sticky(active_count: int | None) -> bool:
@@ -2235,6 +2234,21 @@ class SlaveManager:
             per_bench_cap = CONFIG.get("max_batches_per_benchmark", 0)
             if not per_bench_cap or per_bench_cap < 1:
                 per_bench_cap = max(1, max_concurrent // 4) if max_concurrent else 1
+            # While same-profile peers are empty, do not pile 8–13 roots of one
+            # job onto a single box. That is how 45 assigned CPU roots left
+            # 46 machines idle with zero unassigned leftovers.
+            poll_profile = _slave_work_profile(slave_name)
+            idle_peers = 0
+            if poll_profile:
+                for name in online_slaves or set():
+                    if _slave_work_profile(name) != poll_profile:
+                        continue
+                    if int(active_by_slave.get(name) or 0) == 0:
+                        idle_peers += 1
+                if int(active_by_slave.get(slave_name) or 0) == 0:
+                    idle_peers = max(0, idle_peers - 1)
+            if idle_peers > 0:
+                per_bench_cap = 1
 
             # Rank roots only (no skip). Proofs keep list order. Slow slaves
             # see easier tracks first; fast slaves see hard tracks first.
@@ -2617,6 +2631,18 @@ class SlaveManager:
             per_bench_cap = CONFIG.get("max_batches_per_benchmark", 0)
             if not per_bench_cap or per_bench_cap < 1:
                 per_bench_cap = max(1, max_concurrent // 4)
+            poll_profile = _slave_work_profile(slave_name)
+            idle_peers = 0
+            if poll_profile:
+                for name in online_slaves or set():
+                    if _slave_work_profile(name) != poll_profile:
+                        continue
+                    if int(active_by_slave.get(name) or 0) == 0:
+                        idle_peers += 1
+                if int(active_by_slave.get(slave_name) or 0) == 0:
+                    idle_peers = max(0, idle_peers - 1)
+            if idle_peers > 0:
+                per_bench_cap = 1
 
             now_i = int(now)
             proof_candidates = []
