@@ -15,6 +15,7 @@ from master.proof_affinity import (  # noqa: E402
     preferred_root_slave,
     should_hold_unowned_gpu_for_idle,
     should_skip_root_for_slave,
+    should_sticky_leftover_fanout,
 )
 
 
@@ -92,6 +93,42 @@ def main() -> int:
         (
             should_skip_root_for_slave("pool-cpu-b", None, online) is False,
             "no preference -> no skip",
+        )
+    )
+    cases.append(
+        (
+            should_sticky_leftover_fanout(
+                unassigned_on_job=98,
+                preferred_inflight_total=3,
+                preferred_cap=32,
+                leftover_keep=4,
+            )
+            is True,
+            "knapsack pile fans out when owner cannot absorb leftovers",
+        )
+    )
+    cases.append(
+        (
+            should_sticky_leftover_fanout(
+                unassigned_on_job=8,
+                preferred_inflight_total=3,
+                preferred_cap=32,
+                leftover_keep=4,
+            )
+            is False,
+            "small leftover stays sticky while owner still has room",
+        )
+    )
+    cases.append(
+        (
+            should_sticky_leftover_fanout(
+                unassigned_on_job=4,
+                preferred_inflight_total=0,
+                preferred_cap=32,
+                leftover_keep=4,
+            )
+            is False,
+            "keep-count leftovers stay exclusive",
         )
     )
 

@@ -41,6 +41,7 @@ from master.proof_affinity import (
     fetch_online_slaves,
     preferred_root_slave,
     should_hold_unowned_gpu_for_idle,
+    should_sticky_leftover_fanout,
     should_skip_root_for_slave,
     should_sticky_idle_overflow,
     touch_slave_seen,
@@ -143,6 +144,9 @@ STICKY_OVERFLOW_IDLE_MS = max(
 STICKY_OVERFLOW_OWNER_IDLE_MS = max(
     0, int(os.environ.get("SLAVE_STICKY_OVERFLOW_OWNER_IDLE_MS", str(60 * 1000)))
 )
+# Roots kept exclusive to the sticky owner. Anything above this that the
+# owner cannot absorb into remaining cap fans out to idle machines.
+STICKY_LEFTOVER_KEEP = max(0, int(os.environ.get("SLAVE_STICKY_LEFTOVER_KEEP", "4")))
 
 
 def _is_proof_batch_row(row: dict) -> bool:
@@ -641,6 +645,50 @@ class SlaveManager:
             for k, v in counts.items()
             if k != "enabled" and isinstance(v, int) and v > 0
         }
+
+    def _unlock_sticky_leftover_jobs(
+        self,
+        unassigned_by_bid: Dict[str, int],
+        root_affinity: Dict[str, str],
+        online_slaves: Set[str],
+        active_by_slave: Dict[str, int],
+        adaptive_caps: Dict[str, int],
+        overflow_benchmark_ids: Set[str],
+        preferred_at_cap: Set[str],
+    ) -> None:
+        """Fan out leftover roots the sticky owner cannot absorb right now."""
+        if not unassigned_by_bid:
+            return
+        for bid, n_unassigned in unassigned_by_bid.items():
+            preferred = root_affinity.get(bid)
+            if not preferred or preferred not in online_slaves:
+                continue
+            pref_route = self._route_cap_for_slave(preferred)
+            if pref_route <= 0:
+                continue
+            if preferred in (adaptive_caps or {}):
+                pref_cap = max(0, min(pref_route, int(adaptive_caps[preferred])))
+            else:
+                pref_cap = pref_route
+            if not should_sticky_leftover_fanout(
+                unassigned_on_job=n_unassigned,
+                preferred_inflight_total=int(active_by_slave.get(preferred) or 0),
+                preferred_cap=pref_cap,
+                leftover_keep=STICKY_LEFTOVER_KEEP,
+            ):
+                continue
+            overflow_benchmark_ids.add(bid)
+            preferred_at_cap.add(preferred)
+            logger.info(
+                "sticky leftover fanout preferred=%s bid=%s unassigned=%s "
+                "owner_inflight=%s cap=%s keep=%s",
+                preferred,
+                bid[:8],
+                n_unassigned,
+                int(active_by_slave.get(preferred) or 0),
+                pref_cap,
+                STICKY_LEFTOVER_KEEP,
+            )
 
     def _slot_types_for_slave(self, slave_name: str) -> List[str]:
         counts = self._resource_slot_counts()
@@ -1989,6 +2037,7 @@ class SlaveManager:
         active_by_slave: Dict[str, int] = {}
         slaves_with_proof_work: Set[str] = set()
         preferreds_with_unassigned: Set[str] = set()
+        unassigned_by_bid: Dict[str, int] = {}
         if STICKY_ROOTS_ENABLED:
             for row in self.batches:
                 if row.get("end_time") is not None:
@@ -2001,6 +2050,8 @@ class SlaveManager:
                         slaves_with_proof_work.add(str(owner))
                 elif batch.get("sampled_nonces") is None:
                     bid = str(batch.get("benchmark_id") or "")
+                    if bid:
+                        unassigned_by_bid[bid] = unassigned_by_bid.get(bid, 0) + 1
                     pref = root_affinity.get(bid) if bid else None
                     if pref:
                         preferreds_with_unassigned.add(str(pref))
@@ -2026,6 +2077,16 @@ class SlaveManager:
                     or preferred in views.awaiting_proofs
                 ):
                     preferred_at_cap.add(preferred)
+        if STICKY_ROOTS_ENABLED:
+            self._unlock_sticky_leftover_jobs(
+                unassigned_by_bid,
+                root_affinity,
+                online_slaves,
+                active_by_slave,
+                views.adaptive_caps if views is not None else {},
+                overflow_benchmark_ids,
+                preferred_at_cap,
+            )
         if STICKY_ROOTS_ENABLED and STICKY_OVERFLOW_IDLE_MS > 0:
             inflight_pref_bids: Set[str] = set()
             unassigned_job_age: Dict[str, int] = {}
@@ -2413,6 +2474,7 @@ class SlaveManager:
             active_by_slave: Dict[str, int] = {}
             slaves_with_proof_work: Set[str] = set()
             preferreds_with_unassigned: Set[str] = set()
+            unassigned_by_bid: Dict[str, int] = {}
             if STICKY_ROOTS_ENABLED:
                 for row in self.batches:
                     if row.get("end_time") is not None:
@@ -2425,6 +2487,8 @@ class SlaveManager:
                             slaves_with_proof_work.add(str(owner))
                     elif batch.get("sampled_nonces") is None:
                         bid = str(batch.get("benchmark_id") or "")
+                        if bid:
+                            unassigned_by_bid[bid] = unassigned_by_bid.get(bid, 0) + 1
                         pref = root_affinity.get(bid) if bid else None
                         if pref:
                             preferreds_with_unassigned.add(str(pref))
@@ -2443,6 +2507,16 @@ class SlaveManager:
                         continue
                     if PROOF_PRIORITY_ENABLED and preferred in slaves_with_proof_work:
                         preferred_at_cap.add(preferred)
+            if STICKY_ROOTS_ENABLED:
+                self._unlock_sticky_leftover_jobs(
+                    unassigned_by_bid,
+                    root_affinity,
+                    online_slaves,
+                    active_by_slave,
+                    {},
+                    overflow_benchmark_ids,
+                    preferred_at_cap,
+                )
 
             # Idle reclaim is independent of AT_CAP overflow. With
             # SLAVE_STICKY_OVERFLOW_AT_CAP=false the fleet still must release
