@@ -1365,7 +1365,7 @@ class PrecommitManager:
         gpu_below_floor = gpu_active_jobs < max(1, gpu_floor)
         gpu_starved = gpu_active_jobs <= 0
         reserve_gpu = should_reserve_idle_gpu_create(
-            idle_gpu_needs_work=idle_gpu_needs_work,
+            idle_gpu_needs_work=idle_gpu_starved,
             last_create_ms=int(getattr(self, "_idle_gpu_create_ms", 0) or 0),
             now_ms=int(time.time() * 1000),
         )

@@ -58,23 +58,25 @@ def preferred_root_slave(slave_scores: Dict[str, int]) -> Optional[str]:
 def should_sticky_leftover_fanout(
     *,
     unassigned_on_job: int,
-    preferred_inflight_total: int,
-    preferred_cap: int,
     leftover_keep: int = 4,
+    idle_peers: int = 0,
+    preferred_inflight_total: int = 0,
+    preferred_cap: int = 0,
 ) -> bool:
-    """Unlock exclusive sticky when leftovers exceed what the owner can hold.
+    """Unlock exclusive sticky when leftovers sit idle while peers are empty.
 
-    A knapsack job can have ~100 roots. Exclusive sticky then warehouses
-    the pile on one box (3 in flight, 90+ waiting) while the fleet sits idle.
-    Keep a small leftover on the owner; fan the rest out. Proofs stay local
-    to whoever actually ran each root.
+    Do not compare leftovers to the owner's remaining cap. A 32-slot owner
+    with 3 in flight still "has room" for 29, so a 8–20 root job stayed
+    exclusive and the rest of the fleet got "no batches available".
+    Keep a small leftover exclusive; fan the rest out only when same-profile
+    peers are idle. Proofs stay on whoever actually ran each root.
     """
+    del preferred_inflight_total, preferred_cap
     unassigned = max(0, int(unassigned_on_job or 0))
     keep = max(0, int(leftover_keep or 0))
     if unassigned <= keep:
         return False
-    remaining = max(0, int(preferred_cap or 0) - int(preferred_inflight_total or 0))
-    return unassigned > max(remaining, keep)
+    return int(idle_peers or 0) > 0
 
 
 def should_sticky_idle_overflow(

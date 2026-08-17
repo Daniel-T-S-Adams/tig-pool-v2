@@ -149,6 +149,15 @@ STICKY_OVERFLOW_OWNER_IDLE_MS = max(
 STICKY_LEFTOVER_KEEP = max(0, int(os.environ.get("SLAVE_STICKY_LEFTOVER_KEEP", "4")))
 
 
+def _slave_work_profile(slave_name: str) -> str:
+    name = str(slave_name or "")
+    if name.startswith("pool-gpu-") or name.startswith("c3-slave-"):
+        return "gpu"
+    if name.startswith("pool-cpu-") or name.startswith("aws-cpu-slave-"):
+        return "cpu"
+    return ""
+
+
 def _is_proof_batch_row(row: dict) -> bool:
     batch = row.get("batch") or {}
     return batch.get("sampled_nonces") is not None
@@ -656,37 +665,39 @@ class SlaveManager:
         overflow_benchmark_ids: Set[str],
         preferred_at_cap: Set[str],
     ) -> None:
-        """Fan out leftover roots the sticky owner cannot absorb right now."""
+        """Fan out leftover roots when same-profile peers are sitting idle."""
+        del adaptive_caps, preferred_at_cap
         if not unassigned_by_bid:
             return
+        idle_by_profile = {"cpu": 0, "gpu": 0}
+        for name in online_slaves or set():
+            profile = _slave_work_profile(name)
+            if not profile:
+                continue
+            if int(active_by_slave.get(name) or 0) == 0:
+                idle_by_profile[profile] = idle_by_profile.get(profile, 0) + 1
         for bid, n_unassigned in unassigned_by_bid.items():
             preferred = root_affinity.get(bid)
             if not preferred or preferred not in online_slaves:
                 continue
-            pref_route = self._route_cap_for_slave(preferred)
-            if pref_route <= 0:
-                continue
-            if preferred in (adaptive_caps or {}):
-                pref_cap = max(0, min(pref_route, int(adaptive_caps[preferred])))
-            else:
-                pref_cap = pref_route
+            profile = _slave_work_profile(preferred)
+            idle_peers = max(0, int(idle_by_profile.get(profile) or 0))
+            if profile and int(active_by_slave.get(preferred) or 0) == 0:
+                idle_peers = max(0, idle_peers - 1)
             if not should_sticky_leftover_fanout(
                 unassigned_on_job=n_unassigned,
-                preferred_inflight_total=int(active_by_slave.get(preferred) or 0),
-                preferred_cap=pref_cap,
                 leftover_keep=STICKY_LEFTOVER_KEEP,
+                idle_peers=idle_peers,
             ):
                 continue
             overflow_benchmark_ids.add(bid)
-            preferred_at_cap.add(preferred)
             logger.info(
                 "sticky leftover fanout preferred=%s bid=%s unassigned=%s "
-                "owner_inflight=%s cap=%s keep=%s",
+                "idle_peers=%s keep=%s",
                 preferred,
                 bid[:8],
                 n_unassigned,
-                int(active_by_slave.get(preferred) or 0),
-                pref_cap,
+                idle_peers,
                 STICKY_LEFTOVER_KEEP,
             )
 
@@ -2865,7 +2876,8 @@ class SlaveManager:
                                 preferred and preferred in preferred_at_cap
                             ),
                         ):
-                            continue
+                            if bid not in overflow_benchmark_ids:
+                                continue
                         if should_hold_unowned_gpu_for_idle(
                             algorithm_id=batch["settings"]["algorithm_id"],
                             preferred_slave=preferred,
@@ -2906,7 +2918,8 @@ class SlaveManager:
                                 preferred and preferred in preferred_at_cap
                             ),
                         ):
-                            continue
+                            if bid not in overflow_benchmark_ids:
+                                continue
                         if (not is_proof) and should_hold_unowned_gpu_for_idle(
                             algorithm_id=batch["settings"]["algorithm_id"],
                             preferred_slave=preferred,
