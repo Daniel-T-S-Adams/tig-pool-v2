@@ -321,10 +321,22 @@ ensure_nvidia_for_gpu() {
 
 clone_or_update_slave() {
   local dest="$1"
+  local env_bak=""
   if [[ -d "$dest/.git" ]]; then
+    if [[ -f "$dest/.env" ]]; then
+      env_bak="$(mktemp)"
+      cp "$dest/.env" "$env_bak"
+    fi
     git -C "$dest" fetch --depth 1 origin "$SLAVE_REF" || true
     git -C "$dest" checkout "$SLAVE_REF" || true
-    git -C "$dest" pull --ff-only || true
+    if ! git -C "$dest" pull --ff-only; then
+      echo "Local innopool-slave has diverged; resetting to origin/${SLAVE_REF} (keeping .env)"
+      git -C "$dest" reset --hard "origin/${SLAVE_REF}" || true
+    fi
+    if [[ -n "$env_bak" && -f "$env_bak" ]]; then
+      cp "$env_bak" "$dest/.env"
+      rm -f "$env_bak"
+    fi
   else
     mkdir -p "$(dirname "$dest")"
     git clone --branch "$SLAVE_REF" --depth 1 "$SLAVE_REPO" "$dest"
@@ -440,7 +452,7 @@ start_stack() {
       # shellcheck disable=SC2086
       $dcmd compose pull $services || true
       # shellcheck disable=SC2086
-      $dcmd compose up -d --build --force-recreate --pull always $services
+      $dcmd compose up -d --build --force-recreate --pull missing $services
     fi
     local dash_port
     dash_port="$(grep -E '^DASHBOARD_HOST_PORT=' .env | cut -d= -f2-)"
