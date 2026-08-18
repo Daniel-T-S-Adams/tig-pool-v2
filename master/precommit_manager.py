@@ -289,6 +289,25 @@ def _cpu_create_target(cpu_slots: int) -> int:
     return max(1, cpu_slots)
 
 
+def keep_ahead_want(
+    *,
+    idle: int = 0,
+    proving: int = 0,
+    online: int = 0,
+) -> int:
+    """How many unowned root jobs should already be sitting ready.
+
+    Scales with the live fleet: want = idle + proving, never more than
+    online boxes. Unknown online (0) does not cap, so small tests and a
+    vanished ``slave_seen`` row still request replacements for a proving wave.
+    """
+    raw = max(0, int(idle or 0)) + max(0, int(proving or 0))
+    online_n = max(0, int(online or 0))
+    if online_n > 0:
+        return min(raw, online_n)
+    return raw
+
+
 def compute_idle_cpu_needs_work(
     *,
     idle_cpu_override: bool = True,
@@ -299,16 +318,14 @@ def compute_idle_cpu_needs_work(
     cpu_profile_blocked: bool = False,
     online_idle_cpu_slaves: int = 0,
     cpu_jobs_in_proof_phase: int = 0,
+    unowned_cpu_root_jobs: int = 0,
+    online_cpu_slaves: int = 0,
 ) -> bool:
     """True when precommit should bias toward CPU work for an underfed fleet.
 
-    Claimable roots only suppress the bias when they can absorb the idle CPU
-    fleet. A handful of claimable batches must not disable the CPU weight boost
-    while many online CPU slaves sit empty (create/claimable oscillation).
-
-    ``online_idle_cpu_slaves`` is the decision idle count from
-    ``idle_decision_count`` (max of sustained and instant). Instant empty
-    boxes must be able to pull creates when claimable roots cannot feed them.
+    Claimable leftover roots may feed boxes that are already idle. They do
+    not count as the next job for a box that is still proving. Keep-ahead
+    uses unowned root-phase jobs vs ``keep_ahead_want(proving, online)``.
     """
     if not idle_cpu_override:
         return False
@@ -319,15 +336,13 @@ def compute_idle_cpu_needs_work(
     claimable = max(0, int(cpu_unassigned_claimable or 0))
     idle = max(0, int(online_idle_cpu_slaves or 0))
     proving = max(0, int(cpu_jobs_in_proof_phase or 0))
-    if idle > 0:
-        # Live idle boxes beat the configured slot target. New machines must
-        # get work even when resource_slots.cpu still matches the old fleet.
-        return claimable < idle
-    # Proof-phase jobs still count as busy, but they stop feeding root
-    # workers. Start replacements now — TIG precommit is ~1-2 min, which is
-    # the idle spike if we wait until proofs finish.
-    if proving > 0 and claimable < proving:
+    if idle > 0 and claimable < idle:
         return True
+    want = keep_ahead_want(idle=0, proving=proving, online=online_cpu_slaves)
+    if want > 0 and int(unowned_cpu_root_jobs or 0) < want:
+        return True
+    if idle > 0:
+        return False
     if int(cpu_jobs_needing_roots or 0) >= max(1, int(cpu_create_target or 0)):
         return False
     return claimable == 0
@@ -351,6 +366,10 @@ def idle_create_burst(
     claimable_cpu: int = 0,
     idle_gpu: int = 0,
     claimable_gpu: int = 0,
+    cpu_want_spare: int = 0,
+    cpu_unowned: int = 0,
+    gpu_want_spare: int = 0,
+    gpu_unowned: int = 0,
     base_burst: int = 4,
     max_burst: int = 16,
     cpu_unassigned_remaining: int = 256,
@@ -365,16 +384,12 @@ def idle_create_burst(
     hi = max(1, int(max_burst or 1), int(base_burst or 1))
     if not idle_cpu_needs_work and not idle_gpu_needs_work:
         return 1
-    cpu_def = (
-        max(0, int(idle_cpu or 0) - int(claimable_cpu or 0))
-        if idle_cpu_needs_work
-        else 0
-    )
-    gpu_def = (
-        max(0, int(idle_gpu or 0) - int(claimable_gpu or 0))
-        if idle_gpu_needs_work
-        else 0
-    )
+    cpu_idle_def = max(0, int(idle_cpu or 0) - int(claimable_cpu or 0))
+    cpu_keep_def = max(0, int(cpu_want_spare or 0) - int(cpu_unowned or 0))
+    cpu_def = max(cpu_idle_def, cpu_keep_def) if idle_cpu_needs_work else 0
+    gpu_idle_def = max(0, int(idle_gpu or 0) - int(claimable_gpu or 0))
+    gpu_keep_def = max(0, int(gpu_want_spare or 0) - int(gpu_unowned or 0))
+    gpu_def = max(gpu_idle_def, gpu_keep_def) if idle_gpu_needs_work else 0
     deficit = cpu_def + gpu_def
     if deficit <= 0:
         return 1
@@ -408,17 +423,26 @@ def compute_gpu_keep_ahead(
     gpu_profile_blocked: bool = False,
     gpu_jobs_in_proof_phase: int = 0,
     keep_ahead_cap: int = 8,
+    online_idle_gpu_slaves: int = 0,
+    online_gpu_slaves: int = 0,
 ) -> bool:
     """True when the unowned GPU spare pile is short. GPUs may all be busy.
 
-    Also request replacements for GPU jobs already in proof — those cards
-    go idle when proofs finish, and a TIG precommit started then is 1-2 min late.
+    Spare target scales with idle + proving, capped by live GPU count.
+    ``gpu_spare_jobs`` remains an operator floor, also capped by online.
+    ``keep_ahead_cap`` is only the fallback cap when online is unknown.
     """
     if gpu_profile_blocked:
         return False
-    spare = max(0, int(gpu_spare_jobs or 0))
     proving = max(0, int(gpu_jobs_in_proof_phase or 0))
-    want = max(spare, min(max(0, int(keep_ahead_cap or 0)), proving))
+    online = max(0, int(online_gpu_slaves or 0))
+    want = keep_ahead_want(idle=0, proving=proving, online=online)
+    if online <= 0 and proving > 0:
+        want = min(want, max(0, int(keep_ahead_cap or 0)) or want)
+    spare = max(0, int(gpu_spare_jobs or 0))
+    if spare > 0:
+        spare_cap = online if online > 0 else spare
+        want = max(want, min(spare, spare_cap))
     return want > 0 and int(unowned_gpu_root_jobs or 0) < want
 
 
@@ -430,6 +454,7 @@ def compute_idle_gpu_needs_work(
     unowned_gpu_root_jobs: int = 0,
     gpu_spare_jobs: int = 0,
     gpu_jobs_in_proof_phase: int = 0,
+    online_gpu_slaves: int = 0,
 ) -> bool:
     """True when GPUs need more claimable work, including a keep-ahead spare.
 
@@ -448,6 +473,8 @@ def compute_idle_gpu_needs_work(
         gpu_spare_jobs=gpu_spare_jobs,
         gpu_profile_blocked=gpu_profile_blocked,
         gpu_jobs_in_proof_phase=gpu_jobs_in_proof_phase,
+        online_idle_gpu_slaves=online_idle_gpu_slaves,
+        online_gpu_slaves=online_gpu_slaves,
     )
 
 
@@ -772,6 +799,8 @@ class PrecommitManager:
             cpu_profile_blocked=bool(profile_blocks.get("cpu")),
             online_idle_cpu_slaves=decision_idle,
             cpu_jobs_in_proof_phase=int(snap.get("cpu_jobs_in_proof_phase") or 0),
+            unowned_cpu_root_jobs=int(snap.get("unowned_cpu_root_jobs") or 0),
+            online_cpu_slaves=max(online_cpu, int(snap.get("online_cpu_slaves") or 0)),
         )
         snap["online_idle_cpu_slaves"] = instant
         snap["online_idle_cpu_slaves_instant"] = instant
@@ -910,6 +939,35 @@ class PrecommitManager:
                     ) AS unowned_gpu_root_jobs,
                     (
                         SELECT COUNT(*)
+                        FROM job j
+                        WHERE j.stopped IS NULL
+                          AND j.end_time IS NULL
+                          AND j.merkle_root_ready IS NULL
+                          AND j.settings->>'challenge_id' IN %s
+                          AND NOT EXISTS (
+                            SELECT 1
+                            FROM root_batch rb
+                            WHERE rb.benchmark_id = j.benchmark_id
+                              AND rb.slave IS NOT NULL
+                          )
+                    ) AS unowned_cpu_root_jobs,
+                    (
+                        SELECT COUNT(*)
+                        FROM slave_seen ss
+                        WHERE ss.last_seen >= %s
+                          AND ss.slave_name LIKE 'pool-cpu-%%'
+                    ) AS online_cpu_slaves,
+                    (
+                        SELECT COUNT(*)
+                        FROM slave_seen ss
+                        WHERE ss.last_seen >= %s
+                          AND (
+                            ss.slave_name LIKE 'pool-gpu-%%'
+                            OR ss.slave_name LIKE 'c3-slave-%%'
+                          )
+                    ) AS online_gpu_slaves,
+                    (
+                        SELECT COUNT(*)
                         FROM root_batch rb
                         JOIN job j ON j.benchmark_id = rb.benchmark_id
                         WHERE rb.ready IS NULL
@@ -1022,6 +1080,9 @@ class PrecommitManager:
                     GPU_CHALLENGE_IDS,
                     GPU_CHALLENGE_IDS,
                     CPU_CHALLENGE_IDS,
+                    now_ms - int(SLAVE_ONLINE_MS),
+                    now_ms - int(SLAVE_ONLINE_MS),
+                    CPU_CHALLENGE_IDS,
                     GPU_CHALLENGE_IDS,
                     CPU_CHALLENGE_IDS,
                     now_ms - int(SLAVE_ONLINE_MS),
@@ -1040,6 +1101,9 @@ class PrecommitManager:
             gpu_active_jobs = int(row.get("gpu_active_jobs") or 0)
             gpu_jobs_in_proof_phase = int(row.get("gpu_jobs_in_proof_phase") or 0)
             unowned_gpu_root_jobs = int(row.get("unowned_gpu_root_jobs") or 0)
+            unowned_cpu_root_jobs = int(row.get("unowned_cpu_root_jobs") or 0)
+            online_cpu_slaves = int(row.get("online_cpu_slaves") or 0)
+            online_gpu_slaves = int(row.get("online_gpu_slaves") or 0)
             cpu_roots_pending = int(row.get("cpu_roots_pending") or 0)
             gpu_roots_pending = int(row.get("gpu_roots_pending") or 0)
             cpu_unassigned_roots = int(row.get("cpu_unassigned_roots") or 0)
@@ -1080,6 +1144,9 @@ class PrecommitManager:
                 "gpu_active_jobs": gpu_active_jobs,
                 "gpu_jobs_in_proof_phase": gpu_jobs_in_proof_phase,
                 "unowned_gpu_root_jobs": unowned_gpu_root_jobs,
+                "unowned_cpu_root_jobs": unowned_cpu_root_jobs,
+                "online_cpu_slaves": online_cpu_slaves,
+                "online_gpu_slaves": online_gpu_slaves,
                 "gpu_slot_floor": gpu_floor,
                 "cpu_unassigned_roots": cpu_unassigned_roots,
                 "gpu_unassigned_roots": gpu_unassigned_roots,
@@ -1100,6 +1167,8 @@ class PrecommitManager:
                     gpu_spare_jobs=int(settings.get("gpu_spare_jobs") or 0),
                     gpu_profile_blocked=bool(profile_blocks.get("gpu")),
                     gpu_jobs_in_proof_phase=gpu_jobs_in_proof_phase,
+                    online_idle_gpu_slaves=online_idle_gpu_slaves,
+                    online_gpu_slaves=online_gpu_slaves,
                 ),
                 "idle_gpu_needs_work": compute_idle_gpu_needs_work(
                     gpu_unassigned_claimable=gpu_unassigned_claimable,
@@ -1108,6 +1177,7 @@ class PrecommitManager:
                     unowned_gpu_root_jobs=unowned_gpu_root_jobs,
                     gpu_spare_jobs=int(settings.get("gpu_spare_jobs") or 0),
                     gpu_jobs_in_proof_phase=gpu_jobs_in_proof_phase,
+                    online_gpu_slaves=online_gpu_slaves,
                 ),
             }
         except Exception as exc:
@@ -1170,6 +1240,16 @@ class PrecommitManager:
         self.last_idle_cpu_needs_work = idle_cpu_needs_work
         self.last_idle_gpu_needs_work = idle_gpu_needs_work
         caps = governor.get("profile_caps") or {}
+        cpu_want_spare = keep_ahead_want(
+            idle=0,
+            proving=int(governor.get("cpu_jobs_in_proof_phase") or 0),
+            online=int(governor.get("online_cpu_slaves") or 0),
+        )
+        gpu_want_spare = keep_ahead_want(
+            idle=0,
+            proving=int(governor.get("gpu_jobs_in_proof_phase") or 0),
+            online=int(governor.get("online_gpu_slaves") or 0),
+        )
         self.last_idle_burst = idle_create_burst(
             idle_cpu_needs_work=idle_cpu_needs_work,
             idle_gpu_needs_work=idle_gpu_needs_work,
@@ -1183,6 +1263,10 @@ class PrecommitManager:
             claimable_cpu=int(governor.get("cpu_unassigned_claimable") or 0),
             idle_gpu=int(governor.get("online_idle_gpu_slaves") or 0),
             claimable_gpu=int(governor.get("gpu_unassigned_claimable") or 0),
+            cpu_want_spare=cpu_want_spare,
+            cpu_unowned=int(governor.get("unowned_cpu_root_jobs") or 0),
+            gpu_want_spare=gpu_want_spare,
+            gpu_unowned=int(governor.get("unowned_gpu_root_jobs") or 0),
             base_burst=int(os.environ.get("PRECOMMIT_IDLE_BURST", "4")),
             max_burst=int(os.environ.get("PRECOMMIT_IDLE_BURST_MAX", "16")),
             cpu_unassigned_remaining=max(
@@ -1199,15 +1283,20 @@ class PrecommitManager:
         if self.last_idle_burst > 1:
             logger.info(
                 "idle create sized burst=%s instant_cpu=%s sustained_cpu=%s "
-                "decision_cpu=%s claimable_cpu=%s idle_gpu=%s claimable_gpu=%s",
+                "decision_cpu=%s claimable_cpu=%s unowned_cpu=%s want_cpu=%s "
+                "idle_gpu=%s claimable_gpu=%s unowned_gpu=%s want_gpu=%s",
                 self.last_idle_burst,
                 governor.get("online_idle_cpu_slaves_instant")
                 or governor.get("online_idle_cpu_slaves"),
                 governor.get("sustained_idle_cpu_slaves"),
                 governor.get("decision_idle_cpu_slaves"),
                 governor.get("cpu_unassigned_claimable"),
+                governor.get("unowned_cpu_root_jobs"),
+                cpu_want_spare,
                 governor.get("online_idle_gpu_slaves"),
                 governor.get("gpu_unassigned_claimable"),
+                governor.get("unowned_gpu_root_jobs"),
+                gpu_want_spare,
             )
         governor_reason = ""
         profile_blocks = governor.get("profile_blocks") or {"cpu": False, "gpu": False}

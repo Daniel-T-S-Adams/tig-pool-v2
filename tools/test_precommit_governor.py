@@ -32,6 +32,7 @@ def main() -> int:
         "profile_root_backlog_blocks",
         "should_block_precommit_create",
         "compute_idle_cpu_needs_work",
+        "keep_ahead_want",
         "compute_idle_gpu_starved",
         "compute_gpu_keep_ahead",
         "compute_idle_gpu_needs_work",
@@ -48,6 +49,7 @@ def main() -> int:
     unassigned_cap = ns["compute_cpu_unassigned_cap"]
     profile_blocks = ns["profile_root_backlog_blocks"]
     idle_needs = ns["compute_idle_cpu_needs_work"]
+    keep_want = ns["keep_ahead_want"]
     idle_gpu_starved_fn = ns["compute_idle_gpu_starved"]
     gpu_keep_ahead_fn = ns["compute_gpu_keep_ahead"]
     idle_gpu = ns["compute_idle_gpu_needs_work"]
@@ -287,9 +289,59 @@ def main() -> int:
                 cpu_profile_blocked=False,
                 online_idle_cpu_slaves=0,
                 cpu_jobs_in_proof_phase=8,
+                unowned_cpu_root_jobs=0,
+                online_cpu_slaves=16,
+            ),
+            True,
+            "leftover claimable batches do not count as proving replacements",
+        ),
+        (
+            dict(
+                idle_cpu_override=True,
+                cpu_slots=16,
+                cpu_unassigned_claimable=10,
+                cpu_jobs_needing_roots=16,
+                cpu_create_target=16,
+                cpu_profile_blocked=False,
+                online_idle_cpu_slaves=0,
+                cpu_jobs_in_proof_phase=8,
+                unowned_cpu_root_jobs=8,
+                online_cpu_slaves=16,
             ),
             False,
-            "claimable roots already cover the proving wave",
+            "unowned replacement jobs cover the proving wave",
+        ),
+        (
+            dict(
+                idle_cpu_override=True,
+                cpu_slots=4,
+                cpu_unassigned_claimable=0,
+                cpu_jobs_needing_roots=4,
+                cpu_create_target=4,
+                cpu_profile_blocked=False,
+                online_idle_cpu_slaves=0,
+                cpu_jobs_in_proof_phase=1,
+                unowned_cpu_root_jobs=1,
+                online_cpu_slaves=4,
+            ),
+            False,
+            "tiny CPU fleet keep-ahead is 1 job not a warehouse",
+        ),
+        (
+            dict(
+                idle_cpu_override=True,
+                cpu_slots=67,
+                cpu_unassigned_claimable=10,
+                cpu_jobs_needing_roots=40,
+                cpu_create_target=67,
+                cpu_profile_blocked=False,
+                online_idle_cpu_slaves=0,
+                cpu_jobs_in_proof_phase=20,
+                unowned_cpu_root_jobs=0,
+                online_cpu_slaves=67,
+            ),
+            True,
+            "large proving wave requests keep-ahead even when leftovers exist",
         ),
     ]
     for kwargs, expect, label in idle_cases:
@@ -376,6 +428,39 @@ def main() -> int:
     print(f"{'pass' if ok else 'FAIL'}: proving GPU keep-ahead stops once replacements exist")
     if not ok:
         failed += 1
+    ok = gpu_keep_ahead_fn(
+        unowned_gpu_root_jobs=8,
+        gpu_spare_jobs=2,
+        gpu_jobs_in_proof_phase=18,
+        online_gpu_slaves=18,
+    ) is True
+    print(f"{'pass' if ok else 'FAIL'}: 18 proving GPUs are not capped at 8 replacements")
+    if not ok:
+        failed += 1
+    ok = gpu_keep_ahead_fn(
+        unowned_gpu_root_jobs=2,
+        gpu_spare_jobs=2,
+        gpu_jobs_in_proof_phase=2,
+        online_gpu_slaves=2,
+    ) is False
+    print(f"{'pass' if ok else 'FAIL'}: 2-GPU fleet does not warehouse extra jobs")
+    if not ok:
+        failed += 1
+
+    want_cases = [
+        ((0, 1, 4), 1, "4-box 1-proving wants 1"),
+        ((0, 20, 67), 20, "67-box 20-proving wants 20"),
+        ((5, 0, 5), 5, "5 idle of 5 online wants 5"),
+        ((21, 8, 67), 29, "idle plus proving caps at online"),
+        ((0, 30, 18), 18, "proving above online caps at online"),
+        ((0, 20, 0), 20, "unknown online does not hide a proving wave"),
+    ]
+    for args, expect, label in want_cases:
+        got = keep_want(idle=args[0], proving=args[1], online=args[2])
+        ok = got == expect
+        print(f"{'pass' if ok else 'FAIL'}: {label} got={got} expect={expect}")
+        if not ok:
+            failed += 1
 
     create_cases = [
         (dict(root_phase_jobs=18, proof_phase_jobs=0, max_concurrent=18), False, "root-phase at cap blocks"),
@@ -677,6 +762,45 @@ def main() -> int:
             ),
             1,
             "claimable already covers idle => no burst",
+        ),
+        (
+            burst(
+                idle_cpu_needs_work=True,
+                idle_cpu=0,
+                claimable_cpu=10,
+                cpu_want_spare=20,
+                cpu_unowned=0,
+                max_burst=16,
+                cpu_unassigned_remaining=256,
+            ),
+            16,
+            "proving keep-ahead deficit bursts to max 16",
+        ),
+        (
+            burst(
+                idle_cpu_needs_work=True,
+                idle_cpu=0,
+                claimable_cpu=10,
+                cpu_want_spare=3,
+                cpu_unowned=0,
+                max_burst=16,
+                cpu_unassigned_remaining=256,
+            ),
+            3,
+            "small proving wave bursts only the spare deficit",
+        ),
+        (
+            burst(
+                idle_cpu_needs_work=True,
+                idle_cpu=21,
+                claimable_cpu=25,
+                cpu_want_spare=0,
+                cpu_unowned=0,
+                max_burst=16,
+                cpu_unassigned_remaining=256,
+            ),
+            1,
+            "leftovers covering idle do not burst when no proving spare",
         ),
     ]
     for got, expect, label in burst_cases:
