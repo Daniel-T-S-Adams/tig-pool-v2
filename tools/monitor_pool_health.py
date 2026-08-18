@@ -16,6 +16,7 @@ Examples (on VPS):
 
   # later
   python3 tools/monitor_pool_health.py --summary-only
+  # human events: logs/pool_health/events.txt
 """
 
 from __future__ import annotations
@@ -24,6 +25,7 @@ import argparse
 import json
 import os
 import statistics
+import subprocess
 import sys
 import time
 import urllib.error
@@ -148,7 +150,328 @@ def sample_from_metrics(d: Dict[str, Any]) -> Dict[str, Any]:
         "sustained_idle_cpu_slaves_gov": gov_counts.get("sustained_idle_cpu_slaves"),
         "open_jobs": gov_counts.get("open_jobs"),
         "max_concurrent": gov_counts.get("max_concurrent_benchmarks"),
+        "block_reasons": list(gov.get("block_reasons") or []),
+        "would_block_global": bool(gov.get("would_block_global")),
+        "at_max_concurrent": bool(gov.get("at_max_concurrent")),
+        "stopped_15m": int(creates.get("created_stopped_15m") or 0),
     }
+
+
+_SQL_SNAPSHOT = r"""
+SELECT json_build_object(
+  'cpu_root_phase', (
+    SELECT COUNT(*) FROM job
+    WHERE stopped IS NULL AND end_time IS NULL AND merkle_root_ready IS NULL
+      AND settings->>'challenge_id' IN ('c001','c002','c003','c007','c008')
+  ),
+  'cpu_proof_phase', (
+    SELECT COUNT(*) FROM job
+    WHERE stopped IS NULL AND end_time IS NULL
+      AND merkle_root_ready IS TRUE AND merkle_proofs_ready IS NULL
+      AND settings->>'challenge_id' IN ('c001','c002','c003','c007','c008')
+  ),
+  'gpu_root_phase', (
+    SELECT COUNT(*) FROM job
+    WHERE stopped IS NULL AND end_time IS NULL AND merkle_root_ready IS NULL
+      AND settings->>'challenge_id' IN ('c004','c005','c006')
+  ),
+  'gpu_proof_phase', (
+    SELECT COUNT(*) FROM job
+    WHERE stopped IS NULL AND end_time IS NULL
+      AND merkle_root_ready IS TRUE AND merkle_proofs_ready IS NULL
+      AND settings->>'challenge_id' IN ('c004','c005','c006')
+  ),
+  'unowned_cpu', (
+    SELECT COUNT(*) FROM job j
+    WHERE j.stopped IS NULL AND j.end_time IS NULL AND j.merkle_root_ready IS NULL
+      AND j.settings->>'challenge_id' IN ('c001','c002','c003','c007','c008')
+      AND NOT EXISTS (
+        SELECT 1 FROM root_batch rb
+        WHERE rb.benchmark_id = j.benchmark_id AND rb.slave IS NOT NULL
+      )
+  ),
+  'unowned_gpu', (
+    SELECT COUNT(*) FROM job j
+    WHERE j.stopped IS NULL AND j.end_time IS NULL AND j.merkle_root_ready IS NULL
+      AND j.settings->>'challenge_id' IN ('c004','c005','c006')
+      AND NOT EXISTS (
+        SELECT 1 FROM root_batch rb
+        WHERE rb.benchmark_id = j.benchmark_id AND rb.slave IS NOT NULL
+      )
+  ),
+  'proved_1h_n', (
+    SELECT COUNT(*) FROM job
+    WHERE merkle_proofs_ready IS TRUE AND end_time IS NOT NULL
+      AND start_time >= (EXTRACT(EPOCH FROM NOW())*1000 - 3600000)
+  ),
+  'proved_1h_p50_min', (
+    SELECT ROUND(PERCENTILE_CONT(0.50) WITHIN GROUP (
+      ORDER BY (end_time - start_time)/60000.0)::numeric, 1)
+    FROM job
+    WHERE merkle_proofs_ready IS TRUE AND end_time IS NOT NULL
+      AND start_time >= (EXTRACT(EPOCH FROM NOW())*1000 - 3600000)
+  ),
+  'proved_1h_p90_min', (
+    SELECT ROUND(PERCENTILE_CONT(0.90) WITHIN GROUP (
+      ORDER BY (end_time - start_time)/60000.0)::numeric, 1)
+    FROM job
+    WHERE merkle_proofs_ready IS TRUE AND end_time IS NOT NULL
+      AND start_time >= (EXTRACT(EPOCH FROM NOW())*1000 - 3600000)
+  ),
+  'open_p50_age_min', (
+    SELECT ROUND(PERCENTILE_CONT(0.50) WITHIN GROUP (
+      ORDER BY (EXTRACT(EPOCH FROM NOW())*1000 - start_time)/60000.0)::numeric, 1)
+    FROM job
+    WHERE COALESCE(stopped,false) = false AND end_time IS NULL
+  ),
+  'open_max_age_min', (
+    SELECT ROUND(MAX((EXTRACT(EPOCH FROM NOW())*1000 - start_time)/60000.0)::numeric, 1)
+    FROM job
+    WHERE COALESCE(stopped,false) = false AND end_time IS NULL
+  )
+);
+"""
+
+
+def keep_ahead_want(proving: int, online: int) -> int:
+    raw = max(0, int(proving or 0))
+    online_n = max(0, int(online or 0))
+    if online_n > 0:
+        return min(raw, online_n)
+    return raw
+
+
+def fetch_sql_snapshot(compose_dir: Path, timeout: float = 25.0) -> Dict[str, Any]:
+    """Cheap extra counts the ops JSON does not expose yet."""
+    proc = subprocess.run(
+        [
+            "docker",
+            "compose",
+            "exec",
+            "-T",
+            "db",
+            "psql",
+            "-U",
+            "postgres",
+            "-d",
+            "innopool",
+            "-Atqc",
+            _SQL_SNAPSHOT,
+        ],
+        cwd=str(compose_dir),
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+        check=False,
+    )
+    if proc.returncode != 0:
+        raise RuntimeError((proc.stderr or proc.stdout or "psql failed").strip()[:400])
+    line = (proc.stdout or "").strip().splitlines()
+    if not line:
+        raise RuntimeError("psql returned no snapshot")
+    data = json.loads(line[-1])
+    if not isinstance(data, dict):
+        raise RuntimeError("psql snapshot was not an object")
+    return data
+
+
+def merge_sql_snapshot(sample: Dict[str, Any], snap: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    out = dict(sample)
+    if not snap:
+        out["sql_ok"] = False
+        return out
+    out["sql_ok"] = True
+    out["cpu_root_phase"] = int(snap.get("cpu_root_phase") or 0)
+    out["cpu_proof_phase"] = int(snap.get("cpu_proof_phase") or 0)
+    out["gpu_root_phase"] = int(snap.get("gpu_root_phase") or 0)
+    out["gpu_proof_phase"] = int(snap.get("gpu_proof_phase") or 0)
+    out["unowned_cpu"] = int(snap.get("unowned_cpu") or 0)
+    out["unowned_gpu"] = int(snap.get("unowned_gpu") or 0)
+    out["proved_1h_n"] = int(snap.get("proved_1h_n") or 0)
+    out["proved_1h_p50_min"] = snap.get("proved_1h_p50_min")
+    out["proved_1h_p90_min"] = snap.get("proved_1h_p90_min")
+    out["open_p50_age_min"] = snap.get("open_p50_age_min")
+    out["open_max_age_min"] = snap.get("open_max_age_min")
+    out["want_cpu"] = keep_ahead_want(out["cpu_proof_phase"], int(out.get("cpu_online") or 0))
+    out["want_gpu"] = keep_ahead_want(out["gpu_proof_phase"], int(out.get("gpu_online") or 0))
+    return out
+
+
+def _clock(ts: str) -> str:
+    if not ts or "T" not in ts:
+        return ts or "?"
+    return ts[11:16] + " UTC"
+
+
+def _cpu_idle_threshold(sample: Dict[str, Any]) -> int:
+    online = int(sample.get("cpu_online") or 0)
+    return max(8, int(0.15 * online)) if online else 8
+
+
+def describe_states(sample: Dict[str, Any]) -> str:
+    bits = [
+        f"CPU idle {sample.get('cpu_idle')}/{sample.get('cpu_online')} "
+        f"(busy {sample.get('cpu_busy')})",
+        f"GPU idle {sample.get('gpu_idle')}/{sample.get('gpu_online')}",
+        f"claimable roots {sample.get('claimable')}, sticky {sample.get('sticky')}, "
+        f"unassigned {sample.get('unassigned')}",
+        f"open jobs {sample.get('open_jobs')}/{sample.get('max_concurrent')}",
+    ]
+    if sample.get("sql_ok"):
+        bits.append(
+            f"CPU jobs rooting {sample.get('cpu_root_phase')} / proving {sample.get('cpu_proof_phase')}; "
+            f"unowned replacements {sample.get('unowned_cpu')} (want {sample.get('want_cpu')})"
+        )
+        bits.append(
+            f"GPU jobs rooting {sample.get('gpu_root_phase')} / proving {sample.get('gpu_proof_phase')}; "
+            f"unowned {sample.get('unowned_gpu')} (want {sample.get('want_gpu')})"
+        )
+        if sample.get("proved_1h_n"):
+            bits.append(
+                f"proofs started in last hour: n={sample.get('proved_1h_n')} "
+                f"p50={sample.get('proved_1h_p50_min')}m p90={sample.get('proved_1h_p90_min')}m"
+            )
+        if sample.get("open_max_age_min") is not None:
+            bits.append(
+                f"open job age p50={sample.get('open_p50_age_min')}m "
+                f"max={sample.get('open_max_age_min')}m"
+            )
+    blocks = list(sample.get("block_reasons") or [])
+    if sample.get("cpu_profile_blocked"):
+        blocks.extend(sample.get("cpu_reasons") or [])
+    if sample.get("gpu_profile_blocked"):
+        blocks.extend(sample.get("gpu_reasons") or [])
+    if blocks:
+        bits.append("create blockers: " + "; ".join(str(b) for b in blocks))
+    else:
+        bits.append("no create blockers")
+    bits.append(
+        f"idle-CPU override {'on' if sample.get('idle_cpu_needs_work') else 'off'}, "
+        f"creates_15m={sample.get('creates_15m')}, roots_done_15m={sample.get('roots_done_15m')}, "
+        f"stopped_15m={sample.get('stopped_15m')}"
+    )
+    return bits
+
+
+def _join_states(sample: Dict[str, Any]) -> str:
+    return " ".join(f"{i+1}) {b}" for i, b in enumerate(describe_states(sample)))
+
+
+def detect_events(
+    prev: Optional[Dict[str, Any]],
+    curr: Dict[str, Any],
+    active: set,
+) -> List[Dict[str, Any]]:
+    """Rising/falling edges only, so a 10-minute hole is one story plus a clear."""
+    events: List[Dict[str, Any]] = []
+    ts = curr.get("ts") or _now_iso()
+    clock = _clock(str(ts))
+    thresh = _cpu_idle_threshold(curr)
+    cpu_idle = int(curr.get("cpu_idle") or 0)
+    blocked = bool(curr.get("cpu_profile_blocked") or curr.get("at_max_concurrent"))
+    hole = cpu_idle >= thresh
+    claimable = int(curr.get("claimable") or 0)
+    want_cpu = int(curr.get("want_cpu") or 0)
+    unowned_cpu = int(curr.get("unowned_cpu") or 0)
+    proving = int(curr.get("cpu_proof_phase") or 0)
+    states = _join_states(curr)
+
+    if hole and "cpu_idle_hole" not in active:
+        active.add("cpu_idle_hole")
+        if blocked:
+            kind = "cpu_idle_hole_blocked"
+            lead = (
+                f"At {clock} there were many idle CPU slaves "
+                f"({cpu_idle} of {curr.get('cpu_online')}) and creates were constrained."
+            )
+        elif claimable <= 0:
+            kind = "cpu_idle_hole_no_work"
+            lead = (
+                f"At {clock} there were many idle CPU slaves "
+                f"({cpu_idle} of {curr.get('cpu_online')}) and no claimable roots. "
+                f"Jobs were not sitting ready for them."
+            )
+        else:
+            kind = "cpu_idle_hole_with_claimable"
+            lead = (
+                f"At {clock} there were many idle CPU slaves "
+                f"({cpu_idle} of {curr.get('cpu_online')}) even though {claimable} "
+                f"roots were claimable (assign/sticky issue, not a create starve)."
+            )
+        events.append({"ts": ts, "kind": kind, "text": f"{lead} Recorded states: {states}"})
+
+    if (not hole) and "cpu_idle_hole" in active:
+        active.discard("cpu_idle_hole")
+        events.append({
+            "ts": ts,
+            "kind": "cpu_idle_hole_cleared",
+            "text": (
+                f"At {clock} the CPU idle hole cleared "
+                f"({cpu_idle} of {curr.get('cpu_online')} idle). "
+                f"Recorded states: {states}"
+            ),
+        })
+
+    keep_short = (
+        curr.get("sql_ok")
+        and proving >= 4
+        and want_cpu > 0
+        and unowned_cpu < want_cpu
+        and cpu_idle < thresh
+    )
+    if keep_short and "keep_ahead_short" not in active:
+        active.add("keep_ahead_short")
+        events.append({
+            "ts": ts,
+            "kind": "keep_ahead_short",
+            "text": (
+                f"At {clock} the fleet still looked busy but keep-ahead was short: "
+                f"{unowned_cpu} unowned CPU jobs vs want {want_cpu} "
+                f"({proving} already proving). The next idle wave is already committed. "
+                f"Recorded states: {states}"
+            ),
+        })
+    if (not keep_short) and "keep_ahead_short" in active:
+        active.discard("keep_ahead_short")
+
+    p90 = curr.get("proved_1h_p90_min")
+    if p90 is not None and float(p90) >= 90 and "slow_proofs" not in active:
+        active.add("slow_proofs")
+        events.append({
+            "ts": ts,
+            "kind": "slow_proofs",
+            "text": (
+                f"At {clock} jobs that started in the last hour and already proved "
+                f"had p90 {p90} min (n={curr.get('proved_1h_n')}). "
+                f"Recorded states: {states}"
+            ),
+        })
+    if (p90 is None or float(p90) < 75) and "slow_proofs" in active:
+        active.discard("slow_proofs")
+
+    max_age = curr.get("open_max_age_min")
+    if max_age is not None and float(max_age) >= 90 and "old_open_jobs" not in active:
+        active.add("old_open_jobs")
+        events.append({
+            "ts": ts,
+            "kind": "old_open_jobs",
+            "text": (
+                f"At {clock} an open job was already {max_age} min old "
+                f"(p50 {curr.get('open_p50_age_min')} min). "
+                f"Recorded states: {states}"
+            ),
+        })
+    if (max_age is None or float(max_age) < 75) and "old_open_jobs" in active:
+        active.discard("old_open_jobs")
+
+    return events
+
+
+def append_event(path: Path, event: Dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as f:
+        f.write(json.dumps(event, separators=(",", ":")) + "\n")
+        f.write(event.get("text", "") + "\n\n")
 
 
 def _mean(xs: List[float]) -> Optional[float]:
@@ -341,6 +664,10 @@ def write_summary(path: Path, analysis: Dict[str, Any]) -> None:
         f"  creates_15m={latest.get('creates_15m')} roots_done_15m={latest.get('roots_done_15m')}",
         f"  idle_cpu_needs_work={latest.get('idle_cpu_needs_work')} cpu_blocked={latest.get('cpu_profile_blocked')}",
         f"  open_jobs={latest.get('open_jobs')}/{latest.get('max_concurrent')}",
+        f"  cpu_root/proof={latest.get('cpu_root_phase')}/{latest.get('cpu_proof_phase')} "
+        f"unowned_cpu={latest.get('unowned_cpu')} want_cpu={latest.get('want_cpu')}",
+        f"  proved_1h n={latest.get('proved_1h_n')} p50={latest.get('proved_1h_p50_min')} "
+        f"p90={latest.get('proved_1h_p90_min')} open_max_age={latest.get('open_max_age_min')}",
         "",
         "reasons:",
     ]
@@ -399,7 +726,9 @@ def one_line(sample: Dict[str, Any], verdict: str) -> str:
         f"claim={sample.get('claimable')} sticky={sample.get('sticky')} "
         f"creates15={sample.get('creates_15m')} roots15={sample.get('roots_done_15m')} "
         f"idle_cpu={sample.get('idle_cpu_needs_work')} "
-        f"cpu_blocked={sample.get('cpu_profile_blocked')}"
+        f"cpu_blocked={sample.get('cpu_profile_blocked')} "
+        f"root/proof={sample.get('cpu_root_phase')}/{sample.get('cpu_proof_phase')} "
+        f"unowned={sample.get('unowned_cpu')}/{sample.get('want_cpu')}"
     )
 
 
@@ -416,6 +745,17 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--dotenv", type=Path, default=Path(".env"), help="optional .env to load")
     p.add_argument("--summary-only", action="store_true", help="rebuild summary from existing JSONL and exit")
     p.add_argument("--once", action="store_true", help="take one sample and exit")
+    p.add_argument(
+        "--compose-dir",
+        type=Path,
+        default=Path("."),
+        help="directory with docker-compose.yml for the extra SQL snapshot",
+    )
+    p.add_argument(
+        "--skip-sql",
+        action="store_true",
+        help="do not query Postgres (ops metrics only)",
+    )
     return p.parse_args()
 
 
@@ -436,6 +776,7 @@ def main() -> int:
     jsonl_path = out_dir / "samples.jsonl"
     summary_path = out_dir / "summary.txt"
     latest_path = out_dir / "latest.json"
+    events_path = out_dir / "events.txt"
 
     if args.summary_only:
         samples = load_samples(jsonl_path)
@@ -443,6 +784,9 @@ def main() -> int:
         write_summary(summary_path, analysis)
         latest_path.write_text(json.dumps(analysis, indent=2) + "\n", encoding="utf-8")
         print(summary_path.read_text(encoding="utf-8"))
+        if events_path.is_file():
+            print("--- events ---")
+            print(events_path.read_text(encoding="utf-8"))
         return 0
 
     deadline = None
@@ -451,15 +795,30 @@ def main() -> int:
 
     print(
         f"monitoring {url} every {args.interval}s -> {out_dir} "
-        f"(duration_hours={args.duration_hours or 'forever'})",
+        f"(duration_hours={args.duration_hours or 'forever'} sql={not args.skip_sql})",
         flush=True,
     )
+
+    prev_sample: Optional[Dict[str, Any]] = None
+    active_events: set = set()
+    compose_dir = args.compose_dir.resolve()
 
     while True:
         try:
             metrics = fetch_metrics(url, secret)
             sample = sample_from_metrics(metrics)
+            if not args.skip_sql:
+                try:
+                    sample = merge_sql_snapshot(sample, fetch_sql_snapshot(compose_dir))
+                except Exception as exc:
+                    sample["sql_ok"] = False
+                    sample["sql_error"] = str(exc)[:300]
+                    print(f"{_now_iso()} WARN sql snapshot failed: {exc}", flush=True)
             append_sample(jsonl_path, sample)
+            for event in detect_events(prev_sample, sample, active_events):
+                append_event(events_path, event)
+                print(f"{event['ts']} EVENT {event['kind']}: {event['text']}", flush=True)
+            prev_sample = sample
             samples = load_samples(jsonl_path)
             analysis = analyze(samples)
             write_summary(summary_path, analysis)
