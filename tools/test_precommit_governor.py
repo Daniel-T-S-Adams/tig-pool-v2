@@ -37,6 +37,7 @@ def main() -> int:
         "compute_gpu_keep_ahead",
         "compute_idle_gpu_needs_work",
         "concurrent_create_allowed",
+        "effective_concurrent_cap",
         "idle_decision_count",
         "idle_create_burst",
         "challenge_under_create_cap",
@@ -54,6 +55,7 @@ def main() -> int:
     gpu_keep_ahead_fn = ns["compute_gpu_keep_ahead"]
     idle_gpu = ns["compute_idle_gpu_needs_work"]
     create_ok = ns["concurrent_create_allowed"]
+    eff_cap = ns["effective_concurrent_cap"]
     decision = ns["idle_decision_count"]
     burst = ns["idle_create_burst"]
     under_cap = ns["challenge_under_create_cap"]
@@ -468,6 +470,7 @@ def main() -> int:
         (dict(root_phase_jobs=18, proof_phase_jobs=8, max_concurrent=18, overlap_cap=8), False, "root-phase at cap still blocks"),
         (dict(root_phase_jobs=12, proof_phase_jobs=20, max_concurrent=18, overlap_cap=8), False, "overlap hard ceiling"),
         (dict(root_phase_jobs=10, proof_phase_jobs=8, submitted=8, max_concurrent=18, overlap_cap=8), False, "in-flight precommits consume root budget"),
+        (dict(root_phase_jobs=20, proof_phase_jobs=13, max_concurrent=90, overlap_cap=8), True, "fleet-sized cap lets idle boxes get new jobs"),
     ]
     for kwargs, expect, label in create_cases:
         got = create_ok(**kwargs)
@@ -592,10 +595,23 @@ def main() -> int:
         gpu_starved=False,
         idle_gpu_starved=True,
         cpu_profile_blocked=False,
-    ) is False
-    print(f"{'pass' if ok else 'FAIL'}: do not force CPU while GPU cards are empty")
+    ) is True
+    print(f"{'pass' if ok else 'FAIL'}: idle GPUs do not unlock CPU burst into GPU lottery")
     if not ok:
         failed += 1
+
+    eff_cases = [
+        (dict(max_concurrent=35, online_cpu=67, online_gpu=8, cpu_want_spare=10, gpu_want_spare=3, idle_needs_work=False), 35, "busy fleet keeps autopilot cap"),
+        (dict(max_concurrent=35, online_cpu=67, online_gpu=8, cpu_want_spare=10, gpu_want_spare=3, idle_needs_work=True), 88, "idle fleet lifts cap to online plus keep-ahead"),
+        (dict(max_concurrent=35, online_cpu=0, online_gpu=0, cpu_want_spare=0, gpu_want_spare=0, idle_needs_work=True), 35, "unknown online does not drop the configured cap"),
+        (dict(max_concurrent=120, online_cpu=67, online_gpu=8, cpu_want_spare=10, gpu_want_spare=3, idle_needs_work=True), 120, "already-high cap is not reduced"),
+    ]
+    for kwargs, expect, label in eff_cases:
+        got = eff_cap(**kwargs)
+        ok = got == expect
+        print(f"{'pass' if ok else 'FAIL'}: {label} got={got} expect={expect}")
+        if not ok:
+            failed += 1
 
     ok = force_cpu(
         idle_cpu_needs_work=True,
