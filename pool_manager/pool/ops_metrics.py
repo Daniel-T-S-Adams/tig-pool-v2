@@ -126,6 +126,15 @@ def slave_display_profile(slave_name: str, worker_type: str | None = None) -> st
     return "cpu"
 
 
+def machine_fill_rate(busy: int, online: int):
+    """Share of online machines that have work. Not inflight / route caps."""
+    online_n = max(0, int(online or 0))
+    if online_n <= 0:
+        return None
+    busy_n = min(online_n, max(0, int(busy or 0)))
+    return round(busy_n / online_n, 3)
+
+
 def slave_display_cap(
     *,
     profile: str,
@@ -603,7 +612,7 @@ def _slave_rows(now_ms: int, cfg: dict) -> list[dict]:
             "cap": cap,
             "num_workers": num_workers,
             "worker_type": row.get("worker_type"),
-            "fill": round(inflight / cap, 3) if cap > 0 else None,
+            "fill": (1.0 if busy else 0.0) if online else None,
             "last_seen": row.get("last_seen"),
             "registered_active": bool(row.get("registered_active")),
         })
@@ -655,15 +664,15 @@ def build_ops_metrics() -> dict:
         s["continuous_idle_ms"] = int(meta.get("continuous_idle_ms") or 0)
         s["idle_observed_ms"] = int(meta.get("observed_ms") or 0)
 
-    sum_caps = sum(int(s["cap"] or 0) for s in online)
     sum_inflight = sum(int(s["inflight"] or 0) for s in online)
-    fill_rate = round(sum_inflight / sum_caps, 3) if sum_caps > 0 else None
+    fill_rate = machine_fill_rate(len(busy), len(online))
 
     by_profile = {}
     for profile in ("cpu", "gpu"):
         prof = [s for s in online if s["profile"] == profile]
-        caps = sum(int(s["cap"] or 0) for s in prof)
         inflight = sum(int(s["inflight"] or 0) for s in prof)
+        busy_n = sum(1 for s in prof if s["busy"])
+        online_n = len(prof)
         sustained_n = sum(1 for s in prof if s.get("sustained_idle"))
         fracs = [
             float(s["idle_frac_window"])
@@ -671,14 +680,14 @@ def build_ops_metrics() -> dict:
             if s.get("idle_frac_window") is not None
         ]
         by_profile[profile] = {
-            "online": len(prof),
-            "busy": sum(1 for s in prof if s["busy"]),
+            "online": online_n,
+            "busy": busy_n,
             "idle": sum(1 for s in prof if s["idle"]),
             "sustained_idle": sustained_n,
             "mean_idle_frac_window": round(sum(fracs) / len(fracs), 3) if fracs else None,
             "inflight": inflight,
-            "sum_caps": caps,
-            "fill_rate": round(inflight / caps, 3) if caps > 0 else None,
+            "sum_caps": online_n,
+            "fill_rate": machine_fill_rate(busy_n, online_n),
         }
 
     online_cutoff = now_ms - SLAVE_ONLINE_MS
@@ -891,7 +900,7 @@ def build_ops_metrics() -> dict:
                     )
                 },
             },
-            "sum_caps": sum_caps,
+            "sum_caps": len(online),
             "inflight": sum_inflight,
             "fill_rate": fill_rate,
             "by_profile": by_profile,

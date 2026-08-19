@@ -113,7 +113,7 @@
         <div class="dash-tile">
           <div class="val" id="m-fill">—</div>
           <div class="lbl">Fill rate</div>
-          <div class="tile-sub"><span id="m-inflight">—</span> / <span id="m-caps">—</span> caps</div>
+          <div class="tile-sub"><span id="m-inflight">—</span> busy / <span id="m-caps">—</span> online</div>
           <div class="fill-bar"><span id="m-fill-bar"></span></div>
         </div>
         <div class="dash-tile">
@@ -341,8 +341,8 @@
       el("m-busy").textContent = fmt(s.busy);
       el("m-idle").textContent = fmt(s.idle);
       el("m-fill").textContent = pct(s.fill_rate);
-      el("m-inflight").textContent = fmt(s.inflight);
-      el("m-caps").textContent = fmt(s.sum_caps);
+      el("m-inflight").textContent = fmt(s.busy);
+      el("m-caps").textContent = fmt(s.online);
       el("m-fill-bar").style.width = Math.min(100, Math.round((s.fill_rate || 0) * 100)) + "%";
       el("m-unassigned").textContent = fmt(data.unassigned_root_total);
       el("m-claimable").textContent = fmt(data.claimable_root_total);
@@ -412,7 +412,7 @@
           <td>${fmt(row.online)}</td>
           <td>${fmt(row.busy)}</td>
           <td>${fmt(row.idle)}</td>
-          <td>${pct(row.fill_rate)} <span style="color:var(--muted);font-size:11px;">(${fmt(row.inflight)}/${fmt(row.sum_caps)})</span></td>
+          <td>${pct(row.fill_rate)} <span style="color:var(--muted);font-size:11px;">(${fmt(row.busy)}/${fmt(row.online)})</span></td>
         </tr>`;
       }).join("");
 

@@ -17,7 +17,7 @@ def _load_fns():
     )
     source = path.read_text(encoding="utf-8")
     module = ast.parse(source)
-    wanted = {"slave_display_profile", "slave_display_cap"}
+    wanted = {"slave_display_profile", "slave_display_cap", "machine_fill_rate"}
     nodes = [
         node
         for node in module.body
@@ -35,6 +35,7 @@ def main() -> int:
     ns = _load_fns()
     profile = ns["slave_display_profile"]
     cap = ns["slave_display_cap"]
+    machine_fill = ns["machine_fill_rate"]
     failed = 0
 
     def check(ok: bool, label: str, detail="") -> None:
@@ -64,6 +65,10 @@ def main() -> int:
         cap(profile="gpu", num_workers=12, route_cap=8, is_multi_gpu=True) == 12,
         "multi-GPU dispatcher uses num_workers",
     )
+    check(machine_fill(73, 77) == 0.948, "fleet fill is busy/online", machine_fill(73, 77))
+    check(machine_fill(18, 18) == 1.0, "all GPUs busy is 100%")
+    check(machine_fill(55, 59) == 0.932, "CPU fill is busy/online", machine_fill(55, 59))
+    check(machine_fill(0, 0) is None, "no machines => no fill")
     return 2 if failed else 0
 
 
