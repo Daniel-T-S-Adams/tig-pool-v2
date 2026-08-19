@@ -73,7 +73,7 @@ def main():
                     req = precommit_manager.run()
                     if not req:
                         misses += 1
-                        if misses >= 3:
+                        if misses >= 8:
                             break
                         continue
                     misses = 0

@@ -1676,6 +1676,7 @@ class PrecommitManager:
             idle_gpu_starved=idle_gpu_starved,
             cpu_profile_blocked=bool(profile_blocks.get("cpu")),
         )
+        eligible_before_reserve = list(eligible)
         if reserve_gpu:
             gpu_eligible = [
                 x for x in eligible
@@ -1805,6 +1806,31 @@ class PrecommitManager:
                         continue
             weighted_eligible.append(x)
             weights.append(weight)
+        if not weighted_eligible and reserve_gpu:
+            logger.info(
+                "GPU reserve produced no creatable algorithm; falling back to CPU "
+                "(root_phase=%s pending=%s)",
+                {cid: root_phase_counts.get(cid, 0) for cid in GPU_CHALLENGE_IDS},
+                {cid: per_challenge_counts.get(cid, 0) for cid in GPU_CHALLENGE_IDS},
+            )
+            self._idle_gpu_reserved_count = max(
+                int(getattr(self, "_idle_gpu_reserved_count", 0) or 0) + 1,
+                int(gpu_wave or 0),
+            )
+            reserve_gpu = False
+            force_cpu_only = False
+            eligible = [
+                x for x in eligible_before_reserve
+                if x["algorithm_id"][:4] in CPU_CHALLENGE_IDS
+            ] or list(eligible_before_reserve)
+            for x in eligible:
+                weight = int(x.get("weight") or 0)
+                if weight <= 0:
+                    continue
+                if idle_cpu_needs_work and x["algorithm_id"][:4] in CPU_CHALLENGE_IDS:
+                    weight = max(1, int(round(weight * idle_mult)))
+                weighted_eligible.append(x)
+                weights.append(weight)
         if not weighted_eligible:
             logger.info(
                 "precommit create skipped: no positive-weight algorithms after "
