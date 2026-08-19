@@ -796,8 +796,8 @@ def main() -> int:
                 max_burst=16,
                 cpu_unassigned_remaining=256,
             ),
-            3,
-            "small deficit bursts only the deficit",
+            4,
+            "small idle + empty claimable still uses the 4-job replacement wave",
         ),
         (
             burst(
@@ -858,6 +858,34 @@ def main() -> int:
             ),
             1,
             "leftovers covering idle do not burst when no proving spare",
+        ),
+        (
+            burst(
+                idle_cpu_needs_work=True,
+                idle_cpu=0,
+                claimable_cpu=0,
+                cpu_want_spare=20,
+                cpu_unowned=20,
+                base_burst=4,
+                max_burst=16,
+                cpu_unassigned_remaining=256,
+            ),
+            4,
+            "claimable 0 with unowned already at want still replaces 4",
+        ),
+        (
+            burst(
+                idle_cpu_needs_work=True,
+                idle_cpu=0,
+                claimable_cpu=0,
+                cpu_want_spare=0,
+                cpu_unowned=12,
+                base_burst=4,
+                max_burst=16,
+                cpu_unassigned_remaining=256,
+            ),
+            4,
+            "busy fleet + empty claimable still starts a replacement wave",
         ),
     ]
     for got, expect, label in burst_cases:

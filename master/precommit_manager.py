@@ -377,18 +377,27 @@ def idle_create_burst(
 ) -> int:
     """How many precommits to attempt this tick (including the first).
 
-    1 = normal single create. More only while idle machines have fewer
-    claimable roots than they can absorb. Caps at remaining unassigned
-    room so this cannot rebuild a leftover pile.
+    1 = normal single create. More while idle machines have fewer
+    claimable roots than they can absorb, or when claimable is empty
+    during a proving wave (unowned job counts do not feed finishers).
+    Caps at remaining unassigned room so this cannot rebuild a leftover
+    pile. The empty-claimable replacement is a small base_burst wave,
+    not the full proving count.
     """
     hi = max(1, int(max_burst or 1), int(base_burst or 1))
     if not idle_cpu_needs_work and not idle_gpu_needs_work:
         return 1
     cpu_idle_def = max(0, int(idle_cpu or 0) - int(claimable_cpu or 0))
     cpu_keep_def = max(0, int(cpu_want_spare or 0) - int(cpu_unowned or 0))
+    # Unowned jobs with no claimable roots do not feed a finishing box.
+    # Keep a small replacement wave so the next benchmark can start now.
+    if idle_cpu_needs_work and int(claimable_cpu or 0) <= 0:
+        cpu_keep_def = max(cpu_keep_def, min(hi, int(base_burst or 4)))
     cpu_def = max(cpu_idle_def, cpu_keep_def) if idle_cpu_needs_work else 0
     gpu_idle_def = max(0, int(idle_gpu or 0) - int(claimable_gpu or 0))
     gpu_keep_def = max(0, int(gpu_want_spare or 0) - int(gpu_unowned or 0))
+    if idle_gpu_needs_work and int(claimable_gpu or 0) <= 0:
+        gpu_keep_def = max(gpu_keep_def, min(hi, int(base_burst or 4)))
     gpu_def = max(gpu_idle_def, gpu_keep_def) if idle_gpu_needs_work else 0
     deficit = cpu_def + gpu_def
     if deficit <= 0:
