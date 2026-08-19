@@ -50,30 +50,26 @@ def main():
                 precommit_manager.on_new_block(**data)
             job_manager.run()
             submit_precommit_req = precommit_manager.run()
-            submissions_manager.run(submit_precommit_req)
-            # Burst creates while idle CPUs/GPUs still have no claimable work.
-            extra = max(
-                0,
-                int(getattr(precommit_manager, "last_idle_burst", 1) or 1) - 1,
+            sized = int(getattr(precommit_manager, "last_sized_burst", 0) or 0)
+            if sized <= 0:
+                sized = int(getattr(precommit_manager, "last_idle_burst", 1) or 1)
+            created = [submit_precommit_req] if submit_precommit_req is not None else []
+            extra = extra_creates_this_tick(
+                sized_burst=sized,
+                first_ok=submit_precommit_req is not None,
+                max_burst=PRECOMMIT_IDLE_BURST_MAX,
             )
-            extra = min(extra, PRECOMMIT_IDLE_BURST_MAX)
-            if extra > 0 and (
-                getattr(precommit_manager, "last_idle_cpu_needs_work", False)
-                or getattr(precommit_manager, "last_idle_gpu_needs_work", False)
-            ):
+            if extra > 0:
                 logger.info(
-                    "idle create burst extra=%s cpu_need=%s gpu_need=%s",
+                    "idle create burst extra=%s sized=%s first_ok=%s cpu_need=%s gpu_need=%s",
                     extra,
+                    sized,
+                    submit_precommit_req is not None,
                     getattr(precommit_manager, "last_idle_cpu_needs_work", False),
                     getattr(precommit_manager, "last_idle_gpu_needs_work", False),
                 )
                 misses = 0
                 for _ in range(extra):
-                    if not (
-                        getattr(precommit_manager, "last_idle_cpu_needs_work", False)
-                        or getattr(precommit_manager, "last_idle_gpu_needs_work", False)
-                    ):
-                        break
                     req = precommit_manager.run()
                     if not req:
                         misses += 1
@@ -81,7 +77,12 @@ def main():
                             break
                         continue
                     misses = 0
+                    created.append(req)
+            if created:
+                for req in created:
                     submissions_manager.run(req)
+            else:
+                submissions_manager.run(None)
             slave_manager.run()
         except Exception as e:
             import traceback

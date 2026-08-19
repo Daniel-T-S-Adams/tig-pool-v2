@@ -403,6 +403,26 @@ def idle_create_burst(
     return max(1, min(hi, deficit, room))
 
 
+def extra_creates_this_tick(
+    *,
+    sized_burst: int = 1,
+    first_ok: bool = False,
+    max_burst: int = 16,
+) -> int:
+    """Extra precommit attempts after the first one this tick.
+
+    Uses the burst sized at the start of the first attempt. Later abort
+    paths must not shrink this. If the first attempt failed, still try
+    the full sized burst.
+    """
+    sized = max(0, int(sized_burst or 0))
+    hi = max(0, int(max_burst or 0))
+    if sized <= 1:
+        return 0
+    used = 1 if first_ok else 0
+    return min(hi, max(0, sized - used))
+
+
 def compute_idle_gpu_starved(
     *,
     gpu_unassigned_claimable: int = 0,
@@ -682,6 +702,7 @@ class PrecommitManager:
         self.last_idle_cpu_needs_work = False
         self.last_idle_gpu_needs_work = False
         self.last_idle_burst = 1
+        self.last_sized_burst = 1
         self.last_idle_window = {}
         self._idle_gpu_create_ms = 0
 
@@ -1271,31 +1292,8 @@ class PrecommitManager:
             idle_needs_work=idle_cpu_needs_work or idle_gpu_needs_work,
         )
         overlap_cap = int(os.environ.get("PRECOMMIT_PROOF_OVERLAP", "8"))
-        if not concurrent_create_allowed(
-            root_phase_jobs=root_phase_jobs,
-            proof_phase_jobs=proof_phase_jobs,
-            submitted=self.num_precommits_submitted,
-            max_concurrent=create_cap,
-            overlap_cap=overlap_cap,
-        ):
-            logger.info(
-                "pending benchmarks at cap (pending=%s root=%s proof=%s "
-                "submitted=%s max=%s effective=%s overlap=%s idle_cpu=%s idle_gpu=%s)",
-                num_pending_jobs,
-                root_phase_jobs,
-                proof_phase_jobs,
-                self.num_precommits_submitted,
-                configured_cap,
-                create_cap,
-                overlap_cap,
-                idle_cpu_needs_work,
-                idle_gpu_needs_work,
-            )
-            if not (idle_cpu_needs_work or idle_gpu_needs_work):
-                self.last_idle_cpu_needs_work = False
-                self.last_idle_gpu_needs_work = False
-                self.last_idle_burst = 1
-            return
+        # Size the idle burst before any gate so extras can still run this
+        # tick even if the first attempt aborts.
         self.last_idle_burst = idle_create_burst(
             idle_cpu_needs_work=idle_cpu_needs_work,
             idle_gpu_needs_work=idle_gpu_needs_work,
@@ -1326,6 +1324,7 @@ class PrecommitManager:
                 - int(governor.get("gpu_unassigned_claimable") or 0),
             ),
         )
+        self.last_sized_burst = self.last_idle_burst
         if self.last_idle_burst > 1:
             logger.info(
                 "idle create sized burst=%s instant_cpu=%s sustained_cpu=%s "
@@ -1349,6 +1348,30 @@ class PrecommitManager:
                 root_phase_jobs,
                 proof_phase_jobs,
             )
+        if not concurrent_create_allowed(
+            root_phase_jobs=root_phase_jobs,
+            proof_phase_jobs=proof_phase_jobs,
+            submitted=self.num_precommits_submitted,
+            max_concurrent=create_cap,
+            overlap_cap=overlap_cap,
+        ):
+            logger.info(
+                "pending benchmarks at cap (pending=%s root=%s proof=%s "
+                "submitted=%s max=%s effective=%s overlap=%s idle_cpu=%s idle_gpu=%s)",
+                num_pending_jobs,
+                root_phase_jobs,
+                proof_phase_jobs,
+                self.num_precommits_submitted,
+                configured_cap,
+                create_cap,
+                overlap_cap,
+                idle_cpu_needs_work,
+                idle_gpu_needs_work,
+            )
+            if not (idle_cpu_needs_work or idle_gpu_needs_work):
+                self.last_idle_cpu_needs_work = False
+                self.last_idle_gpu_needs_work = False
+            return
         governor_reason = ""
         profile_blocks = governor.get("profile_blocks") or {"cpu": False, "gpu": False}
         if governor.get("enabled"):
@@ -1369,7 +1392,6 @@ class PrecommitManager:
                     logger.info("precommit governor blocked create: %s", governor_reason)
                     self.last_idle_cpu_needs_work = False
                     self.last_idle_gpu_needs_work = False
-                    self.last_idle_burst = 1
                     return
             if governor_reason.startswith("idle_cpu_override:"):
                 logger.info(

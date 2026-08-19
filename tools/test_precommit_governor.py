@@ -40,6 +40,7 @@ def main() -> int:
         "effective_concurrent_cap",
         "idle_decision_count",
         "idle_create_burst",
+        "extra_creates_this_tick",
         "challenge_under_create_cap",
         "should_force_cpu_only",
         "should_reserve_idle_gpu_create",
@@ -58,6 +59,7 @@ def main() -> int:
     eff_cap = ns["effective_concurrent_cap"]
     decision = ns["idle_decision_count"]
     burst = ns["idle_create_burst"]
+    extra_tick = ns["extra_creates_this_tick"]
     under_cap = ns["challenge_under_create_cap"]
     force_cpu = ns["should_force_cpu_only"]
     reserve_gpu = ns["should_reserve_idle_gpu_create"]
@@ -859,6 +861,20 @@ def main() -> int:
         ),
     ]
     for got, expect, label in burst_cases:
+        ok = got == expect
+        print(f"{'pass' if ok else 'FAIL'}: {label} got={got} expect={expect}")
+        if not ok:
+            failed += 1
+
+    extra_cases = [
+        (extra_tick(sized_burst=16, first_ok=True, max_burst=16), 15, "first ok => 15 extras"),
+        (extra_tick(sized_burst=16, first_ok=False, max_burst=16), 16, "first miss still tries 16"),
+        (extra_tick(sized_burst=1, first_ok=True, max_burst=16), 0, "no idle burst => no extras"),
+        (extra_tick(sized_burst=1, first_ok=False, max_burst=16), 0, "sized 1 first miss => no extras"),
+        (extra_tick(sized_burst=48, first_ok=True, max_burst=16), 16, "extras clamp to max_burst"),
+        (extra_tick(sized_burst=0, first_ok=False, max_burst=16), 0, "zero sized => no extras"),
+    ]
+    for got, expect, label in extra_cases:
         ok = got == expect
         print(f"{'pass' if ok else 'FAIL'}: {label} got={got} expect={expect}")
         if not ok:

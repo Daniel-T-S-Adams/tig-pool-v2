@@ -79,7 +79,16 @@ class DataFetcher:
     def run(self) -> dict:
         config = CONFIG
         logger.debug("fetching latest block")
-        block_data = _get(f"{config['api_url']}/get-block")
+        block_data = _get_safe(f"{config['api_url']}/get-block")
+        if not block_data or not block_data.get("block"):
+            with self._lock:
+                cache = self._cache
+            if cache is not None:
+                logger.warning(
+                    "get-block failed; using cached block so creates continue"
+                )
+                return cache
+            raise Exception("get-block failed and no cached block")
         block = Block.from_dict(block_data["block"])
 
         with self._lock:
