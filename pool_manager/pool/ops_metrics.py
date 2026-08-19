@@ -111,6 +111,37 @@ def _gov_settings(cfg: dict) -> dict:
     return out
 
 
+def slave_display_profile(slave_name: str, worker_type: str | None = None) -> str:
+    """CPU vs GPU for ops tiles. Name prefix only, plus an explicit member type.
+
+    ``c3-slave-*`` is leftover AWS/C3 CPU naming, not a GPU. Real GPUs are
+    ``pool-gpu-*``. Multi-GPU dispatchers are ``pool-gpu-*-c3-*``.
+    """
+    explicit = str(worker_type or "").strip().lower()
+    if explicit in ("cpu", "gpu"):
+        return explicit
+    name = str(slave_name or "")
+    if name.startswith("pool-gpu-"):
+        return "gpu"
+    return "cpu"
+
+
+def slave_display_cap(
+    *,
+    profile: str,
+    num_workers: int = 0,
+    route_cap: int = 0,
+    is_multi_gpu: bool = False,
+) -> int:
+    """Fill-rate denominator: jobs a box can run, not the warehouse route cap."""
+    if str(profile or "") == "gpu":
+        reported = max(0, int(num_workers or 0))
+        if is_multi_gpu:
+            return max(1, reported, int(route_cap or 0))
+        return max(1, reported) if reported else 1
+    return 1
+
+
 def _route_cap_for(slave_name: str, slaves_cfg: list) -> int:
     matched = None
     for route in slaves_cfg or []:
@@ -483,7 +514,7 @@ def _slave_rows(now_ms: int, cfg: dict) -> list[dict]:
     rows = db.fetch_all(
         """
         WITH online AS (
-            SELECT slave_name, last_seen
+            SELECT slave_name, last_seen, num_workers
             FROM slave_seen
             WHERE last_seen >= %s
         ),
@@ -509,8 +540,10 @@ def _slave_rows(now_ms: int, cfg: dict) -> list[dict]:
         SELECT
             n.slave_name,
             m.wallet_address,
+            m.worker_type,
             COALESCE(m.active, false) AS registered_active,
             o.last_seen,
+            o.num_workers,
             COALESCE(i.root_inflight, 0) AS root_inflight,
             COALESCE(p.proof_inflight, 0) AS proof_inflight,
             (o.slave_name IS NOT NULL) AS online
@@ -523,13 +556,18 @@ def _slave_rows(now_ms: int, cfg: dict) -> list[dict]:
         (online_cutoff,),
     )
     slaves_cfg = cfg.get("slaves") or []
-    adaptive = cfg.get("adaptive_slave_caps") or {}
     out = []
     for row in rows:
         name = row["slave_name"]
-        profile = autopilot._slave_profile(name)
+        profile = slave_display_profile(name, row.get("worker_type"))
         route_cap = _route_cap_for(name, slaves_cfg)
-        cap = _effective_cap(name, route_cap, adaptive, profile)
+        num_workers = int(row.get("num_workers") or 0)
+        cap = slave_display_cap(
+            profile=profile,
+            num_workers=num_workers,
+            route_cap=route_cap,
+            is_multi_gpu=autopilot._is_c3_slave(name) and profile == "gpu",
+        )
         root_inflight = int(row.get("root_inflight") or 0)
         proof_inflight = int(row.get("proof_inflight") or 0)
         inflight = root_inflight + proof_inflight
@@ -547,6 +585,8 @@ def _slave_rows(now_ms: int, cfg: dict) -> list[dict]:
             "inflight": inflight,
             "route_cap": route_cap,
             "cap": cap,
+            "num_workers": num_workers,
+            "worker_type": row.get("worker_type"),
             "fill": round(inflight / cap, 3) if cap > 0 else None,
             "last_seen": row.get("last_seen"),
             "registered_active": bool(row.get("registered_active")),
