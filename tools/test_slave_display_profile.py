@@ -52,8 +52,14 @@ def main() -> int:
     check(profile("pool-gpu-abc", "cpu") == "cpu", "explicit worker_type cpu wins")
 
     check(cap(profile="cpu", num_workers=32, route_cap=512) == 1, "CPU fill cap is one job")
-    check(cap(profile="gpu", num_workers=0, route_cap=64) == 1, "single GPU is one unit")
     check(cap(profile="gpu", num_workers=1, route_cap=64) == 1, "reported 1 GPU stays 1")
+    check(cap(profile="gpu", num_workers=4, route_cap=64) == 4, "reported GPU workers win")
+    check(cap(profile="gpu", num_workers=0, route_cap=8) == 8, "no telemetry uses GPU route cap")
+    check(
+        cap(profile="gpu", num_workers=0, route_cap=64, adaptive_max=24) == 24,
+        "warehouse GPU route cap is clamped",
+    )
+    check(cap(profile="gpu", num_workers=0, route_cap=0) == 1, "unknown GPU concurrency is 1")
     check(
         cap(profile="gpu", num_workers=12, route_cap=8, is_multi_gpu=True) == 12,
         "multi-GPU dispatcher uses num_workers",

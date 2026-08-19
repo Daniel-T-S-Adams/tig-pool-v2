@@ -132,14 +132,25 @@ def slave_display_cap(
     num_workers: int = 0,
     route_cap: int = 0,
     is_multi_gpu: bool = False,
+    adaptive_max: int = 0,
 ) -> int:
-    """Fill-rate denominator: jobs a box can run, not the warehouse route cap."""
-    if str(profile or "") == "gpu":
-        reported = max(0, int(num_workers or 0))
-        if is_multi_gpu:
-            return max(1, reported, int(route_cap or 0))
-        return max(1, reported) if reported else 1
-    return 1
+    """Fill-rate denominator: jobs a box can run, not the warehouse route cap.
+
+    CPU stays one job per box. GPU uses reported workers when present,
+    otherwise that slave's allowed batch concurrency.
+    """
+    if str(profile or "") != "gpu":
+        return 1
+    reported = max(0, int(num_workers or 0))
+    allowed = max(0, int(route_cap or 0))
+    family_max = max(0, int(adaptive_max or 0))
+    if family_max > 0 and allowed > 0:
+        allowed = min(allowed, family_max)
+    if is_multi_gpu:
+        return max(1, reported, allowed)
+    if reported > 0:
+        return reported
+    return max(1, allowed)
 
 
 def _route_cap_for(slave_name: str, slaves_cfg: list) -> int:
@@ -556,6 +567,10 @@ def _slave_rows(now_ms: int, cfg: dict) -> list[dict]:
         (online_cutoff,),
     )
     slaves_cfg = cfg.get("slaves") or []
+    adaptive = cfg.get("adaptive_slave_caps") or {}
+    gpu_family_max = int(
+        adaptive.get("gpu_max_cap", adaptive.get("max_cap", 0)) or 0
+    )
     out = []
     for row in rows:
         name = row["slave_name"]
@@ -567,6 +582,7 @@ def _slave_rows(now_ms: int, cfg: dict) -> list[dict]:
             num_workers=num_workers,
             route_cap=route_cap,
             is_multi_gpu=autopilot._is_c3_slave(name) and profile == "gpu",
+            adaptive_max=gpu_family_max if profile == "gpu" else 0,
         )
         root_inflight = int(row.get("root_inflight") or 0)
         proof_inflight = int(row.get("proof_inflight") or 0)
