@@ -823,6 +823,9 @@ class PrecommitManager:
                       AND rb.ready IS NULL
                       AND rb.start_time IS NOT NULL
                   )
+                  AND COALESCE(ss.telem_state, 'idle') NOT IN
+                      ('running', 'downloading', 'submitting')
+                  AND COALESCE(ss.telem_active, 0) <= 0
                 """,
                 (online_cutoff,),
             ) or []
@@ -1175,7 +1178,8 @@ class PrecommitManager:
                           )
                     ) AS gpu_unassigned_claimable,
                     (
-                        -- Online CPU slaves with no assigned unfinished root work.
+                        -- Online CPU slaves with no assigned unfinished root work
+                        -- and no live slave telemetry saying they are still running.
                         SELECT COUNT(*)
                         FROM slave_seen ss
                         WHERE ss.last_seen >= %s
@@ -1187,6 +1191,9 @@ class PrecommitManager:
                               AND rb.ready IS NULL
                               AND rb.start_time IS NOT NULL
                           )
+                          AND COALESCE(ss.telem_state, 'idle') NOT IN
+                              ('running', 'downloading', 'submitting')
+                          AND COALESCE(ss.telem_active, 0) <= 0
                     ) AS online_idle_cpu_slaves,
                     (
                         SELECT COUNT(*)

@@ -111,6 +111,32 @@ def _gov_settings(cfg: dict) -> dict:
     return out
 
 
+def slave_telem_is_working(telem_state: str | None, telem_active) -> bool:
+    """True when the slave's last get-batches heartbeat says it still has work.
+
+    Dashboard idle used only DB inflight, so a box still running/submitting
+    locally looked idle and 'no batches available' looked like a warehouse.
+    """
+    try:
+        if int(telem_active or 0) > 0:
+            return True
+    except (TypeError, ValueError):
+        pass
+    return str(telem_state or "").strip().lower() in (
+        "running",
+        "downloading",
+        "submitting",
+    )
+
+
+def _ensure_slave_telem_columns() -> None:
+    try:
+        db.execute("ALTER TABLE slave_seen ADD COLUMN IF NOT EXISTS telem_state TEXT")
+        db.execute("ALTER TABLE slave_seen ADD COLUMN IF NOT EXISTS telem_active INTEGER")
+    except Exception as exc:
+        logger.debug("slave_seen telem columns: %s", exc)
+
+
 def slave_display_profile(slave_name: str, worker_type: str | None = None) -> str:
     """CPU vs GPU for ops tiles. Name prefix only, plus an explicit member type.
 
@@ -531,10 +557,11 @@ def _governor_view(
 
 def _slave_rows(now_ms: int, cfg: dict) -> list[dict]:
     online_cutoff = now_ms - SLAVE_ONLINE_MS
+    _ensure_slave_telem_columns()
     rows = db.fetch_all(
         """
         WITH online AS (
-            SELECT slave_name, last_seen, num_workers
+            SELECT slave_name, last_seen, num_workers, telem_state, telem_active
             FROM slave_seen
             WHERE last_seen >= %s
         ),
@@ -564,6 +591,8 @@ def _slave_rows(now_ms: int, cfg: dict) -> list[dict]:
             COALESCE(m.active, false) AS registered_active,
             o.last_seen,
             o.num_workers,
+            o.telem_state,
+            o.telem_active,
             COALESCE(i.root_inflight, 0) AS root_inflight,
             COALESCE(p.proof_inflight, 0) AS proof_inflight,
             (o.slave_name IS NOT NULL) AS online
@@ -596,9 +625,12 @@ def _slave_rows(now_ms: int, cfg: dict) -> list[dict]:
         root_inflight = int(row.get("root_inflight") or 0)
         proof_inflight = int(row.get("proof_inflight") or 0)
         inflight = root_inflight + proof_inflight
+        telem_working = slave_telem_is_working(
+            row.get("telem_state"), row.get("telem_active")
+        )
         online = bool(row.get("online"))
-        busy = online and inflight > 0
-        idle = online and inflight == 0
+        busy = online and (inflight > 0 or telem_working)
+        idle = online and not busy
         out.append({
             "slave_name": name,
             "profile": profile,
@@ -614,6 +646,8 @@ def _slave_rows(now_ms: int, cfg: dict) -> list[dict]:
             "worker_type": row.get("worker_type"),
             "fill": (1.0 if busy else 0.0) if online else None,
             "last_seen": row.get("last_seen"),
+            "telem_state": row.get("telem_state"),
+            "telem_active": row.get("telem_active"),
             "registered_active": bool(row.get("registered_active")),
         })
     out.sort(key=lambda s: (-int(s["online"]), -int(s["inflight"]), s["slave_name"] or ""))

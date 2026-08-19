@@ -17,7 +17,12 @@ def _load_fns():
     )
     source = path.read_text(encoding="utf-8")
     module = ast.parse(source)
-    wanted = {"slave_display_profile", "slave_display_cap", "machine_fill_rate"}
+    wanted = {
+        "slave_display_profile",
+        "slave_display_cap",
+        "machine_fill_rate",
+        "slave_telem_is_working",
+    }
     nodes = [
         node
         for node in module.body
@@ -36,6 +41,7 @@ def main() -> int:
     profile = ns["slave_display_profile"]
     cap = ns["slave_display_cap"]
     machine_fill = ns["machine_fill_rate"]
+    telem_busy = ns["slave_telem_is_working"]
     failed = 0
 
     def check(ok: bool, label: str, detail="") -> None:
@@ -69,6 +75,11 @@ def main() -> int:
     check(machine_fill(18, 18) == 1.0, "all GPUs busy is 100%")
     check(machine_fill(55, 59) == 0.932, "CPU fill is busy/online", machine_fill(55, 59))
     check(machine_fill(0, 0) is None, "no machines => no fill")
+    check(telem_busy("running", 0) is True, "running telem is busy")
+    check(telem_busy("submitting", 0) is True, "submitting telem is busy")
+    check(telem_busy("idle", 1) is True, "active_batches>0 is busy")
+    check(telem_busy("idle", 0) is False, "idle telem with no active is idle")
+    check(telem_busy(None, None) is False, "missing telem is not busy")
     return 2 if failed else 0
 
 

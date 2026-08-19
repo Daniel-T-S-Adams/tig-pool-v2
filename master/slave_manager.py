@@ -145,7 +145,7 @@ STICKY_OVERFLOW_OWNER_IDLE_MS = max(
 )
 # Roots kept exclusive to the sticky owner. Anything above this that the
 # owner cannot absorb into remaining cap fans out to idle machines.
-STICKY_LEFTOVER_KEEP = max(0, int(os.environ.get("SLAVE_STICKY_LEFTOVER_KEEP", "4")))
+STICKY_LEFTOVER_KEEP = max(0, int(os.environ.get("SLAVE_STICKY_LEFTOVER_KEEP", "0")))
 
 
 def _slave_work_profile(slave_name: str) -> str:
@@ -417,14 +417,22 @@ class SlaveManager:
         until = int(self._slave_seen_touch_until.get(slave_name) or 0)
         if now_ms < until:
             return
+        telem = self._slave_telemetry.get(slave_name) or {}
         if num_workers is None:
             try:
-                num_workers = int((self._slave_telemetry.get(slave_name) or {}).get("num_workers") or 0) or None
+                num_workers = int(telem.get("num_workers") or 0) or None
             except (TypeError, ValueError):
                 num_workers = None
         try:
             self._ensure_slave_seen_table()
-            touch_slave_seen(get_db_conn().execute, slave_name, now_ms, num_workers=num_workers)
+            touch_slave_seen(
+                get_db_conn().execute,
+                slave_name,
+                now_ms,
+                num_workers=num_workers,
+                telem_state=telem.get("state"),
+                telem_active=telem.get("active_batches"),
+            )
             self._slave_seen_touch_until[slave_name] = now_ms + self._slave_seen_touch_interval_ms
         except Exception as exc:
             logger.warning("slave-seen touch failed for %s: %s", slave_name, exc)
@@ -2338,6 +2346,7 @@ class SlaveManager:
                             preferred_at_cap=bool(
                                 preferred and preferred in preferred_at_cap
                             ),
+                            poller_idle=int(active_by_slave.get(slave_name) or 0) <= 0,
                         ):
                             # Allow overflow-unlocked leftovers.
                             if bid not in overflow_benchmark_ids:
@@ -2901,6 +2910,7 @@ class SlaveManager:
                             preferred_at_cap=bool(
                                 preferred and preferred in preferred_at_cap
                             ),
+                            poller_idle=int(active_by_slave.get(slave_name) or 0) <= 0,
                         ):
                             if bid not in overflow_benchmark_ids:
                                 continue
@@ -2943,6 +2953,7 @@ class SlaveManager:
                             preferred_at_cap=bool(
                                 preferred and preferred in preferred_at_cap
                             ),
+                            poller_idle=int(active_by_slave.get(slave_name) or 0) <= 0,
                         ):
                             if bid not in overflow_benchmark_ids:
                                 continue

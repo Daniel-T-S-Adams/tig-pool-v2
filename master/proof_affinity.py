@@ -132,6 +132,7 @@ def should_skip_root_for_slave(
     *,
     sticky_enabled: bool = STICKY_ROOTS_ENABLED,
     preferred_at_cap: bool = False,
+    poller_idle: bool = False,
 ) -> bool:
     """True when this polling slave must not take a root for a sticky job.
 
@@ -140,8 +141,12 @@ def should_skip_root_for_slave(
     preferred_at_cap means the master released exclusive sticky lock for this
     owner (at-cap overflow and/or aged idle-leftover reclaim). Dark preferred
     owners are handled separately via online_slaves.
+    An idle poller must never be told 'no batches' while leftovers sit on a
+    busy owner — proofs stay with whoever actually ran each root.
     """
     if not sticky_enabled:
+        return False
+    if poller_idle:
         return False
     if not preferred_slave:
         return False
@@ -167,6 +172,8 @@ def ensure_slave_seen_table(execute: Callable) -> None:
         "CREATE INDEX IF NOT EXISTS idx_slave_seen_last_seen ON slave_seen(last_seen)"
     )
     execute("ALTER TABLE slave_seen ADD COLUMN IF NOT EXISTS num_workers INTEGER")
+    execute("ALTER TABLE slave_seen ADD COLUMN IF NOT EXISTS telem_state TEXT")
+    execute("ALTER TABLE slave_seen ADD COLUMN IF NOT EXISTS telem_active INTEGER")
 
 
 def touch_slave_seen(
@@ -174,6 +181,8 @@ def touch_slave_seen(
     slave_name: str,
     now_ms: int,
     num_workers: int | None = None,
+    telem_state: str | None = None,
+    telem_active: int | None = None,
 ) -> None:
     workers = None
     if num_workers is not None:
@@ -181,16 +190,31 @@ def touch_slave_seen(
             workers = int(num_workers) or None
         except (TypeError, ValueError):
             workers = None
+    state = None
+    if telem_state:
+        cleaned = str(telem_state).strip().lower()
+        if cleaned in {"idle", "downloading", "running", "submitting"}:
+            state = cleaned
+    active = None
+    if telem_active is not None:
+        try:
+            active = max(0, int(telem_active))
+        except (TypeError, ValueError):
+            active = None
     execute(
         """
-        INSERT INTO slave_seen (slave_name, last_seen, num_workers)
-        VALUES (%s, %s, %s)
+        INSERT INTO slave_seen (
+            slave_name, last_seen, num_workers, telem_state, telem_active
+        )
+        VALUES (%s, %s, %s, %s, %s)
         ON CONFLICT (slave_name)
         DO UPDATE SET
             last_seen = EXCLUDED.last_seen,
-            num_workers = COALESCE(EXCLUDED.num_workers, slave_seen.num_workers)
+            num_workers = COALESCE(EXCLUDED.num_workers, slave_seen.num_workers),
+            telem_state = COALESCE(EXCLUDED.telem_state, slave_seen.telem_state),
+            telem_active = COALESCE(EXCLUDED.telem_active, slave_seen.telem_active)
         """,
-        (slave_name, int(now_ms), workers),
+        (slave_name, int(now_ms), workers, state, active),
     )
 
 
