@@ -67,6 +67,7 @@ def main():
                     getattr(precommit_manager, "last_idle_cpu_needs_work", False),
                     getattr(precommit_manager, "last_idle_gpu_needs_work", False),
                 )
+                misses = 0
                 for _ in range(extra):
                     if not (
                         getattr(precommit_manager, "last_idle_cpu_needs_work", False)
@@ -75,7 +76,11 @@ def main():
                         break
                     req = precommit_manager.run()
                     if not req:
-                        break
+                        misses += 1
+                        if misses >= 3:
+                            break
+                        continue
+                    misses = 0
                     submissions_manager.run(req)
             slave_manager.run()
         except Exception as e:

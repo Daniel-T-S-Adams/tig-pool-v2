@@ -489,7 +489,9 @@ def effective_concurrent_cap(
 ) -> int:
     """Create ceiling while idle boxes have nothing to claim.
 
-    ``max_concurrent_benchmarks`` is an autopilot leftover brake (live ~35).
+    ``max_concurrent_benchmarks`` is the configured leftover brake.
+    Live values are often far above the fleet (e.g. 276). This lift only
+    matters when that setting is below online boxes plus keep-ahead.
     One job per box needs the live fleet, plus keep-ahead replacements for
     boxes that are already proving. Proof-phase jobs do not feed idle boxes.
     """
@@ -541,16 +543,17 @@ def challenge_under_create_cap(
     gpu_ids: tuple = ("c004", "c005", "c006"),
     gpu_spare_jobs: int = 0,
     idle_gpu_slaves: int = 0,
+    idle_cpu_needs_work: bool = False,
+    idle_cpu_slaves: int = 0,
+    cpu_ids: tuple = ("c001", "c002", "c003", "c007", "c008"),
 ) -> bool:
     """True when this challenge may receive another precommit.
 
-    Proof-phase GPU jobs do not feed idle GPUs (proofs need local artifacts).
-    When GPUs are idle with no claimable roots, count only root-phase jobs
-    against the GPU per-challenge cap so a new root job can start.
-    If every GPU challenge is already at that cap, lift it by the idle/spare
-    count so creates do not fall through to CPU while cards sit empty.
-    Keep-ahead only lifts by the spare count against pending jobs — it must
-    not ignore proof-phase work or copy the idle-card lift.
+    Proof-phase jobs do not feed idle root workers. When a profile is idle
+    with no claimable roots, count only root-phase jobs against that
+    profile's per-challenge cap so a new root job can start.
+    GPU idle lift can grow with empty cards. CPU idle lift is +1..2 so a
+    drained autopilot cap cannot freeze the fleet, without warehousing.
     """
     cid = str(challenge_id or "")[:4]
     cap = per_challenge_max.get(cid)
@@ -559,17 +562,17 @@ def challenge_under_create_cap(
     starved = bool(idle_gpu_starved) or (
         bool(idle_gpu_needs_work) and not bool(gpu_keep_ahead)
     )
-    counts = (
-        root_phase_counts
-        if starved and cid in gpu_ids
-        else pending_counts
-    )
+    cpu_idle = bool(idle_cpu_needs_work) and cid in cpu_ids
+    gpu_idle = starved and cid in gpu_ids
+    counts = root_phase_counts if (cpu_idle or gpu_idle) else pending_counts
     used = int((counts or {}).get(cid, 0) or 0) + int((submitted or {}).get(cid, 0) or 0)
     extra = 0
-    if starved and cid in gpu_ids:
+    if gpu_idle:
         extra = max(int(gpu_spare_jobs or 0), int(idle_gpu_slaves or 0), 1)
     elif gpu_keep_ahead and cid in gpu_ids:
         extra = max(int(gpu_spare_jobs or 0), 1)
+    elif cpu_idle:
+        extra = max(1, min(int(idle_cpu_slaves or 0), 2))
     return used < int(cap) + extra
 
 
@@ -670,6 +673,7 @@ class PrecommitManager:
     def __init__(self):
         self.last_block_id = None
         self.num_precommits_submitted = 0
+        self.per_challenge_precommits_submitted = {}
         self.algorithm_name_2_id = {}
         self.challenge_name_2_id = {}
         self._governor_cache = None
@@ -1274,9 +1278,9 @@ class PrecommitManager:
             max_concurrent=create_cap,
             overlap_cap=overlap_cap,
         ):
-            logger.debug(
+            logger.info(
                 "pending benchmarks at cap (pending=%s root=%s proof=%s "
-                "submitted=%s max=%s effective=%s overlap=%s)",
+                "submitted=%s max=%s effective=%s overlap=%s idle_cpu=%s idle_gpu=%s)",
                 num_pending_jobs,
                 root_phase_jobs,
                 proof_phase_jobs,
@@ -1284,10 +1288,13 @@ class PrecommitManager:
                 configured_cap,
                 create_cap,
                 overlap_cap,
+                idle_cpu_needs_work,
+                idle_gpu_needs_work,
             )
-            self.last_idle_cpu_needs_work = False
-            self.last_idle_gpu_needs_work = False
-            self.last_idle_burst = 1
+            if not (idle_cpu_needs_work or idle_gpu_needs_work):
+                self.last_idle_cpu_needs_work = False
+                self.last_idle_gpu_needs_work = False
+                self.last_idle_burst = 1
             return
         self.last_idle_burst = idle_create_burst(
             idle_cpu_needs_work=idle_cpu_needs_work,
@@ -1353,11 +1360,17 @@ class PrecommitManager:
                 idle_cpu_needs_work=idle_cpu_needs_work,
             )
             if block:
-                logger.info("precommit governor blocked create: %s", governor_reason)
-                self.last_idle_cpu_needs_work = False
-                self.last_idle_gpu_needs_work = False
-                self.last_idle_burst = 1
-                return
+                if idle_cpu_needs_work or idle_gpu_needs_work:
+                    logger.info(
+                        "precommit governor would block (%s); idle override continuing",
+                        governor_reason,
+                    )
+                else:
+                    logger.info("precommit governor blocked create: %s", governor_reason)
+                    self.last_idle_cpu_needs_work = False
+                    self.last_idle_gpu_needs_work = False
+                    self.last_idle_burst = 1
+                    return
             if governor_reason.startswith("idle_cpu_override:"):
                 logger.info(
                     "precommit governor allowing create via idle CPU override "
@@ -1420,11 +1433,20 @@ class PrecommitManager:
         gpu_keep_ahead = bool(governor.get("gpu_keep_ahead"))
         idle_gpu_slaves = int(governor.get("online_idle_gpu_slaves") or 0)
         gpu_spare_jobs = int((governor.get("settings") or {}).get("gpu_spare_jobs") or 0)
+        idle_cpu_slaves = int(
+            governor.get("decision_idle_cpu_slaves")
+            or idle_decision_count(
+                governor.get("sustained_idle_cpu_slaves"),
+                governor.get("online_idle_cpu_slaves"),
+            )
+        )
 
         # Filter eligible algorithms (not over their per-challenge limit).
         # Empty GPU cards: proof-phase jobs do not count against GPU caps, and
         # the cap lifts so those cards are not starved onto CPU. Keep-ahead
         # only adds the spare count — it must not copy the idle-card lift.
+        # Idle CPUs: same root-phase rule, plus a +1..2 lift so a drained
+        # autopilot per-challenge cap cannot freeze the fleet.
         eligible = [
             x for x in algo_selection
             if challenge_under_create_cap(
@@ -1437,6 +1459,8 @@ class PrecommitManager:
                 gpu_keep_ahead=gpu_keep_ahead,
                 gpu_spare_jobs=gpu_spare_jobs,
                 idle_gpu_slaves=idle_gpu_slaves,
+                idle_cpu_needs_work=idle_cpu_needs_work,
+                idle_cpu_slaves=idle_cpu_slaves,
             )
         ]
         # TIG hygiene: skip banned / not-yet-active / failed-binary algorithms.
@@ -1462,7 +1486,18 @@ class PrecommitManager:
                     )
             eligible = kept
         if not eligible:
-            logger.debug("All algorithms are at their per-challenge max concurrent benchmarks")
+            logger.info(
+                "all algorithms at per-challenge max "
+                "(pending=%s root=%s submitted=%s caps=%s "
+                "idle_cpu=%s idle_cpu_slaves=%s idle_gpu=%s)",
+                per_challenge_counts,
+                root_phase_counts,
+                dict(self.per_challenge_precommits_submitted or {}),
+                per_challenge_max,
+                idle_cpu_needs_work,
+                idle_cpu_slaves,
+                idle_gpu_needs_work,
+            )
             return
 
         # Profile backlog: block only the saturated profile so fat GPU/CPU root

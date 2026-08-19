@@ -518,6 +518,45 @@ def main() -> int:
         ),
         (
             under_cap(
+                "c001",
+                pending_counts={"c001": 4},
+                root_phase_counts={"c001": 0},
+                submitted={},
+                per_challenge_max={"c001": 4},
+                idle_cpu_needs_work=True,
+                idle_cpu_slaves=20,
+            )
+            is True,
+            "idle CPUs ignore proof-phase jobs for CPU create cap",
+        ),
+        (
+            under_cap(
+                "c001",
+                pending_counts={"c001": 6},
+                root_phase_counts={"c001": 6},
+                submitted={},
+                per_challenge_max={"c001": 4},
+                idle_cpu_needs_work=True,
+                idle_cpu_slaves=20,
+            )
+            is False,
+            "idle CPU cap lift is still bounded",
+        ),
+        (
+            under_cap(
+                "c001",
+                pending_counts={"c001": 4},
+                root_phase_counts={"c001": 4},
+                submitted={},
+                per_challenge_max={"c001": 4},
+                idle_cpu_needs_work=True,
+                idle_cpu_slaves=20,
+            )
+            is True,
+            "idle CPUs may exceed cap by at most 2",
+        ),
+        (
+            under_cap(
                 "c004",
                 pending_counts={"c004": 8},
                 root_phase_counts={"c004": 6},
