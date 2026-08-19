@@ -40,6 +40,8 @@ def main() -> int:
         "effective_concurrent_cap",
         "idle_decision_count",
         "idle_create_burst",
+        "scaled_idle_burst_max",
+        "empty_claimable_wave",
         "extra_creates_this_tick",
         "challenge_under_create_cap",
         "should_force_cpu_only",
@@ -59,6 +61,8 @@ def main() -> int:
     eff_cap = ns["effective_concurrent_cap"]
     decision = ns["idle_decision_count"]
     burst = ns["idle_create_burst"]
+    scaled_hi = ns["scaled_idle_burst_max"]
+    empty_wave = ns["empty_claimable_wave"]
     extra_tick = ns["extra_creates_this_tick"]
     under_cap = ns["challenge_under_create_cap"]
     force_cpu = ns["should_force_cpu_only"]
@@ -869,9 +873,25 @@ def main() -> int:
                 base_burst=4,
                 max_burst=16,
                 cpu_unassigned_remaining=256,
+                cpu_online=77,
             ),
-            4,
-            "claimable 0 with unowned already at want still replaces 4",
+            16,
+            "claimable 0 uses want (20) not a fixed 4, capped at small-fleet max",
+        ),
+        (
+            burst(
+                idle_cpu_needs_work=True,
+                idle_cpu=0,
+                claimable_cpu=0,
+                cpu_want_spare=80,
+                cpu_unowned=80,
+                base_burst=4,
+                max_burst=16,
+                cpu_unassigned_remaining=256,
+                cpu_online=200,
+            ),
+            25,
+            "200-box fleet empty claimable scales above 16",
         ),
         (
             burst(
@@ -885,10 +905,25 @@ def main() -> int:
                 cpu_unassigned_remaining=256,
             ),
             4,
-            "busy fleet + empty claimable still starts a replacement wave",
+            "busy fleet + empty claimable + no want still starts base wave",
         ),
     ]
     for got, expect, label in burst_cases:
+        ok = got == expect
+        print(f"{'pass' if ok else 'FAIL'}: {label} got={got} expect={expect}")
+        if not ok:
+            failed += 1
+
+    scale_cases = [
+        (scaled_hi(base_burst=4, max_burst=16, online=0, want=0), 16, "unknown fleet keeps configured max"),
+        (scaled_hi(base_burst=4, max_burst=16, online=77, want=20), 16, "77-box fleet stays at 16 floor"),
+        (scaled_hi(base_burst=4, max_burst=16, online=200, want=80), 25, "200-box fleet raises cap to 25"),
+        (scaled_hi(base_burst=4, max_burst=16, online=512, want=200), 64, "huge fleet hits 64 ceiling"),
+        (empty_wave(base_burst=4, hi=16, want=20), 16, "empty claimable wave follows want up to hi"),
+        (empty_wave(base_burst=4, hi=25, want=80), 25, "empty claimable wave uses scaled hi"),
+        (empty_wave(base_burst=4, hi=16, want=0), 4, "no want still keeps base wave"),
+    ]
+    for got, expect, label in scale_cases:
         ok = got == expect
         print(f"{'pass' if ok else 'FAIL'}: {label} got={got} expect={expect}")
         if not ok:

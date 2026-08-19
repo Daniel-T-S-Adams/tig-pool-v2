@@ -358,6 +358,37 @@ def idle_decision_count(sustained: int = 0, instant: int = 0) -> int:
     return max(0, int(sustained or 0), int(instant or 0))
 
 
+def scaled_idle_burst_max(
+    *,
+    base_burst: int = 4,
+    max_burst: int = 16,
+    online: int = 0,
+    want: int = 0,
+) -> int:
+    """Per-tick create cap. Grows with fleet so 200 boxes are not stuck at 16.
+
+    ``max_burst`` is the small-fleet floor. About one extra create per 8
+    online boxes, never above 64. Unassigned room still caps the wave.
+    """
+    base = max(1, int(base_burst or 1))
+    configured = max(base, int(max_burst or base))
+    fleet = max(0, int(online or 0), int(want or 0))
+    if fleet <= 0:
+        return configured
+    grown = max(configured, (fleet + 7) // 8)
+    return min(64, grown)
+
+
+def empty_claimable_wave(
+    *,
+    base_burst: int = 4,
+    hi: int = 16,
+    want: int = 0,
+) -> int:
+    """Replacement jobs when claimable is empty. Scales with keep-ahead want."""
+    return min(max(1, int(hi or 1)), max(int(base_burst or 4), int(want or 0)))
+
+
 def idle_create_burst(
     *,
     idle_cpu_needs_work: bool = False,
@@ -374,6 +405,8 @@ def idle_create_burst(
     max_burst: int = 16,
     cpu_unassigned_remaining: int = 256,
     gpu_unassigned_remaining: int = 32,
+    cpu_online: int = 0,
+    gpu_online: int = 0,
 ) -> int:
     """How many precommits to attempt this tick (including the first).
 
@@ -381,23 +414,49 @@ def idle_create_burst(
     claimable roots than they can absorb, or when claimable is empty
     during a proving wave (unowned job counts do not feed finishers).
     Caps at remaining unassigned room so this cannot rebuild a leftover
-    pile. The empty-claimable replacement is a small base_burst wave,
-    not the full proving count.
+    pile. Empty-claimable replacements scale with fleet/want, not a
+    fixed 4.
     """
-    hi = max(1, int(max_burst or 1), int(base_burst or 1))
     if not idle_cpu_needs_work and not idle_gpu_needs_work:
         return 1
+    want_for_cap = 0
+    online_for_cap = 0
+    if idle_cpu_needs_work:
+        want_for_cap += max(0, int(cpu_want_spare or 0))
+        online_for_cap += max(0, int(cpu_online or 0))
+    if idle_gpu_needs_work:
+        want_for_cap += max(0, int(gpu_want_spare or 0))
+        online_for_cap += max(0, int(gpu_online or 0))
+    hi = scaled_idle_burst_max(
+        base_burst=base_burst,
+        max_burst=max_burst,
+        online=online_for_cap,
+        want=want_for_cap,
+    )
     cpu_idle_def = max(0, int(idle_cpu or 0) - int(claimable_cpu or 0))
     cpu_keep_def = max(0, int(cpu_want_spare or 0) - int(cpu_unowned or 0))
     # Unowned jobs with no claimable roots do not feed a finishing box.
-    # Keep a small replacement wave so the next benchmark can start now.
     if idle_cpu_needs_work and int(claimable_cpu or 0) <= 0:
-        cpu_keep_def = max(cpu_keep_def, min(hi, int(base_burst or 4)))
+        cpu_keep_def = max(
+            cpu_keep_def,
+            empty_claimable_wave(
+                base_burst=base_burst,
+                hi=hi,
+                want=cpu_want_spare,
+            ),
+        )
     cpu_def = max(cpu_idle_def, cpu_keep_def) if idle_cpu_needs_work else 0
     gpu_idle_def = max(0, int(idle_gpu or 0) - int(claimable_gpu or 0))
     gpu_keep_def = max(0, int(gpu_want_spare or 0) - int(gpu_unowned or 0))
     if idle_gpu_needs_work and int(claimable_gpu or 0) <= 0:
-        gpu_keep_def = max(gpu_keep_def, min(hi, int(base_burst or 4)))
+        gpu_keep_def = max(
+            gpu_keep_def,
+            empty_claimable_wave(
+                base_burst=base_burst,
+                hi=hi,
+                want=gpu_want_spare,
+            ),
+        )
     gpu_def = max(gpu_idle_def, gpu_keep_def) if idle_gpu_needs_work else 0
     deficit = cpu_def + gpu_def
     if deficit <= 0:
@@ -1332,6 +1391,8 @@ class PrecommitManager:
                 int(caps.get("gpu_unassigned_cap") or 0)
                 - int(governor.get("gpu_unassigned_claimable") or 0),
             ),
+            cpu_online=int(governor.get("online_cpu_slaves") or 0),
+            gpu_online=int(governor.get("online_gpu_slaves") or 0),
         )
         self.last_sized_burst = self.last_idle_burst
         if self.last_idle_burst > 1:

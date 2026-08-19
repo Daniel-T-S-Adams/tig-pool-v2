@@ -57,7 +57,7 @@ def main():
             extra = extra_creates_this_tick(
                 sized_burst=sized,
                 first_ok=submit_precommit_req is not None,
-                max_burst=PRECOMMIT_IDLE_BURST_MAX,
+                max_burst=max(PRECOMMIT_IDLE_BURST_MAX, sized),
             )
             if extra > 0:
                 logger.info(
