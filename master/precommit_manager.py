@@ -367,15 +367,17 @@ def scaled_idle_burst_max(
 ) -> int:
     """Per-tick create cap. Grows with fleet so 200 boxes are not stuck at 16.
 
-    ``max_burst`` is the small-fleet floor. About one extra create per 8
-    online boxes, never above 64. Unassigned room still caps the wave.
+    ``max_burst`` is the small-fleet floor. Grow with idle/keep-ahead want
+    and about one extra create per 8 online boxes, never above 64.
+    Unassigned room still caps the wave.
     """
     base = max(1, int(base_burst or 1))
     configured = max(base, int(max_burst or base))
-    fleet = max(0, int(online or 0), int(want or 0))
-    if fleet <= 0:
+    fleet = max(0, int(online or 0))
+    need = max(0, int(want or 0))
+    if fleet <= 0 and need <= 0:
         return configured
-    grown = max(configured, (fleet + 7) // 8)
+    grown = max(configured, need, (fleet + 7) // 8)
     return min(64, grown)
 
 
@@ -422,7 +424,7 @@ def idle_create_burst(
     want_for_cap = 0
     online_for_cap = 0
     if idle_cpu_needs_work:
-        want_for_cap += max(0, int(cpu_want_spare or 0))
+        want_for_cap += max(0, int(cpu_want_spare or 0), int(idle_cpu or 0))
         online_for_cap += max(0, int(cpu_online or 0))
     if idle_gpu_needs_work:
         want_for_cap += max(0, int(gpu_want_spare or 0))
@@ -433,7 +435,9 @@ def idle_create_burst(
         online=online_for_cap,
         want=want_for_cap,
     )
-    cpu_idle_def = max(0, int(idle_cpu or 0) - int(claimable_cpu or 0))
+    # Sitting leftovers do not feed idle boxes. Subtracting them sized a
+    # 16-job burst while 38 CPUs stayed empty next to 22 unassigned roots.
+    cpu_idle_def = max(0, int(idle_cpu or 0)) if idle_cpu_needs_work else 0
     cpu_keep_def = max(0, int(cpu_want_spare or 0) - int(cpu_unowned or 0))
     # Unowned jobs with no claimable roots do not feed a finishing box.
     if idle_cpu_needs_work and int(claimable_cpu or 0) <= 0:
@@ -646,8 +650,9 @@ def challenge_under_create_cap(
     Proof-phase jobs do not feed idle root workers. When a profile is idle
     with no claimable roots, count only root-phase jobs against that
     profile's per-challenge cap so a new root job can start.
-    GPU idle lift can grow with empty cards. CPU idle lift is +1..2 so a
-    drained autopilot cap cannot freeze the fleet, without warehousing.
+    GPU idle lift grows with empty cards. CPU idle lift grows with idle
+    boxes — a +2 lift left dozens of CPUs empty against autopilot caps of 7.
+    Unassigned remaining still caps the leftover pile.
     """
     cid = str(challenge_id or "")[:4]
     cap = per_challenge_max.get(cid)
@@ -666,7 +671,7 @@ def challenge_under_create_cap(
     elif gpu_keep_ahead and cid in gpu_ids:
         extra = max(int(gpu_spare_jobs or 0), 1)
     elif cpu_idle:
-        extra = max(1, min(int(idle_cpu_slaves or 0), 2))
+        extra = max(1, int(idle_cpu_slaves or 0))
     return used < int(cap) + extra
 
 

@@ -560,15 +560,15 @@ def main() -> int:
         (
             under_cap(
                 "c001",
-                pending_counts={"c001": 6},
-                root_phase_counts={"c001": 6},
+                pending_counts={"c001": 25},
+                root_phase_counts={"c001": 24},
                 submitted={},
                 per_challenge_max={"c001": 4},
                 idle_cpu_needs_work=True,
                 idle_cpu_slaves=20,
             )
             is False,
-            "idle CPU cap lift is still bounded",
+            "idle CPU cap lift is bounded by idle box count",
         ),
         (
             under_cap(
@@ -581,7 +581,7 @@ def main() -> int:
                 idle_cpu_slaves=20,
             )
             is True,
-            "idle CPUs may exceed cap by at most 2",
+            "idle CPUs lift cap by the idle box count",
         ),
         (
             under_cap(
@@ -819,8 +819,8 @@ def main() -> int:
                 max_burst=16,
                 cpu_unassigned_remaining=256,
             ),
-            16,
-            "48 idle / 0 claimable => burst to max 16",
+            48,
+            "48 idle / 0 claimable => burst matches idle boxes",
         ),
         (
             burst(
@@ -850,9 +850,10 @@ def main() -> int:
                 idle_cpu=21,
                 claimable_cpu=25,
                 max_burst=16,
+                cpu_unassigned_remaining=256,
             ),
-            1,
-            "claimable already covers idle => no burst",
+            21,
+            "sitting leftovers do not shrink the idle burst",
         ),
         (
             burst(
@@ -864,8 +865,8 @@ def main() -> int:
                 max_burst=16,
                 cpu_unassigned_remaining=256,
             ),
-            16,
-            "proving keep-ahead deficit bursts to max 16",
+            20,
+            "proving keep-ahead deficit bursts to the spare want",
         ),
         (
             burst(
@@ -890,8 +891,8 @@ def main() -> int:
                 max_burst=16,
                 cpu_unassigned_remaining=256,
             ),
-            1,
-            "leftovers covering idle do not burst when no proving spare",
+            21,
+            "leftovers covering idle still burst for empty boxes",
         ),
         (
             burst(
@@ -905,8 +906,8 @@ def main() -> int:
                 cpu_unassigned_remaining=256,
                 cpu_online=77,
             ),
-            16,
-            "claimable 0 uses want (20) not a fixed 4, capped at small-fleet max",
+            20,
+            "claimable 0 uses want (20) not a fixed 4",
         ),
         (
             burst(
@@ -920,8 +921,8 @@ def main() -> int:
                 cpu_unassigned_remaining=256,
                 cpu_online=200,
             ),
-            25,
-            "200-box fleet empty claimable scales above 16",
+            64,
+            "200-box fleet empty claimable follows want up to 64",
         ),
         (
             burst(
@@ -946,8 +947,8 @@ def main() -> int:
 
     scale_cases = [
         (scaled_hi(base_burst=4, max_burst=16, online=0, want=0), 16, "unknown fleet keeps configured max"),
-        (scaled_hi(base_burst=4, max_burst=16, online=77, want=20), 16, "77-box fleet stays at 16 floor"),
-        (scaled_hi(base_burst=4, max_burst=16, online=200, want=80), 25, "200-box fleet raises cap to 25"),
+        (scaled_hi(base_burst=4, max_burst=16, online=77, want=20), 20, "77-box fleet burst follows idle want"),
+        (scaled_hi(base_burst=4, max_burst=16, online=200, want=80), 64, "want 80 hits 64 ceiling"),
         (scaled_hi(base_burst=4, max_burst=16, online=512, want=200), 64, "huge fleet hits 64 ceiling"),
         (empty_wave(base_burst=4, hi=16, want=20), 16, "empty claimable wave follows want up to hi"),
         (empty_wave(base_burst=4, hi=25, want=80), 25, "empty claimable wave uses scaled hi"),
