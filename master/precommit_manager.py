@@ -513,12 +513,14 @@ def compute_gpu_keep_ahead(
     keep_ahead_cap: int = 8,
     online_idle_gpu_slaves: int = 0,
     online_gpu_slaves: int = 0,
+    gpu_unassigned_claimable: int = 0,
 ) -> bool:
     """True when the unowned GPU spare pile is short. GPUs may all be busy.
 
     Spare target scales with idle + proving, capped by live GPU count.
     ``gpu_spare_jobs`` remains an operator floor, also capped by online.
     ``keep_ahead_cap`` is only the fallback cap when online is unknown.
+    Unowned jobs with no claimable roots do not feed a finishing card.
     """
     if gpu_profile_blocked:
         return False
@@ -531,7 +533,10 @@ def compute_gpu_keep_ahead(
     if spare > 0:
         spare_cap = online if online > 0 else spare
         want = max(want, min(spare, spare_cap))
-    return want > 0 and int(unowned_gpu_root_jobs or 0) < want
+    usable = int(unowned_gpu_root_jobs or 0)
+    if int(gpu_unassigned_claimable or 0) <= 0:
+        usable = 0
+    return want > 0 and usable < want
 
 
 def compute_idle_gpu_needs_work(
@@ -563,6 +568,7 @@ def compute_idle_gpu_needs_work(
         gpu_jobs_in_proof_phase=gpu_jobs_in_proof_phase,
         online_idle_gpu_slaves=online_idle_gpu_slaves,
         online_gpu_slaves=online_gpu_slaves,
+        gpu_unassigned_claimable=gpu_unassigned_claimable,
     )
 
 
@@ -674,13 +680,13 @@ def should_force_cpu_only(
 ) -> bool:
     """Hard CPU filter once GPUs already have jobs.
 
-    Empty-card GPU creates are handled by ``should_reserve_idle_gpu_create``
-    (one per cooldown). A couple of idle GPUs must not unlock the whole
-    CPU burst back into the GPU lottery.
-    ``idle_gpu_starved`` / ``idle_gpu_needs_work`` stay in the signature so
-    callers do not break; they do not veto CPU-only.
+    Empty GPU cards must still receive reserved creates. This filter only
+    blocks the mixed lottery; ``should_reserve_idle_gpu_create`` can override
+    it for a fleet-scaled GPU wave.
     """
-    del idle_gpu_starved, idle_gpu_needs_work
+    del idle_gpu_needs_work
+    if idle_gpu_starved:
+        return False
     return bool(
         idle_cpu_needs_work
         and (not gpu_starved)
@@ -694,10 +700,17 @@ def should_reserve_idle_gpu_create(
     last_create_ms: int = 0,
     now_ms: int = 0,
     cooldown_ms: int = 30_000,
+    skip_cooldown: bool = False,
 ) -> bool:
-    """At most one idle-GPU create per cooldown so CPU burst cannot flood GPU."""
+    """Reserve a GPU create while cards need work.
+
+    Keep-ahead uses a cooldown so a CPU burst cannot flood GPU. Empty
+    cards skip that cooldown so idle GPUs are not stuck for 30s each.
+    """
     if not idle_gpu_needs_work:
         return False
+    if skip_cooldown:
+        return True
     last = int(last_create_ms or 0)
     now = int(now_ms or 0)
     if last > 0 and now > 0 and (now - last) < int(cooldown_ms):
@@ -773,6 +786,8 @@ class PrecommitManager:
         self.last_sized_burst = 1
         self.last_idle_window = {}
         self._idle_gpu_create_ms = 0
+        self._idle_gpu_reserved_count = 0
+        self._idle_gpu_reserve_tick_ms = 0
 
     def _refresh_cpu_idle_window(self, now_ms: Optional[int] = None) -> dict:
         """Sample online/idle CPU names and update the sustained-idle window."""
@@ -1292,6 +1307,7 @@ class PrecommitManager:
                     gpu_jobs_in_proof_phase=gpu_jobs_in_proof_phase,
                     online_idle_gpu_slaves=online_idle_gpu_slaves,
                     online_gpu_slaves=online_gpu_slaves,
+                    gpu_unassigned_claimable=gpu_unassigned_claimable,
                 ),
                 "idle_gpu_needs_work": compute_idle_gpu_needs_work(
                     gpu_unassigned_claimable=gpu_unassigned_claimable,
@@ -1624,11 +1640,36 @@ class PrecommitManager:
             )
         gpu_below_floor = gpu_active_jobs < max(1, gpu_floor)
         gpu_starved = gpu_active_jobs <= 0
+        now_ms = int(time.time() * 1000)
+        if now_ms - int(getattr(self, "_idle_gpu_reserve_tick_ms", 0) or 0) > 4000:
+            self._idle_gpu_reserved_count = 0
+            self._idle_gpu_reserve_tick_ms = now_ms
+        gpu_claimable = int(governor.get("gpu_unassigned_claimable") or 0)
+        gpu_wave = 0
+        if idle_gpu_starved:
+            gpu_wave = empty_claimable_wave(
+                base_burst=int(os.environ.get("PRECOMMIT_IDLE_BURST", "4")),
+                hi=scaled_idle_burst_max(
+                    base_burst=int(os.environ.get("PRECOMMIT_IDLE_BURST", "4")),
+                    max_burst=int(os.environ.get("PRECOMMIT_IDLE_BURST_MAX", "16")),
+                    online=int(governor.get("online_gpu_slaves") or idle_gpu_slaves or 0),
+                    want=max(
+                        0,
+                        idle_gpu_slaves - gpu_claimable,
+                        gpu_want_spare,
+                    ),
+                ),
+                want=max(0, idle_gpu_slaves - gpu_claimable, gpu_want_spare),
+            )
+        reserved_so_far = int(getattr(self, "_idle_gpu_reserved_count", 0) or 0)
         reserve_gpu = should_reserve_idle_gpu_create(
-            idle_gpu_needs_work=idle_gpu_starved,
+            idle_gpu_needs_work=bool(idle_gpu_starved or idle_gpu_needs_work),
             last_create_ms=int(getattr(self, "_idle_gpu_create_ms", 0) or 0),
-            now_ms=int(time.time() * 1000),
+            now_ms=now_ms,
+            skip_cooldown=bool(idle_gpu_starved and reserved_so_far < max(1, gpu_wave)),
         )
+        if idle_gpu_starved and reserved_so_far >= max(1, gpu_wave):
+            reserve_gpu = False
         force_cpu_only = should_force_cpu_only(
             idle_cpu_needs_work=idle_cpu_needs_work,
             gpu_starved=gpu_starved,
@@ -1853,5 +1894,8 @@ class PrecommitManager:
         )
         if reserve_gpu and c_id in GPU_CHALLENGE_IDS:
             self._idle_gpu_create_ms = int(time.time() * 1000)
+            self._idle_gpu_reserved_count = int(
+                getattr(self, "_idle_gpu_reserved_count", 0) or 0
+            ) + 1
         logger.info(f"Created precommit with algorithm: {a_id}")
         return req

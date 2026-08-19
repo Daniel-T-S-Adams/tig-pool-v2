@@ -379,13 +379,23 @@ def main() -> int:
         ),
         (
             dict(
-                gpu_unassigned_claimable=0,
+                gpu_unassigned_claimable=4,
                 online_idle_gpu_slaves=0,
                 unowned_gpu_root_jobs=2,
                 gpu_spare_jobs=2,
             ),
             False,
             "spare GPU jobs already waiting",
+        ),
+        (
+            dict(
+                gpu_unassigned_claimable=0,
+                online_idle_gpu_slaves=0,
+                unowned_gpu_root_jobs=2,
+                gpu_spare_jobs=2,
+            ),
+            True,
+            "unowned GPU jobs with no claimable roots still need work",
         ),
         (
             dict(gpu_unassigned_claimable=0, online_idle_gpu_slaves=2, gpu_profile_blocked=True),
@@ -416,8 +426,18 @@ def main() -> int:
     print(f"{'pass' if ok else 'FAIL'}: spare pile short requests keep-ahead")
     if not ok:
         failed += 1
-    ok = gpu_keep_ahead_fn(unowned_gpu_root_jobs=2, gpu_spare_jobs=2) is False
+    ok = gpu_keep_ahead_fn(
+        unowned_gpu_root_jobs=2,
+        gpu_spare_jobs=2,
+        gpu_unassigned_claimable=4,
+    ) is False
     print(f"{'pass' if ok else 'FAIL'}: full spare pile stops keep-ahead")
+    ok = gpu_keep_ahead_fn(
+        unowned_gpu_root_jobs=2,
+        gpu_spare_jobs=2,
+        gpu_unassigned_claimable=0,
+    ) is True
+    print(f"{'pass' if ok else 'FAIL'}: unowned GPU jobs without claimable do not satisfy keep-ahead")
     if not ok:
         failed += 1
     ok = gpu_keep_ahead_fn(
@@ -432,6 +452,7 @@ def main() -> int:
         unowned_gpu_root_jobs=6,
         gpu_spare_jobs=2,
         gpu_jobs_in_proof_phase=6,
+        gpu_unassigned_claimable=8,
     ) is False
     print(f"{'pass' if ok else 'FAIL'}: proving GPU keep-ahead stops once replacements exist")
     if not ok:
@@ -450,6 +471,7 @@ def main() -> int:
         gpu_spare_jobs=2,
         gpu_jobs_in_proof_phase=2,
         online_gpu_slaves=2,
+        gpu_unassigned_claimable=4,
     ) is False
     print(f"{'pass' if ok else 'FAIL'}: 2-GPU fleet does not warehouse extra jobs")
     if not ok:
@@ -640,8 +662,8 @@ def main() -> int:
         gpu_starved=False,
         idle_gpu_starved=True,
         cpu_profile_blocked=False,
-    ) is True
-    print(f"{'pass' if ok else 'FAIL'}: idle GPUs do not unlock CPU burst into GPU lottery")
+    ) is False
+    print(f"{'pass' if ok else 'FAIL'}: empty GPU cards are not locked out of creates")
     if not ok:
         failed += 1
 
@@ -681,6 +703,14 @@ def main() -> int:
         cooldown_ms=30_000,
     ) is False
     print(f"{'pass' if ok else 'FAIL'}: idle-GPU create respects cooldown")
+    ok = reserve_gpu(
+        idle_gpu_needs_work=True,
+        last_create_ms=1_000,
+        now_ms=10_000,
+        cooldown_ms=30_000,
+        skip_cooldown=True,
+    ) is True
+    print(f"{'pass' if ok else 'FAIL'}: empty GPU cards skip reserve cooldown")
     if not ok:
         failed += 1
 
