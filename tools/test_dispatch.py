@@ -10,6 +10,7 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from master.dispatch import (  # noqa: E402
+    creates_for_profile,
     dispatch_shorts,
     extra_create_this_tick,
     lock_eligible_algorithms,
@@ -113,6 +114,34 @@ def main() -> int:
     check(
         both_busy == (True, True),
         "neither hole → both may keep-ahead",
+    )
+    check(
+        creates_for_profile(
+            has_hole=True, is_short=True, idle=17, claimable=0, n_algos=3
+        )
+        == 3,
+        "17 idle GPUs get all 3 GPU algorithms this tick",
+    )
+    check(
+        creates_for_profile(
+            has_hole=True, is_short=True, idle=2, claimable=0, n_algos=3
+        )
+        == 2,
+        "do not create more GPU jobs than idle cards",
+    )
+    check(
+        creates_for_profile(
+            has_hole=False, is_short=True, idle=0, claimable=10, n_algos=5
+        )
+        == 1,
+        "CPU keep-ahead without a hole stays one create",
+    )
+    check(
+        creates_for_profile(
+            has_hole=False, is_short=False, idle=0, claimable=10, n_algos=5
+        )
+        == 0,
+        "neither hole nor short → no create",
     )
     mixed = [
         {"algorithm_id": "c001_a098", "weight": 3},

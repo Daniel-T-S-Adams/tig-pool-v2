@@ -13,10 +13,10 @@ from master.client_manager import CONFIG
 from master.proof_affinity import SLAVE_ONLINE_MS, ensure_slave_seen_table
 from master.idle_tracker import CPU_IDLE_TRACKER, idle_window_settings
 from master.dispatch import (
+    creates_for_profile,
     dispatch_shorts,
-    extra_create_this_tick,
     lock_eligible_algorithms,
-    next_create_profile,
+    profile_has_hole,
 )
 from master.capability_scheduler import (
     SCHEDULER as CAPABILITY_SCHEDULER,
@@ -892,76 +892,102 @@ class PrecommitManager:
         )
 
     def run_tick(self):
-        """At most two creates per 5s tick: one per short profile.
+        """Cover idle holes with one create per distinct algorithm this tick.
 
-        TIG accepts ~2.4 precommits/min. Bursting 40+ extras mostly 400s
-        duplicate settings and does not fill boxes. Create only when a
-        profile is short, and alternate if both are.
+        Same algorithm in the same block 400s. GPU holes go first. Keep-ahead
+        without a hole stays a single create.
         """
         self.begin_create_tick()
         governor = self._governor_snapshot()
+        cpu_idle = int(
+            governor.get("decision_idle_cpu_slaves")
+            or idle_decision_count(
+                governor.get("sustained_idle_cpu_slaves"),
+                governor.get("online_idle_cpu_slaves"),
+            )
+        )
+        cpu_claimable = int(governor.get("cpu_unassigned_claimable") or 0)
+        cpu_unowned = int(governor.get("unowned_cpu_root_jobs") or 0)
+        gpu_idle = int(governor.get("online_idle_gpu_slaves") or 0)
+        gpu_claimable = int(governor.get("gpu_unassigned_claimable") or 0)
+        gpu_unowned = int(governor.get("unowned_gpu_root_jobs") or 0)
         cpu_short, gpu_short = dispatch_shorts(
-            cpu_idle=int(
-                governor.get("decision_idle_cpu_slaves")
-                or idle_decision_count(
-                    governor.get("sustained_idle_cpu_slaves"),
-                    governor.get("online_idle_cpu_slaves"),
-                )
-            ),
-            cpu_claimable=int(governor.get("cpu_unassigned_claimable") or 0),
-            cpu_unowned=int(governor.get("unowned_cpu_root_jobs") or 0),
-            gpu_idle=int(governor.get("online_idle_gpu_slaves") or 0),
-            gpu_claimable=int(governor.get("gpu_unassigned_claimable") or 0),
-            gpu_unowned=int(governor.get("unowned_gpu_root_jobs") or 0),
+            cpu_idle=cpu_idle,
+            cpu_claimable=cpu_claimable,
+            cpu_unowned=cpu_unowned,
+            gpu_idle=gpu_idle,
+            gpu_claimable=gpu_claimable,
+            gpu_unowned=gpu_unowned,
+        )
+        cpu_hole = profile_has_hole(idle=cpu_idle, claimable=cpu_claimable)
+        gpu_hole = profile_has_hole(idle=gpu_idle, claimable=gpu_claimable)
+        n_gpu = creates_for_profile(
+            has_hole=gpu_hole,
+            is_short=gpu_short,
+            idle=gpu_idle,
+            claimable=gpu_claimable,
+            n_algos=len(GPU_CHALLENGE_IDS),
+        )
+        n_cpu = creates_for_profile(
+            has_hole=cpu_hole,
+            is_short=cpu_short,
+            idle=cpu_idle,
+            claimable=cpu_claimable,
+            n_algos=len(CPU_CHALLENGE_IDS),
         )
         self.last_cpu_short = cpu_short
         self.last_gpu_short = gpu_short
-        target = next_create_profile(
-            cpu_short=cpu_short,
-            gpu_short=gpu_short,
-            last_profile=str(getattr(self, "last_dispatch_profile", "") or ""),
-        )
-        if not target:
+        self.last_cpu_hole = cpu_hole
+        self.last_gpu_hole = gpu_hole
+        if n_cpu <= 0 and n_gpu <= 0:
             logger.info(
                 "dispatch skip create cpu_short=%s gpu_short=%s idle_cpu=%s "
                 "claimable_cpu=%s unowned_cpu=%s idle_gpu=%s claimable_gpu=%s "
                 "unowned_gpu=%s",
                 cpu_short,
                 gpu_short,
-                governor.get("decision_idle_cpu_slaves")
-                or governor.get("online_idle_cpu_slaves"),
-                governor.get("cpu_unassigned_claimable"),
-                governor.get("unowned_cpu_root_jobs"),
-                governor.get("online_idle_gpu_slaves"),
-                governor.get("gpu_unassigned_claimable"),
-                governor.get("unowned_gpu_root_jobs"),
+                cpu_idle,
+                cpu_claimable,
+                cpu_unowned,
+                gpu_idle,
+                gpu_claimable,
+                gpu_unowned,
             )
             return []
-        self._force_cpu_burst = target == "cpu"
-        self._force_gpu_burst = target == "gpu"
         created = []
-        first = self.run()
-        if first is not None:
-            created.append(first)
-            self.last_dispatch_profile = target
-        extra = extra_create_this_tick(cpu_short=cpu_short, gpu_short=gpu_short)
-        if extra:
-            other = "gpu" if target == "cpu" else "cpu"
-            self._force_cpu_burst = other == "cpu"
-            self._force_gpu_burst = other == "gpu"
-            second = self.run()
-            if second is not None:
-                created.append(second)
-                self.last_dispatch_profile = other
+        self._exclude_algorithm_ids = set()
+        # GPU hole first: 17 idle cards cannot wait for CPU keep-ahead turns.
+        for profile, n in (("gpu", n_gpu), ("cpu", n_cpu)):
+            if n <= 0:
+                continue
+            for _ in range(n):
+                self._force_gpu_burst = profile == "gpu"
+                self._force_cpu_burst = profile == "cpu"
+                req = self.run()
+                if req is None:
+                    break
+                created.append(req)
+                aid = str(getattr(getattr(req, "settings", None), "algorithm_id", "") or "")
+                if aid:
+                    self._exclude_algorithm_ids.add(aid)
+                self.last_dispatch_profile = profile
         self._force_cpu_burst = False
         self._force_gpu_burst = False
+        self._exclude_algorithm_ids = set()
         logger.info(
-            "dispatch tick target=%s extra=%s got=%s cpu_short=%s gpu_short=%s",
-            target,
-            extra,
+            "dispatch tick target=%s extra=%s got=%s cpu_n=%s gpu_n=%s "
+            "cpu_short=%s gpu_short=%s cpu_hole=%s gpu_hole=%s idle_gpu=%s idle_cpu=%s",
+            "gpu" if n_gpu else "cpu",
+            max(0, n_gpu + n_cpu - 1),
             len(created),
+            n_cpu,
+            n_gpu,
             cpu_short,
             gpu_short,
+            cpu_hole,
+            gpu_hole,
+            gpu_idle,
+            cpu_idle,
         )
         return created
 
@@ -2083,6 +2109,29 @@ class PrecommitManager:
                 force_cpu_only,
             )
             return
+
+        exclude_ids = {
+            str(a or "")
+            for a in (getattr(self, "_exclude_algorithm_ids", None) or set())
+            if a
+        }
+        exclude_chals = {a[:4] for a in exclude_ids if len(a) >= 4}
+        if exclude_chals:
+            kept = []
+            kept_w = []
+            for x, w in zip(weighted_eligible, weights):
+                if str(x.get("algorithm_id") or "")[:4] in exclude_chals:
+                    continue
+                kept.append(x)
+                kept_w.append(w)
+            if not kept:
+                logger.info(
+                    "dispatch skip remaining creates, challenges already used this tick=%s",
+                    sorted(exclude_chals),
+                )
+                return
+            weighted_eligible = kept
+            weights = kept_w
 
         logger.debug(
             "Selecting algorithm from: %s idle_cpu=%s idle_gpu=%s gpu_below_floor=%s force_cpu_only=%s",

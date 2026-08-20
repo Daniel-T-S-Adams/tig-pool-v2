@@ -61,7 +61,11 @@ def main():
             traceback.print_exc()
             logger.error(f"{e}")
         finally:
-            time.sleep(5)
+            hole = bool(
+                getattr(precommit_manager, "last_cpu_hole", False)
+                or getattr(precommit_manager, "last_gpu_hole", False)
+            )
+            time.sleep(1 if hole else 5)
 
 
 if __name__ == "__main__":

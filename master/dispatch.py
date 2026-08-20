@@ -94,6 +94,28 @@ def extra_create_this_tick(*, cpu_short: bool, gpu_short: bool) -> int:
     return 1 if (cpu_short and gpu_short) else 0
 
 
+def creates_for_profile(
+    *,
+    has_hole: bool,
+    is_short: bool,
+    idle: int = 0,
+    claimable: int = 0,
+    n_algos: int = 1,
+) -> int:
+    """How many distinct-algorithm creates this tick for one profile.
+
+    A hole is covered with one create per algorithm, capped by the idle
+    deficit. Keep-ahead without a hole stays a single create. Repeating
+    the same algorithm in the same block 400s; this does not burst clones.
+    """
+    if has_hole:
+        deficit = max(1, int(idle or 0) - max(0, int(claimable or 0)))
+        return max(1, min(max(1, int(n_algos or 1)), deficit))
+    if is_short:
+        return 1
+    return 0
+
+
 def lock_eligible_algorithms(eligible, *, profile: str, cpu_ids, gpu_ids):
     """Keep only algorithms for a forced create profile.
 
