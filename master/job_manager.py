@@ -18,12 +18,99 @@ from master.proof_affinity import (
     fetch_online_slaves,
     offline_owners,
 )
+from master.dispatch import pin_limit, slave_work_profile
 import math
 
 logger = logging.getLogger(os.path.splitext(os.path.basename(__file__))[0])
 
 # Mirrored from precommit_manager — keep local to avoid import cycles.
 CPU_CHALLENGE_IDS = ("c001", "c002", "c003", "c007", "c008")
+GPU_CHALLENGE_IDS = ("c004", "c005", "c006")
+
+
+def _job_profile(challenge_id: str) -> str:
+    cid = str(challenge_id or "")[:4]
+    return "gpu" if cid in GPU_CHALLENGE_IDS else "cpu"
+
+
+def pin_new_job_batches(benchmark_id: str, challenge_id: str, num_batches: int) -> int:
+    """Reserve new root rows for idle boxes of the matching profile.
+
+    Leaves leftover batches unassigned so they stay claimable. Pins expire
+    via existing zombie/idle shed if the box never polls.
+    """
+    profile = _job_profile(challenge_id)
+    if int(num_batches or 0) <= 0 or not benchmark_id:
+        return 0
+    now_ms = int(time.time() * 1000)
+    cutoff = now_ms - int(SLAVE_ONLINE_MS)
+    try:
+        ensure_slave_seen_table(get_db_conn().execute)
+        rows = get_db_conn().fetch_all(
+            """
+            SELECT ss.slave_name
+            FROM slave_seen ss
+            WHERE ss.last_seen >= %s
+              AND COALESCE(ss.telem_state, 'idle') NOT IN
+                  ('running', 'downloading', 'submitting')
+              AND COALESCE(ss.telem_active, 0) <= 0
+              AND NOT EXISTS (
+                SELECT 1 FROM root_batch rb
+                WHERE rb.slave = ss.slave_name
+                  AND rb.ready IS NULL
+                  AND rb.start_time IS NOT NULL
+              )
+              AND NOT EXISTS (
+                SELECT 1 FROM proofs_batch pb
+                WHERE pb.slave = ss.slave_name
+                  AND pb.ready IS NULL
+                  AND pb.start_time IS NOT NULL
+              )
+            ORDER BY ss.last_seen ASC
+            """,
+            (cutoff,),
+        ) or []
+    except Exception as exc:
+        logger.warning("pin idle-slave query failed: %s", exc)
+        return 0
+    idle = [
+        r["slave_name"]
+        for r in rows
+        if slave_work_profile(r.get("slave_name")) == profile
+    ]
+    take = pin_limit(num_batches=num_batches, idle_boxes=len(idle))
+    if take <= 0:
+        return 0
+    updates = []
+    for batch_idx, slave_name in enumerate(idle[:take]):
+        updates.append(
+            (
+                """
+                UPDATE root_batch
+                SET slave = %s
+                WHERE benchmark_id = %s
+                  AND batch_idx = %s
+                  AND slave IS NULL
+                """,
+                (slave_name, benchmark_id, batch_idx),
+            )
+        )
+    if not updates:
+        return 0
+    try:
+        get_db_conn().execute_many(*updates)
+    except Exception as exc:
+        logger.warning("pin batches failed job=%s: %s", benchmark_id, exc)
+        return 0
+    logger.info(
+        "dispatch pinned %s/%s root batches on %s job %s idle=%s",
+        take,
+        num_batches,
+        profile,
+        benchmark_id,
+        len(idle),
+    )
+    return take
 
 # Adaptive CPU batch_size at job-create time (kill-switched off by default).
 # Smaller batch_size → more root_batch rows → better fill when claimable << idle.
@@ -530,6 +617,15 @@ class JobManager:
                     ]
             
             get_db_conn().execute_many(*atomic_inserts)
+            if not skip:
+                try:
+                    pin_new_job_batches(
+                        benchmark_id,
+                        getattr(x.settings, "challenge_id", "") or "",
+                        num_batches,
+                    )
+                except Exception as exc:
+                    logger.warning("dispatch pin after create failed %s: %s", benchmark_id, exc)
 
 
         # update jobs from confirmed benchmarks

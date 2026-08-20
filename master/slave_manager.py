@@ -150,9 +150,9 @@ STICKY_LEFTOVER_KEEP = max(0, int(os.environ.get("SLAVE_STICKY_LEFTOVER_KEEP", "
 
 def _slave_work_profile(slave_name: str) -> str:
     name = str(slave_name or "")
-    if name.startswith("pool-gpu-") or name.startswith("c3-slave-"):
+    if name.startswith("pool-gpu-"):
         return "gpu"
-    if name.startswith("pool-cpu-") or name.startswith("aws-cpu-slave-"):
+    if name:
         return "cpu"
     return ""
 
@@ -2228,6 +2228,26 @@ class SlaveManager:
                 b["num_attempts"] = max(0, int(b.get("num_attempts") or 0) - 1)
 
             concurrent = [b["batch"] for b in kept_assigned]
+            for b in kept_assigned:
+                if b.get("start_time") is None:
+                    b["start_time"] = now
+                    batch = b.get("batch") or {}
+                    table = (
+                        "proofs_batch"
+                        if batch.get("sampled_nonces") is not None
+                        else "root_batch"
+                    )
+                    updates.append((
+                        f"""
+                        UPDATE {table}
+                        SET start_time = %s
+                        WHERE benchmark_id = %s
+                          AND batch_idx = %s
+                          AND slave = %s
+                          AND start_time IS NULL
+                        """,
+                        (now, batch.get("benchmark_id"), batch.get("batch_idx"), slave_name),
+                    ))
             concurrent_by_bench: Dict[str, int] = {}
             concurrent_roots = sum(
                 1 for batch in concurrent if batch.get("sampled_nonces") is None

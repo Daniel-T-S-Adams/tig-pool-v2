@@ -12,6 +12,11 @@ from master.sql import get_db_conn
 from master.client_manager import CONFIG
 from master.proof_affinity import SLAVE_ONLINE_MS, ensure_slave_seen_table
 from master.idle_tracker import CPU_IDLE_TRACKER, idle_window_settings
+from master.dispatch import (
+    extra_create_this_tick,
+    next_create_profile,
+    profile_needs_create,
+)
 from master.capability_scheduler import (
     SCHEDULER as CAPABILITY_SCHEDULER,
     algo_is_schedulable,
@@ -854,6 +859,9 @@ class PrecommitManager:
         self._force_gpu_burst = False
         self.last_idle_gpu_starved = False
         self.last_cpu_idle_hole = False
+        self.last_dispatch_profile = ""
+        self.last_cpu_short = False
+        self.last_gpu_short = False
 
     def begin_create_tick(self) -> None:
         """Start a master loop tick so extra run() calls cannot shrink burst."""
@@ -883,70 +891,79 @@ class PrecommitManager:
         )
 
     def run_tick(self):
-        """One master-loop create wave, including idle extras.
+        """At most two creates per 5s tick: one per short profile.
 
-        The burst is captured from run() via a local list so main.py
-        cannot see last_sized_burst=1 after run() just logged frozen=11.
+        TIG accepts ~2.4 precommits/min. Bursting 40+ extras mostly 400s
+        duplicate settings and does not fill boxes. Create only when a
+        profile is short, and alternate if both are.
         """
         self.begin_create_tick()
-        self._force_cpu_burst = False
-        self._force_gpu_burst = False
-        sink = []
-        first = self.run(burst_sink=sink)
-        lock = profile_burst_lock(
-            cpu_hole=bool(getattr(self, "last_cpu_idle_hole", False)),
-            gpu_starved=bool(getattr(self, "last_idle_gpu_starved", False)),
-        )
-        self._force_gpu_burst = lock == "gpu"
-        self._force_cpu_burst = lock == "cpu"
-        sized = resolve_tick_burst(
-            *sink,
-            getattr(self, "last_sized_burst", 0),
-            getattr(self, "last_idle_burst", 1),
-        )
-        extra = extra_creates_this_tick(
-            sized_burst=sized,
-            first_ok=first is not None,
-            max_burst=max(
-                int(os.environ.get("PRECOMMIT_IDLE_BURST_MAX", "16")),
-                sized,
+        governor = self._governor_snapshot()
+        cpu_short = profile_needs_create(
+            idle=int(
+                governor.get("decision_idle_cpu_slaves")
+                or idle_decision_count(
+                    governor.get("sustained_idle_cpu_slaves"),
+                    governor.get("online_idle_cpu_slaves"),
+                )
             ),
+            claimable=int(governor.get("cpu_unassigned_claimable") or 0),
+            unowned_jobs=int(governor.get("unowned_cpu_root_jobs") or 0),
         )
-        created = [first] if first is not None else []
-        logger.info(
-            "idle create burst extra=%s sized=%s sink=%s last_sized=%s "
-            "last_idle=%s first_ok=%s cpu_need=%s gpu_need=%s cpu_hole=%s "
-            "gpu_starved=%s lock=%s",
-            extra,
-            sized,
-            sink,
-            getattr(self, "last_sized_burst", None),
-            getattr(self, "last_idle_burst", None),
-            first is not None,
-            self.last_idle_cpu_needs_work,
-            self.last_idle_gpu_needs_work,
-            getattr(self, "last_cpu_idle_hole", False),
-            getattr(self, "last_idle_gpu_starved", False),
-            lock,
+        gpu_short = profile_needs_create(
+            idle=int(governor.get("online_idle_gpu_slaves") or 0),
+            claimable=int(governor.get("gpu_unassigned_claimable") or 0),
+            unowned_jobs=int(governor.get("unowned_gpu_root_jobs") or 0),
         )
-        misses = 0
-        for _ in range(extra):
-            req = self.run()
-            if not req:
-                misses += 1
-                if misses >= 8:
-                    logger.info(
-                        "idle create burst abort misses=%s sized=%s got=%s",
-                        misses,
-                        sized,
-                        len(created),
-                    )
-                    break
-                continue
-            misses = 0
-            created.append(req)
+        self.last_cpu_short = cpu_short
+        self.last_gpu_short = gpu_short
+        target = next_create_profile(
+            cpu_short=cpu_short,
+            gpu_short=gpu_short,
+            last_profile=str(getattr(self, "last_dispatch_profile", "") or ""),
+        )
+        if not target:
+            logger.info(
+                "dispatch skip create cpu_short=%s gpu_short=%s idle_cpu=%s "
+                "claimable_cpu=%s unowned_cpu=%s idle_gpu=%s claimable_gpu=%s "
+                "unowned_gpu=%s",
+                cpu_short,
+                gpu_short,
+                governor.get("decision_idle_cpu_slaves")
+                or governor.get("online_idle_cpu_slaves"),
+                governor.get("cpu_unassigned_claimable"),
+                governor.get("unowned_cpu_root_jobs"),
+                governor.get("online_idle_gpu_slaves"),
+                governor.get("gpu_unassigned_claimable"),
+                governor.get("unowned_gpu_root_jobs"),
+            )
+            return []
+        self._force_cpu_burst = target == "cpu"
+        self._force_gpu_burst = target == "gpu"
+        created = []
+        first = self.run()
+        if first is not None:
+            created.append(first)
+            self.last_dispatch_profile = target
+        extra = extra_create_this_tick(cpu_short=cpu_short, gpu_short=gpu_short)
+        if extra:
+            other = "gpu" if target == "cpu" else "cpu"
+            self._force_cpu_burst = other == "cpu"
+            self._force_gpu_burst = other == "gpu"
+            second = self.run()
+            if second is not None:
+                created.append(second)
+                self.last_dispatch_profile = other
         self._force_cpu_burst = False
         self._force_gpu_burst = False
+        logger.info(
+            "dispatch tick target=%s extra=%s got=%s cpu_short=%s gpu_short=%s",
+            target,
+            extra,
+            len(created),
+            cpu_short,
+            gpu_short,
+        )
         return created
 
     def _refresh_cpu_idle_window(self, now_ms: Optional[int] = None) -> dict:
