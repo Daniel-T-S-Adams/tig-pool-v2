@@ -34,12 +34,16 @@ def main() -> int:
         "idle CPUs with 0 claimable need a create",
     )
     check(
-        profile_needs_create(idle=0, claimable=17, unowned_jobs=4) is False,
-        "busy CPUs with a warehouse and unowned jobs do not create",
+        profile_needs_create(idle=0, claimable=0, unowned_jobs=0) is True,
+        "busy fleet still wants unowned jobs in the pipeline",
     )
     check(
-        profile_needs_create(idle=0, claimable=0, unowned_jobs=0) is True,
-        "busy fleet still wants one unowned job in the pipeline",
+        profile_needs_create(idle=0, claimable=0, unowned_jobs=3) is True,
+        "fewer than 4 unowned jobs still counts as short",
+    )
+    check(
+        profile_needs_create(idle=0, claimable=17, unowned_jobs=4) is False,
+        "busy CPUs with a warehouse of 4 unowned jobs do not create",
     )
     check(
         profile_needs_create(idle=4, claimable=0, unowned_jobs=2) is True,

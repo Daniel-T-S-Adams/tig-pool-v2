@@ -617,7 +617,14 @@ class JobManager:
                     ]
             
             get_db_conn().execute_many(*atomic_inserts)
-            if not skip:
+            # Pins made claimable=0: named boxes held rows other idle boxes
+            # could not pull. Slaves poll ~1s; unassigned leftovers are the queue.
+            if not skip and os.environ.get("PIN_NEW_JOB_BATCHES", "false").lower() in (
+                "1",
+                "true",
+                "yes",
+                "on",
+            ):
                 try:
                     pin_new_job_batches(
                         benchmark_id,

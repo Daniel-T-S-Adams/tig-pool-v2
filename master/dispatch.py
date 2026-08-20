@@ -8,7 +8,8 @@ other profile.
 from __future__ import annotations
 
 # Confirmed jobs still in flight to cover TIG confirm lag (~1-2 min at ~2.4/min).
-NEXT_JOB_BUFFER = 1
+# One unowned job is ~one box-wave, not 37 idle CPUs. Keep a few ready.
+NEXT_JOB_BUFFER = 4
 PIN_EXPIRE_MS = 30_000
 
 
@@ -22,7 +23,7 @@ def profile_needs_create(
     """True when this profile should receive the next precommit.
 
     Empty boxes with nothing to claim are short. A busy fleet still wants
-    one unowned job in the pipeline so the next batch is ready after TIG
+    a few unowned jobs in the pipeline so the next wave can pull after TIG
     confirms. Proving-job keep-ahead is not a create lock.
     """
     idle_n = max(0, int(idle or 0))
