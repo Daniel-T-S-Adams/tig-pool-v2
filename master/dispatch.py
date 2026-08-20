@@ -89,6 +89,40 @@ def next_create_profile(
     return ""
 
 
+def next_hole_profile(
+    *,
+    cpu_hole: bool,
+    gpu_hole: bool,
+    cpu_idle: int = 0,
+    cpu_claimable: int = 0,
+    gpu_idle: int = 0,
+    gpu_claimable: int = 0,
+    cpu_short: bool = False,
+    gpu_short: bool = False,
+    last_profile: str = "",
+) -> str:
+    """One TIG precommit slot: larger idle hole wins. Tie goes to CPU.
+
+    TIG accepts one precommit per 5s. GPU-first bursts of 5-8 only land the
+    first submit, so 60 idle CPUs starve while 3 GPUs take the slot.
+    """
+    if cpu_hole and gpu_hole:
+        cpu_def = max(0, int(cpu_idle or 0) - max(0, int(cpu_claimable or 0)))
+        gpu_def = max(0, int(gpu_idle or 0) - max(0, int(gpu_claimable or 0)))
+        if gpu_def > cpu_def:
+            return "gpu"
+        return "cpu"
+    if cpu_hole:
+        return "cpu"
+    if gpu_hole:
+        return "gpu"
+    return next_create_profile(
+        cpu_short=cpu_short,
+        gpu_short=gpu_short,
+        last_profile=last_profile,
+    )
+
+
 def extra_create_this_tick(*, cpu_short: bool, gpu_short: bool) -> int:
     """At most one extra create, and only when both profiles are short."""
     return 1 if (cpu_short and gpu_short) else 0

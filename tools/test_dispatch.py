@@ -15,6 +15,7 @@ from master.dispatch import (  # noqa: E402
     extra_create_this_tick,
     lock_eligible_algorithms,
     next_create_profile,
+    next_hole_profile,
     pin_expired,
     pin_limit,
     profile_needs_create,
@@ -70,6 +71,44 @@ def main() -> int:
     check(
         next_create_profile(cpu_short=False, gpu_short=False) == "",
         "neither short → skip create",
+    )
+    check(
+        next_hole_profile(
+            cpu_hole=True,
+            gpu_hole=True,
+            cpu_idle=62,
+            cpu_claimable=0,
+            gpu_idle=3,
+            gpu_claimable=0,
+        )
+        == "cpu",
+        "62 idle CPUs beat 3 idle GPUs for the 5s TIG slot",
+    )
+    check(
+        next_hole_profile(
+            cpu_hole=True,
+            gpu_hole=True,
+            cpu_idle=2,
+            cpu_claimable=0,
+            gpu_idle=17,
+            gpu_claimable=0,
+        )
+        == "gpu",
+        "17 idle GPUs beat 2 idle CPUs for the 5s TIG slot",
+    )
+    check(
+        next_hole_profile(
+            cpu_hole=False,
+            gpu_hole=True,
+            cpu_idle=61,
+            cpu_claimable=61,
+            gpu_idle=3,
+            gpu_claimable=0,
+            cpu_short=False,
+            gpu_short=True,
+        )
+        == "gpu",
+        "CPU hole closed → GPU still gets the slot",
     )
     check(
         extra_create_this_tick(cpu_short=True, gpu_short=True) == 1,

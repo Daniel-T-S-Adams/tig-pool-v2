@@ -1,6 +1,8 @@
 import logging
 import os
+import threading
 import time
+import traceback
 from master.data_fetcher import *
 from master.job_manager import *
 from master.precommit_manager import *
@@ -10,13 +12,23 @@ from master.client_manager import *
 
 logger = logging.getLogger(os.path.splitext(os.path.basename(__file__))[0])
 
-# When the CPU/GPU fleet is underfed, submit more than one precommit per 5s tick.
-# Burst size is min(deficit, PRECOMMIT_IDLE_BURST_MAX, remaining unassigned cap).
-PRECOMMIT_IDLE_BURST = max(1, int(os.environ.get("PRECOMMIT_IDLE_BURST", "4")))
-PRECOMMIT_IDLE_BURST_MAX = max(
-    PRECOMMIT_IDLE_BURST,
-    int(os.environ.get("PRECOMMIT_IDLE_BURST_MAX", "16")),
-)
+# TIG accepts one precommit POST per 5 seconds. Extra creates 503 and then
+# 429-block get-block. Pace creates off the slow job_manager loop.
+PRECOMMIT_PACE_S = max(5.0, float(os.environ.get("PRECOMMIT_PACE_S", "5")))
+
+
+def _create_pacer(precommit_manager, submissions_manager):
+    while True:
+        t0 = time.time()
+        try:
+            if getattr(precommit_manager, "last_block_id", None):
+                created = precommit_manager.run_tick()
+                if created:
+                    submissions_manager.submit_precommit(created[0])
+        except Exception as exc:
+            traceback.print_exc()
+            logger.error("%s", exc)
+        time.sleep(max(0.05, PRECOMMIT_PACE_S - (time.time() - t0)))
 
 
 def main():
@@ -34,6 +46,14 @@ def main():
     slave_manager = SlaveManager()
     slave_manager.start()
 
+    pacer = threading.Thread(
+        target=_create_pacer,
+        args=(precommit_manager, submissions_manager),
+        name="precommit-pacer",
+        daemon=True,
+    )
+    pacer.start()
+
     while True:
         try:
             data = data_fetcher.run()
@@ -49,15 +69,9 @@ def main():
                 submissions_manager.on_new_block(**data)
                 precommit_manager.on_new_block(**data)
             job_manager.run()
-            created = precommit_manager.run_tick()
-            if created:
-                for req in created:
-                    submissions_manager.run(req)
-            else:
-                submissions_manager.run(None)
+            submissions_manager.run(None)
             slave_manager.run()
         except Exception as e:
-            import traceback
             traceback.print_exc()
             logger.error(f"{e}")
         finally:

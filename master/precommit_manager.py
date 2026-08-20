@@ -1,7 +1,8 @@
 import copy
-import os
 import logging
+import os
 import random
+import threading
 import time
 from dataclasses import dataclass
 from master.submissions_manager import SubmitPrecommitRequest
@@ -13,9 +14,9 @@ from master.client_manager import CONFIG
 from master.proof_affinity import SLAVE_ONLINE_MS, ensure_slave_seen_table
 from master.idle_tracker import CPU_IDLE_TRACKER, idle_window_settings
 from master.dispatch import (
-    creates_for_profile,
     dispatch_shorts,
     lock_eligible_algorithms,
+    next_hole_profile,
     profile_has_hole,
 )
 from master.capability_scheduler import (
@@ -893,6 +894,9 @@ class PrecommitManager:
         self.last_dispatch_profile = ""
         self.last_cpu_short = False
         self.last_gpu_short = False
+        self.last_cpu_hole = False
+        self.last_gpu_hole = False
+        self._tick_lock = threading.Lock()
 
     def begin_create_tick(self) -> None:
         """Start a master loop tick so extra run() calls cannot shrink burst."""
@@ -922,11 +926,11 @@ class PrecommitManager:
         )
 
     def run_tick(self):
-        """Cover idle holes with one create per distinct algorithm this tick.
+        """One TIG precommit this tick. Larger idle hole wins the slot."""
+        with self._tick_lock:
+            return self._run_tick_locked()
 
-        Same algorithm in the same block 400s. GPU holes go first. Keep-ahead
-        without a hole stays a single create.
-        """
+    def _run_tick_locked(self):
         self.begin_create_tick()
         governor = self._governor_snapshot()
         cpu_idle = int(
@@ -951,25 +955,22 @@ class PrecommitManager:
         )
         cpu_hole = profile_has_hole(idle=cpu_idle, claimable=cpu_claimable)
         gpu_hole = profile_has_hole(idle=gpu_idle, claimable=gpu_claimable)
-        n_gpu = creates_for_profile(
-            has_hole=gpu_hole,
-            is_short=gpu_short,
-            idle=gpu_idle,
-            claimable=gpu_claimable,
-            n_algos=len(GPU_CHALLENGE_IDS),
-        )
-        n_cpu = creates_for_profile(
-            has_hole=cpu_hole,
-            is_short=cpu_short,
-            idle=cpu_idle,
-            claimable=cpu_claimable,
-            n_algos=len(CPU_CHALLENGE_IDS),
+        profile = next_hole_profile(
+            cpu_hole=cpu_hole,
+            gpu_hole=gpu_hole,
+            cpu_idle=cpu_idle,
+            cpu_claimable=cpu_claimable,
+            gpu_idle=gpu_idle,
+            gpu_claimable=gpu_claimable,
+            cpu_short=cpu_short,
+            gpu_short=gpu_short,
+            last_profile=getattr(self, "last_dispatch_profile", "") or "",
         )
         self.last_cpu_short = cpu_short
         self.last_gpu_short = gpu_short
         self.last_cpu_hole = cpu_hole
         self.last_gpu_hole = gpu_hole
-        if n_cpu <= 0 and n_gpu <= 0:
+        if not profile:
             logger.info(
                 "dispatch skip create cpu_short=%s gpu_short=%s idle_cpu=%s "
                 "claimable_cpu=%s unowned_cpu=%s idle_gpu=%s claimable_gpu=%s "
@@ -984,31 +985,26 @@ class PrecommitManager:
                 gpu_unowned,
             )
             return []
-        created = []
         self._exclude_algorithm_ids = set()
-        # GPU hole first: 17 idle cards cannot wait for CPU keep-ahead turns.
-        for profile, n in (("gpu", n_gpu), ("cpu", n_cpu)):
-            if n <= 0:
-                continue
-            for _ in range(n):
-                self._force_gpu_burst = profile == "gpu"
-                self._force_cpu_burst = profile == "cpu"
-                req = self.run()
-                if req is None:
-                    break
-                created.append(req)
-                aid = str(getattr(getattr(req, "settings", None), "algorithm_id", "") or "")
-                if aid:
-                    self._exclude_algorithm_ids.add(aid)
-                self.last_dispatch_profile = profile
+        self._force_gpu_burst = profile == "gpu"
+        self._force_cpu_burst = profile == "cpu"
+        req = self.run()
         self._force_cpu_burst = False
         self._force_gpu_burst = False
         self._exclude_algorithm_ids = set()
+        created = []
+        if req is not None:
+            created.append(req)
+            self.last_dispatch_profile = profile
+            # Next pacer tick must see the new job, not a 15s stale hole.
+            self._governor_cache_until_ms = 0
+        n_cpu = 1 if profile == "cpu" else 0
+        n_gpu = 1 if profile == "gpu" else 0
         logger.info(
             "dispatch tick target=%s extra=%s got=%s cpu_n=%s gpu_n=%s "
             "cpu_short=%s gpu_short=%s cpu_hole=%s gpu_hole=%s idle_gpu=%s idle_cpu=%s",
-            "gpu" if n_gpu else "cpu",
-            max(0, n_gpu + n_cpu - 1),
+            profile,
+            0,
             len(created),
             n_cpu,
             n_gpu,
@@ -1105,6 +1101,10 @@ class PrecommitManager:
         return summary
 
     def on_new_block(self, block: Block, **kwargs):
+        with self._tick_lock:
+            self._on_new_block_locked(block, **kwargs)
+
+    def _on_new_block_locked(self, block: Block, **kwargs):
         self.last_block_id = block.id
         self.num_precommits_submitted = 0
         self.per_challenge_precommits_submitted = {}

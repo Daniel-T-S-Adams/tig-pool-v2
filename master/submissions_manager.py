@@ -1,8 +1,9 @@
 import brotli
-import requests
-import threading
 import logging
 import os
+import threading
+import time
+import requests
 from common.structs import *
 from common.utils import *
 from typing import Union, Set, List, Dict, Optional
@@ -37,7 +38,14 @@ class SubmitProofRequest(FromDict):
 
 class SubmissionsManager:
     def __init__(self):
-        pass
+        self._last_precommit_post_ts = 0.0
+        self._precommit_lock = threading.Lock()
+
+    def _wait_precommit_gate(self, interval_s: float = 5.0) -> None:
+        """TIG: one precommit POST per 5 seconds or the rest 503."""
+        wait = interval_s - (time.time() - self._last_precommit_post_ts)
+        if wait > 0:
+            time.sleep(wait)
 
     def _mark_submitted(self, submission_type: str, req):
         """Clear local retry queue once TIG has accepted (or already has) the item."""
@@ -97,6 +105,7 @@ class SubmissionsManager:
         if resp.status_code == 200:
             logger.info(f"submitted {submission_type} successfully")
             self._mark_submitted(submission_type, req)
+            return True
         elif resp.headers.get("Content-Type") == "text/plain":
             body = resp.text or ""
             # TIG already has this item — stop resubmitting until the next block
@@ -109,10 +118,25 @@ class SubmissionsManager:
                     f"treating duplicate {submission_type} as already submitted: {body}"
                 )
                 self._mark_submitted(submission_type, req)
-            else:
-                logger.error(f"status {resp.status_code} when submitting {submission_type}: {body}")
-        else:
-            logger.error(f"status {resp.status_code} when submitting {submission_type}")
+                return True
+            logger.error(f"status {resp.status_code} when submitting {submission_type}: {body}")
+            return False
+        logger.error(f"status {resp.status_code} when submitting {submission_type}")
+        return False
+
+    def submit_precommit(self, req: SubmitPrecommitRequest) -> bool:
+        """One precommit POST, gated to TIG's 5s limit. Retry once on 503."""
+        with self._precommit_lock:
+            for attempt in range(2):
+                self._wait_precommit_gate()
+                ok = bool(self._post("precommit", req))
+                self._last_precommit_post_ts = time.time()
+                if ok:
+                    return True
+                if attempt == 0:
+                    logger.warning("precommit not accepted, retry in 5s")
+                    time.sleep(5.0)
+            return False
 
     def _post_thread(self, submission_type: str, req: Union[SubmitPrecommitRequest, SubmitBenchmarkRequest, SubmitProofRequest]):
         thread = threading.Thread(target=self._post, args=(submission_type, req))
@@ -143,12 +167,10 @@ class SubmissionsManager:
                 (tuple(proofs),)
             )
 
-    def run(self, submit_precommit_req: Optional[SubmitPrecommitRequest]):
+    def run(self, submit_precommit_req: Optional[SubmitPrecommitRequest] = None):
         now = int(time.time() * 1000)
-        if submit_precommit_req is None:
-            logger.debug("no precommit to submit")
-        else:
-            self._post_thread("precommit", submit_precommit_req)
+        if submit_precommit_req is not None:
+            self.submit_precommit(submit_precommit_req)
 
         benchmark_to_submit = get_db_conn().fetch_one(
             """
