@@ -717,13 +717,18 @@ class JobManager:
                 (tuple(proofs),)
             )
 
-        # stop any expired jobs
+        # Expire unfinished jobs at TIG's 120-block lifespan. Do not stamp
+        # stopped/end_time on jobs that already assembled proofs.
         get_db_conn().execute(
             """
             UPDATE job
             SET stopped = true,
-                end_time = (EXTRACT(EPOCH FROM NOW()) * 1000)::BIGINT
-            WHERE (stopped IS NULL OR end_time IS NULL)
+                end_time = COALESCE(
+                    end_time,
+                    (EXTRACT(EPOCH FROM NOW()) * 1000)::BIGINT
+                )
+            WHERE stopped IS NULL
+                AND merkle_proofs_ready IS NOT TRUE
                 AND %s >= block_started + 120
             """,
             (block.details.height,)
