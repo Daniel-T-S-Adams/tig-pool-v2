@@ -699,6 +699,20 @@ def should_force_cpu_only(
     )
 
 
+def cpu_idle_blocks_gpu_reserve(
+    *,
+    idle_cpu_needs_work: bool = False,
+    idle_gpu_starved: bool = False,
+) -> bool:
+    """Idle CPUs keep the create lottery unless GPU cards are empty.
+
+    GPU keep-ahead must not lock a CPU idle burst onto c004/c006. That
+    fills the GPU unassigned cap with jobs idle CPUs cannot run, then
+    the ops pill reads as a global create freeze.
+    """
+    return bool(idle_cpu_needs_work) and not bool(idle_gpu_starved)
+
+
 def should_reserve_idle_gpu_create(
     *,
     idle_gpu_needs_work: bool,
@@ -711,6 +725,8 @@ def should_reserve_idle_gpu_create(
 
     Keep-ahead uses a cooldown so a CPU burst cannot flood GPU. Empty
     cards skip that cooldown so idle GPUs are not stuck for 30s each.
+    Callers must pass idle_gpu_needs_work=False when idle CPUs need
+    work and GPU cards are not empty.
     """
     if not idle_gpu_needs_work:
         return False
@@ -789,10 +805,23 @@ class PrecommitManager:
         self.last_idle_gpu_needs_work = False
         self.last_idle_burst = 1
         self.last_sized_burst = 1
+        self._outer_tick_burst = None
         self.last_idle_window = {}
         self._idle_gpu_create_ms = 0
         self._idle_gpu_reserved_count = 0
         self._idle_gpu_reserve_tick_ms = 0
+
+    def begin_create_tick(self) -> None:
+        """Start a master loop tick so extra run() calls cannot shrink burst."""
+        self._outer_tick_burst = None
+
+    def outer_tick_burst(self) -> int:
+        n = int(getattr(self, "_outer_tick_burst", 0) or 0)
+        if n <= 1:
+            n = int(getattr(self, "last_sized_burst", 0) or 0)
+        if n <= 1:
+            n = int(getattr(self, "last_idle_burst", 1) or 1)
+        return max(1, n)
 
     def _refresh_cpu_idle_window(self, now_ms: Optional[int] = None) -> dict:
         """Sample online/idle CPU names and update the sustained-idle window."""
@@ -1390,7 +1419,7 @@ class PrecommitManager:
         overlap_cap = int(os.environ.get("PRECOMMIT_PROOF_OVERLAP", "8"))
         # Size the idle burst before any gate so extras can still run this
         # tick even if the first attempt aborts.
-        self.last_idle_burst = idle_create_burst(
+        tick_burst = idle_create_burst(
             idle_cpu_needs_work=idle_cpu_needs_work,
             idle_gpu_needs_work=idle_gpu_needs_work,
             idle_cpu=int(
@@ -1422,14 +1451,18 @@ class PrecommitManager:
             cpu_online=int(governor.get("online_cpu_slaves") or 0),
             gpu_online=int(governor.get("online_gpu_slaves") or 0),
         )
-        self.last_sized_burst = self.last_idle_burst
-        if self.last_idle_burst > 1:
+        self.last_idle_burst = int(tick_burst or 1)
+        if getattr(self, "_outer_tick_burst", None) in (None, 0):
+            self._outer_tick_burst = self.last_idle_burst
+        self.last_sized_burst = int(self._outer_tick_burst or self.last_idle_burst)
+        if self.last_sized_burst > 1:
             logger.info(
-                "idle create sized burst=%s instant_cpu=%s sustained_cpu=%s "
+                "idle create sized burst=%s frozen=%s instant_cpu=%s sustained_cpu=%s "
                 "decision_cpu=%s claimable_cpu=%s unowned_cpu=%s want_cpu=%s "
                 "idle_gpu=%s claimable_gpu=%s unowned_gpu=%s want_gpu=%s "
                 "cap=%s effective=%s root=%s proof=%s",
                 self.last_idle_burst,
+                self.last_sized_burst,
                 governor.get("online_idle_cpu_slaves_instant")
                 or governor.get("online_idle_cpu_slaves"),
                 governor.get("sustained_idle_cpu_slaves"),
@@ -1674,8 +1707,14 @@ class PrecommitManager:
                 want=max(0, idle_gpu_slaves - gpu_claimable, gpu_want_spare),
             )
         reserved_so_far = int(getattr(self, "_idle_gpu_reserved_count", 0) or 0)
+        want_gpu_reserve = bool(idle_gpu_starved or idle_gpu_needs_work)
+        if cpu_idle_blocks_gpu_reserve(
+            idle_cpu_needs_work=idle_cpu_needs_work,
+            idle_gpu_starved=idle_gpu_starved,
+        ):
+            want_gpu_reserve = False
         reserve_gpu = should_reserve_idle_gpu_create(
-            idle_gpu_needs_work=bool(idle_gpu_starved or idle_gpu_needs_work),
+            idle_gpu_needs_work=want_gpu_reserve,
             last_create_ms=int(getattr(self, "_idle_gpu_create_ms", 0) or 0),
             now_ms=now_ms,
             skip_cooldown=bool(idle_gpu_starved and reserved_so_far < max(1, gpu_wave)),
@@ -1700,7 +1739,7 @@ class PrecommitManager:
                 eligible = gpu_eligible
                 force_cpu_only = False
                 logger.info(
-                    "precommit governor reserving GPU create for idle GPUs "
+                    "precommit governor reserving GPU create for empty GPU cards "
                     "(root_phase=%s pending=%s)",
                     {cid: root_phase_counts.get(cid, 0) for cid in GPU_CHALLENGE_IDS},
                     {cid: per_challenge_counts.get(cid, 0) for cid in GPU_CHALLENGE_IDS},
@@ -1935,5 +1974,10 @@ class PrecommitManager:
             self._idle_gpu_reserved_count = int(
                 getattr(self, "_idle_gpu_reserved_count", 0) or 0
             ) + 1
-        logger.info(f"Created precommit with algorithm: {a_id}")
+        logger.info(
+            "Created precommit with algorithm: %s burst=%s frozen=%s",
+            a_id,
+            self.last_idle_burst,
+            self.last_sized_burst,
+        )
         return req

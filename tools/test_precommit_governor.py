@@ -45,6 +45,7 @@ def main() -> int:
         "extra_creates_this_tick",
         "challenge_under_create_cap",
         "should_force_cpu_only",
+        "cpu_idle_blocks_gpu_reserve",
         "should_reserve_idle_gpu_create",
         "has_positive_weight_for_profile",
     )
@@ -66,6 +67,7 @@ def main() -> int:
     extra_tick = ns["extra_creates_this_tick"]
     under_cap = ns["challenge_under_create_cap"]
     force_cpu = ns["should_force_cpu_only"]
+    cpu_blocks_gpu = ns["cpu_idle_blocks_gpu_reserve"]
     reserve_gpu = ns["should_reserve_idle_gpu_create"]
     has_weighted = ns["has_positive_weight_for_profile"]
 
@@ -688,6 +690,32 @@ def main() -> int:
         cpu_profile_blocked=False,
     ) is True
     print(f"{'pass' if ok else 'FAIL'}: keep-ahead spare does not block idle CPU creates")
+    if not ok:
+        failed += 1
+
+    ok = cpu_blocks_gpu(
+        idle_cpu_needs_work=True,
+        idle_gpu_starved=False,
+    ) is True
+    print(f"{'pass' if ok else 'FAIL'}: idle CPUs block GPU keep-ahead reserve")
+    if not ok:
+        failed += 1
+    ok = cpu_blocks_gpu(
+        idle_cpu_needs_work=True,
+        idle_gpu_starved=True,
+    ) is False
+    print(f"{'pass' if ok else 'FAIL'}: empty GPU cards can still reserve")
+    if not ok:
+        failed += 1
+    ok = cpu_blocks_gpu(
+        idle_cpu_needs_work=False,
+        idle_gpu_starved=False,
+    ) is False
+    print(f"{'pass' if ok else 'FAIL'}: fed CPUs allow GPU keep-ahead reserve")
+    if not ok:
+        failed += 1
+    ok = extra_tick(sized_burst=41, first_ok=True, max_burst=41) == 40
+    print(f"{'pass' if ok else 'FAIL'}: 41-job CPU idle tick still extras 40")
     if not ok:
         failed += 1
 

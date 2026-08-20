@@ -357,9 +357,17 @@
 
       const gov = data.governor || {};
       const reasons = gov.block_reasons || [];
+      const profile = gov.profile_blocks || {};
+      const gpuOnlyCap = reasons.length
+        && profile.gpu
+        && !profile.cpu
+        && !gov.at_max_concurrent
+        && !gov.would_block_global;
       const pill = el("status-pill");
       if (data.master_config_error) {
         setPill(pill, "config error", "bad");
+      } else if (gpuOnlyCap && gov.idle_cpu_needs_work) {
+        setPill(pill, "CPU underfed", "warn");
       } else if (reasons.length) {
         setPill(pill, "creates constrained", "warn");
       } else if ((data.sticky_reserved_root_total || 0) > 0 && (s.idle || 0) > 2) {
