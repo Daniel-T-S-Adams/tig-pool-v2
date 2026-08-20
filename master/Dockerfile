@@ -15,5 +15,6 @@ COPY proof_affinity.py /app/master/proof_affinity.py
 COPY capability_scheduler.py /app/master/capability_scheduler.py
 COPY cpu_tier_caps.py /app/master/cpu_tier_caps.py
 COPY idle_tracker.py /app/master/idle_tracker.py
-# Patched create loop: idle-CPU burst (PRECOMMIT_IDLE_BURST).
-COPY main.py /app/master/main.py
+# Official image CMD is `python main.py` with WORKDIR /app.
+# /app/master/main.py is not the process entrypoint.
+COPY main.py /app/main.py
