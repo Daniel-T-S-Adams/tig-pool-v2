@@ -33,6 +33,8 @@ _GOV_DEFAULTS = {
     "cpu_unassigned_per_online": 8,
     "max_cpu_unassigned_roots_ceiling": 768,
     "max_gpu_unassigned_roots": 144,
+    "gpu_unassigned_per_online": 8,
+    "max_gpu_unassigned_roots_ceiling": 768,
     "min_cpu_roots_pending": 128,
     "max_cpu_roots_pending": 1024,
     "min_gpu_roots_pending": 64,
@@ -73,6 +75,19 @@ def compute_cpu_unassigned_cap(
     return min(ceiling, adaptive)
 
 
+def compute_gpu_unassigned_cap(
+    settings: dict | None,
+    online_gpu: int = 0,
+) -> int:
+    """Same live GPU unassigned ceiling as master/precommit_manager.py."""
+    settings = settings or {}
+    configured = max(1, int(settings.get("max_gpu_unassigned_roots") or 144))
+    per = max(1, int(settings.get("gpu_unassigned_per_online") or 8))
+    ceiling = max(configured, int(settings.get("max_gpu_unassigned_roots_ceiling") or 768))
+    adaptive = max(configured, int(online_gpu or 0) * per)
+    return min(ceiling, adaptive)
+
+
 def _gov_settings(cfg: dict) -> dict:
     gov = (cfg or {}).get("precommit_governor") or {}
     out = dict(_GOV_DEFAULTS)
@@ -89,6 +104,11 @@ def _gov_settings(cfg: dict) -> dict:
             int,
         ),
         "max_gpu_unassigned_roots": ("PRECOMMIT_GOVERNOR_MAX_GPU_UNASSIGNED_ROOTS", int),
+        "gpu_unassigned_per_online": ("PRECOMMIT_GOVERNOR_GPU_UNASSIGNED_PER_ONLINE", int),
+        "max_gpu_unassigned_roots_ceiling": (
+            "PRECOMMIT_GOVERNOR_MAX_GPU_UNASSIGNED_ROOTS_CEILING",
+            int,
+        ),
         "min_cpu_roots_pending": ("PRECOMMIT_GOVERNOR_MIN_CPU_ROOTS_PENDING", int),
         "max_cpu_roots_pending": ("PRECOMMIT_GOVERNOR_MAX_CPU_ROOTS_PENDING", int),
         "min_gpu_roots_pending": ("PRECOMMIT_GOVERNOR_MIN_GPU_ROOTS_PENDING", int),
@@ -253,6 +273,7 @@ def _governor_view(
     online_idle_cpu_slaves: int = 0,
     decision_idle_cpu_slaves: int | None = None,
     online_cpu_slaves: int = 0,
+    online_gpu_slaves: int = 0,
 ) -> dict:
     settings = _gov_settings(cfg)
     if not settings.get("enabled", True):
@@ -427,7 +448,7 @@ def _governor_view(
         "cpu_pending_cap": cpu_pending_cap,
         "gpu_pending_cap": gpu_pending_cap,
         "cpu_unassigned_cap": compute_cpu_unassigned_cap(settings, online_cpu_slaves),
-        "gpu_unassigned_cap": max(1, int(settings["max_gpu_unassigned_roots"])),
+        "gpu_unassigned_cap": compute_gpu_unassigned_cap(settings, online_gpu_slaves),
     }
 
     cpu_roots_pending = int(row.get("cpu_roots_pending") or 0)
@@ -890,12 +911,14 @@ def build_ops_metrics() -> dict:
             else idle_cpu_n
         )
         decision_cpu_n = max(0, sustained_cpu_n, idle_cpu_n)
+        online_gpu_n = int((by_profile.get("gpu") or {}).get("online") or 0)
         governor = _governor_view(
             cfg,
             now_ms,
             online_idle_cpu_slaves=idle_cpu_n,
             decision_idle_cpu_slaves=decision_cpu_n,
             online_cpu_slaves=online_cpu_n,
+            online_gpu_slaves=online_gpu_n,
         )
         governor["idle_window"] = cpu_idle_win
 

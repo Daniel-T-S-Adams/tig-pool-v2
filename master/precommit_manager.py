@@ -108,6 +108,18 @@ def _governor_settings():
                 os.environ.get("PRECOMMIT_GOVERNOR_MAX_GPU_UNASSIGNED_ROOTS", "144"),
             )
         ),
+        "gpu_unassigned_per_online": int(
+            gov.get(
+                "gpu_unassigned_per_online",
+                os.environ.get("PRECOMMIT_GOVERNOR_GPU_UNASSIGNED_PER_ONLINE", "8"),
+            )
+        ),
+        "max_gpu_unassigned_roots_ceiling": int(
+            gov.get(
+                "max_gpu_unassigned_roots_ceiling",
+                os.environ.get("PRECOMMIT_GOVERNOR_MAX_GPU_UNASSIGNED_ROOTS_CEILING", "768"),
+            )
+        ),
         # Keep this many unowned GPU root jobs ready so a finishing GPU does
         # not wait a full TIG precommit (~2 min) before the next job.
         "gpu_spare_jobs": int(
@@ -178,11 +190,29 @@ def compute_cpu_unassigned_cap(
     return min(ceiling, adaptive)
 
 
+def compute_gpu_unassigned_cap(
+    settings: dict | None,
+    online_gpu: int = 0,
+) -> int:
+    """Claimable-unassigned GPU ceiling: floor, then 8 per online GPU.
+
+    Same shape as CPU. A GPU join must raise the queue; a flat 32/144
+    does not.
+    """
+    settings = settings or {}
+    configured = max(1, int(settings.get("max_gpu_unassigned_roots") or 144))
+    per = max(1, int(settings.get("gpu_unassigned_per_online") or 8))
+    ceiling = max(configured, int(settings.get("max_gpu_unassigned_roots_ceiling") or 768))
+    adaptive = max(configured, int(online_gpu or 0) * per)
+    return min(ceiling, adaptive)
+
+
 def compute_profile_root_caps(
     settings: dict | None,
     cpu_create_target: int,
     gpu_slots_total: int,
     online_cpu: int = 0,
+    online_gpu: int = 0,
 ) -> dict:
     """Adaptive per-profile pending-root ceilings from live create capacity."""
     settings = settings or _governor_settings()
@@ -202,7 +232,7 @@ def compute_profile_root_caps(
         "cpu_pending_cap": cpu_cap,
         "gpu_pending_cap": gpu_cap,
         "cpu_unassigned_cap": compute_cpu_unassigned_cap(settings, online_cpu),
-        "gpu_unassigned_cap": max(1, int(settings.get("max_gpu_unassigned_roots") or 144)),
+        "gpu_unassigned_cap": compute_gpu_unassigned_cap(settings, online_gpu),
     }
 
 
@@ -1124,6 +1154,9 @@ class PrecommitManager:
         caps = dict(snap.get("profile_caps") or {})
         if caps:
             caps["cpu_unassigned_cap"] = compute_cpu_unassigned_cap(settings, online_cpu)
+            caps["gpu_unassigned_cap"] = compute_gpu_unassigned_cap(
+                settings, int(snap.get("online_gpu_slaves") or 0)
+            )
             snap["profile_caps"] = caps
             snap["profile_blocks"] = profile_root_backlog_blocks(
                 int(snap.get("cpu_roots_pending") or 0),
@@ -1465,6 +1498,7 @@ class PrecommitManager:
                 cpu_create_target,
                 gpu_slots_total,
                 online_cpu=int(idle_win.get("online") or 0),
+                online_gpu=online_gpu_slaves,
             )
             profile_blocks = profile_root_backlog_blocks(
                 cpu_roots_pending,

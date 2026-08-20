@@ -29,6 +29,7 @@ def main() -> int:
         "_clamp_int",
         "compute_profile_root_caps",
         "compute_cpu_unassigned_cap",
+        "compute_gpu_unassigned_cap",
         "profile_root_backlog_blocks",
         "should_block_precommit_create",
         "compute_idle_cpu_needs_work",
@@ -55,6 +56,7 @@ def main() -> int:
     should_block = ns["should_block_precommit_create"]
     compute_caps = ns["compute_profile_root_caps"]
     unassigned_cap = ns["compute_cpu_unassigned_cap"]
+    gpu_unassigned_cap = ns["compute_gpu_unassigned_cap"]
     profile_blocks = ns["profile_root_backlog_blocks"]
     idle_needs = ns["compute_idle_cpu_needs_work"]
     keep_want = ns["keep_ahead_want"]
@@ -873,19 +875,94 @@ def main() -> int:
     if not ok:
         failed += 1
 
+    gpu_cap_settings = {
+        "max_gpu_unassigned_roots": 144,
+        "gpu_unassigned_per_online": 8,
+        "max_gpu_unassigned_roots_ceiling": 768,
+    }
+    got = gpu_unassigned_cap(gpu_cap_settings, 18)
+    ok = got == 144
+    print(f"{'pass' if ok else 'FAIL'}: 18 GPUs keep 144 floor got={got}")
+    if not ok:
+        failed += 1
+    got = gpu_unassigned_cap(gpu_cap_settings, 40)
+    ok = got == 320
+    print(f"{'pass' if ok else 'FAIL'}: 40 GPUs raise unassigned cap 144 -> 320 got={got}")
+    if not ok:
+        failed += 1
+    got = gpu_unassigned_cap(gpu_cap_settings, 80)
+    ok = got == 640
+    print(f"{'pass' if ok else 'FAIL'}: 80 GPUs raise unassigned cap 144 -> 640 got={got}")
+    if not ok:
+        failed += 1
+    got = gpu_unassigned_cap(gpu_cap_settings, 200)
+    ok = got == 768
+    print(f"{'pass' if ok else 'FAIL'}: huge GPU fleet hits 768 ceiling got={got}")
+    if not ok:
+        failed += 1
+    got = gpu_unassigned_cap(
+        {
+            "max_gpu_unassigned_roots": 32,
+            "gpu_unassigned_per_online": 8,
+            "max_gpu_unassigned_roots_ceiling": 768,
+        },
+        0,
+    )
+    ok = got == 32
+    print(f"{'pass' if ok else 'FAIL'}: online GPU 0 keeps configured floor 32 got={got}")
+    if not ok:
+        failed += 1
+
+    gpu_caps = compute_caps(
+        {
+            **cap_settings,
+            "max_gpu_unassigned_roots": 144,
+            "gpu_unassigned_per_online": 8,
+            "max_gpu_unassigned_roots_ceiling": 768,
+        },
+        cpu_create_target=10,
+        gpu_slots_total=9,
+        online_gpu=40,
+    )
+    ok = gpu_caps["gpu_unassigned_cap"] == 320
+    print(
+        f"{'pass' if ok else 'FAIL'}: profile caps use online GPUs not slots "
+        f"gpu_unassigned={gpu_caps['gpu_unassigned_cap']}"
+    )
+    if not ok:
+        failed += 1
+
     ops_cap = _load_fns(
         "compute_cpu_unassigned_cap",
+        "compute_gpu_unassigned_cap",
         rel="pool_manager/pool/ops_metrics.py",
-    )["compute_cpu_unassigned_cap"]
+    )
     settings_256 = {
         "max_cpu_unassigned_roots": 256,
         "cpu_unassigned_per_online": 8,
         "max_cpu_unassigned_roots_ceiling": 768,
     }
-    ok = ops_cap(settings_256, 66) == unassigned_cap(settings_256, 66) == 528
+    ok = (
+        ops_cap["compute_cpu_unassigned_cap"](settings_256, 66)
+        == unassigned_cap(settings_256, 66)
+        == 528
+    )
     print(
         f"{'pass' if ok else 'FAIL'}: ops unassigned cap matches master "
-        f"ops={ops_cap(settings_256, 66)} master={unassigned_cap(settings_256, 66)}"
+        f"ops={ops_cap['compute_cpu_unassigned_cap'](settings_256, 66)} "
+        f"master={unassigned_cap(settings_256, 66)}"
+    )
+    if not ok:
+        failed += 1
+    ok = (
+        ops_cap["compute_gpu_unassigned_cap"](gpu_cap_settings, 40)
+        == gpu_unassigned_cap(gpu_cap_settings, 40)
+        == 320
+    )
+    print(
+        f"{'pass' if ok else 'FAIL'}: ops GPU unassigned cap matches master "
+        f"ops={ops_cap['compute_gpu_unassigned_cap'](gpu_cap_settings, 40)} "
+        f"master={gpu_unassigned_cap(gpu_cap_settings, 40)}"
     )
     if not ok:
         failed += 1
