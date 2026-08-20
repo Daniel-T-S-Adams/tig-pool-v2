@@ -11,6 +11,7 @@ sys.path.insert(0, str(ROOT))
 
 from master.dispatch import (  # noqa: E402
     extra_create_this_tick,
+    lock_eligible_algorithms,
     next_create_profile,
     pin_expired,
     pin_limit,
@@ -71,6 +72,37 @@ def main() -> int:
     check(
         extra_create_this_tick(cpu_short=True, gpu_short=False) == 0,
         "one profile short → no 59-job burst",
+    )
+    mixed = [
+        {"algorithm_id": "c001_a098", "weight": 3},
+        {"algorithm_id": "c004_a100", "weight": 3},
+        {"algorithm_id": "c008_a039", "weight": 3},
+    ]
+    cpu_ids = ("c001", "c002", "c003", "c007", "c008")
+    gpu_ids = ("c004", "c005", "c006")
+    cpu_locked = lock_eligible_algorithms(
+        mixed, profile="cpu", cpu_ids=cpu_ids, gpu_ids=gpu_ids
+    )
+    check(
+        [x["algorithm_id"][:4] for x in cpu_locked] == ["c001", "c008"],
+        "CPU lock drops GPU algorithms",
+    )
+    gpu_locked = lock_eligible_algorithms(
+        mixed, profile="gpu", cpu_ids=cpu_ids, gpu_ids=gpu_ids
+    )
+    check(
+        [x["algorithm_id"][:4] for x in gpu_locked] == ["c004"],
+        "GPU lock drops CPU algorithms",
+    )
+    check(
+        lock_eligible_algorithms(
+            [{"algorithm_id": "c004_a100"}],
+            profile="cpu",
+            cpu_ids=cpu_ids,
+            gpu_ids=gpu_ids,
+        )
+        == [],
+        "CPU lock of GPU-only list is empty so caller can fail open",
     )
     check(pin_limit(num_batches=12, idle_boxes=40) == 12, "pin at most this job's batches")
     check(pin_limit(num_batches=12, idle_boxes=3) == 3, "pin at most idle boxes")

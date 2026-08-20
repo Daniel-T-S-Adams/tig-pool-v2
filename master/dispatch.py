@@ -61,6 +61,25 @@ def extra_create_this_tick(*, cpu_short: bool, gpu_short: bool) -> int:
     return 1 if (cpu_short and gpu_short) else 0
 
 
+def lock_eligible_algorithms(eligible, *, profile: str, cpu_ids, gpu_ids):
+    """Keep only algorithms for a forced create profile.
+
+    Returns [] when nothing matches so the caller can fail open.
+    """
+    wanted = str(profile or "")
+    if wanted == "gpu":
+        ids = set(gpu_ids or ())
+    elif wanted == "cpu":
+        ids = set(cpu_ids or ())
+    else:
+        return list(eligible or [])
+    return [
+        x
+        for x in (eligible or [])
+        if str((x or {}).get("algorithm_id") or "")[:4] in ids
+    ]
+
+
 def pin_limit(*, num_batches: int, idle_boxes: int) -> int:
     """Pin new batches onto idle boxes; leave leftovers claimable.
 

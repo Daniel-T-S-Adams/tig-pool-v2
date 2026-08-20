@@ -14,6 +14,7 @@ from master.proof_affinity import SLAVE_ONLINE_MS, ensure_slave_seen_table
 from master.idle_tracker import CPU_IDLE_TRACKER, idle_window_settings
 from master.dispatch import (
     extra_create_this_tick,
+    lock_eligible_algorithms,
     next_create_profile,
     profile_needs_create,
 )
@@ -1551,8 +1552,10 @@ class PrecommitManager:
         if getattr(self, "_force_gpu_burst", False):
             idle_gpu_needs_work = True
             idle_gpu_starved = True
-        elif getattr(self, "_force_cpu_burst", False) and not idle_gpu_starved:
+        elif getattr(self, "_force_cpu_burst", False):
             idle_cpu_needs_work = True
+            idle_gpu_needs_work = False
+            idle_gpu_starved = False
         self.last_idle_cpu_needs_work = idle_cpu_needs_work
         self.last_idle_gpu_needs_work = idle_gpu_needs_work
         self.last_idle_gpu_starved = idle_gpu_starved
@@ -1877,6 +1880,10 @@ class PrecommitManager:
         if getattr(self, "_force_gpu_burst", False):
             gpu_wave = max(gpu_wave, idle_gpu_slaves, 1)
             want_gpu_reserve = True
+        if getattr(self, "_force_cpu_burst", False) and not getattr(
+            self, "_force_gpu_burst", False
+        ):
+            want_gpu_reserve = False
         reserve_gpu = should_reserve_idle_gpu_create(
             idle_gpu_needs_work=want_gpu_reserve,
             last_create_ms=int(getattr(self, "_idle_gpu_create_ms", 0) or 0),
@@ -1885,10 +1892,8 @@ class PrecommitManager:
         )
         if idle_gpu_starved and reserved_so_far >= max(1, gpu_wave):
             reserve_gpu = False
-        if (
-            getattr(self, "_force_cpu_burst", False)
-            and not idle_gpu_starved
-            and not getattr(self, "_force_gpu_burst", False)
+        if getattr(self, "_force_cpu_burst", False) and not getattr(
+            self, "_force_gpu_burst", False
         ):
             reserve_gpu = False
         force_cpu_only = should_force_cpu_only(
@@ -1951,15 +1956,24 @@ class PrecommitManager:
                     "idle CPU override active but no CPU algorithms eligible; "
                     "allowing normal selection"
                 )
-        if getattr(self, "_force_cpu_burst", False) and not force_cpu_only:
-            cpu_eligible = [
-                x for x in eligible
-                if x["algorithm_id"][:4] in CPU_CHALLENGE_IDS
-            ]
-            if cpu_eligible:
-                eligible = cpu_eligible
-                force_cpu_only = True
-                logger.info("idle CPU burst forcing remaining creates onto CPU")
+        forced_profile = (
+            "gpu"
+            if getattr(self, "_force_gpu_burst", False)
+            else "cpu"
+            if getattr(self, "_force_cpu_burst", False)
+            else ""
+        )
+        if forced_profile:
+            locked = lock_eligible_algorithms(
+                eligible_before_reserve,
+                profile=forced_profile,
+                cpu_ids=CPU_CHALLENGE_IDS,
+                gpu_ids=GPU_CHALLENGE_IDS,
+            )
+            if locked:
+                eligible = locked
+                force_cpu_only = forced_profile == "cpu"
+                logger.info("dispatch locked create to %s", forced_profile)
 
         weighted_eligible = []
         weights = []
