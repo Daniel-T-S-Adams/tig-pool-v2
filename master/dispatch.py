@@ -33,6 +33,38 @@ def profile_needs_create(
     return int(unowned_jobs or 0) < max(0, int(next_job_buffer or 0))
 
 
+def profile_has_hole(*, idle: int = 0, claimable: int = 0) -> bool:
+    """True when idle boxes of this profile have nothing they can pull."""
+    idle_n = max(0, int(idle or 0))
+    return idle_n > 0 and max(0, int(claimable or 0)) < idle_n
+
+
+def dispatch_shorts(
+    *,
+    cpu_idle: int = 0,
+    cpu_claimable: int = 0,
+    cpu_unowned: int = 0,
+    gpu_idle: int = 0,
+    gpu_claimable: int = 0,
+    gpu_unowned: int = 0,
+    next_job_buffer: int = NEXT_JOB_BUFFER,
+) -> tuple[bool, bool]:
+    """CPU/GPU short flags for this tick.
+
+    An idle hole always wins. Keep-ahead (unowned < buffer) only runs on a
+    busy profile when the other profile has no hole. Otherwise 100% busy
+    CPUs keep taking creates while GPUs sit empty.
+    """
+    cpu_hole = profile_has_hole(idle=cpu_idle, claimable=cpu_claimable)
+    gpu_hole = profile_has_hole(idle=gpu_idle, claimable=gpu_claimable)
+    buf = max(0, int(next_job_buffer or 0))
+    cpu_ahead = (not cpu_hole) and int(cpu_unowned or 0) < buf
+    gpu_ahead = (not gpu_hole) and int(gpu_unowned or 0) < buf
+    cpu_short = cpu_hole or (cpu_ahead and not gpu_hole)
+    gpu_short = gpu_hole or (gpu_ahead and not cpu_hole)
+    return cpu_short, gpu_short
+
+
 def next_create_profile(
     *,
     cpu_short: bool,

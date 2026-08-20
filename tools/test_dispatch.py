@@ -10,6 +10,7 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from master.dispatch import (  # noqa: E402
+    dispatch_shorts,
     extra_create_this_tick,
     lock_eligible_algorithms,
     next_create_profile,
@@ -76,6 +77,42 @@ def main() -> int:
     check(
         extra_create_this_tick(cpu_short=True, gpu_short=False) == 0,
         "one profile short → no 59-job burst",
+    )
+    cpu_busy_gpu_hole = dispatch_shorts(
+        cpu_idle=0,
+        cpu_claimable=0,
+        cpu_unowned=2,
+        gpu_idle=6,
+        gpu_claimable=0,
+        gpu_unowned=1,
+    )
+    check(
+        cpu_busy_gpu_hole == (False, True),
+        "busy CPUs keep-ahead must not steal an idle GPU hole",
+    )
+    cpu_hole_gpu_busy = dispatch_shorts(
+        cpu_idle=19,
+        cpu_claimable=0,
+        cpu_unowned=4,
+        gpu_idle=0,
+        gpu_claimable=8,
+        gpu_unowned=0,
+    )
+    check(
+        cpu_hole_gpu_busy == (True, False),
+        "idle CPUs win over GPU keep-ahead",
+    )
+    both_busy = dispatch_shorts(
+        cpu_idle=0,
+        cpu_claimable=10,
+        cpu_unowned=2,
+        gpu_idle=0,
+        gpu_claimable=4,
+        gpu_unowned=2,
+    )
+    check(
+        both_busy == (True, True),
+        "neither hole → both may keep-ahead",
     )
     mixed = [
         {"algorithm_id": "c001_a098", "weight": 3},

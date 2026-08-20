@@ -13,10 +13,10 @@ from master.client_manager import CONFIG
 from master.proof_affinity import SLAVE_ONLINE_MS, ensure_slave_seen_table
 from master.idle_tracker import CPU_IDLE_TRACKER, idle_window_settings
 from master.dispatch import (
+    dispatch_shorts,
     extra_create_this_tick,
     lock_eligible_algorithms,
     next_create_profile,
-    profile_needs_create,
 )
 from master.capability_scheduler import (
     SCHEDULER as CAPABILITY_SCHEDULER,
@@ -900,21 +900,19 @@ class PrecommitManager:
         """
         self.begin_create_tick()
         governor = self._governor_snapshot()
-        cpu_short = profile_needs_create(
-            idle=int(
+        cpu_short, gpu_short = dispatch_shorts(
+            cpu_idle=int(
                 governor.get("decision_idle_cpu_slaves")
                 or idle_decision_count(
                     governor.get("sustained_idle_cpu_slaves"),
                     governor.get("online_idle_cpu_slaves"),
                 )
             ),
-            claimable=int(governor.get("cpu_unassigned_claimable") or 0),
-            unowned_jobs=int(governor.get("unowned_cpu_root_jobs") or 0),
-        )
-        gpu_short = profile_needs_create(
-            idle=int(governor.get("online_idle_gpu_slaves") or 0),
-            claimable=int(governor.get("gpu_unassigned_claimable") or 0),
-            unowned_jobs=int(governor.get("unowned_gpu_root_jobs") or 0),
+            cpu_claimable=int(governor.get("cpu_unassigned_claimable") or 0),
+            cpu_unowned=int(governor.get("unowned_cpu_root_jobs") or 0),
+            gpu_idle=int(governor.get("online_idle_gpu_slaves") or 0),
+            gpu_claimable=int(governor.get("gpu_unassigned_claimable") or 0),
+            gpu_unowned=int(governor.get("unowned_gpu_root_jobs") or 0),
         )
         self.last_cpu_short = cpu_short
         self.last_gpu_short = gpu_short
