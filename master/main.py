@@ -49,35 +49,7 @@ def main():
                 submissions_manager.on_new_block(**data)
                 precommit_manager.on_new_block(**data)
             job_manager.run()
-            precommit_manager.begin_create_tick()
-            submit_precommit_req = precommit_manager.run()
-            sized = int(precommit_manager.outer_tick_burst())
-            created = [submit_precommit_req] if submit_precommit_req is not None else []
-            extra = extra_creates_this_tick(
-                sized_burst=sized,
-                first_ok=submit_precommit_req is not None,
-                max_burst=max(PRECOMMIT_IDLE_BURST_MAX, sized),
-            )
-            if sized > 1 or extra > 0:
-                logger.info(
-                    "idle create burst extra=%s sized=%s first_ok=%s cpu_need=%s gpu_need=%s",
-                    extra,
-                    sized,
-                    submit_precommit_req is not None,
-                    getattr(precommit_manager, "last_idle_cpu_needs_work", False),
-                    getattr(precommit_manager, "last_idle_gpu_needs_work", False),
-                )
-            if extra > 0:
-                misses = 0
-                for _ in range(extra):
-                    req = precommit_manager.run()
-                    if not req:
-                        misses += 1
-                        if misses >= 8:
-                            break
-                        continue
-                    misses = 0
-                    created.append(req)
+            created = precommit_manager.run_tick()
             if created:
                 for req in created:
                     submissions_manager.run(req)

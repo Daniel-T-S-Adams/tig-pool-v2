@@ -495,6 +495,24 @@ def extra_creates_this_tick(
     return min(hi, max(0, sized - used))
 
 
+def resolve_tick_burst(*values) -> int:
+    """Pick the real idle burst.
+
+    last_sized_burst is initialized to 1. Treating 1 as 'already sized'
+    hid last_idle_burst=41 and the extra-create loop never ran — one
+    job per ~25s tick while dozens of CPUs sat empty.
+    """
+    best = 1
+    for value in values:
+        try:
+            n = int(value or 0)
+        except (TypeError, ValueError):
+            n = 0
+        if n > best:
+            best = n
+    return best
+
+
 def compute_idle_gpu_starved(
     *,
     gpu_unassigned_claimable: int = 0,
@@ -806,6 +824,7 @@ class PrecommitManager:
         self.last_idle_burst = 1
         self.last_sized_burst = 1
         self._outer_tick_burst = None
+        self._tick_bursts = []
         self.last_idle_window = {}
         self._idle_gpu_create_ms = 0
         self._idle_gpu_reserved_count = 0
@@ -813,15 +832,83 @@ class PrecommitManager:
 
     def begin_create_tick(self) -> None:
         """Start a master loop tick so extra run() calls cannot shrink burst."""
+        self._tick_bursts = []
         self._outer_tick_burst = None
 
+    def _record_tick_burst(self, burst: int) -> int:
+        n = max(1, int(burst or 1))
+        bursts = getattr(self, "_tick_bursts", None)
+        if not isinstance(bursts, list):
+            bursts = []
+            self._tick_bursts = bursts
+        bursts.append(n)
+        frozen = resolve_tick_burst(*bursts)
+        self.last_idle_burst = n
+        self.last_sized_burst = frozen
+        self._outer_tick_burst = frozen
+        return frozen
+
     def outer_tick_burst(self) -> int:
-        n = int(getattr(self, "_outer_tick_burst", 0) or 0)
-        if n <= 1:
-            n = int(getattr(self, "last_sized_burst", 0) or 0)
-        if n <= 1:
-            n = int(getattr(self, "last_idle_burst", 1) or 1)
-        return max(1, n)
+        bursts = getattr(self, "_tick_bursts", None) or []
+        return resolve_tick_burst(
+            *bursts,
+            getattr(self, "_outer_tick_burst", 0),
+            getattr(self, "last_sized_burst", 0),
+            getattr(self, "last_idle_burst", 1),
+        )
+
+    def run_tick(self):
+        """One master-loop create wave, including idle extras.
+
+        The burst is captured from run() via a local list so main.py
+        cannot see last_sized_burst=1 after run() just logged frozen=11.
+        """
+        self.begin_create_tick()
+        sink = []
+        first = self.run(burst_sink=sink)
+        sized = resolve_tick_burst(
+            *sink,
+            getattr(self, "last_sized_burst", 0),
+            getattr(self, "last_idle_burst", 1),
+        )
+        extra = extra_creates_this_tick(
+            sized_burst=sized,
+            first_ok=first is not None,
+            max_burst=max(
+                int(os.environ.get("PRECOMMIT_IDLE_BURST_MAX", "16")),
+                sized,
+            ),
+        )
+        created = [first] if first is not None else []
+        logger.info(
+            "idle create burst extra=%s sized=%s sink=%s last_sized=%s "
+            "last_idle=%s first_ok=%s cpu_need=%s gpu_need=%s",
+            extra,
+            sized,
+            sink,
+            getattr(self, "last_sized_burst", None),
+            getattr(self, "last_idle_burst", None),
+            first is not None,
+            self.last_idle_cpu_needs_work,
+            self.last_idle_gpu_needs_work,
+        )
+        misses = 0
+        for _ in range(extra):
+            req = self.run()
+            if not req:
+                misses += 1
+                if misses >= 8:
+                    logger.info(
+                        "idle create burst abort misses=%s sized=%s got=%s",
+                        misses,
+                        sized,
+                        len(created),
+                    )
+                    break
+                continue
+            misses = 0
+            created.append(req)
+        return created
 
     def _refresh_cpu_idle_window(self, now_ms: Optional[int] = None) -> dict:
         """Sample online/idle CPU names and update the sustained-idle window."""
@@ -1373,7 +1460,7 @@ class PrecommitManager:
         self._governor_cache_until_ms = now_ms + cache_ms
         return snapshot
 
-    def run(self) -> SubmitPrecommitRequest:
+    def run(self, burst_sink=None) -> SubmitPrecommitRequest:
         pending_row = get_db_conn().fetch_one(
             """
             SELECT
@@ -1451,18 +1538,17 @@ class PrecommitManager:
             cpu_online=int(governor.get("online_cpu_slaves") or 0),
             gpu_online=int(governor.get("online_gpu_slaves") or 0),
         )
-        self.last_idle_burst = int(tick_burst or 1)
-        if getattr(self, "_outer_tick_burst", None) in (None, 0):
-            self._outer_tick_burst = self.last_idle_burst
-        self.last_sized_burst = int(self._outer_tick_burst or self.last_idle_burst)
-        if self.last_sized_burst > 1:
+        frozen = self._record_tick_burst(tick_burst)
+        if burst_sink is not None:
+            burst_sink.append(int(frozen or 1))
+        if frozen > 1:
             logger.info(
                 "idle create sized burst=%s frozen=%s instant_cpu=%s sustained_cpu=%s "
                 "decision_cpu=%s claimable_cpu=%s unowned_cpu=%s want_cpu=%s "
                 "idle_gpu=%s claimable_gpu=%s unowned_gpu=%s want_gpu=%s "
                 "cap=%s effective=%s root=%s proof=%s",
                 self.last_idle_burst,
-                self.last_sized_burst,
+                frozen,
                 governor.get("online_idle_cpu_slaves_instant")
                 or governor.get("online_idle_cpu_slaves"),
                 governor.get("sustained_idle_cpu_slaves"),

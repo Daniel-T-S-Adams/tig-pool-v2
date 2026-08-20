@@ -43,6 +43,7 @@ def main() -> int:
         "scaled_idle_burst_max",
         "empty_claimable_wave",
         "extra_creates_this_tick",
+        "resolve_tick_burst",
         "challenge_under_create_cap",
         "should_force_cpu_only",
         "cpu_idle_blocks_gpu_reserve",
@@ -65,6 +66,7 @@ def main() -> int:
     scaled_hi = ns["scaled_idle_burst_max"]
     empty_wave = ns["empty_claimable_wave"]
     extra_tick = ns["extra_creates_this_tick"]
+    resolve_burst = ns["resolve_tick_burst"]
     under_cap = ns["challenge_under_create_cap"]
     force_cpu = ns["should_force_cpu_only"]
     cpu_blocks_gpu = ns["cpu_idle_blocks_gpu_reserve"]
@@ -716,6 +718,22 @@ def main() -> int:
         failed += 1
     ok = extra_tick(sized_burst=41, first_ok=True, max_burst=41) == 40
     print(f"{'pass' if ok else 'FAIL'}: 41-job CPU idle tick still extras 40")
+    if not ok:
+        failed += 1
+    ok = resolve_burst(1, 41) == 41
+    print(f"{'pass' if ok else 'FAIL'}: last_sized init 1 does not hide idle burst 41")
+    if not ok:
+        failed += 1
+    ok = resolve_burst(1, 0, 1) == 1
+    print(f"{'pass' if ok else 'FAIL'}: all ones stays a single create")
+    if not ok:
+        failed += 1
+    ok = extra_tick(
+        sized_burst=resolve_burst(1, 41),
+        first_ok=True,
+        max_burst=41,
+    ) == 40
+    print(f"{'pass' if ok else 'FAIL'}: resolving sized=1 + idle=41 still extras 40")
     if not ok:
         failed += 1
 
