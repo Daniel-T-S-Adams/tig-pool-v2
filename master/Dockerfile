@@ -8,6 +8,7 @@ COPY assign_views.py /app/master/assign_views.py
 COPY slave_manager.py /app/master/slave_manager.py
 COPY precommit_manager.py /app/master/precommit_manager.py
 COPY job_manager.py /app/master/job_manager.py
+COPY dispatch.py /app/master/dispatch.py
 COPY data_fetcher.py /app/master/data_fetcher.py
 COPY submissions_manager.py /app/master/submissions_manager.py
 COPY proof_affinity.py /app/master/proof_affinity.py
