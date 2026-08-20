@@ -829,6 +829,7 @@ class PrecommitManager:
         self._idle_gpu_create_ms = 0
         self._idle_gpu_reserved_count = 0
         self._idle_gpu_reserve_tick_ms = 0
+        self._force_cpu_burst = False
 
     def begin_create_tick(self) -> None:
         """Start a master loop tick so extra run() calls cannot shrink burst."""
@@ -864,8 +865,11 @@ class PrecommitManager:
         cannot see last_sized_burst=1 after run() just logged frozen=11.
         """
         self.begin_create_tick()
+        self._force_cpu_burst = False
         sink = []
         first = self.run(burst_sink=sink)
+        if self.last_idle_cpu_needs_work:
+            self._force_cpu_burst = True
         sized = resolve_tick_burst(
             *sink,
             getattr(self, "last_sized_burst", 0),
@@ -882,7 +886,7 @@ class PrecommitManager:
         created = [first] if first is not None else []
         logger.info(
             "idle create burst extra=%s sized=%s sink=%s last_sized=%s "
-            "last_idle=%s first_ok=%s cpu_need=%s gpu_need=%s",
+            "last_idle=%s first_ok=%s cpu_need=%s gpu_need=%s cpu_burst=%s",
             extra,
             sized,
             sink,
@@ -891,6 +895,7 @@ class PrecommitManager:
             first is not None,
             self.last_idle_cpu_needs_work,
             self.last_idle_gpu_needs_work,
+            self._force_cpu_burst,
         )
         misses = 0
         for _ in range(extra):
@@ -908,6 +913,7 @@ class PrecommitManager:
                 continue
             misses = 0
             created.append(req)
+        self._force_cpu_burst = False
         return created
 
     def _refresh_cpu_idle_window(self, now_ms: Optional[int] = None) -> dict:
@@ -1481,6 +1487,8 @@ class PrecommitManager:
         governor = self._governor_snapshot()
         idle_cpu_needs_work = bool(governor.get("idle_cpu_needs_work"))
         idle_gpu_needs_work = bool(governor.get("idle_gpu_needs_work"))
+        if getattr(self, "_force_cpu_burst", False):
+            idle_cpu_needs_work = True
         self.last_idle_cpu_needs_work = idle_cpu_needs_work
         self.last_idle_gpu_needs_work = idle_gpu_needs_work
         caps = governor.get("profile_caps") or {}
@@ -1807,6 +1815,8 @@ class PrecommitManager:
         )
         if idle_gpu_starved and reserved_so_far >= max(1, gpu_wave):
             reserve_gpu = False
+        if getattr(self, "_force_cpu_burst", False):
+            reserve_gpu = False
         force_cpu_only = should_force_cpu_only(
             idle_cpu_needs_work=idle_cpu_needs_work,
             gpu_starved=gpu_starved,
@@ -1866,6 +1876,15 @@ class PrecommitManager:
                     "idle CPU override active but no CPU algorithms eligible; "
                     "allowing normal selection"
                 )
+        if getattr(self, "_force_cpu_burst", False) and not force_cpu_only:
+            cpu_eligible = [
+                x for x in eligible
+                if x["algorithm_id"][:4] in CPU_CHALLENGE_IDS
+            ]
+            if cpu_eligible:
+                eligible = cpu_eligible
+                force_cpu_only = True
+                logger.info("idle CPU burst forcing remaining creates onto CPU")
 
         weighted_eligible = []
         weights = []
