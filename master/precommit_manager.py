@@ -700,35 +700,56 @@ def should_force_cpu_only(
     idle_gpu_starved: bool = False,
     idle_gpu_needs_work: bool = False,
     cpu_profile_blocked: bool,
+    cpu_idle_hole: bool = False,
 ) -> bool:
-    """Hard CPU filter once GPUs already have jobs.
+    """Hard CPU filter only for empty CPU boxes with nothing to claim.
 
-    Empty GPU cards must still receive reserved creates. This filter only
-    blocks the mixed lottery; ``should_reserve_idle_gpu_create`` can override
-    it for a fleet-scaled GPU wave.
+    CPU keep-ahead is not a lock — that starves live GPU cards. Empty GPU
+    cards still use ``should_reserve_idle_gpu_create`` for a GPU wave.
     """
     del idle_gpu_needs_work
+    del idle_cpu_needs_work
     if idle_gpu_starved:
         return False
-    return bool(
-        idle_cpu_needs_work
-        and (not gpu_starved)
-        and (not cpu_profile_blocked)
-    )
+    if not cpu_idle_hole:
+        return False
+    return bool((not gpu_starved) and (not cpu_profile_blocked))
+
+
+def cpu_idle_hole(*, idle: int = 0, claimable: int = 0) -> bool:
+    """True when live CPU boxes are empty and have nothing to claim."""
+    idle_n = max(0, int(idle or 0))
+    return idle_n > 0 and int(claimable or 0) < idle_n
+
+
+def profile_burst_lock(*, cpu_hole: bool = False, gpu_starved: bool = False) -> str:
+    """Which extras this tick may lock.
+
+    Empty GPU cards beat CPU keep-ahead. CPU lock is only for empty CPU
+    boxes with nothing to claim — not for a CPU warehouse that still wants
+    spare unowned jobs.
+    """
+    if gpu_starved:
+        return "gpu"
+    if cpu_hole:
+        return "cpu"
+    return ""
 
 
 def cpu_idle_blocks_gpu_reserve(
     *,
     idle_cpu_needs_work: bool = False,
     idle_gpu_starved: bool = False,
+    cpu_idle_hole: bool = False,
 ) -> bool:
-    """Idle CPUs keep the create lottery unless GPU cards are empty.
+    """Empty CPUs keep the lottery unless GPU cards are also empty.
 
-    GPU keep-ahead must not lock a CPU idle burst onto c004/c006. That
-    fills the GPU unassigned cap with jobs idle CPUs cannot run, then
-    the ops pill reads as a global create freeze.
+    CPU keep-ahead (busy fleet, unowned < want) must not freeze GPU
+    creates. That leaves live GPU cards idle with claimable_gpu=0 while
+    CPU already has a warehouse.
     """
-    return bool(idle_cpu_needs_work) and not bool(idle_gpu_starved)
+    del idle_cpu_needs_work
+    return bool(cpu_idle_hole) and not bool(idle_gpu_starved)
 
 
 def should_reserve_idle_gpu_create(
@@ -830,6 +851,9 @@ class PrecommitManager:
         self._idle_gpu_reserved_count = 0
         self._idle_gpu_reserve_tick_ms = 0
         self._force_cpu_burst = False
+        self._force_gpu_burst = False
+        self.last_idle_gpu_starved = False
+        self.last_cpu_idle_hole = False
 
     def begin_create_tick(self) -> None:
         """Start a master loop tick so extra run() calls cannot shrink burst."""
@@ -866,10 +890,15 @@ class PrecommitManager:
         """
         self.begin_create_tick()
         self._force_cpu_burst = False
+        self._force_gpu_burst = False
         sink = []
         first = self.run(burst_sink=sink)
-        if self.last_idle_cpu_needs_work:
-            self._force_cpu_burst = True
+        lock = profile_burst_lock(
+            cpu_hole=bool(getattr(self, "last_cpu_idle_hole", False)),
+            gpu_starved=bool(getattr(self, "last_idle_gpu_starved", False)),
+        )
+        self._force_gpu_burst = lock == "gpu"
+        self._force_cpu_burst = lock == "cpu"
         sized = resolve_tick_burst(
             *sink,
             getattr(self, "last_sized_burst", 0),
@@ -886,7 +915,8 @@ class PrecommitManager:
         created = [first] if first is not None else []
         logger.info(
             "idle create burst extra=%s sized=%s sink=%s last_sized=%s "
-            "last_idle=%s first_ok=%s cpu_need=%s gpu_need=%s cpu_burst=%s",
+            "last_idle=%s first_ok=%s cpu_need=%s gpu_need=%s cpu_hole=%s "
+            "gpu_starved=%s lock=%s",
             extra,
             sized,
             sink,
@@ -895,7 +925,9 @@ class PrecommitManager:
             first is not None,
             self.last_idle_cpu_needs_work,
             self.last_idle_gpu_needs_work,
-            self._force_cpu_burst,
+            getattr(self, "last_cpu_idle_hole", False),
+            getattr(self, "last_idle_gpu_starved", False),
+            lock,
         )
         misses = 0
         for _ in range(extra):
@@ -914,6 +946,7 @@ class PrecommitManager:
             misses = 0
             created.append(req)
         self._force_cpu_burst = False
+        self._force_gpu_burst = False
         return created
 
     def _refresh_cpu_idle_window(self, now_ms: Optional[int] = None) -> dict:
@@ -1487,10 +1520,26 @@ class PrecommitManager:
         governor = self._governor_snapshot()
         idle_cpu_needs_work = bool(governor.get("idle_cpu_needs_work"))
         idle_gpu_needs_work = bool(governor.get("idle_gpu_needs_work"))
-        if getattr(self, "_force_cpu_burst", False):
+        idle_gpu_starved = bool(governor.get("idle_gpu_starved"))
+        cpu_hole = cpu_idle_hole(
+            idle=int(
+                governor.get("decision_idle_cpu_slaves")
+                or idle_decision_count(
+                    governor.get("sustained_idle_cpu_slaves"),
+                    governor.get("online_idle_cpu_slaves"),
+                )
+            ),
+            claimable=int(governor.get("cpu_unassigned_claimable") or 0),
+        )
+        if getattr(self, "_force_gpu_burst", False):
+            idle_gpu_needs_work = True
+            idle_gpu_starved = True
+        elif getattr(self, "_force_cpu_burst", False) and not idle_gpu_starved:
             idle_cpu_needs_work = True
         self.last_idle_cpu_needs_work = idle_cpu_needs_work
         self.last_idle_gpu_needs_work = idle_gpu_needs_work
+        self.last_idle_gpu_starved = idle_gpu_starved
+        self.last_cpu_idle_hole = cpu_hole
         caps = governor.get("profile_caps") or {}
         cpu_want_spare = keep_ahead_want(
             idle=0,
@@ -1675,8 +1724,8 @@ class PrecommitManager:
             root_phase_counts[row["challenge_id"]] = row["root_cnt"]
 
         per_challenge_max = CONFIG.get("per_challenge_max_benchmarks", {})
-        idle_gpu_needs_work = bool(governor.get("idle_gpu_needs_work"))
-        idle_gpu_starved = bool(governor.get("idle_gpu_starved"))
+        idle_gpu_needs_work = bool(idle_gpu_needs_work)
+        idle_gpu_starved = bool(idle_gpu_starved)
         gpu_keep_ahead = bool(governor.get("gpu_keep_ahead"))
         idle_gpu_slaves = int(governor.get("online_idle_gpu_slaves") or 0)
         gpu_spare_jobs = int((governor.get("settings") or {}).get("gpu_spare_jobs") or 0)
@@ -1805,8 +1854,12 @@ class PrecommitManager:
         if cpu_idle_blocks_gpu_reserve(
             idle_cpu_needs_work=idle_cpu_needs_work,
             idle_gpu_starved=idle_gpu_starved,
+            cpu_idle_hole=cpu_hole,
         ):
             want_gpu_reserve = False
+        if getattr(self, "_force_gpu_burst", False):
+            gpu_wave = max(gpu_wave, idle_gpu_slaves, 1)
+            want_gpu_reserve = True
         reserve_gpu = should_reserve_idle_gpu_create(
             idle_gpu_needs_work=want_gpu_reserve,
             last_create_ms=int(getattr(self, "_idle_gpu_create_ms", 0) or 0),
@@ -1815,13 +1868,18 @@ class PrecommitManager:
         )
         if idle_gpu_starved and reserved_so_far >= max(1, gpu_wave):
             reserve_gpu = False
-        if getattr(self, "_force_cpu_burst", False):
+        if (
+            getattr(self, "_force_cpu_burst", False)
+            and not idle_gpu_starved
+            and not getattr(self, "_force_gpu_burst", False)
+        ):
             reserve_gpu = False
         force_cpu_only = should_force_cpu_only(
             idle_cpu_needs_work=idle_cpu_needs_work,
             gpu_starved=gpu_starved,
             idle_gpu_starved=idle_gpu_starved,
             cpu_profile_blocked=bool(profile_blocks.get("cpu")),
+            cpu_idle_hole=cpu_hole,
         )
         eligible_before_reserve = list(eligible)
         if reserve_gpu:

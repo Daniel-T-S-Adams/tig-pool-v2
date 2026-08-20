@@ -47,6 +47,8 @@ def main() -> int:
         "challenge_under_create_cap",
         "should_force_cpu_only",
         "cpu_idle_blocks_gpu_reserve",
+        "cpu_idle_hole",
+        "profile_burst_lock",
         "should_reserve_idle_gpu_create",
         "has_positive_weight_for_profile",
     )
@@ -70,6 +72,8 @@ def main() -> int:
     under_cap = ns["challenge_under_create_cap"]
     force_cpu = ns["should_force_cpu_only"]
     cpu_blocks_gpu = ns["cpu_idle_blocks_gpu_reserve"]
+    cpu_hole_fn = ns["cpu_idle_hole"]
+    burst_lock = ns["profile_burst_lock"]
     reserve_gpu = ns["should_reserve_idle_gpu_create"]
     has_weighted = ns["has_positive_weight_for_profile"]
 
@@ -656,8 +660,19 @@ def main() -> int:
         gpu_starved=False,
         idle_gpu_needs_work=False,
         cpu_profile_blocked=False,
+        cpu_idle_hole=True,
     ) is True
-    print(f"{'pass' if ok else 'FAIL'}: force CPU when GPUs already have work")
+    print(f"{'pass' if ok else 'FAIL'}: force CPU when empty CPUs have nothing to claim")
+    if not ok:
+        failed += 1
+    ok = force_cpu(
+        idle_cpu_needs_work=True,
+        gpu_starved=False,
+        idle_gpu_needs_work=False,
+        cpu_profile_blocked=False,
+        cpu_idle_hole=False,
+    ) is False
+    print(f"{'pass' if ok else 'FAIL'}: CPU keep-ahead does not lock extras off GPU")
     if not ok:
         failed += 1
 
@@ -690,21 +705,57 @@ def main() -> int:
         idle_gpu_starved=False,
         idle_gpu_needs_work=True,
         cpu_profile_blocked=False,
+        cpu_idle_hole=True,
     ) is True
-    print(f"{'pass' if ok else 'FAIL'}: keep-ahead spare does not block idle CPU creates")
+    print(f"{'pass' if ok else 'FAIL'}: GPU keep-ahead spare does not block empty CPU creates")
+    if not ok:
+        failed += 1
+
+    ok = cpu_hole_fn(idle=46, claimable=0) is True
+    print(f"{'pass' if ok else 'FAIL'}: 46 idle CPUs with 0 claimable is a CPU hole")
+    if not ok:
+        failed += 1
+    ok = cpu_hole_fn(idle=0, claimable=114) is False
+    print(f"{'pass' if ok else 'FAIL'}: busy CPUs with a warehouse are not a CPU hole")
+    if not ok:
+        failed += 1
+    ok = burst_lock(cpu_hole=False, gpu_starved=True) == "gpu"
+    print(f"{'pass' if ok else 'FAIL'}: empty GPUs lock extras to GPU even if CPU wants keep-ahead")
+    if not ok:
+        failed += 1
+    ok = burst_lock(cpu_hole=True, gpu_starved=False) == "cpu"
+    print(f"{'pass' if ok else 'FAIL'}: empty CPUs lock extras to CPU when GPUs are fed")
+    if not ok:
+        failed += 1
+    ok = burst_lock(cpu_hole=True, gpu_starved=True) == "gpu"
+    print(f"{'pass' if ok else 'FAIL'}: empty GPUs beat empty CPUs for extra lock")
+    if not ok:
+        failed += 1
+    ok = burst_lock(cpu_hole=False, gpu_starved=False) == ""
+    print(f"{'pass' if ok else 'FAIL'}: no lock when both profiles have work")
     if not ok:
         failed += 1
 
     ok = cpu_blocks_gpu(
         idle_cpu_needs_work=True,
         idle_gpu_starved=False,
+        cpu_idle_hole=True,
     ) is True
-    print(f"{'pass' if ok else 'FAIL'}: idle CPUs block GPU keep-ahead reserve")
+    print(f"{'pass' if ok else 'FAIL'}: empty CPUs block GPU keep-ahead reserve")
+    if not ok:
+        failed += 1
+    ok = cpu_blocks_gpu(
+        idle_cpu_needs_work=True,
+        idle_gpu_starved=False,
+        cpu_idle_hole=False,
+    ) is False
+    print(f"{'pass' if ok else 'FAIL'}: CPU keep-ahead does not freeze GPU creates")
     if not ok:
         failed += 1
     ok = cpu_blocks_gpu(
         idle_cpu_needs_work=True,
         idle_gpu_starved=True,
+        cpu_idle_hole=True,
     ) is False
     print(f"{'pass' if ok else 'FAIL'}: empty GPU cards can still reserve")
     if not ok:
