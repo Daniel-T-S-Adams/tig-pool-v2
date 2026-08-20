@@ -32,7 +32,7 @@ _GOV_DEFAULTS = {
     "max_cpu_unassigned_roots": 512,
     "cpu_unassigned_per_online": 8,
     "max_cpu_unassigned_roots_ceiling": 768,
-    "max_gpu_unassigned_roots": 32,
+    "max_gpu_unassigned_roots": 144,
     "min_cpu_roots_pending": 128,
     "max_cpu_roots_pending": 1024,
     "min_gpu_roots_pending": 64,

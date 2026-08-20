@@ -105,7 +105,7 @@ def _governor_settings():
         "max_gpu_unassigned_roots": int(
             gov.get(
                 "max_gpu_unassigned_roots",
-                os.environ.get("PRECOMMIT_GOVERNOR_MAX_GPU_UNASSIGNED_ROOTS", "32"),
+                os.environ.get("PRECOMMIT_GOVERNOR_MAX_GPU_UNASSIGNED_ROOTS", "144"),
             )
         ),
         # Keep this many unowned GPU root jobs ready so a finishing GPU does
@@ -202,7 +202,7 @@ def compute_profile_root_caps(
         "cpu_pending_cap": cpu_cap,
         "gpu_pending_cap": gpu_cap,
         "cpu_unassigned_cap": compute_cpu_unassigned_cap(settings, online_cpu),
-        "gpu_unassigned_cap": max(1, int(settings.get("max_gpu_unassigned_roots") or 32)),
+        "gpu_unassigned_cap": max(1, int(settings.get("max_gpu_unassigned_roots") or 144)),
     }
 
 
