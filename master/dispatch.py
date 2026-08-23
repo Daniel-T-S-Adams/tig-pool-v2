@@ -104,17 +104,19 @@ def next_hole_profile(
     gpu_short: bool = False,
     last_profile: str = "",
 ) -> str:
-    """One TIG precommit slot: larger idle hole wins. Tie goes to CPU.
+    """One TIG precommit slot when a profile has a hole.
 
-    TIG accepts one precommit per 5s. GPU-first bursts of 5-8 only land the
-    first submit, so 60 idle CPUs starve while 3 GPUs take the slot.
+    Do not compare CPU empty seats to GPU cards. After XL boxes joined,
+    65 CPU seats always beat 16 idle T4s and every create locked to CPU.
+    Both holes alternate, same as both-short.
     """
+    del cpu_idle, cpu_claimable, gpu_idle, gpu_claimable
     if cpu_hole and gpu_hole:
-        cpu_def = max(0, int(cpu_idle or 0) - max(0, int(cpu_claimable or 0)))
-        gpu_def = max(0, int(gpu_idle or 0) - max(0, int(gpu_claimable or 0)))
-        if gpu_def > cpu_def:
-            return "gpu"
-        return "cpu"
+        return next_create_profile(
+            cpu_short=True,
+            gpu_short=True,
+            last_profile=last_profile,
+        )
     if cpu_hole:
         return "cpu"
     if gpu_hole:

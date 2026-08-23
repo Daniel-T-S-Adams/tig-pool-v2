@@ -78,13 +78,27 @@ def main() -> int:
         next_hole_profile(
             cpu_hole=True,
             gpu_hole=True,
-            cpu_idle=62,
+            cpu_idle=65,
             cpu_claimable=0,
-            gpu_idle=3,
+            gpu_idle=16,
             gpu_claimable=0,
+            last_profile="",
         )
         == "cpu",
-        "62 idle CPUs beat 3 idle GPUs for the 5s TIG slot",
+        "both holes, no last profile → CPU first (then alternate)",
+    )
+    check(
+        next_hole_profile(
+            cpu_hole=True,
+            gpu_hole=True,
+            cpu_idle=65,
+            cpu_claimable=0,
+            gpu_idle=16,
+            gpu_claimable=0,
+            last_profile="cpu",
+        )
+        == "gpu",
+        "both holes after a CPU create → GPU, even if CPU seats are 65",
     )
     check(
         next_hole_profile(
@@ -94,9 +108,10 @@ def main() -> int:
             cpu_claimable=0,
             gpu_idle=17,
             gpu_claimable=0,
+            last_profile="gpu",
         )
-        == "gpu",
-        "17 idle GPUs beat 2 idle CPUs for the 5s TIG slot",
+        == "cpu",
+        "both holes after a GPU create → CPU",
     )
     check(
         next_hole_profile(
