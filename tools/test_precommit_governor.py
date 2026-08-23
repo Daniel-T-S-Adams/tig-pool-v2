@@ -364,6 +364,38 @@ def main() -> int:
             True,
             "no unowned spare still requests keep-ahead",
         ),
+        (
+            dict(
+                idle_cpu_override=True,
+                cpu_slots=18,
+                cpu_unassigned_claimable=1,
+                cpu_jobs_needing_roots=10,
+                cpu_create_target=18,
+                cpu_profile_blocked=False,
+                online_idle_cpu_slaves=3,
+                cpu_jobs_in_proof_phase=10,
+                unowned_cpu_root_jobs=8,
+                online_cpu_slaves=18,
+            ),
+            True,
+            "EPYC empty seats (3) with 1 claimable still need work",
+        ),
+        (
+            dict(
+                idle_cpu_override=True,
+                cpu_slots=18,
+                cpu_unassigned_claimable=4,
+                cpu_jobs_needing_roots=10,
+                cpu_create_target=18,
+                cpu_profile_blocked=False,
+                online_idle_cpu_slaves=3,
+                cpu_jobs_in_proof_phase=10,
+                unowned_cpu_root_jobs=8,
+                online_cpu_slaves=18,
+            ),
+            False,
+            "claimable covering empty seats is not a hole",
+        ),
     ]
     for kwargs, expect, label in idle_cases:
         got = idle_needs(**kwargs)
@@ -736,6 +768,10 @@ def main() -> int:
         failed += 1
     ok = cpu_hole_fn(idle=0, claimable=114) is False
     print(f"{'pass' if ok else 'FAIL'}: busy CPUs with a warehouse are not a CPU hole")
+    if not ok:
+        failed += 1
+    ok = cpu_hole_fn(idle=3, claimable=1) is True
+    print(f"{'pass' if ok else 'FAIL'}: 3 empty EPYC seats with 1 leftover is a hole")
     if not ok:
         failed += 1
     ok = burst_lock(cpu_hole=False, gpu_starved=True) == "gpu"
@@ -1144,6 +1180,19 @@ def main() -> int:
         (empty_wave(base_burst=4, hi=16, want=20), 16, "empty claimable wave follows want up to hi"),
         (empty_wave(base_burst=4, hi=25, want=80), 25, "empty claimable wave uses scaled hi"),
         (empty_wave(base_burst=4, hi=16, want=0), 4, "no want still keeps base wave"),
+        (
+            burst(
+                idle_cpu_needs_work=True,
+                idle_cpu=0,
+                claimable_cpu=10,
+                cpu_want_spare=2,
+                cpu_unowned=8,
+                max_burst=16,
+                cpu_unassigned_remaining=256,
+            ),
+            1,
+            "name-busy EPYCs with leftovers do not burst 72 seat-creates",
+        ),
     ]
     for got, expect, label in scale_cases:
         ok = got == expect

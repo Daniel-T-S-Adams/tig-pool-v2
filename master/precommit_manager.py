@@ -19,6 +19,7 @@ from master.dispatch import (
     next_hole_profile,
     profile_has_hole,
 )
+from master.cpu_tier_caps import cpu_tier_cap_settings, sum_cpu_empty_seats
 from master.capability_scheduler import (
     SCHEDULER as CAPABILITY_SCHEDULER,
     algo_is_schedulable,
@@ -1249,7 +1250,12 @@ class PrecommitManager:
         )
         if not idle_win.get("enabled", True):
             sustained = instant
-        decision_idle = idle_decision_count(sustained, instant)
+        decision_names = idle_decision_count(sustained, instant)
+        # Empty XL seats (workers//32 - active) count as idle for the hole.
+        # Name-count alone treats an EPYC at 1/4 as busy. Burst sizing stays
+        # on names so 72 empty seats do not mint a 64-job wave.
+        seats = int(snap.get("online_idle_cpu_seats") or 0)
+        decision_idle = max(decision_names, seats)
         online_cpu = int(idle_win.get("online") or 0)
         cpu_slots = max(int(snap.get("cpu_slots") or 0), online_cpu)
         cpu_create_target = (
@@ -1291,6 +1297,7 @@ class PrecommitManager:
         snap["online_idle_cpu_slaves"] = instant
         snap["online_idle_cpu_slaves_instant"] = instant
         snap["sustained_idle_cpu_slaves"] = sustained
+        snap["burst_idle_cpu_slaves"] = decision_names
         snap["decision_idle_cpu_slaves"] = decision_idle
         snap["idle_window"] = idle_win
         snap["idle_cpu_needs_work"] = idle_cpu_needs_work
@@ -1602,6 +1609,33 @@ class PrecommitManager:
             gpu_unassigned_claimable = int(row.get("gpu_unassigned_claimable") or 0)
             online_idle_cpu_slaves = int(row.get("online_idle_cpu_slaves") or 0)
             online_idle_gpu_slaves = int(row.get("online_idle_gpu_slaves") or 0)
+            online_idle_cpu_seats = 0
+            try:
+                seat_rows = get_db_conn().fetch_all(
+                    """
+                    SELECT
+                        ss.telem_cores,
+                        ss.telem_active,
+                        ss.num_workers,
+                        (
+                            SELECT COUNT(*)
+                            FROM root_batch rb
+                            WHERE rb.slave = ss.slave_name
+                              AND rb.ready IS NULL
+                              AND rb.start_time IS NOT NULL
+                        ) AS assigned
+                    FROM slave_seen ss
+                    WHERE ss.last_seen >= %s
+                      AND ss.slave_name LIKE 'pool-cpu-%%'
+                    """,
+                    (now_ms - int(SLAVE_ONLINE_MS),),
+                ) or []
+                online_idle_cpu_seats = sum_cpu_empty_seats(
+                    seat_rows, cpu_tier_cap_settings(CONFIG)
+                )
+            except Exception as exc:
+                logger.debug("cpu empty-seat census failed: %s", exc)
+                online_idle_cpu_seats = online_idle_cpu_slaves
             gpu_floor = _gpu_slot_floor_total()
             profile_caps = compute_profile_root_caps(
                 settings,
@@ -1644,6 +1678,7 @@ class PrecommitManager:
                 "cpu_unassigned_claimable": cpu_unassigned_claimable,
                 "gpu_unassigned_claimable": gpu_unassigned_claimable,
                 "online_idle_cpu_slaves": online_idle_cpu_slaves,
+                "online_idle_cpu_seats": online_idle_cpu_seats,
                 "online_idle_gpu_slaves": online_idle_gpu_slaves,
                 "profile_caps": profile_caps,
                 "profile_blocks": profile_blocks,
@@ -1766,8 +1801,9 @@ class PrecommitManager:
             idle_cpu_needs_work=idle_cpu_needs_work,
             idle_gpu_needs_work=idle_gpu_needs_work,
             idle_cpu=int(
-                governor.get("decision_idle_cpu_slaves")
-                or idle_decision_count(
+                governor.get("burst_idle_cpu_slaves")
+                if governor.get("burst_idle_cpu_slaves") is not None
+                else idle_decision_count(
                     governor.get("sustained_idle_cpu_slaves"),
                     governor.get("online_idle_cpu_slaves"),
                 )

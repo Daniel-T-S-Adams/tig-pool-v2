@@ -287,6 +287,69 @@ def main() -> int:
             )
         )
 
+        live_tier = ns["live_cpu_tier"]
+        empty_seats = ns["cpu_empty_seats"]
+        sum_seats = ns["sum_cpu_empty_seats"]
+        hold_xl = ns["should_hold_leftover_for_xl"]
+        cases.append((live_tier(cores=32) == TIER_M, "32 cores → M"))
+        cases.append((live_tier(cores=192) == TIER_XL, "192 cores → XL"))
+        cases.append((live_tier(workers=153) == TIER_XL, "153 workers → XL"))
+        cases.append(
+            (
+                empty_seats(workers=25, cores=32, active=0, settings=settings) == 1,
+                "Pica empty seats = 1",
+            )
+        )
+        cases.append(
+            (
+                empty_seats(workers=153, cores=192, active=1, settings=settings) == 3,
+                "EPYC 153w active=1 → 3 empty seats",
+            )
+        )
+        cases.append(
+            (
+                empty_seats(
+                    workers=153, cores=192, active=0, assigned=1, settings=settings
+                )
+                == 3,
+                "assigned roots count against empty seats",
+            )
+        )
+        cases.append(
+            (
+                sum_seats(
+                    [{"telem_cores": 192, "num_workers": 153, "telem_active": 0}] * 18,
+                    settings,
+                )
+                == 72,
+                "18 idle EPYCs → 72 empty seats",
+            )
+        )
+        cases.append(
+            (
+                hold_xl(poller_earnable=1, hungry_xl_seats=3, sticky_own=False) is True,
+                "Pica holds leftover while XL seats hungry",
+            )
+        )
+        cases.append(
+            (
+                hold_xl(poller_earnable=1, hungry_xl_seats=3, sticky_own=True) is False,
+                "Pica still takes its own sticky job",
+            )
+        )
+        cases.append(
+            (
+                hold_xl(poller_earnable=4, hungry_xl_seats=3, sticky_own=False) is False,
+                "EPYC poller is not held",
+            )
+        )
+        cases.append(
+            (
+                hold_xl(poller_earnable=1, hungry_xl_seats=0, sticky_own=False) is False,
+                "no hungry XL → Picas take leftovers",
+            )
+        )
+
         # Capability rank: XL preferred for hard roots
         cs = _load_cap_sched()
         hard = 0.9

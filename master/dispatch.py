@@ -7,6 +7,8 @@ other profile.
 
 from __future__ import annotations
 
+from master.cpu_tier_caps import should_hold_leftover_for_xl
+
 # Confirmed jobs still in flight to cover TIG confirm lag (~1-2 min at ~2.4/min).
 # One unowned job is ~one box-wave, not 37 idle CPUs. Two ready is enough
 # to keep the next box busy without doubling into TIG's 100-cap.

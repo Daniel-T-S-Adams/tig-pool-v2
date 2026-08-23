@@ -23,6 +23,8 @@ TIER_NAMES = {TIER_S: "S", TIER_M: "M", TIER_L: "L", TIER_XL: "XL"}
 TIER_FROM_NAME = {v: k for k, v in TIER_NAMES.items()}
 
 DEFAULT_CPU_TIER_CAPS = {"S": 1, "M": 1, "L": 3, "XL": 6}
+# Match capability_scheduler.DEFAULT_TIER_CORE_CEILINGS without importing it.
+DEFAULT_TIER_CORE_CEILINGS = (32, 64, 96)
 DEFAULT_XL_ABSOLUTE_MAX = 8
 DEFAULT_WORKERS_PER_CPU_JOB = 32
 # cores / num_workers. Kept for tests / legacy headroom helper.
@@ -153,6 +155,124 @@ def cpu_tier_cap_settings(config: Optional[Mapping[str, Any]] = None) -> dict:
         "live_telemetry_enabled": _env_bool("CAPABILITY_LIVE_TELEMETRY", "true")
         or bool(cfg.get("live_telemetry_enabled")),
     }
+
+
+def live_cpu_tier(
+    cores: Any = None,
+    workers: Any = None,
+    ceilings: Any = None,
+) -> int:
+    """S/M/L/XL from live cores (preferred) or workers. Unknown → M."""
+    n = _parse_int(cores) or _parse_int(workers)
+    if n is None:
+        return TIER_M
+    bounds = tuple(ceilings or DEFAULT_TIER_CORE_CEILINGS)[:3]
+    for idx, ceiling in enumerate(bounds):
+        try:
+            if int(n) < int(ceiling):
+                return idx
+        except (TypeError, ValueError):
+            continue
+    return TIER_XL
+
+
+def cpu_earnable_from_live(
+    *,
+    cores: Any = None,
+    workers: Any = None,
+    load_1m: Any = None,
+    settings: Optional[Mapping[str, Any]] = None,
+    load_shed_active: bool = False,
+) -> int:
+    """Concurrent jobs this CPU box may run from live inventory."""
+    cfg = settings if settings is not None else cpu_tier_cap_settings()
+    telem: Dict[str, Any] = {}
+    cores_i = _parse_int(cores)
+    workers_i = _parse_int(workers)
+    if cores_i is not None:
+        telem["cores"] = cores_i
+    if workers_i is not None:
+        telem["num_workers"] = workers_i
+    if load_1m is not None and load_1m != "":
+        try:
+            telem["load_1m"] = float(load_1m)
+        except (TypeError, ValueError):
+            pass
+    return cpu_earnable_concurrent_ceiling(
+        tier=live_cpu_tier(cores_i, workers_i),
+        telemetry=telem,
+        settings=cfg,
+        load_shed_active=load_shed_active,
+    )
+
+
+def cpu_empty_seats(
+    *,
+    cores: Any = None,
+    workers: Any = None,
+    active: Any = 0,
+    assigned: Any = None,
+    load_1m: Any = None,
+    settings: Optional[Mapping[str, Any]] = None,
+    load_shed_active: bool = False,
+) -> int:
+    """Empty concurrent seats on one CPU box. Pica=1, 153-worker EPYC=4."""
+    try:
+        inflight = max(0, int(active or 0))
+    except (TypeError, ValueError):
+        inflight = 0
+    if assigned is not None:
+        try:
+            inflight = max(inflight, max(0, int(assigned or 0)))
+        except (TypeError, ValueError):
+            pass
+    earnable = cpu_earnable_from_live(
+        cores=cores,
+        workers=workers,
+        load_1m=load_1m,
+        settings=settings,
+        load_shed_active=load_shed_active,
+    )
+    return max(0, int(earnable) - inflight)
+
+
+def sum_cpu_empty_seats(
+    rows: Any,
+    settings: Optional[Mapping[str, Any]] = None,
+) -> int:
+    """Sum empty seats across slave_seen / telem rows."""
+    cfg = settings if settings is not None else cpu_tier_cap_settings()
+    total = 0
+    for row in rows or []:
+        if not isinstance(row, Mapping):
+            continue
+        total += cpu_empty_seats(
+            cores=row.get("telem_cores") if "telem_cores" in row else row.get("cores"),
+            workers=row.get("num_workers"),
+            active=row.get("telem_active") if "telem_active" in row else row.get("active"),
+            assigned=row.get("assigned"),
+            load_1m=row.get("load_1m"),
+            settings=cfg,
+        )
+    return total
+
+
+def should_hold_leftover_for_xl(
+    *,
+    poller_earnable: int = 1,
+    hungry_xl_seats: int = 0,
+    sticky_own: bool = False,
+) -> bool:
+    """True when a 1-seat box must not take leftover roots.
+
+    Hungry XL seats (EPYC empty concurrent slots) get the unassigned pile
+    first. The small box still keeps its own sticky job.
+    """
+    if sticky_own:
+        return False
+    if int(poller_earnable or 0) > 1:
+        return False
+    return int(hungry_xl_seats or 0) > 0
 
 
 def tier_concurrent_ceiling(tier: int, settings: Mapping[str, Any]) -> int:

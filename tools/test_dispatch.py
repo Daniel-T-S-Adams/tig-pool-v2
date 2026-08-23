@@ -19,6 +19,7 @@ from master.dispatch import (  # noqa: E402
     pin_expired,
     pin_limit,
     profile_needs_create,
+    should_hold_leftover_for_xl,
     slave_work_profile,
 )
 
@@ -221,6 +222,20 @@ def main() -> int:
     check(slave_work_profile("pool-gpu-abc") == "gpu", "pool-gpu is GPU")
     check(slave_work_profile("pool-cpu-abc") == "cpu", "pool-cpu is CPU")
     check(slave_work_profile("c3-slave-1") == "cpu", "c3-slave leftover name is CPU")
+    check(
+        should_hold_leftover_for_xl(
+            poller_earnable=1, hungry_xl_seats=4, sticky_own=False
+        )
+        is True,
+        "1-seat poller holds leftovers for hungry XL",
+    )
+    check(
+        should_hold_leftover_for_xl(
+            poller_earnable=1, hungry_xl_seats=4, sticky_own=True
+        )
+        is False,
+        "sticky owner is not held",
+    )
     return failed
 
 
