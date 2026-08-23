@@ -988,12 +988,13 @@ class PrecommitManager:
         logger.warning("TIG 100-cap hit; holding creates for %.0fs", hold)
 
     def _count_unresolved_tig_slots(self) -> int:
-        """Jobs TIG still counts toward the 100: no proof, inside the window.
+        """Jobs TIG still counts toward the 100.
 
-        Local expiry stamps unfinished jobs at 120 blocks. TIG's player
-        cap still holds older stopped/no-proof rows (we just measured 44
-        extra in the 120-400 block band). Count that longer tail or the
-        gate thinks there is room and TIG 400s.
+        Open work with no proof always counts. Stopped/no-proof rows only
+        count inside TIG's ~120-block expire. A 400-block tail of old
+        local stops is history, not a live TIG slot — counting it parked
+        creates while the fleet went idle.
+        If TIG still 400s, ``note_tig_cap_hit`` holds creates.
         """
         ceiling = tig_unresolved_ceiling(
             limit=int(os.environ.get("TIG_UNRESOLVED_LIMIT", "100")),
@@ -1001,7 +1002,7 @@ class PrecommitManager:
         )
         if time.time() < float(getattr(self, "_tig_cap_hold_until", 0) or 0):
             return ceiling
-        window = max(1, int(os.environ.get("TIG_UNRESOLVED_WINDOW_BLOCKS", "400")))
+        stop_window = max(1, int(os.environ.get("TIG_UNRESOLVED_WINDOW_BLOCKS", "120")))
         height = int(getattr(self, "last_block_height", 0) or 0)
         try:
             if height <= 0:
@@ -1017,11 +1018,15 @@ class PrecommitManager:
                 FROM job
                 WHERE proof_submitted IS NULL
                   AND (
-                    (block_started IS NOT NULL AND %s < block_started + %s)
-                    OR (block_started IS NULL AND end_time IS NULL)
+                    (stopped IS NULL AND end_time IS NULL)
+                    OR (
+                      stopped IS NOT NULL
+                      AND block_started IS NOT NULL
+                      AND %s < block_started + %s
+                    )
                   )
                 """,
-                (height, window),
+                (height, stop_window),
             ) or {}
             return max(0, int(row.get("n") or 0))
         except Exception as exc:
