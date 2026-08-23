@@ -26,6 +26,7 @@ def _load_fn(name: str):
 
 def main() -> int:
     choose = _load_fn("choose_adaptive_cpu_batch_size")
+    fit = _load_fn("fit_batch_size_to_job_cap")
     failed = 0
 
     def check(ok: bool, label: str) -> None:
@@ -98,6 +99,13 @@ def main() -> int:
     )
     check(meta["mode"] == "keep_configured", f"balanced mode ({meta['mode']})")
     check(bs == 64, f"balanced keeps configured ({bs})")
+
+    # Allowlisted SAT 100k must fit 256 batches instead of being born stopped.
+    sat_bs = fit(32, 100000, 256)
+    sat_batches = math.ceil(100000 / sat_bs)
+    check(sat_bs >= math.ceil(100000 / 256), f"SAT 100k floor ({sat_bs})")
+    check(sat_batches <= 256, f"SAT 100k batches {sat_batches} <= 256")
+    check(fit(32, 2048, 256) == 32, "small jobs keep configured batch_size")
 
     # GPU path not tested here — caller gates on CPU challenge ids.
 

@@ -131,6 +131,22 @@ ADAPTIVE_CPU_BATCH_TARGET_PER_IDLE = max(
 )
 
 
+def fit_batch_size_to_job_cap(
+    batch_size: int,
+    num_nonces: int,
+    max_job_batches: int = 256,
+) -> int:
+    """Raise batch_size so ceil(nonces / bs) never exceeds max_job_batches.
+
+    Allowlisted huge tracks (SAT n_vars=100000) must still run. Creating them
+    already-stopped burns a TIG unresolved slot for ~120 blocks.
+    """
+    bs = max(1, int(batch_size or 1))
+    nonces = max(1, int(num_nonces or 1))
+    cap = max(1, int(max_job_batches or 1))
+    return max(bs, int(math.ceil(nonces / cap)))
+
+
 def choose_adaptive_cpu_batch_size(
     configured_batch_size: int,
     num_nonces: int,
@@ -499,6 +515,23 @@ class JobManager:
                         adapt_meta.get("idle"),
                     )
                 batch_size = adapted
+            fitted = fit_batch_size_to_job_cap(
+                batch_size,
+                x.details.num_nonces,
+                int(max_job_batches or 256),
+            )
+            if fitted != batch_size:
+                logger.info(
+                    "job %s batch_size %s -> %s to fit max_job_batches=%s "
+                    "nonces=%s batches~%s",
+                    benchmark_id,
+                    batch_size,
+                    fitted,
+                    max_job_batches,
+                    x.details.num_nonces,
+                    int(math.ceil(x.details.num_nonces / fitted)),
+                )
+                batch_size = fitted
             num_batches = math.ceil(x.details.num_nonces / batch_size)
             oversized = bool(max_job_batches) and num_batches > max_job_batches
 
