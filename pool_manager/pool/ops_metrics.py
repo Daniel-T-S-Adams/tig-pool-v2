@@ -157,6 +157,9 @@ def _ensure_slave_telem_columns() -> None:
     if _slave_telem_columns_ready:
         return
     try:
+        if db.has_columns("slave_seen", "telem_state", "telem_active"):
+            _slave_telem_columns_ready = True
+            return
         db.execute_many(
             ("ALTER TABLE slave_seen ADD COLUMN IF NOT EXISTS telem_state TEXT", None),
             ("ALTER TABLE slave_seen ADD COLUMN IF NOT EXISTS telem_active INTEGER", None),

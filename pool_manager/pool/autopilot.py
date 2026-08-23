@@ -506,6 +506,20 @@ def _ensure_member_hardening_schema():
     if time.monotonic() < _member_hardening_retry_after:
         return
     try:
+        if (
+            db.has_columns(
+                "pool_members",
+                "trust_state",
+                "preflight_status",
+                "preflight_report",
+                "trusted_at",
+            )
+            and db.has_index("idx_pool_members_trust_state")
+            and db.table_exists("slave_seen")
+            and db.has_columns("slave_seen", "num_workers")
+        ):
+            _member_hardening_schema_ready = True
+            return
         db.execute_many(
             ("ALTER TABLE pool_members ADD COLUMN IF NOT EXISTS trust_state TEXT NOT NULL DEFAULT 'probation'", None),
             ("ALTER TABLE pool_members ADD COLUMN IF NOT EXISTS preflight_status TEXT", None),

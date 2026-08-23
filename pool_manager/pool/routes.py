@@ -74,6 +74,26 @@ def _ensure_fleet_schema():
     global _fleet_schema_ready
     if _fleet_schema_ready:
         return
+    if (
+        db.table_exists("pool_fleets")
+        and db.has_index("idx_pool_fleets_wallet")
+        and db.has_index("idx_pool_members_fleet_id")
+        and db.has_index("idx_pool_members_trust_state")
+        and db.has_columns(
+            "pool_members",
+            "fleet_id",
+            "worker_type",
+            "machine_index",
+            "declared_cores",
+            "declared_gpu_model",
+            "trust_state",
+            "preflight_status",
+            "preflight_report",
+            "trusted_at",
+        )
+    ):
+        _fleet_schema_ready = True
+        return
     db.execute_many(
         (
             """

@@ -111,6 +111,47 @@ def execute_many(*queries, lock_timeout: str | None = None):
                 cur.execute(sql, params)
 
 
+def table_exists(table: str) -> bool:
+    row = fetch_one(
+        """
+        SELECT 1
+        FROM information_schema.tables
+        WHERE table_schema = 'public' AND table_name = %s
+        """,
+        (table,),
+    )
+    return row is not None
+
+
+def has_columns(table: str, *columns: str) -> bool:
+    if not columns:
+        return True
+    rows = fetch_all(
+        """
+        SELECT column_name
+        FROM information_schema.columns
+        WHERE table_schema = 'public'
+          AND table_name = %s
+          AND column_name = ANY(%s)
+        """,
+        (table, list(columns)),
+    )
+    found = {str(row["column_name"]) for row in rows}
+    return all(name in found for name in columns)
+
+
+def has_index(index_name: str) -> bool:
+    row = fetch_one(
+        """
+        SELECT 1
+        FROM pg_class
+        WHERE relname = %s AND relkind = 'i'
+        """,
+        (index_name,),
+    )
+    return row is not None
+
+
 def get_setting(key: str, default: str = "") -> str:
     row = fetch_one("SELECT value FROM pool_settings WHERE key = %s", (key,))
     return row["value"] if row else default
