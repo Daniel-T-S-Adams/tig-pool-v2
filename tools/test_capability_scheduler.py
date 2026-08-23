@@ -237,6 +237,46 @@ def main() -> int:
     cases.append((mult_unknown == 1.0, f"fail-open unknown inventory got {mult_unknown}"))
     cases.append((mult_zero_strong == 0.15, f"known empty strong census got {mult_zero_strong}"))
 
+    census_threads = ns["census_threads"]
+    cases.append((census_threads(live_cores=32, live_workers=25) == 32, "live cores beat workers"))
+    cases.append((census_threads(live_workers=25) == 25, "workers last-resort"))
+    cases.append((census_threads(preflight_threads=64, live_workers=25) == 64, "preflight beats workers"))
+    cases.append((census_threads(declared_cores=48, live_workers=25) == 48, "declared beats workers"))
+    cases.append((census_threads() is None, "no inventory → None"))
+    cases.append((census_threads(live_cores=0, live_workers=0) is None, "zeros are unknown"))
+    cases.append(
+        (
+            hardware_tier(threads=census_threads(live_cores=32, live_workers=25)) == TIER_M,
+            "32-thread/25-worker stays M",
+        )
+    )
+    cases.append(
+        (
+            hardware_tier(threads=census_threads(live_workers=25)) == TIER_S,
+            "25 workers alone is S (do not use for inventory)",
+        )
+    )
+
+    track_speed_from_ema = ns["track_speed_from_ema"]
+    speed_rows = track_speed_from_ema(
+        [
+            {"slave_name": "slow", "challenge": "satisfiability", "track_id": "n_vars=100000",
+             "ema_runtime_ms": 40 * 60 * 1000, "sample_n": 4},
+            {"slave_name": "fast", "challenge": "satisfiability", "track_id": "n_vars=100000",
+             "ema_runtime_ms": 10 * 60 * 1000, "sample_n": 4},
+            {"slave_name": "mid", "challenge": "satisfiability", "track_id": "n_vars=100000",
+             "ema_runtime_ms": 20 * 60 * 1000, "sample_n": 4},
+            {"slave_name": "ignored", "challenge": "satisfiability", "track_id": "n_vars=100000",
+             "ema_runtime_ms": 99 * 60 * 1000, "sample_n": 0},
+        ]
+    )
+    cases.append((len(speed_rows) == 3, f"track speed dropped zero-sample got {len(speed_rows)}"))
+    cases.append((speed_rows[0]["slave_name"] == "slow", "slowest slave ranks first"))
+    cases.append((speed_rows[0]["speed_ratio"] == 2.0, f"slow ratio vs median got {speed_rows[0]['speed_ratio']}"))
+    cases.append((speed_rows[0]["slower"] is True, "ratio > 1 marked slower"))
+    cases.append((speed_rows[-1]["slave_name"] == "fast", "fastest ranks last"))
+    cases.append((speed_rows[-1]["speed_ratio"] == 0.5, f"fast ratio got {speed_rows[-1]['speed_ratio']}"))
+
     ok, reason = algo_is_schedulable(
         "c001_a098",
         algorithms=[

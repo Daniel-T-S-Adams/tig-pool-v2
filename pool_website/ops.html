@@ -218,6 +218,30 @@
       </div>
 
       <div class="card" style="margin-bottom:22px;">
+        <h2 style="margin-bottom:10px;">Slave track speed</h2>
+        <p class="ops-meta" style="margin-top:0;" id="track-speed-meta">
+          2h EMA vs fleet median. Ratio &gt; 1 is slower on that track.
+        </p>
+        <div class="table-scroll">
+          <table class="data-table compact">
+            <thead>
+              <tr>
+                <th>Slave</th>
+                <th>Challenge / track</th>
+                <th>EMA</th>
+                <th>Fleet p50</th>
+                <th>Ratio</th>
+                <th>n</th>
+              </tr>
+            </thead>
+            <tbody id="track-speed-body">
+              <tr><td colspan="6" class="loading">Loading…</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <div class="card" style="margin-bottom:22px;">
         <h2 style="margin-bottom:10px;">Fattest open jobs</h2>
         <div class="table-scroll">
           <table class="data-table compact">
@@ -408,6 +432,7 @@
         ["GPU roots pending", counts.gpu_roots_pending, (gov.caps || {}).gpu_pending_cap],
         ["Open jobs", counts.open_jobs, counts.max_concurrent_benchmarks],
         ["Root ready rate window", counts.root_ready_benchmarks_window, counts.benchmarks_seen_window],
+        ["CPU core inventory", (data.capability_inventory || {}).core_info, (data.capability_inventory || {}).online_cpu],
       ];
       el("gov-counts").innerHTML = countRows.map(([label, a, b]) =>
         `<tr><td style="color:var(--muted);">${label}</td><td style="text-align:right;font-family:JetBrains Mono,monospace;">${fmt(a)}${b !== undefined && b !== null ? " / " + fmt(b) : ""}</td></tr>`
@@ -449,6 +474,25 @@
             <td>${fmt(j.age_min)}m</td>
           </tr>`).join("")
         : `<tr><td colspan="5" style="color:var(--muted);">No sticky-reserved unassigned roots</td></tr>`;
+
+      const speeds = data.track_speed || [];
+      const inv = data.capability_inventory || {};
+      el("track-speed-meta").textContent =
+        "2h EMA vs fleet median. Ratio > 1 is slower. Inventory " +
+        fmt(inv.core_info) + "/" + fmt(inv.online_cpu) +
+        (inv.inventory_known ? " known." : " unknown (throttle fail-open).");
+      el("track-speed-body").innerHTML = speeds.length
+        ? speeds.map((r) => `<tr>
+            <td class="mono" title="${r.slave_name || ""}">${r.slave_name || "—"}</td>
+            <td>${r.challenge || "—"} <span style="color:var(--muted);">/</span> <span class="mono">${r.track_id || "—"}</span></td>
+            <td>${r.ema_runtime_ms != null ? Math.round(r.ema_runtime_ms / 60000) + "m" : "—"}</td>
+            <td>${r.fleet_median_ms != null ? Math.round(r.fleet_median_ms / 60000) + "m" : "—"}</td>
+            <td style="color:${r.slower ? "var(--orange, #fb923c)" : "var(--green, #34d399)"};">${
+              r.speed_ratio == null ? "—" : Number(r.speed_ratio).toFixed(2) + "×"
+            }</td>
+            <td>${fmt(r.sample_n)}</td>
+          </tr>`).join("")
+        : `<tr><td colspan="6" style="color:var(--muted);">No slave_track_ema samples in the last 2h</td></tr>`;
 
       const fat = data.fattest_open_jobs || [];
       el("fattest-body").innerHTML = fat.length

@@ -152,6 +152,78 @@ def capability_settings(config: Optional[Mapping[str, Any]] = None) -> dict:
     }
 
 
+def census_threads(
+    *,
+    preflight_threads: Any = None,
+    declared_cores: Any = None,
+    live_cores: Any = None,
+    live_workers: Any = None,
+) -> Optional[int]:
+    """Best core count for the strong-CPU census.
+
+    Prefer live get-batches ``cores``, then preflight threads, then declared
+    cores. ``num_workers`` is last-resort for other callers; the strong census
+    omits it so a 32-thread/25-worker Pica is not treated as S.
+    """
+    for raw in (live_cores, preflight_threads, declared_cores, live_workers):
+        if raw is None or raw == "":
+            continue
+        try:
+            n = int(raw)
+        except (TypeError, ValueError):
+            continue
+        if n > 0:
+            return n
+    return None
+
+
+def track_speed_from_ema(
+    rows: Iterable[Mapping[str, Any]],
+    *,
+    min_samples: int = 1,
+    limit: int = 48,
+) -> List[dict]:
+    """Slave×track EMA vs fleet median. speed_ratio > 1 means slower."""
+    grouped: Dict[Tuple[str, str], List[float]] = {}
+    items: List[Tuple[str, str, str, float, int]] = []
+    for row in rows or []:
+        challenge = str(row.get("challenge") or "")
+        track_id = str(row.get("track_id") or "")
+        try:
+            ema = float(row.get("ema_runtime_ms") or 0)
+            samples = int(row.get("sample_n") or 0)
+        except (TypeError, ValueError):
+            continue
+        if ema <= 0 or samples < min_samples:
+            continue
+        slave = str(row.get("slave_name") or "")
+        if not slave:
+            continue
+        grouped.setdefault((challenge, track_id), []).append(ema)
+        items.append((slave, challenge, track_id, ema, samples))
+    medians = {k: sorted(v)[len(v) // 2] for k, v in grouped.items() if v}
+    out = []
+    for slave, challenge, track_id, ema, samples in items:
+        med = medians.get((challenge, track_id))
+        if not med or med <= 0:
+            continue
+        ratio = ema / med
+        out.append(
+            {
+                "slave_name": slave,
+                "challenge": challenge,
+                "track_id": track_id,
+                "ema_runtime_ms": round(ema, 1),
+                "fleet_median_ms": round(float(med), 1),
+                "speed_ratio": round(ratio, 3),
+                "sample_n": samples,
+                "slower": ratio > 1.0,
+            }
+        )
+    out.sort(key=lambda r: (-float(r["speed_ratio"]), r["slave_name"] or ""))
+    return out[: max(0, int(limit))]
+
+
 def hardware_tier(
     *,
     threads: Optional[int] = None,
@@ -731,6 +803,10 @@ class CapabilityScheduler:
                 ensure_slave_track_ema_table(execute)
             except Exception as exc:
                 logger.debug("ensure slave_track_ema failed: %s", exc)
+            try:
+                execute("ALTER TABLE slave_seen ADD COLUMN IF NOT EXISTS telem_cores INTEGER")
+            except Exception as exc:
+                logger.debug("ensure slave_seen.telem_cores failed: %s", exc)
 
         window_ms = 2 * 60 * 60 * 1000
         since_ms = now_ms - window_ms
@@ -776,26 +852,29 @@ class CapabilityScheduler:
             )
         except Exception as exc:
             logger.debug("capability ema query failed: %s", exc)
-        try:
-            census_rows = (
-                fetch_all(
-                    """
+        census_sql = """
                     SELECT
                         M.slave_name,
                         M.declared_cores,
                         M.preflight_status,
                         M.preflight_report,
-                        S.last_seen
+                        S.last_seen,
+                        S.num_workers,
+                        S.telem_cores
                     FROM pool_members M
                     LEFT JOIN slave_seen S ON S.slave_name = M.slave_name
                     WHERE M.active = true
                       AND M.slave_name LIKE 'pool-cpu-%'
                     """
-                )
-                or []
-            )
-        except Exception as exc:
-            logger.debug("capability census query failed: %s", exc)
+        try:
+            census_rows = fetch_all(census_sql) or []
+        except Exception:
+            try:
+                census_rows = fetch_all(
+                    census_sql.replace("S.telem_cores", "NULL::integer AS telem_cores")
+                ) or []
+            except Exception as exc:
+                logger.debug("capability census query failed: %s", exc)
 
         track_hardness: Dict[Tuple[str, str], float] = {}
         for row in hardness_rows:
@@ -842,20 +921,21 @@ class CapabilityScheduler:
                 continue
             online_cpu += 1
             report = _parse_report(row.get("preflight_report"))
-            threads = report.get("threads")
+            # Workers-only must not count as inventory: a 32-thread/25-worker
+            # Pica would look S and trip the throttle before live cores land.
+            threads = census_threads(
+                preflight_threads=report.get("threads"),
+                declared_cores=row.get("declared_cores"),
+                live_cores=row.get("telem_cores"),
+            )
             ram_gb = report.get("ram_gb")
             declared = row.get("declared_cores")
-            has_core_info = (
-                (threads is not None and int(threads) > 0)
-                or (declared is not None and int(declared) > 0)
-            )
-            if has_core_info:
-                online_with_core_info += 1
-            else:
+            if threads is None:
                 # Unknown hardware cannot count toward the strong census.
                 continue
+            online_with_core_info += 1
             tier = hardware_tier(
-                threads=int(threads) if threads is not None else None,
+                threads=threads,
                 declared_cores=int(declared) if declared is not None else None,
                 ram_gb=int(ram_gb) if ram_gb is not None else None,
                 preflight_status=row.get("preflight_status"),

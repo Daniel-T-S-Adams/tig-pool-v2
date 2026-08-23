@@ -174,6 +174,7 @@ def ensure_slave_seen_table(execute: Callable) -> None:
     execute("ALTER TABLE slave_seen ADD COLUMN IF NOT EXISTS num_workers INTEGER")
     execute("ALTER TABLE slave_seen ADD COLUMN IF NOT EXISTS telem_state TEXT")
     execute("ALTER TABLE slave_seen ADD COLUMN IF NOT EXISTS telem_active INTEGER")
+    execute("ALTER TABLE slave_seen ADD COLUMN IF NOT EXISTS telem_cores INTEGER")
 
 
 def touch_slave_seen(
@@ -183,6 +184,7 @@ def touch_slave_seen(
     num_workers: int | None = None,
     telem_state: str | None = None,
     telem_active: int | None = None,
+    telem_cores: int | None = None,
 ) -> None:
     workers = None
     if num_workers is not None:
@@ -201,20 +203,27 @@ def touch_slave_seen(
             active = max(0, int(telem_active))
         except (TypeError, ValueError):
             active = None
+    cores = None
+    if telem_cores is not None:
+        try:
+            cores = int(telem_cores) or None
+        except (TypeError, ValueError):
+            cores = None
     execute(
         """
         INSERT INTO slave_seen (
-            slave_name, last_seen, num_workers, telem_state, telem_active
+            slave_name, last_seen, num_workers, telem_state, telem_active, telem_cores
         )
-        VALUES (%s, %s, %s, %s, %s)
+        VALUES (%s, %s, %s, %s, %s, %s)
         ON CONFLICT (slave_name)
         DO UPDATE SET
             last_seen = EXCLUDED.last_seen,
             num_workers = COALESCE(EXCLUDED.num_workers, slave_seen.num_workers),
             telem_state = COALESCE(EXCLUDED.telem_state, slave_seen.telem_state),
-            telem_active = COALESCE(EXCLUDED.telem_active, slave_seen.telem_active)
+            telem_active = COALESCE(EXCLUDED.telem_active, slave_seen.telem_active),
+            telem_cores = COALESCE(EXCLUDED.telem_cores, slave_seen.telem_cores)
         """,
-        (slave_name, int(now_ms), workers, state, active),
+        (slave_name, int(now_ms), workers, state, active, cores),
     )
 
 

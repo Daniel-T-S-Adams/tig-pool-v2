@@ -432,6 +432,7 @@ class SlaveManager:
                 num_workers=num_workers,
                 telem_state=telem.get("state"),
                 telem_active=telem.get("active_batches"),
+                telem_cores=telem.get("cores"),
             )
             self._slave_seen_touch_until[slave_name] = now_ms + self._slave_seen_touch_interval_ms
         except Exception as exc:

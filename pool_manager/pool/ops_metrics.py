@@ -691,6 +691,102 @@ def _slave_rows(now_ms: int, cfg: dict) -> list[dict]:
     return out
 
 
+def _track_speed_from_ema(rows, *, min_samples: int = 1, limit: int = 48) -> list[dict]:
+    grouped: dict[tuple[str, str], list[float]] = {}
+    items = []
+    for row in rows or []:
+        challenge = str(row.get("challenge") or "")
+        track_id = str(row.get("track_id") or "")
+        try:
+            ema = float(row.get("ema_runtime_ms") or 0)
+            samples = int(row.get("sample_n") or 0)
+        except (TypeError, ValueError):
+            continue
+        if ema <= 0 or samples < min_samples:
+            continue
+        slave = str(row.get("slave_name") or "")
+        if not slave:
+            continue
+        grouped.setdefault((challenge, track_id), []).append(ema)
+        items.append((slave, challenge, track_id, ema, samples))
+    medians = {k: sorted(v)[len(v) // 2] for k, v in grouped.items() if v}
+    out = []
+    for slave, challenge, track_id, ema, samples in items:
+        med = medians.get((challenge, track_id))
+        if not med or med <= 0:
+            continue
+        ratio = ema / med
+        out.append({
+            "slave_name": slave,
+            "challenge": challenge,
+            "track_id": track_id,
+            "ema_runtime_ms": round(ema, 1),
+            "fleet_median_ms": round(float(med), 1),
+            "speed_ratio": round(ratio, 3),
+            "sample_n": samples,
+            "slower": ratio > 1.0,
+        })
+    out.sort(key=lambda r: (-float(r["speed_ratio"]), r["slave_name"] or ""))
+    return out[: max(0, int(limit))]
+
+
+def _track_speed_rows(now_ms: int) -> list[dict]:
+    if not db.table_exists("slave_track_ema"):
+        return []
+    try:
+        rows = db.fetch_all(
+            """
+            SELECT slave_name, challenge, track_id, ema_runtime_ms, sample_n
+            FROM slave_track_ema
+            WHERE updated_at >= %s
+            """,
+            (int(now_ms) - 2 * 60 * 60 * 1000,),
+        )
+    except Exception as exc:
+        logger.debug("track speed query failed: %s", exc)
+        return []
+    return _track_speed_from_ema(rows)
+
+
+def _capability_inventory(now_ms: int) -> dict:
+    online_cutoff = int(now_ms) - SLAVE_ONLINE_MS
+    cores_col = (
+        "S.telem_cores"
+        if db.has_columns("slave_seen", "telem_cores")
+        else "NULL::integer"
+    )
+    try:
+        row = db.fetch_one(
+            f"""
+            SELECT
+                COUNT(*) FILTER (WHERE S.last_seen >= %s) AS online_cpu,
+                COUNT(*) FILTER (
+                    WHERE S.last_seen >= %s
+                      AND (
+                        COALESCE({cores_col}, 0) > 0
+                        OR COALESCE(M.declared_cores, 0) > 0
+                        OR COALESCE((M.preflight_report->>'threads')::int, 0) > 0
+                      )
+                ) AS core_info
+            FROM pool_members M
+            LEFT JOIN slave_seen S ON S.slave_name = M.slave_name
+            WHERE M.active = true
+              AND M.slave_name LIKE 'pool-cpu-%%'
+            """,
+            (online_cutoff, online_cutoff),
+        ) or {}
+    except Exception as exc:
+        logger.debug("capability inventory query failed: %s", exc)
+        row = {}
+    online_cpu = int(row.get("online_cpu") or 0)
+    core_info = int(row.get("core_info") or 0)
+    return {
+        "online_cpu": online_cpu,
+        "core_info": core_info,
+        "inventory_known": core_info > 0,
+    }
+
+
 _OPS_CACHE = db.SingleFlightCache(float(os.environ.get("OPS_METRICS_CACHE_S", "12")))
 
 
@@ -1004,6 +1100,8 @@ def _build_ops_metrics_uncached() -> dict:
             "roots_done_15m": int(finishes.get("roots_done_15m") or 0),
             "roots_done_60m": int(finishes.get("roots_done_60m") or 0),
         },
+        "track_speed": _track_speed_rows(now_ms),
+        "capability_inventory": _capability_inventory(now_ms),
         "fattest_open_jobs": fattest,
         "config_snapshot": {
             "max_concurrent_benchmarks": (cfg or {}).get("max_concurrent_benchmarks"),
