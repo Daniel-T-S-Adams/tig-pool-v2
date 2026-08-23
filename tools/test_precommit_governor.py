@@ -557,6 +557,9 @@ def main() -> int:
         (dict(root_phase_jobs=20, proof_phase_jobs=13, max_concurrent=90, overlap_cap=8), True, "fleet-sized cap lets idle boxes get new jobs"),
         (dict(root_phase_jobs=10, proof_phase_jobs=0, max_concurrent=90, unresolved=85, unresolved_ceiling=85), False, "TIG unresolved ceiling blocks creates"),
         (dict(root_phase_jobs=10, proof_phase_jobs=0, max_concurrent=90, unresolved=84, unresolved_ceiling=85), True, "one slot under TIG ceiling still creates"),
+        (dict(root_phase_jobs=42, proof_phase_jobs=0, max_concurrent=20, unresolved=42, unresolved_ceiling=85, seat_hole=True), True, "42 open / parked 20 / seat hole still creates"),
+        (dict(root_phase_jobs=42, proof_phase_jobs=0, max_concurrent=20, unresolved=85, unresolved_ceiling=85, seat_hole=True), False, "TIG 85 blocks even with a seat hole"),
+        (dict(root_phase_jobs=42, proof_phase_jobs=0, max_concurrent=20, unresolved=42, unresolved_ceiling=85, seat_hole=False), False, "42/20 without a hole stays blocked"),
     ]
     for kwargs, expect, label in create_cases:
         got = create_ok(**kwargs)

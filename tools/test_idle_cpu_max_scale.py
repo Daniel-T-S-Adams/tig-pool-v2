@@ -13,7 +13,11 @@ def _load_fns():
     source = path.read_text(encoding="utf-8")
     module = ast.parse(source)
     keep = []
-    want = {"should_idle_cpu_max_scale", "precommit_already_oversubscribed"}
+    want = {
+        "should_idle_cpu_max_scale",
+        "precommit_already_oversubscribed",
+        "idle_hole_blocks_cap_drain",
+    }
     for node in module.body:
         if isinstance(node, ast.FunctionDef) and node.name in want:
             keep.append(node)
@@ -28,6 +32,7 @@ def main() -> int:
     ns = _load_fns()
     fn = ns["should_idle_cpu_max_scale"]
     oversub = ns["precommit_already_oversubscribed"]
+    hole_drain = ns["idle_hole_blocks_cap_drain"]
     base = dict(
         enabled=True,
         productive_idle_cpu=4,
@@ -91,6 +96,18 @@ def main() -> int:
     ]
     for (jobs, cap), expect, label in helper_cases:
         got = oversub(active_jobs=jobs, current_max=cap)
+        passed = got is expect
+        print(f"{'pass' if passed else 'FAIL'}: {label} -> {got}")
+        if not passed:
+            failed += 1
+    drain_cases = [
+        (dict(idle_cpu=27, cpu_claimable=0), True, "idle CPU + 0 claimable blocks cap drain"),
+        (dict(idle_gpu=14, gpu_claimable=0), True, "idle GPU + 0 claimable blocks cap drain"),
+        (dict(idle_cpu=27, cpu_claimable=30), False, "claimable covers idle CPU → drain ok"),
+        (dict(idle_cpu=0, idle_gpu=0), False, "no empty seats → drain ok"),
+    ]
+    for kwargs, expect, label in drain_cases:
+        got = hole_drain(**kwargs)
         passed = got is expect
         print(f"{'pass' if passed else 'FAIL'}: {label} -> {got}")
         if not passed:

@@ -12,18 +12,18 @@ def _load_fn():
     path = pathlib.Path(__file__).resolve().parents[1] / "master" / "slave_manager.py"
     source = path.read_text(encoding="utf-8")
     module = ast.parse(source)
-    target = None
+    keep = []
+    want = {"batch_owner_stealable", "assigned_root_reclaimable"}
     for node in module.body:
-        if isinstance(node, ast.FunctionDef) and node.name == "batch_owner_stealable":
-            target = node
-            break
-    if target is None:
-        raise RuntimeError("batch_owner_stealable not found")
+        if isinstance(node, ast.FunctionDef) and node.name in want:
+            keep.append(node)
+    if {n.name for n in keep} != want:
+        raise RuntimeError(f"missing slave_manager helpers: {want - {n.name for n in keep}}")
     ns: dict = {"Optional": __import__("typing").Optional, "Set": __import__("typing").Set}
     # Default arg DARK_OWNER_RECLAIM_MS is a Name in the function signature —
     # provide it in ns before exec.
     ns["DARK_OWNER_RECLAIM_MS"] = 180_000
-    exec(compile(ast.Module(body=[target], type_ignores=[]), str(path), "exec"), ns, ns)
+    exec(compile(ast.Module(body=keep, type_ignores=[]), str(path), "exec"), ns, ns)
     return ns["batch_owner_stealable"]
 
 

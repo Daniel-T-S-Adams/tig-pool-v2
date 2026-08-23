@@ -720,16 +720,21 @@ def concurrent_create_allowed(
     overlap_cap: int = 8,
     unresolved: int = 0,
     unresolved_ceiling: int = 0,
+    seat_hole: bool = False,
 ) -> bool:
     """True when another precommit may start.
 
     Hard stop when local TIG-unresolved jobs (live, unsent, or skipped)
-    already sit at the safe ceiling. Proof-phase overlap is only a local
-    pipeline hint and must not beat that ceiling.
+    already sit at the safe ceiling. A real seat hole (empty seats above
+    claimable leftovers) may refill even if open jobs sit over the parked
+    cap — that is the 42/20 stall. Proof-phase overlap is only a local
+    pipeline hint and must not beat the TIG ceiling.
     """
     ceiling = int(unresolved_ceiling or 0)
     if ceiling > 0 and int(unresolved or 0) >= ceiling:
         return False
+    if seat_hole:
+        return True
     cap = int(max_concurrent or 0)
     if cap <= 0:
         return True
@@ -1909,6 +1914,10 @@ class PrecommitManager:
                 root_phase_jobs,
                 proof_phase_jobs,
             )
+        seat_hole = (
+            int(fleet_cap["cpu_empty"]) > int(fleet_cap["cpu_claimable"])
+            or int(fleet_cap["gpu_empty"]) > int(fleet_cap["gpu_claimable"])
+        )
         if not concurrent_create_allowed(
             root_phase_jobs=root_phase_jobs,
             proof_phase_jobs=proof_phase_jobs,
@@ -1917,6 +1926,7 @@ class PrecommitManager:
             overlap_cap=overlap_cap,
             unresolved=unresolved,
             unresolved_ceiling=unresolved_ceiling,
+            seat_hole=seat_hole,
         ):
             logger.info(
                 "pending benchmarks at cap (pending=%s root=%s proof=%s "

@@ -3036,6 +3036,25 @@ def precommit_already_oversubscribed(
     return int(active_jobs or 0) > int(current_max or 0)
 
 
+def idle_hole_blocks_cap_drain(
+    *,
+    idle_cpu: int = 0,
+    cpu_claimable: int = 0,
+    idle_gpu: int = 0,
+    gpu_claimable: int = 0,
+) -> bool:
+    """Do not shrink max_concurrent while empty seats have nothing to pull.
+
+    The 42/20 stall was idle CPUs + 0 claimable while autopilot drained the
+    parked cap and precommit refused to refill.
+    """
+    if int(idle_cpu or 0) > 0 and int(cpu_claimable or 0) <= 0:
+        return True
+    if int(idle_gpu or 0) > 0 and int(gpu_claimable or 0) <= 0:
+        return True
+    return False
+
+
 def should_idle_cpu_max_scale(
     *,
     enabled: bool,
@@ -4372,6 +4391,12 @@ def _plan_config_change(report: dict, cfg: dict, clean_windows: int) -> dict:
     proposed_slots_for_gate = slots_rec.get("proposed") or {}
     productive_idle_cpu = int(slot_signals.get("productive_idle_cpu") or 0)
     productive_idle_gpu = int(slot_signals.get("productive_idle_gpu") or 0)
+    hole_blocks_drain = idle_hole_blocks_cap_drain(
+        idle_cpu=productive_idle_cpu,
+        cpu_claimable=int(funnel_summary.get("cpu_unassigned_claimable") or 0),
+        idle_gpu=productive_idle_gpu,
+        gpu_claimable=int(funnel_summary.get("gpu_unassigned_claimable") or 0),
+    )
     slot_idle_map = slot_signals.get("slot_idle") or {}
     slot_idle_cpu = int(slot_idle_map.get("cpu") or slot_idle_map.get(CPU_SLOT_TYPE) or 0)
     stale_roots = int(slot_signals.get("stale_roots") or health.get("stale_roots") or 0)
@@ -4546,7 +4571,15 @@ def _plan_config_change(report: dict, cfg: dict, clean_windows: int) -> dict:
         current = int(cfg.get("max_concurrent_benchmarks") or 0)
         capacity_model = report.get("capacity_model") or {}
         drain_floor = _funnel_drain_floor(capacity_model)
-        should_drain = current > drain_floor and funnel_should_drain
+        should_drain = (
+            current > drain_floor and funnel_should_drain and not hole_blocks_drain
+        )
+        if hole_blocks_drain:
+            decision.setdefault("guardrails", {})["idle_hole_cap_drain"] = {
+                "skipped": "empty_seats_with_no_claimable",
+                "productive_idle_cpu": productive_idle_cpu,
+                "productive_idle_gpu": productive_idle_gpu,
+            }
         if should_drain:
             next_max = max(drain_floor, current - max(1, MAX_BENCHMARK_DOWN_STEP))
             new_cfg = json.loads(json.dumps(cfg))
@@ -4589,7 +4622,14 @@ def _plan_config_change(report: dict, cfg: dict, clean_windows: int) -> dict:
         current = int(cfg.get("max_concurrent_benchmarks") or 0)
         capacity_model = report.get("capacity_model") or {}
         drain_floor = _funnel_drain_floor(capacity_model)
-        if current > drain_floor:
+        if hole_blocks_drain:
+            decision.setdefault("guardrails", {})["root_backlog_max_concurrent"] = {
+                **backlog_pressure,
+                "current": current,
+                "drain_floor": drain_floor,
+                "skipped": "empty_seats_with_no_claimable",
+            }
+        elif current > drain_floor:
             next_max = max(drain_floor, current - max(1, MAX_BENCHMARK_DOWN_STEP))
             new_cfg = json.loads(json.dumps(cfg))
             new_cfg["max_concurrent_benchmarks"] = next_max
@@ -4604,12 +4644,13 @@ def _plan_config_change(report: dict, cfg: dict, clean_windows: int) -> dict:
             }
             decision["config"] = new_cfg
             return decision
-        decision.setdefault("guardrails", {})["root_backlog_max_concurrent"] = {
-            **backlog_pressure,
-            "current": current,
-            "drain_floor": drain_floor,
-            "skipped": "already_at_or_below_drain_floor",
-        }
+        elif not hole_blocks_drain:
+            decision.setdefault("guardrails", {})["root_backlog_max_concurrent"] = {
+                **backlog_pressure,
+                "current": current,
+                "drain_floor": drain_floor,
+                "skipped": "already_at_or_below_drain_floor",
+            }
 
     if health.get("unserved_stranded_benchmarks"):
         current = int(cfg.get("max_concurrent_benchmarks") or 0)

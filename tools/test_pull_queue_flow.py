@@ -1,0 +1,190 @@
+#!/usr/bin/env python3
+"""Pull-queue: assign fills seats, stuck work is leftover, create only refills."""
+
+from __future__ import annotations
+
+import ast
+import pathlib
+import sys
+
+
+def _load_fns(rel: str, *names: str, extra_ns: dict | None = None):
+    path = pathlib.Path(__file__).resolve().parents[1] / rel
+    source = path.read_text(encoding="utf-8")
+    module = ast.parse(source)
+    keep = []
+    want = set(names)
+    for node in module.body:
+        if isinstance(node, ast.FunctionDef) and node.name in want:
+            keep.append(node)
+    if {n.name for n in keep} != want:
+        raise RuntimeError(f"missing in {rel}: {want - {n.name for n in keep}}")
+    ns = dict(extra_ns or {})
+    exec(compile(ast.Module(body=keep, type_ignores=[]), str(path), "exec"), ns, ns)
+    return ns
+
+
+def main() -> int:
+    failed = 0
+
+    def check(ok: bool, label: str) -> None:
+        nonlocal failed
+        print(f"{'pass' if ok else 'FAIL'}: {label}")
+        if not ok:
+            failed += 1
+
+    fleet_ns = _load_fns(
+        "master/cpu_tier_caps.py",
+        "build_fleet_capacity",
+        "fleet_hole_deficit",
+        "seat_create_burst",
+    )
+    fleet = fleet_ns["build_fleet_capacity"]
+    hole = fleet_ns["fleet_hole_deficit"]
+    pica4 = fleet(cpu_empty=4, cpu_claimable=0, open_jobs=42, parked_cap=20)
+    epyc1 = fleet(cpu_empty=4, cpu_claimable=0, open_jobs=42, parked_cap=20)
+    check(
+        hole(pica4) == hole(epyc1) == 4,
+        "4 Pica seats and 1 EPYC×4 have the same hole",
+    )
+
+    slave_ns = _load_fns(
+        "master/slave_manager.py",
+        "seat_per_bench_cap",
+        "assigned_root_reclaimable",
+        "batch_owner_stealable",
+        extra_ns={
+            "Optional": __import__("typing").Optional,
+            "Set": __import__("typing").Set,
+            "DARK_OWNER_RECLAIM_MS": 180_000,
+        },
+    )
+    per_bench = slave_ns["seat_per_bench_cap"]
+    reclaim = slave_ns["assigned_root_reclaimable"]
+    stealable = slave_ns["batch_owner_stealable"]
+    check(
+        per_bench(max_concurrent=5, configured=0) == 5,
+        "EPYC earnable 5 may take 5 roots of one job (no idle-peer spray)",
+    )
+    check(
+        per_bench(max_concurrent=1, configured=0) == 1,
+        "Pica seat cap stays 1",
+    )
+    check(
+        reclaim(is_proof=False, owner_active=4, owner_working=False) is True,
+        "owner idle + assigned leftover is reclaimable",
+    )
+    check(
+        reclaim(is_proof=True, owner_active=0, owner_working=False) is False,
+        "proofs stay with the artifact owner",
+    )
+    now = 10_000_000
+    check(
+        stealable(
+            now_ms=now,
+            slave="idle-owner",
+            start_time=now - 5_000,
+            algorithm_id="c001_x",
+            online_slaves={"pica", "idle-owner"},
+            is_proof=False,
+            retry_ms=7_200_000,
+            owner_active=3,
+            owner_working=False,
+        )
+        is True,
+        "next Pica/EPYC poll can claim an owner-idle assigned root",
+    )
+    check(
+        stealable(
+            now_ms=now,
+            slave="working-owner",
+            start_time=now - 5_000,
+            algorithm_id="c001_x",
+            online_slaves={"pica", "working-owner"},
+            is_proof=False,
+            retry_ms=7_200_000,
+            owner_active=3,
+            owner_working=True,
+        )
+        is False,
+        "working owner keeps a fresh assigned root",
+    )
+
+    pre_ns = _load_fns(
+        "master/precommit_manager.py",
+        "concurrent_create_allowed",
+        "effective_concurrent_cap",
+    )
+    create_ok = pre_ns["concurrent_create_allowed"]
+    eff_cap = pre_ns["effective_concurrent_cap"]
+    check(
+        create_ok(
+            root_phase_jobs=42,
+            max_concurrent=20,
+            unresolved=42,
+            unresolved_ceiling=85,
+            seat_hole=True,
+        )
+        is True,
+        "42 open / parked 20 / 27 idle CPU / 0 claimable → create allowed",
+    )
+    check(
+        create_ok(
+            root_phase_jobs=20,
+            max_concurrent=20,
+            unresolved=85,
+            unresolved_ceiling=85,
+            seat_hole=True,
+        )
+        is False,
+        "85 unresolved → create blocked",
+    )
+    pica_cap = eff_cap(
+        max_concurrent=20, idle_needs_work=True, hole_deficit=4, max_hole_lift=16
+    )
+    epyc_cap = eff_cap(
+        max_concurrent=20, idle_needs_work=True, hole_deficit=4, max_hole_lift=16
+    )
+    check(
+        pica_cap == epyc_cap,
+        "4 Pica seats and 1 EPYC×4 make the same create-cap decision",
+    )
+
+    root = pathlib.Path(__file__).resolve().parents[1]
+    sys.path.insert(0, str(root))
+    from master.dispatch import next_hole_profile  # noqa: E402
+
+    check(
+        next_hole_profile(
+            cpu_hole=True,
+            gpu_hole=True,
+            cpu_idle=27,
+            cpu_claimable=0,
+            gpu_idle=14,
+            gpu_claimable=0,
+            last_profile="cpu",
+        )
+        == "gpu",
+        "14 idle GPUs, 0 GPU claimable, last create CPU → next create is GPU",
+    )
+
+    auto_ns = _load_fns(
+        "pool_manager/pool/autopilot.py",
+        "idle_hole_blocks_cap_drain",
+        "precommit_already_oversubscribed",
+    )
+    check(
+        auto_ns["idle_hole_blocks_cap_drain"](idle_cpu=27, cpu_claimable=0) is True,
+        "autopilot must not drain the parked cap while CPU seats are empty",
+    )
+    check(
+        auto_ns["precommit_already_oversubscribed"](active_jobs=42, current_max=20)
+        is True,
+        "oversub upscale guard still sees 42/20",
+    )
+
+    return 2 if failed else 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

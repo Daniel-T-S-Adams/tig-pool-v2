@@ -122,6 +122,34 @@ def owner_idle_unlocks_sticky(active_count: int | None) -> bool:
     return int(active_count or 0) <= 0
 
 
+def seat_per_bench_cap(*, max_concurrent: int = 1, configured: int = 0) -> int:
+    """How many roots of one job this box may hold. Empty seats, not spray=1."""
+    seats = max(1, int(max_concurrent or 1))
+    if int(configured or 0) >= 1:
+        return max(1, min(int(configured), seats))
+    return seats
+
+
+def assigned_root_reclaimable(
+    *,
+    is_proof: bool = False,
+    owner_active: int | None = None,
+    owner_working: bool | None = None,
+) -> bool:
+    """True when an assigned root should be leftover for the next empty seat.
+
+    Proofs stay with the artifact owner. Roots on an idle or not-working
+    owner become claimable so 49 pending rows do not sit next to idle boxes.
+    """
+    if is_proof:
+        return False
+    if owner_active is not None and int(owner_active or 0) <= 0:
+        return True
+    if owner_working is False:
+        return True
+    return False
+
+
 # When the sticky preferred owner is online but already at its adaptive cap,
 # allow other live CPUs to take unassigned roots. Without this, pending root
 # batches sit locked to a full owner while the rest of the fleet idles.
@@ -252,13 +280,22 @@ def batch_owner_stealable(
     is_proof: bool,
     dark_reclaim_ms: int = DARK_OWNER_RECLAIM_MS,
     retry_ms: Optional[int] = None,
+    owner_active: int | None = None,
+    owner_working: bool | None = None,
 ) -> bool:
     """True when an assigned batch may be given to another polling slave.
 
     Proofs are never dark-stolen (local artifacts). Roots may be reclaimed
     from a dark owner after dark_reclaim_ms even if challenge retry is hours.
+    Idle or not-working owners release roots immediately so empty seats pull.
     """
     if slave is None or start_time is None:
+        return True
+    if assigned_root_reclaimable(
+        is_proof=is_proof,
+        owner_active=owner_active,
+        owner_working=owner_working,
+    ):
         return True
     age = int(now_ms) - int(start_time)
     effective_retry = (
@@ -2284,24 +2321,10 @@ class SlaveManager:
             root_cap_while_proofs = (
                 PROOF_PRIORITY_MAX_ROOTS if has_proof_work else max_concurrent
             )
-            per_bench_cap = CONFIG.get("max_batches_per_benchmark", 0)
-            if not per_bench_cap or per_bench_cap < 1:
-                per_bench_cap = max(1, max_concurrent // 4) if max_concurrent else 1
-            # While same-profile peers are empty, do not pile 8–13 roots of one
-            # job onto a single box. That is how 45 assigned CPU roots left
-            # 46 machines idle with zero unassigned leftovers.
-            poll_profile = _slave_work_profile(slave_name)
-            idle_peers = 0
-            if poll_profile:
-                for name in online_slaves or set():
-                    if _slave_work_profile(name) != poll_profile:
-                        continue
-                    if int(active_by_slave.get(name) or 0) == 0:
-                        idle_peers += 1
-                if int(active_by_slave.get(slave_name) or 0) == 0:
-                    idle_peers = max(0, idle_peers - 1)
-            if idle_peers > 0:
-                per_bench_cap = 1
+            per_bench_cap = seat_per_bench_cap(
+                max_concurrent=max_concurrent,
+                configured=int(CONFIG.get("max_batches_per_benchmark") or 0),
+            )
 
             # Rank roots only (no skip). Proofs keep list order. Slow slaves
             # see easier tracks first; fast slaves see hard tracks first.
@@ -2406,13 +2429,20 @@ class SlaveManager:
                             continue
                         if concurrent_by_bench.get(bid, 0) >= per_bench_cap:
                             continue
+                    owner = b.get("slave")
                     if not batch_owner_stealable(
                         now_ms=int(now),
-                        slave=b.get("slave"),
+                        slave=owner,
                         start_time=b.get("start_time"),
                         algorithm_id=batch["settings"]["algorithm_id"],
                         online_slaves=online_slaves,
                         is_proof=is_proof,
+                        owner_active=active_by_slave.get(str(owner)) if owner else None,
+                        owner_working=telem_slave_is_working(
+                            self._slave_telemetry.get(str(owner)) or {}
+                        )
+                        if owner
+                        else None,
                     ):
                         continue
                     b["slave"] = slave_name
@@ -2682,21 +2712,10 @@ class SlaveManager:
             # every slave poll behind one Postgres round-trip.
             route_cap = int(slave["max_concurrent_batches"])
             max_concurrent = self._adaptive_max_concurrent(slave_name, route_cap)
-            per_bench_cap = CONFIG.get("max_batches_per_benchmark", 0)
-            if not per_bench_cap or per_bench_cap < 1:
-                per_bench_cap = max(1, max_concurrent // 4)
-            poll_profile = _slave_work_profile(slave_name)
-            idle_peers = 0
-            if poll_profile:
-                for name in online_slaves or set():
-                    if _slave_work_profile(name) != poll_profile:
-                        continue
-                    if int(active_by_slave.get(name) or 0) == 0:
-                        idle_peers += 1
-                if int(active_by_slave.get(slave_name) or 0) == 0:
-                    idle_peers = max(0, idle_peers - 1)
-            if idle_peers > 0:
-                per_bench_cap = 1
+            per_bench_cap = seat_per_bench_cap(
+                max_concurrent=max_concurrent,
+                configured=int(CONFIG.get("max_batches_per_benchmark") or 0),
+            )
 
             now_i = int(now)
             proof_candidates = []
@@ -3032,13 +3051,20 @@ class SlaveManager:
                             and concurrent_roots >= root_cap_while_proofs
                         ):
                             continue
+                        owner = b.get("slave")
                         if not batch_owner_stealable(
                             now_ms=int(now),
-                            slave=b.get("slave"),
+                            slave=owner,
                             start_time=b.get("start_time"),
                             algorithm_id=batch["settings"]["algorithm_id"],
                             online_slaves=online_slaves,
                             is_proof=is_proof,
+                            owner_active=active_by_slave.get(str(owner)) if owner else None,
+                            owner_working=telem_slave_is_working(
+                                self._slave_telemetry.get(str(owner)) or {}
+                            )
+                            if owner
+                            else None,
                         ):
                             continue
                         if respect_cap and concurrent_by_bench.get(bid, 0) >= per_bench_cap:

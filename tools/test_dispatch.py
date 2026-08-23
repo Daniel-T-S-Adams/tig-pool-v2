@@ -104,6 +104,19 @@ def main() -> int:
         next_hole_profile(
             cpu_hole=True,
             gpu_hole=True,
+            cpu_idle=27,
+            cpu_claimable=0,
+            gpu_idle=14,
+            gpu_claimable=0,
+            last_profile="cpu",
+        )
+        == "gpu",
+        "14 idle GPUs + 0 GPU claimable after a CPU create → GPU",
+    )
+    check(
+        next_hole_profile(
+            cpu_hole=True,
+            gpu_hole=True,
             cpu_idle=2,
             cpu_claimable=0,
             gpu_idle=17,
