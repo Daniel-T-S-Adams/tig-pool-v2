@@ -1479,6 +1479,24 @@ def _safe_div(numerator: int | float | None, denominator: int | float | None) ->
     return round(float(numerator or 0) / float(denominator), 4)
 
 
+def proof_counts_toward_conversion(
+    *,
+    has_proof_batches: bool,
+    proof_submitted: bool = False,
+    stopped: bool = False,
+    has_end_time: bool = False,
+) -> bool:
+    """True when a job belongs in proof_conversion_rate's denominator.
+
+    Open proof-phase work (and local-done waiting on TIG confirm) must not
+    look like a failed conversion. Only settled jobs count: TIG-confirmed
+    proofs, stopped, or ended.
+    """
+    if not has_proof_batches:
+        return False
+    return bool(proof_submitted) or bool(stopped) or bool(has_end_time)
+
+
 def _reward_funnel_summary(now_ms: int) -> dict:
     cutoff_metrics = now_ms - METRIC_WINDOW_MS
     cfg, _cfg_error = _fetch_master_config()
@@ -1537,7 +1555,20 @@ def _reward_funnel_summary(now_ms: int) -> dict:
             COUNT(*) FILTER (WHERE jb.benchmark_submit_time IS NOT NULL) AS benchmark_submit_attempted,
             COUNT(*) FILTER (WHERE jb.benchmark_submitted = true) AS benchmark_submitted_confirmed,
             COUNT(*) FILTER (WHERE jb.sampled_nonces IS NOT NULL) AS sampled_benchmarks,
-            COUNT(*) FILTER (WHERE COALESCE(pa.proof_batches, 0) > 0) AS proof_required_benchmarks,
+            COUNT(*) FILTER (
+                WHERE COALESCE(pa.proof_batches, 0) > 0
+                  AND (
+                      jb.proof_submitted = true
+                      OR jb.stopped = true
+                      OR jb.end_time IS NOT NULL
+                  )
+            ) AS proof_required_benchmarks,
+            COUNT(*) FILTER (
+                WHERE COALESCE(pa.proof_batches, 0) > 0
+                  AND jb.proof_submitted IS NOT TRUE
+                  AND jb.stopped IS NULL
+                  AND jb.end_time IS NULL
+            ) AS proof_inflight_benchmarks,
             COUNT(*) FILTER (WHERE jb.merkle_proofs_ready = true) AS proof_ready_benchmarks,
             COUNT(*) FILTER (WHERE jb.proof_submit_time IS NOT NULL) AS proof_submit_attempted,
             COUNT(*) FILTER (WHERE jb.proof_submitted = true) AS proof_submitted_confirmed,
@@ -1648,7 +1679,20 @@ def _reward_funnel_summary(now_ms: int) -> dict:
             COUNT(*) FILTER (WHERE jb.merkle_root_ready = true) AS root_ready_benchmarks,
             COUNT(*) FILTER (WHERE jb.benchmark_submitted = true) AS benchmark_submitted_confirmed,
             COUNT(*) FILTER (WHERE jb.sampled_nonces IS NOT NULL) AS sampled_benchmarks,
-            COUNT(*) FILTER (WHERE COALESCE(pa.proof_batches, 0) > 0) AS proof_required_benchmarks,
+            COUNT(*) FILTER (
+                WHERE COALESCE(pa.proof_batches, 0) > 0
+                  AND (
+                      jb.proof_submitted = true
+                      OR jb.stopped = true
+                      OR jb.end_time IS NOT NULL
+                  )
+            ) AS proof_required_benchmarks,
+            COUNT(*) FILTER (
+                WHERE COALESCE(pa.proof_batches, 0) > 0
+                  AND jb.proof_submitted IS NOT TRUE
+                  AND jb.stopped IS NULL
+                  AND jb.end_time IS NULL
+            ) AS proof_inflight_benchmarks,
             COUNT(*) FILTER (WHERE jb.merkle_proofs_ready = true) AS proof_ready_benchmarks,
             COUNT(*) FILTER (WHERE jb.proof_submitted = true) AS proof_submitted_confirmed,
             ROUND(AVG(jb.num_nonces)::numeric, 1) AS avg_num_nonces,
@@ -1716,6 +1760,7 @@ def _reward_funnel_summary(now_ms: int) -> dict:
     proof_required = int(total.get("proof_required_benchmarks") or 0)
     proof_submitted = int(total.get("proof_submitted_confirmed") or 0)
     proof_attempted = int(total.get("proof_submit_attempted") or 0)
+    proof_inflight = int(total.get("proof_inflight_benchmarks") or 0)
     stopped = int(total.get("stopped_benchmarks") or 0)
     stopped_without_roots = int(total.get("stopped_without_roots") or 0)
     intentional_stopped_without_roots = sum(
@@ -1728,6 +1773,8 @@ def _reward_funnel_summary(now_ms: int) -> dict:
     cpu_roots_pending = int(float(total.get("cpu_roots_pending") or 0))
     gpu_roots_pending = int(float(total.get("gpu_roots_pending") or 0))
     avg_time_to_proof = total.get("avg_time_to_proof_submit_sec")
+    # Settled jobs only. In-flight proof-phase rows stay out of the denominator
+    # so a full warehouse does not print 70% conversion and drain max_concurrent.
     proof_conversion = _safe_div(proof_submitted, proof_required)
     proof_attempt_rate = _safe_div(proof_attempted, proof_required)
     stopped_rate = _safe_div(stopped, seen)
@@ -1763,6 +1810,7 @@ def _reward_funnel_summary(now_ms: int) -> dict:
             "gpu_roots_pending": gpu_roots_pending,
             "root_ready_rate": _safe_div(root_ready, seen),
             "proof_conversion_rate": proof_conversion,
+            "proof_inflight_benchmarks": proof_inflight,
             "proof_submit_attempt_rate": proof_attempt_rate,
             "stopped_rate": stopped_rate,
             "unexpected_stopped_rate": unexpected_stopped_rate,
