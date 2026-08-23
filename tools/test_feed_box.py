@@ -1,0 +1,354 @@
+#!/usr/bin/env python3
+"""Feed-the-box: take fat leftovers, skip crumbs on an empty seat."""
+
+from __future__ import annotations
+
+import ast
+import pathlib
+
+
+def _load_fns(rel: str, *names: str, extra_ns: dict | None = None):
+    path = pathlib.Path(__file__).resolve().parents[1] / rel
+    source = path.read_text(encoding="utf-8")
+    module = ast.parse(source)
+    keep = []
+    want = set(names)
+    for node in module.body:
+        if isinstance(node, ast.FunctionDef) and node.name in want:
+            keep.append(node)
+    if {n.name for n in keep} != want:
+        raise RuntimeError(f"missing in {rel}: {want - {n.name for n in keep}}")
+    ns = dict(extra_ns or {})
+    exec(compile(ast.Module(body=keep, type_ignores=[]), str(path), "exec"), ns, ns)
+    return ns
+
+
+def main() -> int:
+    failed = 0
+
+    def check(ok: bool, label: str) -> None:
+        nonlocal failed
+        print(f"{'pass' if ok else 'FAIL'}: {label}")
+        if not ok:
+            failed += 1
+
+    ns = _load_fns(
+        "master/slave_manager.py",
+        "batch_remaining_nonces",
+        "poller_worker_count",
+        "leftover_feeds_box",
+        "leftover_is_crumb",
+        "leftover_takeable_by_poller",
+        "should_skip_crumb_for_empty_seat",
+        "takeable_unassigned_by_bid",
+        "claimable_has_fat_leftover",
+        "feed_leftover_rank",
+        "same_job_fill_allows",
+        "leftover_nonces_by_job",
+        "unassigned_roots_by_job",
+        "pick_fill_bid",
+        extra_ns={
+            "Optional": __import__("typing").Optional,
+            "Dict": __import__("typing").Dict,
+        },
+    )
+    feeds = ns["leftover_feeds_box"]
+    crumb = ns["leftover_is_crumb"]
+    skip = ns["should_skip_crumb_for_empty_seat"]
+    has_fat = ns["claimable_has_fat_leftover"]
+    rank = ns["feed_leftover_rank"]
+    same_job = ns["same_job_fill_allows"]
+    takeable = ns["leftover_takeable_by_poller"]
+    takeable_map = ns["takeable_unassigned_by_bid"]
+    pick = ns["pick_fill_bid"]
+    leftover_nonces = ns["leftover_nonces_by_job"]
+    unassigned = ns["unassigned_roots_by_job"]
+    workers = ns["poller_worker_count"]
+
+    check(
+        workers({"num_workers": 25}, is_gpu=False) == 25,
+        "Pica telem workers stay 25",
+    )
+    check(
+        workers({"num_workers": 190}, is_gpu=False) == 190,
+        "EPYC telem workers stay 190",
+    )
+    check(
+        workers({}, is_gpu=True) == 1,
+        "GPU with no telem defaults to 1 worker",
+    )
+
+    check(
+        feeds(remaining_nonces=12, unassigned_on_job=1, workers=25, empty_seats=1)
+        is False,
+        "Pica 25w + 12-nonce leftover is a crumb",
+    )
+    check(
+        feeds(remaining_nonces=64, unassigned_on_job=1, workers=25, empty_seats=1)
+        is True,
+        "Pica 25w + 64-nonce leftover is fat",
+    )
+    check(
+        feeds(remaining_nonces=80, unassigned_on_job=1, workers=25, empty_seats=1)
+        is True,
+        "Pica 25w + 80-nonce leftover is fat",
+    )
+    check(
+        feeds(remaining_nonces=64, unassigned_on_job=5, workers=190, empty_seats=5)
+        is True,
+        "EPYC 190w + 5 unassigned x 64 stacks to fat",
+    )
+    check(
+        feeds(remaining_nonces=64, unassigned_on_job=1, workers=190, empty_seats=5)
+        is False,
+        "EPYC 190w + one 64-nonce leftover is a crumb",
+    )
+    check(
+        feeds(remaining_nonces=190, unassigned_on_job=1, workers=190, empty_seats=5)
+        is True,
+        "EPYC 190w + 190-nonce leftover is fat",
+    )
+
+    fat_jobs = {"fat": 80, "crumb": 1}
+    fat_nonces = {"fat": 64, "crumb": 12}
+    check(
+        has_fat(
+            unassigned_by_bid=fat_jobs,
+            leftover_nonces_by_bid=fat_nonces,
+            workers=25,
+            empty_seats=1,
+        )
+        is True,
+        "80-root knapsack counts as fat claimable for a Pica",
+    )
+    check(
+        skip(
+            remaining_nonces=12,
+            unassigned_on_job=1,
+            workers=25,
+            empty_seats=1,
+            poller_assigned=0,
+            taking_this_poll=0,
+            has_fat_claimable=True,
+            sticky_own=False,
+        )
+        is True,
+        "empty Pica skips a 12-nonce crumb when fat leftovers exist",
+    )
+    check(
+        skip(
+            remaining_nonces=64,
+            unassigned_on_job=1,
+            workers=25,
+            empty_seats=1,
+            poller_assigned=0,
+            taking_this_poll=0,
+            has_fat_claimable=True,
+            sticky_own=False,
+        )
+        is False,
+        "empty Pica takes a 64-nonce leftover",
+    )
+    check(
+        skip(
+            remaining_nonces=64,
+            unassigned_on_job=1,
+            workers=190,
+            empty_seats=5,
+            poller_assigned=0,
+            taking_this_poll=0,
+            has_fat_claimable=True,
+            sticky_own=False,
+        )
+        is True,
+        "empty EPYC skips one 64-nonce leftover when a fat job exists",
+    )
+    check(
+        skip(
+            remaining_nonces=12,
+            unassigned_on_job=1,
+            workers=25,
+            empty_seats=1,
+            poller_assigned=0,
+            taking_this_poll=0,
+            has_fat_claimable=False,
+            sticky_own=False,
+        )
+        is False,
+        "no fat claimable: take the crumb",
+    )
+    check(
+        skip(
+            remaining_nonces=12,
+            unassigned_on_job=1,
+            workers=25,
+            empty_seats=1,
+            poller_assigned=0,
+            taking_this_poll=0,
+            has_fat_claimable=True,
+            sticky_own=True,
+        )
+        is False,
+        "sticky owner still finishes scraps",
+    )
+    check(
+        skip(
+            remaining_nonces=12,
+            unassigned_on_job=1,
+            workers=25,
+            empty_seats=1,
+            is_proof=True,
+            has_fat_claimable=True,
+        )
+        is False,
+        "proofs are never skipped as crumbs",
+    )
+
+    fat_rank = rank(unassigned_on_job=80, remaining_nonces=64, original_idx=9)
+    crumb_rank = rank(unassigned_on_job=1, remaining_nonces=12, original_idx=0)
+    check(
+        fat_rank < crumb_rank,
+        "80-unassigned job ranks before a 1-unassigned crumb",
+    )
+    own_rank = rank(
+        unassigned_on_job=1, remaining_nonces=12, original_idx=0, sticky_own=True
+    )
+    check(own_rank < fat_rank, "own leftover ranks before a fatter stranger job")
+
+    check(
+        same_job(fill_bid="A", bid="A", sticky_own=False) is True,
+        "same-job fill allows the locked bid",
+    )
+    check(
+        same_job(fill_bid="A", bid="B", sticky_own=False) is False,
+        "after fill_bid=A, reject B unless sticky",
+    )
+    check(
+        same_job(fill_bid="A", bid="B", sticky_own=True) is True,
+        "sticky own may leave the fill lock",
+    )
+    check(
+        same_job(fill_bid="", bid="B", sticky_own=False) is True,
+        "no fill lock yet: any job is allowed",
+    )
+
+    check(
+        takeable(
+            "fat",
+            slave_name="pica",
+            root_affinity={"fat": "other"},
+            overflow_benchmark_ids=set(),
+        )
+        is False,
+        "fat leftover locked to another owner is not takeable",
+    )
+    check(
+        takeable(
+            "fat",
+            slave_name="pica",
+            root_affinity={"fat": "other"},
+            overflow_benchmark_ids={"fat"},
+        )
+        is True,
+        "overflow-unlocked leftover is takeable",
+    )
+    locked_fat = takeable_map(
+        {"fat": 80, "crumb": 1},
+        slave_name="pica",
+        root_affinity={"fat": "other"},
+        overflow_benchmark_ids=set(),
+    )
+    check(
+        has_fat(
+            unassigned_by_bid=locked_fat,
+            leftover_nonces_by_bid=fat_nonces,
+            workers=25,
+            empty_seats=1,
+        )
+        is False,
+        "sticky-locked fat does not count as fat claimable for this poller",
+    )
+
+    check(
+        pick(["crumb"], {"crumb": 1, "fat": 80}, {"crumb": 12, "fat": 64})
+        == "crumb",
+        "held crumb stays the fill lock when no fat-claimable flag",
+    )
+    check(
+        pick(
+            ["crumb"],
+            {"crumb": 1, "fat": 80},
+            {"crumb": 12, "fat": 64},
+            workers=25,
+            empty_seats=1,
+            has_fat_claimable=True,
+        )
+        == "",
+        "do not lock remaining seats onto a crumb when fat leftovers exist",
+    )
+    check(
+        pick(
+            ["fat"],
+            {"crumb": 1, "fat": 80},
+            {"crumb": 12, "fat": 64},
+            workers=25,
+            empty_seats=1,
+            has_fat_claimable=True,
+        )
+        == "fat",
+        "held fat job stays the fill lock",
+    )
+
+    rows = [
+        {
+            "slave": None,
+            "end_time": None,
+            "batch": {
+                "benchmark_id": "fat",
+                "num_nonces": 64,
+                "sampled_nonces": None,
+            },
+        },
+        {
+            "slave": None,
+            "end_time": None,
+            "batch": {
+                "benchmark_id": "fat",
+                "num_nonces": 64,
+                "sampled_nonces": None,
+            },
+        },
+        {
+            "slave": None,
+            "end_time": None,
+            "batch": {
+                "benchmark_id": "crumb",
+                "num_nonces": 12,
+                "sampled_nonces": None,
+            },
+        },
+        {
+            "slave": "busy",
+            "end_time": None,
+            "batch": {
+                "benchmark_id": "assigned",
+                "num_nonces": 64,
+                "sampled_nonces": None,
+            },
+        },
+    ]
+    check(
+        leftover_nonces(rows) == {"fat": 64, "crumb": 12},
+        "leftover nonce map ignores assigned roots",
+    )
+    check(
+        unassigned(rows) == {"fat": 2, "crumb": 1},
+        "unassigned root counts ignore assigned roots",
+    )
+    check(crumb(remaining_nonces=12, workers=25, empty_seats=1) is True, "12 < 25 is crumb")
+
+    return 2 if failed else 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

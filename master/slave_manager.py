@@ -150,6 +150,247 @@ def assigned_root_reclaimable(
     return False
 
 
+def batch_remaining_nonces(batch: Optional[dict] = None) -> int:
+    try:
+        return max(0, int((batch or {}).get("num_nonces") or 0))
+    except (TypeError, ValueError):
+        return 0
+
+
+def poller_worker_count(telemetry: Optional[dict] = None, *, is_gpu: bool = False) -> int:
+    try:
+        n = int((telemetry or {}).get("num_workers") or 0)
+    except (TypeError, ValueError):
+        n = 0
+    if n >= 1:
+        return n
+    return 1 if is_gpu else 25
+
+
+def leftover_feeds_box(
+    *,
+    remaining_nonces: int = 0,
+    unassigned_on_job: int = 0,
+    workers: int = 1,
+    empty_seats: int = 1,
+) -> bool:
+    """True when this leftover can keep the box's workers busy.
+
+    One fat batch is enough. A pile of sibling leftovers can feed an XL
+    even when each batch is smaller than 190 workers.
+    """
+    if int(remaining_nonces or 0) >= max(1, int(workers or 1)):
+        return True
+    seats = max(1, int(empty_seats or 1))
+    if seats <= 1:
+        return False
+    return int(unassigned_on_job or 0) >= seats
+
+
+def leftover_is_crumb(
+    *,
+    remaining_nonces: int = 0,
+    unassigned_on_job: int = 0,
+    workers: int = 1,
+    empty_seats: int = 1,
+) -> bool:
+    return not leftover_feeds_box(
+        remaining_nonces=remaining_nonces,
+        unassigned_on_job=unassigned_on_job,
+        workers=workers,
+        empty_seats=empty_seats,
+    )
+
+
+def leftover_takeable_by_poller(
+    bid: str,
+    *,
+    slave_name: str = "",
+    root_affinity: Optional[dict] = None,
+    overflow_benchmark_ids: Optional[set] = None,
+) -> bool:
+    """Fat leftovers locked to another live owner do not justify skipping crumbs."""
+    key = str(bid or "")
+    if not key:
+        return False
+    preferred = (root_affinity or {}).get(key)
+    if not preferred or preferred == slave_name:
+        return True
+    overflow = overflow_benchmark_ids or set()
+    return key in overflow or bid in overflow
+
+
+def should_skip_crumb_for_empty_seat(
+    *,
+    is_proof: bool = False,
+    remaining_nonces: int = 0,
+    unassigned_on_job: int = 0,
+    workers: int = 1,
+    empty_seats: int = 1,
+    poller_assigned: int = 0,
+    taking_this_poll: int = 0,
+    has_fat_claimable: bool = False,
+    sticky_own: bool = False,
+) -> bool:
+    """Crumbs must not take the only seat when fat leftovers exist."""
+    if is_proof or sticky_own:
+        return False
+    if int(poller_assigned or 0) + int(taking_this_poll or 0) > 0:
+        return False
+    if not has_fat_claimable:
+        return False
+    return leftover_is_crumb(
+        remaining_nonces=remaining_nonces,
+        unassigned_on_job=unassigned_on_job,
+        workers=workers,
+        empty_seats=empty_seats,
+    )
+
+
+def takeable_unassigned_by_bid(
+    unassigned_by_bid: Optional[dict] = None,
+    *,
+    slave_name: str = "",
+    root_affinity: Optional[dict] = None,
+    overflow_benchmark_ids: Optional[set] = None,
+) -> Dict[str, int]:
+    out: Dict[str, int] = {}
+    for bid, n_unassigned in (unassigned_by_bid or {}).items():
+        if leftover_takeable_by_poller(
+            str(bid),
+            slave_name=slave_name,
+            root_affinity=root_affinity,
+            overflow_benchmark_ids=overflow_benchmark_ids,
+        ):
+            out[str(bid)] = int(n_unassigned or 0)
+    return out
+
+
+def claimable_has_fat_leftover(
+    *,
+    unassigned_by_bid: Optional[dict] = None,
+    leftover_nonces_by_bid: Optional[dict] = None,
+    workers: int = 1,
+    empty_seats: int = 1,
+) -> bool:
+    leftovers = leftover_nonces_by_bid or {}
+    for bid, n_unassigned in (unassigned_by_bid or {}).items():
+        if leftover_feeds_box(
+            remaining_nonces=int(leftovers.get(bid) or leftovers.get(str(bid)) or 0),
+            unassigned_on_job=int(n_unassigned or 0),
+            workers=workers,
+            empty_seats=empty_seats,
+        ):
+            return True
+    return False
+
+
+def feed_leftover_rank(
+    *,
+    unassigned_on_job: int = 0,
+    remaining_nonces: int = 0,
+    original_idx: int = 0,
+    sticky_own: bool = False,
+    is_proof: bool = False,
+) -> tuple:
+    """Lower is better. Own leftovers first, then the fattest job."""
+    if is_proof:
+        return (0, 0, 0, int(original_idx))
+    if sticky_own:
+        return (1, 0, 0, int(original_idx))
+    return (
+        2,
+        -max(0, int(unassigned_on_job or 0)),
+        -max(0, int(remaining_nonces or 0)),
+        int(original_idx),
+    )
+
+
+def same_job_fill_allows(
+    *,
+    fill_bid: str = "",
+    bid: str = "",
+    sticky_own: bool = False,
+    is_proof: bool = False,
+) -> bool:
+    """Once this poll starts a fat job, stay on it."""
+    if is_proof or sticky_own or not fill_bid:
+        return True
+    return str(bid or "") == str(fill_bid or "")
+
+
+def leftover_nonces_by_job(rows) -> Dict[str, int]:
+    """Max remaining nonces among unassigned unfinished roots, per job."""
+    out: Dict[str, int] = {}
+    for row in rows or []:
+        batch = (row or {}).get("batch") or {}
+        if batch.get("sampled_nonces") is not None:
+            continue
+        if (row or {}).get("end_time") is not None:
+            continue
+        if (row or {}).get("slave") is not None:
+            continue
+        bid = str(batch.get("benchmark_id") or "")
+        if not bid:
+            continue
+        n = batch_remaining_nonces(batch)
+        if n > out.get(bid, 0):
+            out[bid] = n
+    return out
+
+
+def unassigned_roots_by_job(rows) -> Dict[str, int]:
+    """Unassigned unfinished root count per job."""
+    out: Dict[str, int] = {}
+    for row in rows or []:
+        batch = (row or {}).get("batch") or {}
+        if batch.get("sampled_nonces") is not None:
+            continue
+        if (row or {}).get("end_time") is not None:
+            continue
+        if (row or {}).get("slave") is not None:
+            continue
+        bid = str(batch.get("benchmark_id") or "")
+        if bid:
+            out[bid] = out.get(bid, 0) + 1
+    return out
+
+
+def pick_fill_bid(
+    held_root_bids,
+    unassigned_by_bid=None,
+    leftover_nonces_by_bid=None,
+    *,
+    workers: int = 1,
+    empty_seats: int = 1,
+    has_fat_claimable: bool = False,
+) -> str:
+    """Stay on the held job that still has the most leftover work.
+
+    Do not lock remaining empty seats onto a crumb when a fat leftover exists.
+    """
+    bids = [str(b) for b in (held_root_bids or []) if b]
+    if not bids:
+        return ""
+    unassigned = unassigned_by_bid or {}
+    nonces = leftover_nonces_by_bid or {}
+    best = max(
+        bids,
+        key=lambda bid: (
+            int(unassigned.get(bid) or 0),
+            int(nonces.get(bid) or 0),
+        ),
+    )
+    if has_fat_claimable and leftover_is_crumb(
+        remaining_nonces=int(nonces.get(best) or 0),
+        unassigned_on_job=int(unassigned.get(best) or 0),
+        workers=workers,
+        empty_seats=empty_seats,
+    ):
+        return ""
+    return best
+
+
 # When the sticky preferred owner is online but already at its adaptive cap,
 # allow other live CPUs to take unassigned roots. Without this, pending root
 # batches sit locked to a full owner while the rest of the fleet idles.
@@ -2325,54 +2566,98 @@ class SlaveManager:
                 max_concurrent=max_concurrent,
                 configured=int(CONFIG.get("max_batches_per_benchmark") or 0),
             )
+            poller_workers = poller_worker_count(
+                self._slave_telemetry.get(slave_name) or {},
+                is_gpu=_slave_work_profile(slave_name) == "gpu",
+            )
+            leftover_nonces = leftover_nonces_by_job(self.batches)
+            if not unassigned_by_bid:
+                unassigned_by_bid = unassigned_roots_by_job(self.batches)
+            empty_seats = max(0, int(max_concurrent) - len(kept_assigned))
+            takeable_unassigned = takeable_unassigned_by_bid(
+                unassigned_by_bid,
+                slave_name=slave_name,
+                root_affinity=root_affinity,
+                overflow_benchmark_ids=overflow_benchmark_ids,
+            )
+            feed_empty_seats = max(1, empty_seats or int(max_concurrent or 1))
+            has_fat_claimable = claimable_has_fat_leftover(
+                unassigned_by_bid=takeable_unassigned,
+                leftover_nonces_by_bid=leftover_nonces,
+                workers=poller_workers,
+                empty_seats=feed_empty_seats,
+            )
+            held_root_bids = [
+                str((b.get("batch") or {}).get("benchmark_id") or "")
+                for b in kept_assigned
+                if not _is_proof_batch_row(b)
+            ]
+            fill_bid = pick_fill_bid(
+                held_root_bids,
+                takeable_unassigned,
+                leftover_nonces,
+                workers=poller_workers,
+                empty_seats=feed_empty_seats,
+                has_fat_claimable=has_fat_claimable,
+            )
+            poller_assigned_roots = sum(
+                1 for b in kept_assigned if not _is_proof_batch_row(b)
+            )
+            taking_roots = 0
 
-            # Rank roots only (no skip). Proofs keep list order. Slow slaves
-            # see easier tracks first; fast slaves see hard tracks first.
+            # Rank roots: own leftovers, then fattest job, then hardness.
             cap_enabled = bool(views.cap_enabled)
             cap_views = views.cap_views or {}
             job_meta = views.job_meta or {}
-            root_rows = list(self.batches)
-            if cap_enabled:
-                def _fast_root_key(item):
-                    idx, row = item
-                    batch = row.get("batch") or {}
-                    if batch.get("sampled_nonces") is not None:
-                        return (3, 0.0, idx)
-                    bid = str(batch.get("benchmark_id") or "")
-                    meta = job_meta.get(bid) or {}
-                    challenge = batch.get("challenge") or meta.get("challenge") or ""
-                    settings = batch.get("settings") or {}
-                    track_id = settings.get("track_id") or meta.get("track_id") or ""
-                    hardness = CAPABILITY_SCHEDULER.track_hardness(
-                        challenge, track_id, views=cap_views
-                    )
-                    speed = CAPABILITY_SCHEDULER.slave_speed_ratio(
-                        slave_name, challenge, track_id, views=cap_views
-                    )
-                    start_time = meta.get("start_time")
-                    try:
-                        job_age_ms = int(now) - int(start_time) if start_time is not None else 0
-                    except (TypeError, ValueError):
-                        job_age_ms = 0
-                    sticky_own = (
-                        row.get("end_time") is None
-                        and (
-                            bid in finish_root_bids
-                            or root_affinity.get(bid) == slave_name
-                        )
-                    )
-                    return prefer_shorter_rank_key(
-                        hardness=hardness,
-                        slave_speed_ratio=speed,
-                        job_age_ms=job_age_ms,
-                        original_idx=idx,
-                        sticky_own=sticky_own,
-                        overflow=bid in overflow_benchmark_ids,
-                    )
 
-                root_rows = [
-                    row for _, row in sorted(enumerate(self.batches), key=_fast_root_key)
-                ]
+            def _fast_root_key(item):
+                idx, row = item
+                batch = row.get("batch") or {}
+                bid = str(batch.get("benchmark_id") or "")
+                sticky_own = (
+                    row.get("end_time") is None
+                    and (
+                        bid in finish_root_bids
+                        or root_affinity.get(bid) == slave_name
+                    )
+                )
+                feed = feed_leftover_rank(
+                    unassigned_on_job=unassigned_by_bid.get(str(bid), 0),
+                    remaining_nonces=batch_remaining_nonces(batch),
+                    original_idx=idx,
+                    sticky_own=sticky_own,
+                    is_proof=batch.get("sampled_nonces") is not None,
+                )
+                if not cap_enabled or batch.get("sampled_nonces") is not None:
+                    return feed
+                meta = job_meta.get(bid) or {}
+                challenge = batch.get("challenge") or meta.get("challenge") or ""
+                settings = batch.get("settings") or {}
+                track_id = settings.get("track_id") or meta.get("track_id") or ""
+                hardness = CAPABILITY_SCHEDULER.track_hardness(
+                    challenge, track_id, views=cap_views
+                )
+                speed = CAPABILITY_SCHEDULER.slave_speed_ratio(
+                    slave_name, challenge, track_id, views=cap_views
+                )
+                start_time = meta.get("start_time")
+                try:
+                    job_age_ms = int(now) - int(start_time) if start_time is not None else 0
+                except (TypeError, ValueError):
+                    job_age_ms = 0
+                rest = prefer_shorter_rank_key(
+                    hardness=hardness,
+                    slave_speed_ratio=speed,
+                    job_age_ms=job_age_ms,
+                    original_idx=idx,
+                    sticky_own=sticky_own,
+                    overflow=bid in overflow_benchmark_ids,
+                )
+                return feed + rest
+
+            root_rows = [
+                row for _, row in sorted(enumerate(self.batches), key=_fast_root_key)
+            ]
 
             # Pass 1: proofs this slave can build. Pass 2: ranked roots.
             for want_proof, rows in ((True, self.batches), (False, root_rows)):
@@ -2429,6 +2714,27 @@ class SlaveManager:
                             continue
                         if concurrent_by_bench.get(bid, 0) >= per_bench_cap:
                             continue
+                        sticky_own = (
+                            bid in finish_root_bids
+                            or root_affinity.get(bid) == slave_name
+                        )
+                        if not same_job_fill_allows(
+                            fill_bid=fill_bid,
+                            bid=bid,
+                            sticky_own=sticky_own,
+                        ):
+                            continue
+                        if should_skip_crumb_for_empty_seat(
+                            remaining_nonces=batch_remaining_nonces(batch),
+                            unassigned_on_job=unassigned_by_bid.get(str(bid), 0),
+                            workers=poller_workers,
+                            empty_seats=max(1, empty_seats or int(max_concurrent or 1)),
+                            poller_assigned=poller_assigned_roots,
+                            taking_this_poll=taking_roots,
+                            has_fat_claimable=has_fat_claimable,
+                            sticky_own=sticky_own,
+                        ):
+                            continue
                     owner = b.get("slave")
                     if not batch_owner_stealable(
                         now_ms=int(now),
@@ -2473,6 +2779,9 @@ class SlaveManager:
                     concurrent_by_bench[bid] = concurrent_by_bench.get(bid, 0) + 1
                     if not is_proof:
                         concurrent_roots += 1
+                        taking_roots += 1
+                        if not fill_bid:
+                            fill_bid = str(bid)
         if not concurrent:
             logger.debug("no batches available for %s (fast)", slave_name)
         return concurrent, updates
@@ -2716,6 +3025,13 @@ class SlaveManager:
                 max_concurrent=max_concurrent,
                 configured=int(CONFIG.get("max_batches_per_benchmark") or 0),
             )
+            leftover_nonces = leftover_nonces_by_job(self.batches)
+            if not unassigned_by_bid:
+                unassigned_by_bid = unassigned_roots_by_job(self.batches)
+            poller_workers = poller_worker_count(
+                self._slave_telemetry.get(slave_name) or {},
+                is_gpu=_slave_work_profile(slave_name) == "gpu",
+            )
 
             now_i = int(now)
             proof_candidates = []
@@ -2846,6 +3162,36 @@ class SlaveManager:
                     bid = b["batch"]["benchmark_id"]
                     concurrent_by_bench[bid] = concurrent_by_bench.get(bid, 0) + 1
 
+                empty_seats = max(0, int(max_concurrent) - len(kept_assigned))
+                takeable_unassigned = takeable_unassigned_by_bid(
+                    unassigned_by_bid,
+                    slave_name=slave_name,
+                    root_affinity=root_affinity,
+                    overflow_benchmark_ids=overflow_benchmark_ids,
+                )
+                feed_empty_seats = max(1, empty_seats or int(max_concurrent or 1))
+                has_fat_claimable = claimable_has_fat_leftover(
+                    unassigned_by_bid=takeable_unassigned,
+                    leftover_nonces_by_bid=leftover_nonces,
+                    workers=poller_workers,
+                    empty_seats=feed_empty_seats,
+                )
+                held_root_bids = [
+                    str((b.get("batch") or {}).get("benchmark_id") or "")
+                    for b in kept_assigned
+                    if not _is_proof_batch_row(b)
+                ]
+                fill_bid = pick_fill_bid(
+                    held_root_bids,
+                    takeable_unassigned,
+                    leftover_nonces,
+                    workers=poller_workers,
+                    empty_seats=feed_empty_seats,
+                    has_fat_claimable=has_fat_claimable,
+                )
+                poller_assigned_roots = concurrent_roots
+                taking_roots = 0
+
                 need_assign = len(concurrent) < max_concurrent
 
                 def _batch_meta(batch):
@@ -2884,6 +3230,22 @@ class SlaveManager:
                     idx, row = item
                     batch = row["batch"]
                     is_proof = batch.get("sampled_nonces") is not None
+                    bid = batch["benchmark_id"]
+                    sticky_own = (
+                        (not is_proof)
+                        and row.get("end_time") is None
+                        and (
+                            bid in finish_root_bids
+                            or root_affinity.get(bid) == slave_name
+                        )
+                    )
+                    feed = feed_leftover_rank(
+                        unassigned_on_job=unassigned_by_bid.get(str(bid), 0),
+                        remaining_nonces=batch_remaining_nonces(batch),
+                        original_idx=idx,
+                        sticky_own=sticky_own,
+                        is_proof=is_proof,
+                    )
                     own_proof = is_proof and has_artifacts(
                         batch["benchmark_id"], batch["batch_idx"]
                     )
@@ -2910,7 +3272,7 @@ class SlaveManager:
                         or overflow_root
                         or starved_root
                     ):
-                        return (
+                        return feed + (
                             0
                             if own_proof
                             else 1
@@ -2926,7 +3288,7 @@ class SlaveManager:
                             idx,
                         )
                     _, _, hardness, speed, job_age_ms, roots_ready = _batch_meta(batch)
-                    return assign_rank_tuple(
+                    return feed + assign_rank_tuple(
                         is_proof=False,
                         own_proof=False,
                         starved_root=False,
@@ -2992,7 +3354,7 @@ class SlaveManager:
                     return False
 
                 def assign_pass(respect_cap):
-                    nonlocal concurrent_roots
+                    nonlocal concurrent_roots, fill_bid, taking_roots
                     for b in ordered_batches:
                         batch = b["batch"]
                         bid = batch["benchmark_id"]
@@ -3069,6 +3431,28 @@ class SlaveManager:
                             continue
                         if respect_cap and concurrent_by_bench.get(bid, 0) >= per_bench_cap:
                             continue
+                        if not is_proof:
+                            sticky_own = (
+                                bid in finish_root_bids
+                                or root_affinity.get(bid) == slave_name
+                            )
+                            if not same_job_fill_allows(
+                                fill_bid=fill_bid,
+                                bid=bid,
+                                sticky_own=sticky_own,
+                            ):
+                                continue
+                            if should_skip_crumb_for_empty_seat(
+                                remaining_nonces=batch_remaining_nonces(batch),
+                                unassigned_on_job=unassigned_by_bid.get(str(bid), 0),
+                                workers=poller_workers,
+                                empty_seats=max(1, empty_seats or int(max_concurrent or 1)),
+                                poller_assigned=poller_assigned_roots,
+                                taking_this_poll=taking_roots,
+                                has_fat_claimable=has_fat_claimable,
+                                sticky_own=sticky_own,
+                            ):
+                                continue
                         b["slave"] = slave_name
                         b["start_time"] = now
                         b["num_attempts"] += 1
@@ -3099,6 +3483,9 @@ class SlaveManager:
                         concurrent.append(batch)
                         if not is_proof:
                             concurrent_roots += 1
+                            taking_roots += 1
+                            if not fill_bid:
+                                fill_bid = bid
 
                 # Pass 1: spread across benchmarks (respect per-benchmark cap) so all
                 # challenges advance together. Pass 2: if slots remain because few
