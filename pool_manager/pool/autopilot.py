@@ -496,9 +496,14 @@ def _is_public_member_slave(slave_name: str) -> bool:
     return slave_name.startswith(("pool-cpu-", "pool-gpu-"))
 
 
+_member_hardening_retry_after = 0.0
+
+
 def _ensure_member_hardening_schema():
-    global _member_hardening_schema_ready
+    global _member_hardening_schema_ready, _member_hardening_retry_after
     if _member_hardening_schema_ready:
+        return
+    if time.monotonic() < _member_hardening_retry_after:
         return
     try:
         db.execute_many(
@@ -517,9 +522,11 @@ def _ensure_member_hardening_schema():
                 None,
             ),
             ("ALTER TABLE slave_seen ADD COLUMN IF NOT EXISTS num_workers INTEGER", None),
+            lock_timeout="2s",
         )
         _member_hardening_schema_ready = True
     except Exception as exc:
+        _member_hardening_retry_after = time.monotonic() + 60
         logger.warning("member hardening schema check failed: %s", exc)
 
 

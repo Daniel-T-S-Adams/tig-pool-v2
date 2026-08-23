@@ -67,7 +67,13 @@ def _wallet_to_slave_name(wallet: str, worker_type: str = "cpu") -> str:
         i += 1
 
 
+_fleet_schema_ready = False
+
+
 def _ensure_fleet_schema():
+    global _fleet_schema_ready
+    if _fleet_schema_ready:
+        return
     db.execute_many(
         (
             """
@@ -100,7 +106,9 @@ def _ensure_fleet_schema():
         ("CREATE INDEX IF NOT EXISTS idx_pool_fleets_wallet ON pool_fleets(wallet_address)", None),
         ("CREATE INDEX IF NOT EXISTS idx_pool_members_fleet_id ON pool_members(fleet_id)", None),
         ("CREATE INDEX IF NOT EXISTS idx_pool_members_trust_state ON pool_members(trust_state)", None),
+        lock_timeout="2s",
     )
+    _fleet_schema_ready = True
 
 
 def _hash_token(token: str) -> str:

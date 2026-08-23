@@ -149,10 +149,20 @@ def slave_telem_is_working(telem_state: str | None, telem_active) -> bool:
     )
 
 
+_slave_telem_columns_ready = False
+
+
 def _ensure_slave_telem_columns() -> None:
+    global _slave_telem_columns_ready
+    if _slave_telem_columns_ready:
+        return
     try:
-        db.execute("ALTER TABLE slave_seen ADD COLUMN IF NOT EXISTS telem_state TEXT")
-        db.execute("ALTER TABLE slave_seen ADD COLUMN IF NOT EXISTS telem_active INTEGER")
+        db.execute_many(
+            ("ALTER TABLE slave_seen ADD COLUMN IF NOT EXISTS telem_state TEXT", None),
+            ("ALTER TABLE slave_seen ADD COLUMN IF NOT EXISTS telem_active INTEGER", None),
+            lock_timeout="2s",
+        )
+        _slave_telem_columns_ready = True
     except Exception as exc:
         logger.debug("slave_seen telem columns: %s", exc)
 

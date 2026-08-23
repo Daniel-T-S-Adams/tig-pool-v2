@@ -1,8 +1,11 @@
-import os
 import logging
+import os
+import threading
+from contextlib import contextmanager
+
 import psycopg2
 import psycopg2.extras
-from contextlib import contextmanager
+from psycopg2 import pool
 
 logger = logging.getLogger(__name__)
 
@@ -13,18 +16,69 @@ _conn_params = {
     "password": os.environ.get("POSTGRES_PASSWORD", ""),
 }
 
+# Distinct from master's POSTGRES_POOL_MAX (48). env_file would otherwise
+# make this process try to open the same 48 sockets.
+_pool_min = max(1, int(os.environ.get("MANAGER_POSTGRES_POOL_MIN", "2")))
+_pool_max = max(_pool_min, int(os.environ.get("MANAGER_POSTGRES_POOL_MAX", "8")))
+_pool: pool.ThreadedConnectionPool | None = None
+_pool_lock = threading.Lock()
+
+
+def _get_pool() -> pool.ThreadedConnectionPool:
+    global _pool
+    if _pool is not None and not getattr(_pool, "closed", False):
+        return _pool
+    with _pool_lock:
+        if _pool is None or getattr(_pool, "closed", False):
+            _pool = pool.ThreadedConnectionPool(
+                _pool_min,
+                _pool_max,
+                **_conn_params,
+            )
+            logger.info(
+                "Postgres pool ready at %s (min=%s max=%s)",
+                _conn_params.get("host"),
+                _pool_min,
+                _pool_max,
+            )
+        return _pool
+
+
+def _putconn(conn) -> None:
+    current = _pool
+    if current is None or conn is None:
+        return
+    try:
+        if getattr(conn, "closed", 1):
+            current.putconn(conn, close=True)
+            return
+        if not getattr(conn, "autocommit", False):
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+        current.putconn(conn)
+    except Exception:
+        try:
+            conn.close()
+        except Exception:
+            pass
+
 
 @contextmanager
 def get_conn():
-    conn = psycopg2.connect(**_conn_params)
+    conn = _get_pool().getconn()
     try:
         yield conn
         conn.commit()
     except Exception:
-        conn.rollback()
+        try:
+            conn.rollback()
+        except Exception:
+            pass
         raise
     finally:
-        conn.close()
+        _putconn(conn)
 
 
 def fetch_one(sql: str, params=None) -> dict | None:
@@ -47,10 +101,12 @@ def execute(sql: str, params=None):
             cur.execute(sql, params)
 
 
-def execute_many(*queries):
+def execute_many(*queries, lock_timeout: str | None = None):
     """Execute multiple (sql, params) tuples atomically."""
     with get_conn() as conn:
         with conn.cursor() as cur:
+            if lock_timeout:
+                cur.execute(f"SET LOCAL lock_timeout = '{lock_timeout}'")
             for sql, params in queries:
                 cur.execute(sql, params)
 
