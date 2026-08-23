@@ -19,7 +19,12 @@ from master.dispatch import (
     next_hole_profile,
     profile_has_hole,
 )
-from master.cpu_tier_caps import cpu_tier_cap_settings, sum_cpu_empty_seats
+from master.cpu_tier_caps import (
+    build_fleet_capacity,
+    cpu_tier_cap_settings,
+    fleet_remaining_cap_room,
+    sum_cpu_empty_seats,
+)
 from master.capability_scheduler import (
     SCHEDULER as CAPABILITY_SCHEDULER,
     algo_is_schedulable,
@@ -471,6 +476,7 @@ def idle_create_burst(
     gpu_unassigned_remaining: int = 32,
     cpu_online: int = 0,
     gpu_online: int = 0,
+    remaining_cap_room: int | None = None,
 ) -> int:
     """How many precommits to attempt this tick (including the first).
 
@@ -534,7 +540,14 @@ def idle_create_burst(
         room += max(0, int(gpu_unassigned_remaining or 0))
     if room <= 0:
         return 1
-    return max(1, min(hi, deficit, room))
+    burst_hi = max(1, int(max_burst or 1))
+    sized = max(1, min(hi, deficit, room, burst_hi))
+    if remaining_cap_room is not None:
+        cap_room = max(0, int(remaining_cap_room or 0))
+        if cap_room <= 0:
+            return 1
+        sized = min(sized, cap_room)
+    return max(1, sized)
 
 
 def extra_creates_this_tick(
@@ -673,21 +686,25 @@ def effective_concurrent_cap(
     gpu_want_spare: int = 0,
     idle_needs_work: bool = False,
     unresolved_ceiling: int = 0,
+    hole_deficit: int = 0,
+    max_hole_lift: int = 16,
 ) -> int:
-    """Create ceiling: one job per live box plus a small spare, under TIG 100.
+    """Create ceiling. Honor a parked autopilot cap.
 
-    Autopilot may park ``max_concurrent_benchmarks`` far below the fleet.
-    When we know how many boxes are online, lift to fleet + spare so they
-    stay busy. Never climb past ``unresolved_ceiling`` (TIG 100 minus
-    headroom). Unknown online keeps the configured cap.
+    Lifting to ``online + spare`` (80+ jobs) while autopilot parked at 20
+    is how 78 jobs sat on a 20 cap and stales grew. Keep-ahead and empty
+    XL seats may add at most one burst-sized hole, never the whole fleet.
+    Never climb past ``unresolved_ceiling`` (TIG 100 minus headroom).
     """
+    del online_cpu, online_gpu, cpu_want_spare, gpu_want_spare
     cap = max(0, int(max_concurrent or 0))
-    fleet = max(0, int(online_cpu or 0)) + max(0, int(online_gpu or 0))
-    spare = max(0, int(cpu_want_spare or 0)) + max(0, int(gpu_want_spare or 0))
-    if fleet > 0:
-        fill = max(cap, fleet + spare)
-    else:
-        fill = cap
+    fill = cap
+    if idle_needs_work:
+        extra = min(
+            max(0, int(hole_deficit or 0)),
+            max(0, int(max_hole_lift or 0)),
+        )
+        fill = cap + extra
     ceiling = max(0, int(unresolved_ceiling or 0))
     if ceiling > 0 and fill > 0:
         fill = min(fill, ceiling)
@@ -740,6 +757,7 @@ def challenge_under_create_cap(
     idle_gpu_slaves: int = 0,
     idle_cpu_needs_work: bool = False,
     idle_cpu_slaves: int = 0,
+    max_idle_lift: int = 16,
     cpu_ids: tuple = ("c001", "c002", "c003", "c007", "c008"),
 ) -> bool:
     """True when this challenge may receive another precommit.
@@ -768,7 +786,7 @@ def challenge_under_create_cap(
     elif gpu_keep_ahead and cid in gpu_ids:
         extra = max(int(gpu_spare_jobs or 0), 1)
     elif cpu_idle:
-        extra = max(1, int(idle_cpu_slaves or 0))
+        extra = max(1, min(int(idle_cpu_slaves or 0), max(1, int(max_idle_lift or 16))))
     return used < int(cap) + extra
 
 
@@ -1251,11 +1269,10 @@ class PrecommitManager:
         if not idle_win.get("enabled", True):
             sustained = instant
         decision_names = idle_decision_count(sustained, instant)
-        # Empty XL seats (workers//32 - active) count as idle for the hole.
-        # Name-count alone treats an EPYC at 1/4 as busy. Burst sizing stays
-        # on names so 72 empty seats do not mint a 64-job wave.
+        # One unit: empty seats. Names stay in the snapshot for logs only.
+        # Census failure already copies hostname idle into online_idle_cpu_seats.
         seats = int(snap.get("online_idle_cpu_seats") or 0)
-        decision_idle = max(decision_names, seats)
+        decision_idle = seats
         online_cpu = int(idle_win.get("online") or 0)
         cpu_slots = max(int(snap.get("cpu_slots") or 0), online_cpu)
         cpu_create_target = (
@@ -1297,7 +1314,8 @@ class PrecommitManager:
         snap["online_idle_cpu_slaves"] = instant
         snap["online_idle_cpu_slaves_instant"] = instant
         snap["sustained_idle_cpu_slaves"] = sustained
-        snap["burst_idle_cpu_slaves"] = decision_names
+        snap["name_idle_cpu_slaves"] = decision_names
+        snap["burst_idle_cpu_slaves"] = decision_idle
         snap["decision_idle_cpu_slaves"] = decision_idle
         snap["idle_window"] = idle_win
         snap["idle_cpu_needs_work"] = idle_cpu_needs_work
@@ -1785,6 +1803,29 @@ class PrecommitManager:
             headroom=int(os.environ.get("TIG_UNRESOLVED_HEADROOM", "15")),
         )
         unresolved = self._count_unresolved_tig_slots()
+        fleet_cap = build_fleet_capacity(
+            cpu_empty=int(
+                governor.get("online_idle_cpu_seats")
+                if governor.get("online_idle_cpu_seats") is not None
+                else governor.get("decision_idle_cpu_slaves")
+                or 0
+            ),
+            gpu_online=int(governor.get("online_gpu_slaves") or 0),
+            gpu_empty=int(governor.get("online_idle_gpu_slaves") or 0),
+            cpu_claimable=int(governor.get("cpu_unassigned_claimable") or 0),
+            gpu_claimable=int(governor.get("gpu_unassigned_claimable") or 0),
+            open_jobs=num_pending_jobs,
+            parked_cap=configured_cap,
+        )
+        hole_deficit = 0
+        if idle_cpu_needs_work:
+            hole_deficit += max(
+                0, fleet_cap["cpu_empty"] - fleet_cap["cpu_claimable"]
+            )
+        if idle_gpu_needs_work:
+            hole_deficit += max(
+                0, fleet_cap["gpu_empty"] - fleet_cap["gpu_claimable"]
+            )
         create_cap = effective_concurrent_cap(
             max_concurrent=configured_cap,
             online_cpu=int(governor.get("online_cpu_slaves") or 0),
@@ -1793,6 +1834,8 @@ class PrecommitManager:
             gpu_want_spare=gpu_want_spare,
             idle_needs_work=idle_cpu_needs_work or idle_gpu_needs_work,
             unresolved_ceiling=unresolved_ceiling,
+            hole_deficit=hole_deficit,
+            max_hole_lift=int(os.environ.get("PRECOMMIT_IDLE_BURST_MAX", "16")),
         )
         overlap_cap = int(os.environ.get("PRECOMMIT_PROOF_OVERLAP", "8"))
         # Size the idle burst before any gate so extras can still run this
@@ -1801,7 +1844,9 @@ class PrecommitManager:
             idle_cpu_needs_work=idle_cpu_needs_work,
             idle_gpu_needs_work=idle_gpu_needs_work,
             idle_cpu=int(
-                governor.get("burst_idle_cpu_slaves")
+                governor.get("online_idle_cpu_seats")
+                if governor.get("online_idle_cpu_seats") is not None
+                else governor.get("burst_idle_cpu_slaves")
                 if governor.get("burst_idle_cpu_slaves") is not None
                 else idle_decision_count(
                     governor.get("sustained_idle_cpu_slaves"),
@@ -1829,6 +1874,13 @@ class PrecommitManager:
             ),
             cpu_online=int(governor.get("online_cpu_slaves") or 0),
             gpu_online=int(governor.get("online_gpu_slaves") or 0),
+            remaining_cap_room=fleet_remaining_cap_room(
+                {
+                    **fleet_cap,
+                    "parked_cap": create_cap,
+                    "open_jobs": num_pending_jobs,
+                }
+            ),
         )
         frozen = self._record_tick_burst(tick_burst)
         if burst_sink is not None:

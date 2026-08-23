@@ -7,7 +7,7 @@ other profile.
 
 from __future__ import annotations
 
-from master.cpu_tier_caps import should_hold_leftover_for_xl
+from master.cpu_tier_caps import should_hold_leftover_for_xl  # noqa: F401
 
 # Confirmed jobs still in flight to cover TIG confirm lag (~1-2 min at ~2.4/min).
 # One unowned job is ~one box-wave, not 37 idle CPUs. Two ready is enough
@@ -172,12 +172,47 @@ def lock_eligible_algorithms(eligible, *, profile: str, cpu_ids, gpu_ids):
     ]
 
 
-def pin_limit(*, num_batches: int, idle_boxes: int) -> int:
-    """Pin new batches onto idle boxes; leave leftovers claimable.
+def pin_limit(*, num_batches: int, idle_boxes: int = 0, empty_seats: int | None = None) -> int:
+    """Pin new batches onto empty seats; leave leftovers claimable.
 
-    Never invent extra batches. Never pin more names than idle boxes.
+    Never invent extra batches. Seat count wins over hostname count so
+    one idle EPYC (4 seats) pins like four idle Picas.
     """
-    return max(0, min(int(num_batches or 0), int(idle_boxes or 0)))
+    seats = int(idle_boxes or 0) if empty_seats is None else int(empty_seats or 0)
+    return max(0, min(int(num_batches or 0), seats))
+
+
+def pin_targets(*, boxes, num_batches: int):
+    """Expand ``(slave, seats)`` into ``(batch_idx, slave)`` pins.
+
+    Same seat total → same pin count, whether those seats live on one
+    XL box or many S/M boxes.
+    """
+    out = []
+    idx = 0
+    limit = max(0, int(num_batches or 0))
+    for item in boxes or []:
+        if idx >= limit:
+            break
+        if isinstance(item, dict):
+            name = str(item.get("slave_name") or item.get("name") or "")
+            try:
+                seats = int(item.get("empty_seats") or item.get("seats") or 1)
+            except (TypeError, ValueError):
+                seats = 1
+        else:
+            try:
+                name = str(item[0])
+                seats = int(item[1]) if len(item) > 1 else 1
+            except (TypeError, ValueError, IndexError):
+                continue
+        if not name:
+            continue
+        take = min(max(0, seats), limit - idx)
+        for _ in range(take):
+            out.append((idx, name))
+            idx += 1
+    return out
 
 
 def pin_expired(*, now_ms: int, pinned_at_ms: int, expire_ms: int = PIN_EXPIRE_MS) -> bool:

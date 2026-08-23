@@ -18,7 +18,8 @@ from master.proof_affinity import (
     fetch_online_slaves,
     offline_owners,
 )
-from master.dispatch import pin_limit, slave_work_profile
+from master.dispatch import pin_limit, pin_targets, slave_work_profile
+from master.cpu_tier_caps import cpu_empty_seats, cpu_tier_cap_settings
 import math
 
 logger = logging.getLogger(os.path.splitext(os.path.basename(__file__))[0])
@@ -48,7 +49,7 @@ def pin_new_job_batches(benchmark_id: str, challenge_id: str, num_batches: int) 
         ensure_slave_seen_table(get_db_conn().execute)
         rows = get_db_conn().fetch_all(
             """
-            SELECT ss.slave_name
+            SELECT ss.slave_name, ss.telem_cores, ss.num_workers, ss.telem_active
             FROM slave_seen ss
             WHERE ss.last_seen >= %s
               AND COALESCE(ss.telem_state, 'idle') NOT IN
@@ -73,16 +74,32 @@ def pin_new_job_batches(benchmark_id: str, challenge_id: str, num_batches: int) 
     except Exception as exc:
         logger.warning("pin idle-slave query failed: %s", exc)
         return 0
-    idle = [
-        r["slave_name"]
-        for r in rows
-        if slave_work_profile(r.get("slave_name")) == profile
-    ]
-    take = pin_limit(num_batches=num_batches, idle_boxes=len(idle))
+    settings = cpu_tier_cap_settings(CONFIG)
+    idle = []
+    for row in rows:
+        name = row.get("slave_name")
+        if slave_work_profile(name) != profile:
+            continue
+        if profile == "cpu":
+            seats = cpu_empty_seats(
+                cores=row.get("telem_cores"),
+                workers=row.get("num_workers"),
+                active=row.get("telem_active") or 0,
+                settings=settings,
+            )
+        else:
+            seats = 1
+        if int(seats or 0) <= 0:
+            continue
+        idle.append((name, int(seats)))
+    take = pin_limit(
+        num_batches=num_batches,
+        empty_seats=sum(seats for _name, seats in idle),
+    )
     if take <= 0:
         return 0
     updates = []
-    for batch_idx, slave_name in enumerate(idle[:take]):
+    for batch_idx, slave_name in pin_targets(boxes=idle, num_batches=num_batches):
         updates.append(
             (
                 """

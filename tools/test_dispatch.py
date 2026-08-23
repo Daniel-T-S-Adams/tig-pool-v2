@@ -18,6 +18,7 @@ from master.dispatch import (  # noqa: E402
     next_hole_profile,
     pin_expired,
     pin_limit,
+    pin_targets,
     profile_needs_create,
     should_hold_leftover_for_xl,
     slave_work_profile,
@@ -217,6 +218,17 @@ def main() -> int:
     check(pin_limit(num_batches=12, idle_boxes=40) == 12, "pin at most this job's batches")
     check(pin_limit(num_batches=12, idle_boxes=3) == 3, "pin at most idle boxes")
     check(pin_limit(num_batches=12, idle_boxes=0) == 0, "no idle boxes → no pins")
+    check(
+        pin_limit(num_batches=12, empty_seats=4) == 4,
+        "pin follows empty seats, not hostnames",
+    )
+    pica_pins = pin_targets(
+        boxes=[("pica1", 1), ("pica2", 1), ("pica3", 1), ("pica4", 1)],
+        num_batches=12,
+    )
+    epyc_pins = pin_targets(boxes=[("epyc1", 4)], num_batches=12)
+    check(len(pica_pins) == len(epyc_pins) == 4, "4 Pica seats pin like 1 EPYC×4")
+    check(epyc_pins == [(0, "epyc1"), (1, "epyc1"), (2, "epyc1"), (3, "epyc1")], "EPYC gets 4 roots")
     check(pin_expired(now_ms=40_000, pinned_at_ms=5_000) is True, "stale pin expires")
     check(pin_expired(now_ms=20_000, pinned_at_ms=5_000) is False, "fresh pin is kept")
     check(slave_work_profile("pool-gpu-abc") == "gpu", "pool-gpu is GPU")
@@ -226,8 +238,8 @@ def main() -> int:
         should_hold_leftover_for_xl(
             poller_earnable=1, hungry_xl_seats=4, sticky_own=False
         )
-        is True,
-        "1-seat poller holds leftovers for hungry XL",
+        is False,
+        "1-seat poller is not held for hungry XL",
     )
     check(
         should_hold_leftover_for_xl(

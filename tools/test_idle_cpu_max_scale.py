@@ -8,24 +8,26 @@ import pathlib
 import sys
 
 
-def _load_fn():
+def _load_fns():
     path = pathlib.Path(__file__).resolve().parents[1] / "pool_manager" / "pool" / "autopilot.py"
     source = path.read_text(encoding="utf-8")
     module = ast.parse(source)
-    fn = None
+    keep = []
+    want = {"should_idle_cpu_max_scale", "precommit_already_oversubscribed"}
     for node in module.body:
-        if isinstance(node, ast.FunctionDef) and node.name == "should_idle_cpu_max_scale":
-            fn = node
-            break
-    if fn is None:
-        raise RuntimeError("should_idle_cpu_max_scale not found")
+        if isinstance(node, ast.FunctionDef) and node.name in want:
+            keep.append(node)
+    if {n.name for n in keep} != want:
+        raise RuntimeError(f"missing autopilot helpers: {want - {n.name for n in keep}}")
     ns = {}
-    exec(compile(ast.Module(body=[fn], type_ignores=[]), str(path), "exec"), ns, ns)
-    return ns["should_idle_cpu_max_scale"]
+    exec(compile(ast.Module(body=keep, type_ignores=[]), str(path), "exec"), ns, ns)
+    return ns
 
 
 def main() -> int:
-    fn = _load_fn()
+    ns = _load_fns()
+    fn = ns["should_idle_cpu_max_scale"]
+    oversub = ns["precommit_already_oversubscribed"]
     base = dict(
         enabled=True,
         productive_idle_cpu=4,
@@ -69,12 +71,28 @@ def main() -> int:
         ({**base, "proposed_max": 12}, False, "no higher proposal"),
         ({**base, "roots_pending": 256}, False, "hard root backlog"),
         ({**base, "enabled": False}, False, "disabled"),
+        (
+            {**base, "current_max": 20, "proposed_max": 44, "active_jobs": 78},
+            False,
+            "78 open on parked 20 must not idle-upscale",
+        ),
     ]
     failed = 0
     for kwargs, expect, label in cases:
         ok_flag, reason = fn(**kwargs)
         passed = ok_flag is expect
         print(f"{'pass' if passed else 'FAIL'}: {label} -> {ok_flag} ({reason})")
+        if not passed:
+            failed += 1
+    helper_cases = [
+        ((78, 20), True, "78/20 is oversubscribed"),
+        ((20, 20), False, "at cap is saturated, not over"),
+        ((12, 20), False, "under cap is not oversubscribed"),
+    ]
+    for (jobs, cap), expect, label in helper_cases:
+        got = oversub(active_jobs=jobs, current_max=cap)
+        passed = got is expect
+        print(f"{'pass' if passed else 'FAIL'}: {label} -> {got}")
         if not passed:
             failed += 1
     return 2 if failed else 0

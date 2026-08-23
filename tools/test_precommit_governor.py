@@ -737,11 +737,13 @@ def main() -> int:
         failed += 1
 
     eff_cases = [
-        (dict(max_concurrent=24, online_cpu=67, online_gpu=16, cpu_want_spare=2, gpu_want_spare=2, idle_needs_work=False), 87, "busy fleet lifts below-fleet autopilot cap"),
-        (dict(max_concurrent=24, online_cpu=67, online_gpu=16, cpu_want_spare=2, gpu_want_spare=2, idle_needs_work=True), 87, "idle fleet lifts cap to online plus spare"),
+        (dict(max_concurrent=24, online_cpu=67, online_gpu=16, cpu_want_spare=2, gpu_want_spare=2, idle_needs_work=False), 24, "busy fleet honors a parked autopilot cap"),
+        (dict(max_concurrent=24, online_cpu=67, online_gpu=16, idle_needs_work=True, hole_deficit=0), 24, "keep-ahead idle flag does not lift to fleet size"),
+        (dict(max_concurrent=24, online_cpu=67, online_gpu=16, idle_needs_work=True, hole_deficit=17, max_hole_lift=16), 40, "hole lifts by one burst, not 83 boxes"),
+        (dict(max_concurrent=20, online_cpu=66, online_gpu=18, idle_needs_work=True, hole_deficit=35, max_hole_lift=16), 36, "78-on-20 flood cannot reopen via empty XL seats"),
         (dict(max_concurrent=35, online_cpu=0, online_gpu=0, cpu_want_spare=0, gpu_want_spare=0, idle_needs_work=True), 35, "unknown online does not drop the configured cap"),
-        (dict(max_concurrent=120, online_cpu=67, online_gpu=16, cpu_want_spare=2, gpu_want_spare=2, idle_needs_work=True, unresolved_ceiling=85), 85, "TIG ceiling clamps an already-high cap"),
-        (dict(max_concurrent=24, online_cpu=67, online_gpu=16, cpu_want_spare=2, gpu_want_spare=2, unresolved_ceiling=85), 85, "fleet lift never exceeds TIG ceiling"),
+        (dict(max_concurrent=120, online_cpu=67, online_gpu=16, idle_needs_work=True, hole_deficit=50, unresolved_ceiling=85), 85, "TIG ceiling still clamps a high configured cap"),
+        (dict(max_concurrent=24, online_cpu=67, online_gpu=16, unresolved_ceiling=85), 24, "no idle hole keeps the parked cap under TIG ceiling"),
     ]
     for kwargs, expect, label in eff_cases:
         got = eff_cap(**kwargs)
@@ -749,6 +751,20 @@ def main() -> int:
         print(f"{'pass' if ok else 'FAIL'}: {label} got={got} expect={expect}")
         if not ok:
             failed += 1
+
+    pica_cap = eff_cap(
+        max_concurrent=20, idle_needs_work=True, hole_deficit=4, max_hole_lift=16
+    )
+    epyc_cap = eff_cap(
+        max_concurrent=20, idle_needs_work=True, hole_deficit=4, max_hole_lift=16
+    )
+    ok = pica_cap == epyc_cap == 24
+    print(
+        f"{'pass' if ok else 'FAIL'}: 4 Pica seats and 1 EPYC×4 lift the parked cap the same "
+        f"pica={pica_cap} epyc={epyc_cap}"
+    )
+    if not ok:
+        failed += 1
 
     ok = force_cpu(
         idle_cpu_needs_work=True,
@@ -1046,8 +1062,8 @@ def main() -> int:
                 max_burst=16,
                 cpu_unassigned_remaining=256,
             ),
-            48,
-            "48 idle / 0 claimable => burst matches idle boxes",
+            16,
+            "48 idle / 0 claimable clamps to max_burst",
         ),
         (
             burst(
@@ -1079,8 +1095,8 @@ def main() -> int:
                 max_burst=16,
                 cpu_unassigned_remaining=256,
             ),
-            21,
-            "sitting leftovers do not shrink the idle burst",
+            16,
+            "sitting leftovers do not shrink the idle burst past max_burst",
         ),
         (
             burst(
@@ -1092,8 +1108,8 @@ def main() -> int:
                 max_burst=16,
                 cpu_unassigned_remaining=256,
             ),
-            20,
-            "proving keep-ahead deficit bursts to the spare want",
+            16,
+            "proving keep-ahead deficit clamps to max_burst",
         ),
         (
             burst(
@@ -1118,8 +1134,8 @@ def main() -> int:
                 max_burst=16,
                 cpu_unassigned_remaining=256,
             ),
-            21,
-            "leftovers covering idle still burst for empty boxes",
+            16,
+            "leftovers covering idle still burst, clamped to max_burst",
         ),
         (
             burst(
@@ -1133,8 +1149,8 @@ def main() -> int:
                 cpu_unassigned_remaining=256,
                 cpu_online=77,
             ),
-            20,
-            "claimable 0 uses want (20) not a fixed 4",
+            16,
+            "claimable 0 uses want but clamps to max_burst",
         ),
         (
             burst(
@@ -1148,8 +1164,8 @@ def main() -> int:
                 cpu_unassigned_remaining=256,
                 cpu_online=200,
             ),
-            64,
-            "200-box fleet empty claimable follows want up to 64",
+            16,
+            "200-box fleet empty claimable clamps to max_burst",
         ),
         (
             burst(
@@ -1192,6 +1208,30 @@ def main() -> int:
             ),
             1,
             "name-busy EPYCs with leftovers do not burst 72 seat-creates",
+        ),
+        (
+            burst(
+                idle_cpu_needs_work=True,
+                idle_cpu=35,
+                claimable_cpu=0,
+                max_burst=16,
+                cpu_unassigned_remaining=256,
+                remaining_cap_room=0,
+            ),
+            1,
+            "oversubscribed parked cap does not burst empty seats",
+        ),
+        (
+            burst(
+                idle_cpu_needs_work=True,
+                idle_cpu=4,
+                claimable_cpu=0,
+                max_burst=16,
+                cpu_unassigned_remaining=256,
+                remaining_cap_room=10,
+            ),
+            4,
+            "4 empty seats burst 4 whether Pica or EPYC",
         ),
     ]
     for got, expect, label in scale_cases:

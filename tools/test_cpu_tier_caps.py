@@ -327,19 +327,8 @@ def main() -> int:
         )
         cases.append(
             (
-                hold_xl(poller_earnable=1, hungry_xl_seats=3, sticky_own=False) is True,
-                "Pica holds leftover while XL seats hungry",
-            )
-        )
-        cases.append(
-            (
-                hold_xl(
-                    poller_earnable=1,
-                    hungry_xl_seats=3,
-                    leftover_jobs=7,
-                )
-                is False,
-                "surplus leftover jobs → Picas may take",
+                hold_xl(poller_earnable=1, hungry_xl_seats=3, sticky_own=False) is False,
+                "Pica is not held when XL seats are hungry",
             )
         )
         cases.append(
@@ -349,8 +338,8 @@ def main() -> int:
                     hungry_xl_seats=3,
                     leftover_jobs=2,
                 )
-                is True,
-                "scarce leftover jobs stay reserved for XL",
+                is False,
+                "scarce leftovers are still claimable by Picas",
             )
         )
         cases.append(
@@ -392,6 +381,35 @@ def main() -> int:
                 )
                 is False,
                 "idle GPU poller is never held for XL CPUs",
+            )
+        )
+
+        fleet = ns["build_fleet_capacity"]
+        hole = ns["fleet_hole_deficit"]
+        burst_seats = ns["seat_create_burst"]
+        pica4 = fleet(cpu_empty=4, cpu_claimable=0, open_jobs=10, parked_cap=20)
+        epyc1 = fleet(cpu_empty=4, cpu_claimable=0, open_jobs=10, parked_cap=20)
+        cases.append(
+            (
+                hole(pica4) == hole(epyc1) == 4,
+                "4 Pica seats and 1 EPYC×4 have the same hole",
+            )
+        )
+        cases.append(
+            (
+                burst_seats(empty_seats=4, claimable=0, remaining_cap_room=10, max_burst=16)
+                == burst_seats(empty_seats=4, claimable=0, remaining_cap_room=10, max_burst=16)
+                == 4,
+                "same empty seats → same create burst",
+            )
+        )
+        cases.append(
+            (
+                burst_seats(
+                    empty_seats=35, claimable=0, remaining_cap_room=0, max_burst=16
+                )
+                == 0,
+                "oversubscribed cap room yields no seat burst",
             )
         )
 

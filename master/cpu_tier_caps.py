@@ -257,6 +257,66 @@ def sum_cpu_empty_seats(
     return total
 
 
+def build_fleet_capacity(
+    *,
+    cpu_earnable: int = 0,
+    cpu_empty: int = 0,
+    gpu_online: int = 0,
+    gpu_empty: int = 0,
+    cpu_claimable: int = 0,
+    gpu_claimable: int = 0,
+    open_jobs: int = 0,
+    parked_cap: int = 0,
+) -> Dict[str, int]:
+    """One snapshot: seats, claimable leftovers, and the parked job cap."""
+    return {
+        "cpu_earnable": max(0, int(cpu_earnable or 0)),
+        "cpu_empty": max(0, int(cpu_empty or 0)),
+        "gpu_online": max(0, int(gpu_online or 0)),
+        "gpu_empty": max(0, int(gpu_empty or 0)),
+        "cpu_claimable": max(0, int(cpu_claimable or 0)),
+        "gpu_claimable": max(0, int(gpu_claimable or 0)),
+        "open_jobs": max(0, int(open_jobs or 0)),
+        "parked_cap": max(0, int(parked_cap or 0)),
+    }
+
+
+def fleet_hole_deficit(capacity: Optional[Mapping[str, Any]] = None) -> int:
+    """Empty seats minus claimable leftovers. Same seats → same hole."""
+    cap = capacity or {}
+    cpu = max(0, int(cap.get("cpu_empty") or 0) - int(cap.get("cpu_claimable") or 0))
+    gpu = max(0, int(cap.get("gpu_empty") or 0) - int(cap.get("gpu_claimable") or 0))
+    return cpu + gpu
+
+
+def fleet_remaining_cap_room(capacity: Optional[Mapping[str, Any]] = None) -> int:
+    """How many more open jobs the parked cap will still accept."""
+    cap = capacity or {}
+    parked = int(cap.get("parked_cap") or 0)
+    if parked <= 0:
+        return 0
+    return max(0, parked - int(cap.get("open_jobs") or 0))
+
+
+def seat_create_burst(
+    *,
+    empty_seats: int = 0,
+    claimable: int = 0,
+    remaining_cap_room: int = 0,
+    max_burst: int = 16,
+) -> int:
+    """Creates this tick from empty seats, never from hostname count."""
+    hole = max(0, int(empty_seats or 0) - max(0, int(claimable or 0)))
+    return max(
+        0,
+        min(
+            hole,
+            max(0, int(remaining_cap_room or 0)),
+            max(0, int(max_burst or 0)),
+        ),
+    )
+
+
 def should_hold_leftover_for_xl(
     *,
     poller_earnable: int = 1,
@@ -266,26 +326,20 @@ def should_hold_leftover_for_xl(
     poller_is_cpu: bool = True,
     leftover_is_cpu: bool = True,
 ) -> bool:
-    """True when a 1-seat CPU box must not take leftover CPU roots.
+    """Size is a rank, not a hold. Always False.
 
-    Reserve leftovers only when the pile is scarce relative to hungry XL
-    *boxes* (not every empty seat). A warehouse of leftover jobs next to
-    idle Picas must not sit unused because two EPYCs still have a spare
-    slot. GPU leftovers are never held.
+    An EPYC joining must not park Picas. Capability ranking still prefers
+    XL on hard tracks. Arguments are accepted so old call sites stay safe.
     """
-    if sticky_own:
-        return False
-    if not poller_is_cpu or not leftover_is_cpu:
-        return False
-    if int(poller_earnable or 0) > 1:
-        return False
-    hungry = int(hungry_xl_seats or 0)
-    if hungry <= 0:
-        return False
-    jobs = int(leftover_jobs or 0)
-    if jobs > hungry:
-        return False
-    return True
+    del (
+        poller_earnable,
+        hungry_xl_seats,
+        leftover_jobs,
+        sticky_own,
+        poller_is_cpu,
+        leftover_is_cpu,
+    )
+    return False
 
 
 def tier_concurrent_ceiling(tier: int, settings: Mapping[str, Any]) -> int:

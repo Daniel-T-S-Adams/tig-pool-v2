@@ -3023,6 +3023,19 @@ def _root_backlog_pressure(funnel_summary: dict | None) -> dict | None:
     }
 
 
+def precommit_already_oversubscribed(
+    *,
+    active_jobs: int = 0,
+    current_max: int = 0,
+) -> bool:
+    """True when open jobs already exceed the parked create ceiling.
+
+    Drain may lower the cap under in-flight work. Raising it again while
+    oversubscribed is the 78/20 yo-yo.
+    """
+    return int(active_jobs or 0) > int(current_max or 0)
+
+
 def should_idle_cpu_max_scale(
     *,
     enabled: bool,
@@ -3081,6 +3094,10 @@ def should_idle_cpu_max_scale(
                 return False, "proof_conversion_below_soft_floor_for_slot_idle_scale"
     if int(proposed_max or 0) <= int(current_max or 0):
         return False, "proposed_max_not_higher"
+    if precommit_already_oversubscribed(
+        active_jobs=active_jobs, current_max=current_max
+    ):
+        return False, "precommit_already_oversubscribed"
     # Only bump when the current ceiling is actually binding.
     if int(active_jobs or 0) < max(1, int(current_max or 0) - 1):
         return False, "precommit_capacity_not_saturated"
@@ -4815,6 +4832,16 @@ def _plan_config_change(report: dict, cfg: dict, clean_windows: int) -> dict:
                 "current": current,
                 "target": target,
                 "active_jobs": active_jobs,
+            }
+        elif target > current and precommit_already_oversubscribed(
+            active_jobs=active_jobs, current_max=current
+        ):
+            decision.setdefault("guardrails", {})["max_concurrent_benchmarks"] = {
+                "skipped": "precommit_already_oversubscribed",
+                "current": current,
+                "target": target,
+                "active_jobs": active_jobs,
+                "signals": max_rec.get("signals") or {},
             }
         elif (
             target > current

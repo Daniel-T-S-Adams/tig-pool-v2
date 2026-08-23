@@ -30,7 +30,6 @@ from master.cpu_tier_caps import (
     cpu_tier_cap_settings,
     effective_cpu_adaptive_max_cap,
     parse_slave_telemetry,
-    should_hold_leftover_for_xl,
     telem_slave_is_working,
     telemetry_load_over_shed,
     telemetry_ram_critical,
@@ -1617,55 +1616,6 @@ class SlaveManager:
             ),
         )
 
-    def _hungry_xl_cpu_seats(
-        self,
-        poller: str,
-        online_slaves,
-        active_by_slave,
-        now_ms: int,
-    ) -> int:
-        """Hungry XL *boxes* that can take more CPU leftovers.
-
-        Ignores boxes that already have assigned work but load≈0 (stuck
-        download/submit). Counting their empty seats parked the Pica fleet.
-        """
-        settings = cpu_tier_cap_settings(CONFIG)
-        boxes = 0
-        for name in online_slaves or ():
-            if name == poller or not str(name).startswith("pool-cpu-"):
-                continue
-            telem = self._slave_telemetry.get(name) or {}
-            earnable = cpu_earnable_from_live(
-                cores=telem.get("cores"),
-                workers=telem.get("num_workers"),
-                load_1m=telem.get("load_1m"),
-                settings=settings,
-                load_shed_active=int(now_ms) < int(
-                    self._cpu_load_shed_until.get(name) or 0
-                ),
-            )
-            if int(earnable) <= 1:
-                continue
-            assigned = int((active_by_slave or {}).get(name) or 0)
-            telem_active = telem.get("active_batches")
-            try:
-                if telem_active is not None:
-                    assigned = max(assigned, int(telem_active))
-            except (TypeError, ValueError):
-                pass
-            empty = max(0, int(earnable) - assigned)
-            if empty <= 0:
-                continue
-            if assigned > 0:
-                try:
-                    load = telem.get("load_1m")
-                    if load is not None and float(load) < 1.0:
-                        continue
-                except (TypeError, ValueError):
-                    pass
-            boxes += 1
-        return boxes
-
     def _cached_finish_root_benchmarks(self, slave_name: str, now_ms: int) -> Set[str]:
         cached = self._finish_root_cache.get(slave_name)
         if cached is not None:
@@ -2243,12 +2193,6 @@ class SlaveManager:
                 if preferred == slave_name and bid in pending_unfinished_roots:
                     finish_root_bids.add(bid)
 
-        poller_earnable = self._cpu_live_earnable(slave_name, int(now))
-        hungry_xl_seats = self._hungry_xl_cpu_seats(
-            slave_name, online_slaves, active_by_slave, int(now)
-        )
-        leftover_jobs = len(unassigned_by_bid)
-
         updates = []
         concurrent = []
         with self.lock:
@@ -2458,23 +2402,6 @@ class SlaveManager:
                             slave_inflight=_slave_gpu_inflight(
                                 slave_name, active_by_slave, slaves_with_proof_work
                             ),
-                        ):
-                            continue
-                        if (
-                            b.get("slave") is None
-                            and should_hold_leftover_for_xl(
-                                poller_earnable=poller_earnable,
-                                hungry_xl_seats=hungry_xl_seats,
-                                leftover_jobs=leftover_jobs,
-                                sticky_own=(
-                                    preferred == slave_name
-                                    or bid in finish_root_bids
-                                ),
-                                poller_is_cpu=_slave_work_profile(slave_name) == "cpu",
-                                leftover_is_cpu=_algorithm_is_cpu(
-                                    batch["settings"]["algorithm_id"]
-                                ),
-                            )
                         ):
                             continue
                         if concurrent_by_bench.get(bid, 0) >= per_bench_cap:
@@ -2834,12 +2761,6 @@ class SlaveManager:
                         if preferred == slave_name and bid in pending_unfinished_roots:
                             finish_root_bids.add(bid)
 
-            poller_earnable = self._cpu_live_earnable(slave_name, now_i)
-            hungry_xl_seats = self._hungry_xl_cpu_seats(
-                slave_name, online_slaves, active_by_slave, now_i
-            )
-            leftover_jobs = len(unassigned_by_bid)
-
             def has_artifacts(bid: str, batch_idx: int) -> bool:
                 return bool(artifact_hits.get((str(bid), int(batch_idx)), False))
 
@@ -3046,23 +2967,6 @@ class SlaveManager:
                             ),
                         ):
                             continue
-                        if (
-                            row.get("slave") is None
-                            and should_hold_leftover_for_xl(
-                                poller_earnable=poller_earnable,
-                                hungry_xl_seats=hungry_xl_seats,
-                                leftover_jobs=leftover_jobs,
-                                sticky_own=(
-                                    preferred == slave_name
-                                    or bid in finish_root_bids
-                                ),
-                                poller_is_cpu=_slave_work_profile(slave_name) == "cpu",
-                                leftover_is_cpu=_algorithm_is_cpu(
-                                    batch["settings"]["algorithm_id"]
-                                ),
-                            )
-                        ):
-                            continue
                         _, _, hardness, _, job_age_ms, _ = _batch_meta(batch)
                         if hardness < min_hardness or job_age_ms >= cap_settings["age_out_ms"]:
                             return True
@@ -3104,24 +3008,6 @@ class SlaveManager:
                             slave_inflight=_slave_gpu_inflight(
                                 slave_name, active_by_slave, slaves_with_proof_work
                             ),
-                        ):
-                            continue
-                        if (
-                            (not is_proof)
-                            and b.get("slave") is None
-                            and should_hold_leftover_for_xl(
-                                poller_earnable=poller_earnable,
-                                hungry_xl_seats=hungry_xl_seats,
-                                leftover_jobs=leftover_jobs,
-                                sticky_own=(
-                                    preferred == slave_name
-                                    or bid in finish_root_bids
-                                ),
-                                poller_is_cpu=_slave_work_profile(slave_name) == "cpu",
-                                leftover_is_cpu=_algorithm_is_cpu(
-                                    batch["settings"]["algorithm_id"]
-                                ),
-                            )
                         ):
                             continue
                         if cap_enabled and (not is_proof):
