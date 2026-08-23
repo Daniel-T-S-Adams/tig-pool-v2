@@ -8,8 +8,9 @@ other profile.
 from __future__ import annotations
 
 # Confirmed jobs still in flight to cover TIG confirm lag (~1-2 min at ~2.4/min).
-# One unowned job is ~one box-wave, not 37 idle CPUs. Keep a few ready.
-NEXT_JOB_BUFFER = 4
+# One unowned job is ~one box-wave, not 37 idle CPUs. Two ready is enough
+# to keep the next box busy without doubling into TIG's 100-cap.
+NEXT_JOB_BUFFER = 2
 PIN_EXPIRE_MS = 30_000
 
 

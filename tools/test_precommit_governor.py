@@ -34,6 +34,7 @@ def main() -> int:
         "should_block_precommit_create",
         "compute_idle_cpu_needs_work",
         "keep_ahead_want",
+        "tig_unresolved_ceiling",
         "compute_idle_gpu_starved",
         "compute_gpu_keep_ahead",
         "compute_idle_gpu_needs_work",
@@ -60,6 +61,7 @@ def main() -> int:
     profile_blocks = ns["profile_root_backlog_blocks"]
     idle_needs = ns["compute_idle_cpu_needs_work"]
     keep_want = ns["keep_ahead_want"]
+    tig_ceiling = ns["tig_unresolved_ceiling"]
     idle_gpu_starved_fn = ns["compute_idle_gpu_starved"]
     gpu_keep_ahead_fn = ns["compute_gpu_keep_ahead"]
     idle_gpu = ns["compute_idle_gpu_needs_work"]
@@ -293,9 +295,10 @@ def main() -> int:
                 cpu_profile_blocked=False,
                 online_idle_cpu_slaves=0,
                 cpu_jobs_in_proof_phase=8,
+                online_cpu_slaves=16,
             ),
             True,
-            "proof-phase jobs start CPU replacements before the idle wave",
+            "busy proving fleet with no unowned spare still needs work",
         ),
         (
             dict(
@@ -339,11 +342,11 @@ def main() -> int:
                 cpu_profile_blocked=False,
                 online_idle_cpu_slaves=0,
                 cpu_jobs_in_proof_phase=1,
-                unowned_cpu_root_jobs=1,
+                unowned_cpu_root_jobs=2,
                 online_cpu_slaves=4,
             ),
             False,
-            "tiny CPU fleet keep-ahead is 1 job not a warehouse",
+            "tiny CPU fleet 2-job spare is covered",
         ),
         (
             dict(
@@ -359,7 +362,7 @@ def main() -> int:
                 online_cpu_slaves=67,
             ),
             True,
-            "large proving wave requests keep-ahead even when leftovers exist",
+            "no unowned spare still requests keep-ahead",
         ),
     ]
     for kwargs, expect, label in idle_cases:
@@ -454,8 +457,9 @@ def main() -> int:
         unowned_gpu_root_jobs=2,
         gpu_spare_jobs=2,
         gpu_jobs_in_proof_phase=6,
-    ) is True
-    print(f"{'pass' if ok else 'FAIL'}: proving GPU jobs raise keep-ahead above spare")
+        gpu_unassigned_claimable=4,
+    ) is False
+    print(f"{'pass' if ok else 'FAIL'}: proving does not raise GPU keep-ahead above spare")
     if not ok:
         failed += 1
     ok = gpu_keep_ahead_fn(
@@ -468,12 +472,13 @@ def main() -> int:
     if not ok:
         failed += 1
     ok = gpu_keep_ahead_fn(
-        unowned_gpu_root_jobs=8,
+        unowned_gpu_root_jobs=2,
         gpu_spare_jobs=2,
         gpu_jobs_in_proof_phase=18,
         online_gpu_slaves=18,
-    ) is True
-    print(f"{'pass' if ok else 'FAIL'}: 18 proving GPUs are not capped at 8 replacements")
+        gpu_unassigned_claimable=8,
+    ) is False
+    print(f"{'pass' if ok else 'FAIL'}: 2-job spare covers proving GPUs")
     if not ok:
         failed += 1
     ok = gpu_keep_ahead_fn(
@@ -488,12 +493,12 @@ def main() -> int:
         failed += 1
 
     want_cases = [
-        ((0, 1, 4), 1, "4-box 1-proving wants 1"),
-        ((0, 20, 67), 20, "67-box 20-proving wants 20"),
+        ((0, 1, 4), 2, "4-box fleet wants 2 spare, not one per proving"),
+        ((0, 20, 67), 2, "67-box busy fleet wants 2 spare not 20"),
         ((5, 0, 5), 5, "5 idle of 5 online wants 5"),
-        ((21, 8, 67), 29, "idle plus proving caps at online"),
-        ((0, 30, 18), 18, "proving above online caps at online"),
-        ((0, 20, 0), 20, "unknown online does not hide a proving wave"),
+        ((21, 8, 67), 23, "idle plus spare caps at online"),
+        ((0, 30, 18), 2, "proving does not warehouse past spare"),
+        ((0, 20, 0), 0, "unknown online does not invent a proving warehouse"),
     ]
     for args, expect, label in want_cases:
         got = keep_want(idle=args[0], proving=args[1], online=args[2])
@@ -502,6 +507,15 @@ def main() -> int:
         if not ok:
             failed += 1
 
+    ok = tig_ceiling(100, 15) == 85
+    print(f"{'pass' if ok else 'FAIL'}: TIG ceiling is 100 minus headroom")
+    if not ok:
+        failed += 1
+    ok = tig_ceiling(100, 0) == 100
+    print(f"{'pass' if ok else 'FAIL'}: zero headroom keeps the TIG limit")
+    if not ok:
+        failed += 1
+
     create_cases = [
         (dict(root_phase_jobs=18, proof_phase_jobs=0, max_concurrent=18), False, "root-phase at cap blocks"),
         (dict(root_phase_jobs=10, proof_phase_jobs=8, max_concurrent=18, overlap_cap=8), True, "proof overlap allows next wave"),
@@ -509,6 +523,8 @@ def main() -> int:
         (dict(root_phase_jobs=12, proof_phase_jobs=20, max_concurrent=18, overlap_cap=8), False, "overlap hard ceiling"),
         (dict(root_phase_jobs=10, proof_phase_jobs=8, submitted=8, max_concurrent=18, overlap_cap=8), False, "in-flight precommits consume root budget"),
         (dict(root_phase_jobs=20, proof_phase_jobs=13, max_concurrent=90, overlap_cap=8), True, "fleet-sized cap lets idle boxes get new jobs"),
+        (dict(root_phase_jobs=10, proof_phase_jobs=0, max_concurrent=90, unresolved=85, unresolved_ceiling=85), False, "TIG unresolved ceiling blocks creates"),
+        (dict(root_phase_jobs=10, proof_phase_jobs=0, max_concurrent=90, unresolved=84, unresolved_ceiling=85), True, "one slot under TIG ceiling still creates"),
     ]
     for kwargs, expect, label in create_cases:
         got = create_ok(**kwargs)
@@ -689,10 +705,11 @@ def main() -> int:
         failed += 1
 
     eff_cases = [
-        (dict(max_concurrent=35, online_cpu=67, online_gpu=8, cpu_want_spare=10, gpu_want_spare=3, idle_needs_work=False), 35, "busy fleet keeps autopilot cap"),
-        (dict(max_concurrent=35, online_cpu=67, online_gpu=8, cpu_want_spare=10, gpu_want_spare=3, idle_needs_work=True), 88, "idle fleet lifts cap to online plus keep-ahead"),
+        (dict(max_concurrent=24, online_cpu=67, online_gpu=16, cpu_want_spare=2, gpu_want_spare=2, idle_needs_work=False), 87, "busy fleet lifts below-fleet autopilot cap"),
+        (dict(max_concurrent=24, online_cpu=67, online_gpu=16, cpu_want_spare=2, gpu_want_spare=2, idle_needs_work=True), 87, "idle fleet lifts cap to online plus spare"),
         (dict(max_concurrent=35, online_cpu=0, online_gpu=0, cpu_want_spare=0, gpu_want_spare=0, idle_needs_work=True), 35, "unknown online does not drop the configured cap"),
-        (dict(max_concurrent=120, online_cpu=67, online_gpu=8, cpu_want_spare=10, gpu_want_spare=3, idle_needs_work=True), 120, "already-high cap is not reduced"),
+        (dict(max_concurrent=120, online_cpu=67, online_gpu=16, cpu_want_spare=2, gpu_want_spare=2, idle_needs_work=True, unresolved_ceiling=85), 85, "TIG ceiling clamps an already-high cap"),
+        (dict(max_concurrent=24, online_cpu=67, online_gpu=16, cpu_want_spare=2, gpu_want_spare=2, unresolved_ceiling=85), 85, "fleet lift never exceeds TIG ceiling"),
     ]
     for kwargs, expect, label in eff_cases:
         got = eff_cap(**kwargs)

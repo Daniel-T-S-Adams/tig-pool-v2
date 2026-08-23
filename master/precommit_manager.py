@@ -326,23 +326,41 @@ def _cpu_create_target(cpu_slots: int) -> int:
     return max(1, cpu_slots)
 
 
+def _keep_ahead_spare() -> int:
+    try:
+        return max(0, int(os.environ.get("PRECOMMIT_KEEP_AHEAD_SPARE", "2")))
+    except (TypeError, ValueError):
+        return 2
+
+
+def tig_unresolved_ceiling(limit: int = 100, headroom: int = 15) -> int:
+    """Local create stop before TIG's 100 stopped/no-proof/fraud cap."""
+    lim = max(1, int(limit or 100))
+    room = max(0, int(headroom or 0))
+    return max(1, lim - room)
+
+
 def keep_ahead_want(
     *,
     idle: int = 0,
     proving: int = 0,
     online: int = 0,
+    spare: int = 2,
 ) -> int:
     """How many unowned root jobs should already be sitting ready.
 
-    Scales with the live fleet: want = idle + proving, never more than
-    online boxes. Unknown online (0) does not cap, so small tests and a
-    vanished ``slave_seen`` row still request replacements for a proving wave.
+    One job per idle box plus a couple of replacements — not one extra
+    job per proving box. Proving already occupies a TIG slot; doubling
+    that wave is what walks into the 100-cap. Unknown online (0) does
+    not invent a spare warehouse.
     """
-    raw = max(0, int(idle or 0)) + max(0, int(proving or 0))
+    extra = max(0, int(spare or 0))
+    idle_n = max(0, int(idle or 0))
     online_n = max(0, int(online or 0))
+    raw = idle_n + extra
     if online_n > 0:
         return min(raw, online_n)
-    return raw
+    return idle_n
 
 
 def compute_idle_cpu_needs_work(
@@ -357,12 +375,13 @@ def compute_idle_cpu_needs_work(
     cpu_jobs_in_proof_phase: int = 0,
     unowned_cpu_root_jobs: int = 0,
     online_cpu_slaves: int = 0,
+    keep_ahead_spare: int = 2,
 ) -> bool:
     """True when precommit should bias toward CPU work for an underfed fleet.
 
     Claimable leftover roots may feed boxes that are already idle. They do
     not count as the next job for a box that is still proving. Keep-ahead
-    uses unowned root-phase jobs vs ``keep_ahead_want(proving, online)``.
+    is a small spare pile, not one replacement per proving job.
     """
     if not idle_cpu_override:
         return False
@@ -375,7 +394,12 @@ def compute_idle_cpu_needs_work(
     proving = max(0, int(cpu_jobs_in_proof_phase or 0))
     if idle > 0 and claimable < idle:
         return True
-    want = keep_ahead_want(idle=0, proving=proving, online=online_cpu_slaves)
+    want = keep_ahead_want(
+        idle=0,
+        proving=proving,
+        online=online_cpu_slaves,
+        spare=max(0, int(keep_ahead_spare or 0)),
+    )
     if want > 0 and int(unowned_cpu_root_jobs or 0) < want:
         return True
     if idle > 0:
@@ -573,19 +597,25 @@ def compute_gpu_keep_ahead(
     online_idle_gpu_slaves: int = 0,
     online_gpu_slaves: int = 0,
     gpu_unassigned_claimable: int = 0,
+    keep_ahead_spare: int = 2,
 ) -> bool:
     """True when the unowned GPU spare pile is short. GPUs may all be busy.
 
-    Spare target scales with idle + proving, capped by live GPU count.
+    Spare target is a couple of replacements, capped by live GPU count.
     ``gpu_spare_jobs`` remains an operator floor, also capped by online.
-    ``keep_ahead_cap`` is only the fallback cap when online is unknown.
+    Proving jobs already occupy TIG slots and do not raise the warehouse.
     Unowned jobs with no claimable roots do not feed a finishing card.
     """
     if gpu_profile_blocked:
         return False
     proving = max(0, int(gpu_jobs_in_proof_phase or 0))
     online = max(0, int(online_gpu_slaves or 0))
-    want = keep_ahead_want(idle=0, proving=proving, online=online)
+    want = keep_ahead_want(
+        idle=0,
+        proving=proving,
+        online=online,
+        spare=max(0, int(keep_ahead_spare or 0)),
+    )
     if online <= 0 and proving > 0:
         want = min(want, max(0, int(keep_ahead_cap or 0)) or want)
     spare = max(0, int(gpu_spare_jobs or 0))
@@ -607,6 +637,7 @@ def compute_idle_gpu_needs_work(
     gpu_spare_jobs: int = 0,
     gpu_jobs_in_proof_phase: int = 0,
     online_gpu_slaves: int = 0,
+    keep_ahead_spare: int = 2,
 ) -> bool:
     """True when GPUs need more claimable work, including a keep-ahead spare.
 
@@ -628,6 +659,7 @@ def compute_idle_gpu_needs_work(
         online_idle_gpu_slaves=online_idle_gpu_slaves,
         online_gpu_slaves=online_gpu_slaves,
         gpu_unassigned_claimable=gpu_unassigned_claimable,
+        keep_ahead_spare=keep_ahead_spare,
     )
 
 
@@ -639,21 +671,26 @@ def effective_concurrent_cap(
     cpu_want_spare: int = 0,
     gpu_want_spare: int = 0,
     idle_needs_work: bool = False,
+    unresolved_ceiling: int = 0,
 ) -> int:
-    """Create ceiling while idle boxes have nothing to claim.
+    """Create ceiling: one job per live box plus a small spare, under TIG 100.
 
-    ``max_concurrent_benchmarks`` is the configured leftover brake.
-    Live values are often far above the fleet (e.g. 276). This lift only
-    matters when that setting is below online boxes plus keep-ahead.
-    One job per box needs the live fleet, plus keep-ahead replacements for
-    boxes that are already proving. Proof-phase jobs do not feed idle boxes.
+    Autopilot may park ``max_concurrent_benchmarks`` far below the fleet.
+    When we know how many boxes are online, lift to fleet + spare so they
+    stay busy. Never climb past ``unresolved_ceiling`` (TIG 100 minus
+    headroom). Unknown online keeps the configured cap.
     """
     cap = max(0, int(max_concurrent or 0))
-    if not idle_needs_work:
-        return cap
     fleet = max(0, int(online_cpu or 0)) + max(0, int(online_gpu or 0))
     spare = max(0, int(cpu_want_spare or 0)) + max(0, int(gpu_want_spare or 0))
-    return max(cap, fleet + spare)
+    if fleet > 0:
+        fill = max(cap, fleet + spare)
+    else:
+        fill = cap
+    ceiling = max(0, int(unresolved_ceiling or 0))
+    if ceiling > 0 and fill > 0:
+        fill = min(fill, ceiling)
+    return fill
 
 
 def concurrent_create_allowed(
@@ -663,14 +700,18 @@ def concurrent_create_allowed(
     submitted: int = 0,
     max_concurrent: int = 0,
     overlap_cap: int = 8,
+    unresolved: int = 0,
+    unresolved_ceiling: int = 0,
 ) -> bool:
     """True when another precommit may start.
 
-    Proof-phase jobs still occupy runtime, but they no longer feed idle root
-    workers. Allow a bounded overlap so the next wave is already submitting
-    while the current wave proves — otherwise idle spikes for the ~1-2 min
-    TIG precommit after proofs finish.
+    Hard stop when local TIG-unresolved jobs (live, unsent, or skipped)
+    already sit at the safe ceiling. Proof-phase overlap is only a local
+    pipeline hint and must not beat that ceiling.
     """
+    ceiling = int(unresolved_ceiling or 0)
+    if ceiling > 0 and int(unresolved or 0) >= ceiling:
+        return False
     cap = int(max_concurrent or 0)
     if cap <= 0:
         return True
@@ -870,6 +911,7 @@ def should_block_precommit_create(
 class PrecommitManager:
     def __init__(self):
         self.last_block_id = None
+        self.last_block_height = 0
         self.num_precommits_submitted = 0
         self.per_challenge_precommits_submitted = {}
         self.algorithm_name_2_id = {}
@@ -930,6 +972,47 @@ class PrecommitManager:
         with self._tick_lock:
             return self._run_tick_locked()
 
+    def note_precommit_accepted(self, challenge_id=None):
+        """Count a precommit only after TIG accepts it (HTTP 200)."""
+        self.num_precommits_submitted += 1
+        if challenge_id:
+            self.per_challenge_precommits_submitted[challenge_id] = (
+                self.per_challenge_precommits_submitted.get(challenge_id, 0) + 1
+            )
+
+    def _count_unresolved_tig_slots(self) -> int:
+        """Jobs TIG still counts toward the 100: no proof, inside the window."""
+        window = max(1, int(os.environ.get("TIG_UNRESOLVED_WINDOW_BLOCKS", "120")))
+        height = int(getattr(self, "last_block_height", 0) or 0)
+        ceiling = tig_unresolved_ceiling(
+            limit=int(os.environ.get("TIG_UNRESOLVED_LIMIT", "100")),
+            headroom=int(os.environ.get("TIG_UNRESOLVED_HEADROOM", "15")),
+        )
+        try:
+            if height <= 0:
+                row = get_db_conn().fetch_one(
+                    "SELECT COALESCE(MAX(block_started), 0) AS h FROM job"
+                ) or {}
+                height = int(row.get("h") or 0)
+            if height <= 0:
+                return 0
+            row = get_db_conn().fetch_one(
+                """
+                SELECT COUNT(*) AS n
+                FROM job
+                WHERE proof_submitted IS NULL
+                  AND (
+                    (block_started IS NOT NULL AND %s < block_started + %s)
+                    OR (block_started IS NULL AND end_time IS NULL)
+                  )
+                """,
+                (height, window),
+            ) or {}
+            return max(0, int(row.get("n") or 0))
+        except Exception as exc:
+            logger.warning("unresolved TIG slot count failed: %s", exc)
+            return ceiling
+
     def _run_tick_locked(self):
         self.begin_create_tick()
         governor = self._governor_snapshot()
@@ -945,6 +1028,7 @@ class PrecommitManager:
         gpu_idle = int(governor.get("online_idle_gpu_slaves") or 0)
         gpu_claimable = int(governor.get("gpu_unassigned_claimable") or 0)
         gpu_unowned = int(governor.get("unowned_gpu_root_jobs") or 0)
+        next_buf = _keep_ahead_spare()
         cpu_short, gpu_short = dispatch_shorts(
             cpu_idle=cpu_idle,
             cpu_claimable=cpu_claimable,
@@ -952,6 +1036,7 @@ class PrecommitManager:
             gpu_idle=gpu_idle,
             gpu_claimable=gpu_claimable,
             gpu_unowned=gpu_unowned,
+            next_job_buffer=next_buf,
         )
         cpu_hole = profile_has_hole(idle=cpu_idle, claimable=cpu_claimable)
         gpu_hole = profile_has_hole(idle=gpu_idle, claimable=gpu_claimable)
@@ -1106,6 +1191,10 @@ class PrecommitManager:
 
     def _on_new_block_locked(self, block: Block, **kwargs):
         self.last_block_id = block.id
+        try:
+            self.last_block_height = int(block.details.height)
+        except Exception:
+            pass
         self.num_precommits_submitted = 0
         self.per_challenge_precommits_submitted = {}
         self.challenge_configs = block.config["challenges"]
@@ -1177,6 +1266,7 @@ class PrecommitManager:
             cpu_jobs_in_proof_phase=int(snap.get("cpu_jobs_in_proof_phase") or 0),
             unowned_cpu_root_jobs=int(snap.get("unowned_cpu_root_jobs") or 0),
             online_cpu_slaves=max(online_cpu, int(snap.get("online_cpu_slaves") or 0)),
+            keep_ahead_spare=_keep_ahead_spare(),
         )
         snap["online_idle_cpu_slaves"] = instant
         snap["online_idle_cpu_slaves_instant"] = instant
@@ -1551,6 +1641,7 @@ class PrecommitManager:
                     online_idle_gpu_slaves=online_idle_gpu_slaves,
                     online_gpu_slaves=online_gpu_slaves,
                     gpu_unassigned_claimable=gpu_unassigned_claimable,
+                    keep_ahead_spare=_keep_ahead_spare(),
                 ),
                 "idle_gpu_needs_work": compute_idle_gpu_needs_work(
                     gpu_unassigned_claimable=gpu_unassigned_claimable,
@@ -1560,6 +1651,7 @@ class PrecommitManager:
                     gpu_spare_jobs=int(settings.get("gpu_spare_jobs") or 0),
                     gpu_jobs_in_proof_phase=gpu_jobs_in_proof_phase,
                     online_gpu_slaves=online_gpu_slaves,
+                    keep_ahead_spare=_keep_ahead_spare(),
                 ),
             }
         except Exception as exc:
@@ -1619,17 +1711,25 @@ class PrecommitManager:
         self.last_idle_gpu_starved = idle_gpu_starved
         self.last_cpu_idle_hole = cpu_hole
         caps = governor.get("profile_caps") or {}
+        keep_spare = _keep_ahead_spare()
         cpu_want_spare = keep_ahead_want(
             idle=0,
             proving=int(governor.get("cpu_jobs_in_proof_phase") or 0),
             online=int(governor.get("online_cpu_slaves") or 0),
+            spare=keep_spare,
         )
         gpu_want_spare = keep_ahead_want(
             idle=0,
             proving=int(governor.get("gpu_jobs_in_proof_phase") or 0),
             online=int(governor.get("online_gpu_slaves") or 0),
+            spare=keep_spare,
         )
         configured_cap = int(CONFIG.get("max_concurrent_benchmarks") or 0)
+        unresolved_ceiling = tig_unresolved_ceiling(
+            limit=int(os.environ.get("TIG_UNRESOLVED_LIMIT", "100")),
+            headroom=int(os.environ.get("TIG_UNRESOLVED_HEADROOM", "15")),
+        )
+        unresolved = self._count_unresolved_tig_slots()
         create_cap = effective_concurrent_cap(
             max_concurrent=configured_cap,
             online_cpu=int(governor.get("online_cpu_slaves") or 0),
@@ -1637,6 +1737,7 @@ class PrecommitManager:
             cpu_want_spare=cpu_want_spare,
             gpu_want_spare=gpu_want_spare,
             idle_needs_work=idle_cpu_needs_work or idle_gpu_needs_work,
+            unresolved_ceiling=unresolved_ceiling,
         )
         overlap_cap = int(os.environ.get("PRECOMMIT_PROOF_OVERLAP", "8"))
         # Size the idle burst before any gate so extras can still run this
@@ -1706,10 +1807,13 @@ class PrecommitManager:
             submitted=self.num_precommits_submitted,
             max_concurrent=create_cap,
             overlap_cap=overlap_cap,
+            unresolved=unresolved,
+            unresolved_ceiling=unresolved_ceiling,
         ):
             logger.info(
                 "pending benchmarks at cap (pending=%s root=%s proof=%s "
-                "submitted=%s max=%s effective=%s overlap=%s idle_cpu=%s idle_gpu=%s)",
+                "submitted=%s max=%s effective=%s overlap=%s unresolved=%s "
+                "ceiling=%s idle_cpu=%s idle_gpu=%s)",
                 num_pending_jobs,
                 root_phase_jobs,
                 proof_phase_jobs,
@@ -1717,6 +1821,8 @@ class PrecommitManager:
                 configured_cap,
                 create_cap,
                 overlap_cap,
+                unresolved,
+                unresolved_ceiling,
                 idle_cpu_needs_work,
                 idle_gpu_needs_work,
             )
@@ -2231,8 +2337,6 @@ class PrecommitManager:
             if "hyperparameters" not in selection["track_settings"][t_id]:
                 selection["track_settings"][t_id]["hyperparameters"] = None
 
-        self.num_precommits_submitted += 1
-        self.per_challenge_precommits_submitted[c_id] = self.per_challenge_precommits_submitted.get(c_id, 0) + 1
         req = SubmitPrecommitRequest(
             settings=BenchmarkSettings(
                 challenge_id=c_id,

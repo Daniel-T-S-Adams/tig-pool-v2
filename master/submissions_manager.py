@@ -39,7 +39,14 @@ class SubmitProofRequest(FromDict):
 class SubmissionsManager:
     def __init__(self):
         self._last_precommit_post_ts = 0.0
+        self._last_benchmark_post_ts = 0.0
+        self._last_proof_post_ts = 0.0
         self._precommit_lock = threading.Lock()
+        self._output_lock = threading.Lock()
+
+    def _endpoint_ready(self, name: str, interval_s: float = 5.0) -> bool:
+        last = float(getattr(self, f"_last_{name}_post_ts", 0.0) or 0.0)
+        return (time.time() - last) >= float(interval_s)
 
     def _wait_precommit_gate(self, interval_s: float = 5.0) -> None:
         """TIG: one precommit POST per 5 seconds or the rest 503."""
@@ -168,10 +175,19 @@ class SubmissionsManager:
             )
 
     def run(self, submit_precommit_req: Optional[SubmitPrecommitRequest] = None):
-        now = int(time.time() * 1000)
         if submit_precommit_req is not None:
             self.submit_precommit(submit_precommit_req)
+        self.submit_due_outputs()
 
+    def submit_due_outputs(self):
+        """One benchmark and one proof if due. Safe from pacer + main loop."""
+        with self._output_lock:
+            self._submit_due_benchmark()
+            self._submit_due_proof()
+
+    def _submit_due_benchmark(self):
+        if not self._endpoint_ready("benchmark"):
+            return
         benchmark_to_submit = get_db_conn().fetch_one(
             """
             WITH updated AS (
@@ -208,6 +224,7 @@ class SubmissionsManager:
             benchmark_id = benchmark_to_submit["benchmark_id"]
             merkle_root = benchmark_to_submit["merkle_root"] 
             solution_quality = benchmark_to_submit["solution_quality"]
+            self._last_benchmark_post_ts = time.time()
 
             if benchmark_to_submit["stopped"]:
                 self._post_thread("benchmark", SubmitBenchmarkRequest(
@@ -226,6 +243,9 @@ class SubmissionsManager:
         else:
             logger.debug("no benchmark to submit")
 
+    def _submit_due_proof(self):
+        if not self._endpoint_ready("proof"):
+            return
         proof_to_submit = get_db_conn().fetch_one(
             """
             WITH updated AS (
@@ -259,6 +279,7 @@ class SubmissionsManager:
         if proof_to_submit:
             benchmark_id = proof_to_submit["benchmark_id"]
             merkle_proofs = proof_to_submit["merkle_proofs"]
+            self._last_proof_post_ts = time.time()
 
             self._post_thread("proof", SubmitProofRequest(
                 benchmark_id=benchmark_id,

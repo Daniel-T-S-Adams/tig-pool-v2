@@ -13,7 +13,9 @@ from master.client_manager import *
 logger = logging.getLogger(os.path.splitext(os.path.basename(__file__))[0])
 
 # TIG accepts one precommit POST per 5 seconds. Extra creates 503 and then
-# 429-block get-block. Pace creates off the slow job_manager loop.
+# 429-block get-block. Pace creates off the slow job_manager loop. Proofs
+# and benchmarks use the same 5s-per-endpoint rule — drain them here so
+# a long job_manager.run() cannot leave 20 local-proved jobs unsent.
 PRECOMMIT_PACE_S = max(5.0, float(os.environ.get("PRECOMMIT_PACE_S", "5")))
 
 
@@ -21,10 +23,15 @@ def _create_pacer(precommit_manager, submissions_manager):
     while True:
         t0 = time.time()
         try:
+            submissions_manager.submit_due_outputs()
             if getattr(precommit_manager, "last_block_id", None):
                 created = precommit_manager.run_tick()
                 if created:
-                    submissions_manager.submit_precommit(created[0])
+                    req = created[0]
+                    if submissions_manager.submit_precommit(req):
+                        precommit_manager.note_precommit_accepted(
+                            getattr(getattr(req, "settings", None), "challenge_id", None)
+                        )
         except Exception as exc:
             traceback.print_exc()
             logger.error("%s", exc)

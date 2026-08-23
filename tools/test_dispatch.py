@@ -41,12 +41,12 @@ def main() -> int:
         "busy fleet still wants unowned jobs in the pipeline",
     )
     check(
-        profile_needs_create(idle=0, claimable=0, unowned_jobs=3) is True,
-        "fewer than 4 unowned jobs still counts as short",
+        profile_needs_create(idle=0, claimable=0, unowned_jobs=1) is True,
+        "fewer than 2 unowned jobs still counts as short",
     )
     check(
-        profile_needs_create(idle=0, claimable=17, unowned_jobs=4) is False,
-        "busy CPUs with a warehouse of 4 unowned jobs do not create",
+        profile_needs_create(idle=0, claimable=17, unowned_jobs=2) is False,
+        "busy CPUs with a warehouse of 2 unowned jobs do not create",
     )
     check(
         profile_needs_create(idle=4, claimable=0, unowned_jobs=2) is True,
@@ -145,10 +145,10 @@ def main() -> int:
     both_busy = dispatch_shorts(
         cpu_idle=0,
         cpu_claimable=10,
-        cpu_unowned=2,
+        cpu_unowned=1,
         gpu_idle=0,
         gpu_claimable=4,
-        gpu_unowned=2,
+        gpu_unowned=1,
     )
     check(
         both_busy == (True, True),
