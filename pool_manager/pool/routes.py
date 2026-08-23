@@ -229,9 +229,15 @@ export INNOPOOL_INSTALL_ROOT=/home/ubuntu
 export DEBIAN_FRONTEND=noninteractive
 apt-get update
 apt-get install -y curl git ca-certificates gnupg python3
-apt-get remove -y docker.io docker-doc docker-compose docker-compose-v2 podman-docker containerd runc || true
-curl -fsSL https://get.docker.com | sh
-apt-get install -y docker-compose-plugin
+if curl -fsSL --connect-timeout 20 --retry 2 https://get.docker.com -o /tmp/get-docker.sh; then
+  apt-get remove -y docker.io docker-doc docker-compose docker-compose-v2 podman-docker containerd runc || true
+  sh /tmp/get-docker.sh
+  apt-get install -y docker-compose-plugin || true
+else
+  echo "get.docker.com unreachable (TLS/network). Installing Docker from Ubuntu apt..."
+  apt-get install -y docker.io docker-compose-v2 \
+    || apt-get install -y docker.io docker-compose-plugin
+fi
 systemctl enable --now docker
 usermod -aG docker ubuntu || true
 

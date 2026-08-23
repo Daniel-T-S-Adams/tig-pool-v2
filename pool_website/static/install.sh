@@ -118,9 +118,15 @@ install_docker_if_needed() {
   echo "Installing Docker..."
   $SUDO apt-get update
   $SUDO apt-get install -y curl git ca-certificates python3
-  $SUDO apt-get remove -y docker.io docker-doc docker-compose docker-compose-v2 podman-docker containerd runc || true
-  curl -fsSL https://get.docker.com | $SUDO sh
-  $SUDO apt-get install -y docker-compose-plugin
+  if curl -fsSL --connect-timeout 20 --retry 2 https://get.docker.com -o /tmp/get-docker.sh; then
+    $SUDO apt-get remove -y docker.io docker-doc docker-compose docker-compose-v2 podman-docker containerd runc || true
+    $SUDO sh /tmp/get-docker.sh
+    $SUDO apt-get install -y docker-compose-plugin || true
+  else
+    echo "get.docker.com unreachable (TLS/network). Installing Docker from Ubuntu apt..."
+    $SUDO apt-get install -y docker.io docker-compose-v2 \
+      || $SUDO apt-get install -y docker.io docker-compose-plugin
+  fi
   $SUDO systemctl enable --now docker || true
   # Ensure the interactive login user can run docker without sudo.
   if [[ "$INSTALL_USER" != "root" ]]; then
