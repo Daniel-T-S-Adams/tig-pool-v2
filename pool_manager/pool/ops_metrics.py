@@ -688,7 +688,14 @@ def _slave_rows(now_ms: int, cfg: dict) -> list[dict]:
     return out
 
 
+_OPS_CACHE = db.SingleFlightCache(float(os.environ.get("OPS_METRICS_CACHE_S", "12")))
+
+
 def build_ops_metrics() -> dict:
+    return _OPS_CACHE.get(_build_ops_metrics_uncached)
+
+
+def _build_ops_metrics_uncached() -> dict:
     now_ms = int(time.time() * 1000)
     cfg, cfg_error = autopilot._fetch_master_config()
 

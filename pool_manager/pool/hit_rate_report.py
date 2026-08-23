@@ -478,7 +478,14 @@ def aggregate_rows(jobs: list[dict]) -> list[dict]:
     return out
 
 
+_HIT_REPORT_CACHE = db.SingleFlightCache(float(os.environ.get("HIT_RATE_REPORT_CACHE_S", "30")))
+
+
 def build_hit_rate_report(window_ms: int | None = None) -> dict:
+    return _HIT_REPORT_CACHE.get(lambda: _build_hit_rate_report_uncached(window_ms))
+
+
+def _build_hit_rate_report_uncached(window_ms: int | None = None) -> dict:
     now_ms = int(time.time() * 1000)
     window_ms = int(window_ms or HIT_RATE_WINDOW_MS)
     cutoff_ms = now_ms - window_ms

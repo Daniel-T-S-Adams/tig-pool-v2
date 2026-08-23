@@ -26,6 +26,39 @@ _pool: pool.ThreadedConnectionPool | None = None
 _pool_lock = threading.Lock()
 
 
+class SingleFlightCache:
+    """One in-flight builder at a time; reuse the last good result.
+
+    Dashboard polls and the autopilot loop must not each open a warehouse
+    query. Overlapping /admin/ops/metrics calls were pinning the manager pool.
+    """
+
+    def __init__(self, ttl_s: float):
+        self.ttl_s = max(0.0, float(ttl_s))
+        self._lock = threading.Lock()
+        self._value = None
+        self._ts = 0.0
+
+    def get(self, builder, force: bool = False):
+        now = time.time()
+        if not force and self._value is not None and now - self._ts < self.ttl_s:
+            return self._value
+        with self._lock:
+            now = time.time()
+            if not force and self._value is not None and now - self._ts < self.ttl_s:
+                return self._value
+            try:
+                value = builder()
+                self._value = value
+                self._ts = time.time()
+                return value
+            except Exception:
+                if self._value is not None:
+                    logger.warning("returning stale cache after build failure")
+                    return self._value
+                raise
+
+
 def _get_pool() -> pool.ThreadedConnectionPool:
     global _pool
     if _pool is not None and not getattr(_pool, "closed", False):

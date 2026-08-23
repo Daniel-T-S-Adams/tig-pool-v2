@@ -264,6 +264,7 @@
     const STORAGE_KEY = "innopool_ops_admin_secret";
     const REFRESH_MS = 15000;
     let timer = null;
+    let tickBusy = false;
     let secret = sessionStorage.getItem(STORAGE_KEY) || "";
 
     const el = (id) => document.getElementById(id);
@@ -516,6 +517,8 @@
     }
 
     async function tick() {
+      if (tickBusy) return;
+      tickBusy = true;
       try {
         const data = await fetchMetrics();
         showApp();
@@ -538,6 +541,8 @@
           if (note) note.textContent = "API error: " + (err.message || err);
           console.error(err);
         }
+      } finally {
+        tickBusy = false;
       }
     }
 

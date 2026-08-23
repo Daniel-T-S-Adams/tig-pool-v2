@@ -343,9 +343,16 @@ def _fleet_onboarding_payload(token: str, worker_type: str) -> dict:
 
 # ── public stats ───────────────────────────────────────────────────────────────
 
+_STATS_CACHE = db.SingleFlightCache(float(os.environ.get("POOL_STATS_CACHE_S", "10")))
+
+
 @router.get("/stats")
 def get_pool_stats():
     """Overall pool statistics for the landing page."""
+    return _STATS_CACHE.get(_get_pool_stats_uncached)
+
+
+def _get_pool_stats_uncached():
     members = db.fetch_one(
         "SELECT COUNT(*) AS total FROM pool_members WHERE active = true"
     )
