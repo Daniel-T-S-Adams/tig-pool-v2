@@ -37,6 +37,7 @@ from master.cpu_tier_caps import (
 from master.proof_affinity import (
 
     STICKY_ROOTS_ENABLED,
+    canonicalize_pool_slave_name,
     ensure_slave_seen_table,
     fetch_online_slaves,
     preferred_root_slave,
@@ -2450,7 +2451,7 @@ class SlaveManager:
 
         @app.route('/get-batches', methods=['GET'])
         def get_batch(request: Request):
-            if (slave_name := request.headers.get('User-Agent', None)) is None:
+            if (slave_name := canonicalize_pool_slave_name(request.headers.get('User-Agent', None))) is None:
                 return "User-Agent header is required", 403
             if not any(re.match(slave["name_regex"], slave_name) for slave in CONFIG["slaves"]):
                 logger.warning(f"slave {slave_name} does not match any regex. rejecting get-batch request")
@@ -3130,7 +3131,7 @@ class SlaveManager:
             return JSONResponse(content=jsonable_encoder(concurrent))
 
         def find_batch(batch_id: str, request: Request):
-            if (slave_name := request.headers.get('User-Agent', None)) is None:
+            if (slave_name := canonicalize_pool_slave_name(request.headers.get('User-Agent', None))) is None:
                 raise HTTPException(status_code=403, detail="User-Agent header is required")
             self._require_authorized_slave(slave_name)
             
@@ -3206,7 +3207,7 @@ class SlaveManager:
             error = result.get("error", "")
             benchmark_id, batch_idx_s = batch_id.rsplit("_", 1)
             batch_idx = int(batch_idx_s)
-            slave_name = request.headers.get("User-Agent")
+            slave_name = canonicalize_pool_slave_name(request.headers.get("User-Agent"))
             b = None
             try:
                 slave_name, b = find_batch(batch_id, request)
@@ -3317,7 +3318,7 @@ class SlaveManager:
             except HTTPException as exc:
                 if exc.status_code != 408:
                     raise
-                slave_name = request.headers.get("User-Agent")
+                slave_name = canonicalize_pool_slave_name(request.headers.get("User-Agent"))
                 self._require_authorized_slave(slave_name)
                 if _root_already_ready(benchmark_id, batch_idx):
                     _retire_batch_id(batch_id)
@@ -3456,7 +3457,7 @@ class SlaveManager:
                         logger.debug(
                             "idempotent proofs accept for already-ready %s from %s",
                             batch_id,
-                            request.headers.get("User-Agent"),
+                            canonicalize_pool_slave_name(request.headers.get("User-Agent")),
                         )
                         return {"status": "OK"}
                 raise

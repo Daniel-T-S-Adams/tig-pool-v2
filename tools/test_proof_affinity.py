@@ -11,6 +11,7 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from master.proof_affinity import (  # noqa: E402
+    canonicalize_pool_slave_name,
     offline_owners,
     preferred_root_slave,
     should_hold_unowned_gpu_for_idle,
@@ -35,6 +36,28 @@ def main() -> int:
         )
     )
     cases.append((preferred_root_slave({}) is None, "empty scores -> None"))
+    cases.append(
+        (
+            canonicalize_pool_slave_name("pool-cpu6a10bcc3bb93-home-9654-14")
+            == "pool-cpu-6a10bcc3bb93-home-9654-14",
+            "insert hyphen after pool-cpu",
+        )
+    )
+    cases.append(
+        (
+            canonicalize_pool_slave_name("pool-cpu-6a10bcc3bb93-home-9654-14")
+            == "pool-cpu-6a10bcc3bb93-home-9654-14",
+            "correct pool-cpu name unchanged",
+        )
+    )
+    cases.append(
+        (
+            canonicalize_pool_slave_name("pool-gpu6a10bcc3bb93-aws-1")
+            == "pool-gpu-6a10bcc3bb93-aws-1",
+            "insert hyphen after pool-gpu",
+        )
+    )
+    cases.append((canonicalize_pool_slave_name(None) is None, "None UA stays None"))
     cases.append((preferred_root_slave({"": 5, None: 9}) is None, "blank slaves ignored"))
 
     online = {"pool-cpu-a", "pool-cpu-b"}

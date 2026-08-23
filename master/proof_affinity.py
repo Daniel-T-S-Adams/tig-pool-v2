@@ -13,7 +13,27 @@ dark. These helpers:
 from __future__ import annotations
 
 import os
+import re
 from typing import Callable, Dict, Iterable, Optional, Set
+
+# pool-cpu6a10… / pool-gpu6a10… (missing hyphen after cpu|gpu).
+_POOL_NAME_MISSING_HYPHEN = re.compile(
+    r"^(pool-(?:cpu|gpu))([0-9a-f]{12}\b.*)$",
+    re.IGNORECASE,
+)
+
+
+def canonicalize_pool_slave_name(name: Optional[str]) -> Optional[str]:
+    """Insert the hyphen in ``pool-cpu<hex>…`` / ``pool-gpu<hex>…`` typos."""
+    if name is None:
+        return None
+    raw = str(name).strip()
+    if not raw:
+        return raw
+    match = _POOL_NAME_MISSING_HYPHEN.match(raw)
+    if match:
+        return f"{match.group(1)}-{match.group(2)}"
+    return raw
 
 
 def _env_bool(name: str, default: str = "true") -> bool:
