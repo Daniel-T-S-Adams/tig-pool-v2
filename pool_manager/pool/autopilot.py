@@ -12,6 +12,7 @@ import logging
 import math
 import os
 import re
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -5121,7 +5122,7 @@ def maybe_run():
     now_ms = int(time.time() * 1000)
     cfg, cfg_error = _fetch_master_config()
     cleanup = _cleanup_stale_assignments(cfg, now_ms)
-    report = build_report()
+    report = build_report(force=True)
     if cfg_error and not report.get("master_config_error"):
         report["master_config_error"] = cfg_error
 
@@ -5191,7 +5192,32 @@ def maybe_run():
     return decision
 
 
-def build_report() -> dict:
+_REPORT_CACHE_MS = int(os.environ.get("AUTOPILOT_REPORT_CACHE_MS", "8000"))
+_report_lock = threading.Lock()
+_report_cache: dict[str, Any] = {"ts": 0, "report": None}
+
+
+def build_report(*, force: bool = False) -> dict:
+    now_ms = int(time.time() * 1000)
+    if not force:
+        cached = _report_cache.get("report")
+        ts = int(_report_cache.get("ts") or 0)
+        if cached is not None and now_ms - ts < _REPORT_CACHE_MS:
+            return cached
+    with _report_lock:
+        now_ms = int(time.time() * 1000)
+        if not force:
+            cached = _report_cache.get("report")
+            ts = int(_report_cache.get("ts") or 0)
+            if cached is not None and now_ms - ts < _REPORT_CACHE_MS:
+                return cached
+        report = _build_report_uncached()
+        _report_cache["report"] = report
+        _report_cache["ts"] = int(time.time() * 1000)
+        return report
+
+
+def _build_report_uncached() -> dict:
     now_ms = int(time.time() * 1000)
     cfg, cfg_error = _fetch_master_config()
     slaves = _slave_metrics(now_ms)

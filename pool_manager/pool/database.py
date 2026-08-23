@@ -1,6 +1,7 @@
 import logging
 import os
 import threading
+import time
 from contextlib import contextmanager
 
 import psycopg2
@@ -19,7 +20,8 @@ _conn_params = {
 # Distinct from master's POSTGRES_POOL_MAX (48). env_file would otherwise
 # make this process try to open the same 48 sockets.
 _pool_min = max(1, int(os.environ.get("MANAGER_POSTGRES_POOL_MIN", "2")))
-_pool_max = max(_pool_min, int(os.environ.get("MANAGER_POSTGRES_POOL_MAX", "8")))
+_pool_max = max(_pool_min, int(os.environ.get("MANAGER_POSTGRES_POOL_MAX", "16")))
+_pool_wait_sec = max(0.0, float(os.environ.get("MANAGER_POSTGRES_POOL_WAIT_SEC", "8")))
 _pool: pool.ThreadedConnectionPool | None = None
 _pool_lock = threading.Lock()
 
@@ -42,6 +44,26 @@ def _get_pool() -> pool.ThreadedConnectionPool:
                 _pool_max,
             )
         return _pool
+
+
+def _checkout():
+    current = _get_pool()
+    deadline = time.monotonic() + _pool_wait_sec
+    last_err: BaseException | None = None
+    while True:
+        try:
+            return current.getconn()
+        except pool.PoolError as exc:
+            last_err = exc
+            if _pool_wait_sec <= 0 or time.monotonic() >= deadline:
+                logger.error(
+                    "Postgres pool exhausted (max=%s wait=%ss)",
+                    _pool_max,
+                    _pool_wait_sec,
+                )
+                raise
+            time.sleep(0.05)
+    raise last_err  # pragma: no cover
 
 
 def _putconn(conn) -> None:
@@ -67,7 +89,7 @@ def _putconn(conn) -> None:
 
 @contextmanager
 def get_conn():
-    conn = _get_pool().getconn()
+    conn = _checkout()
     try:
         yield conn
         conn.commit()
