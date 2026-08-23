@@ -912,6 +912,7 @@ class PrecommitManager:
     def __init__(self):
         self.last_block_id = None
         self.last_block_height = 0
+        self._tig_cap_hold_until = 0.0
         self.num_precommits_submitted = 0
         self.per_challenge_precommits_submitted = {}
         self.algorithm_name_2_id = {}
@@ -980,14 +981,28 @@ class PrecommitManager:
                 self.per_challenge_precommits_submitted.get(challenge_id, 0) + 1
             )
 
+    def note_tig_cap_hit(self, hold_s: float = 90.0):
+        """TIG said we are over 100. Stop minting until the hold ends."""
+        hold = max(15.0, float(hold_s or 90.0))
+        self._tig_cap_hold_until = time.time() + hold
+        logger.warning("TIG 100-cap hit; holding creates for %.0fs", hold)
+
     def _count_unresolved_tig_slots(self) -> int:
-        """Jobs TIG still counts toward the 100: no proof, inside the window."""
-        window = max(1, int(os.environ.get("TIG_UNRESOLVED_WINDOW_BLOCKS", "120")))
-        height = int(getattr(self, "last_block_height", 0) or 0)
+        """Jobs TIG still counts toward the 100: no proof, inside the window.
+
+        Local expiry stamps unfinished jobs at 120 blocks. TIG's player
+        cap still holds older stopped/no-proof rows (we just measured 44
+        extra in the 120-400 block band). Count that longer tail or the
+        gate thinks there is room and TIG 400s.
+        """
         ceiling = tig_unresolved_ceiling(
             limit=int(os.environ.get("TIG_UNRESOLVED_LIMIT", "100")),
             headroom=int(os.environ.get("TIG_UNRESOLVED_HEADROOM", "15")),
         )
+        if time.time() < float(getattr(self, "_tig_cap_hold_until", 0) or 0):
+            return ceiling
+        window = max(1, int(os.environ.get("TIG_UNRESOLVED_WINDOW_BLOCKS", "400")))
+        height = int(getattr(self, "last_block_height", 0) or 0)
         try:
             if height <= 0:
                 row = get_db_conn().fetch_one(

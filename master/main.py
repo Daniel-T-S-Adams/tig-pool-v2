@@ -32,6 +32,8 @@ def _create_pacer(precommit_manager, submissions_manager):
                         precommit_manager.note_precommit_accepted(
                             getattr(getattr(req, "settings", None), "challenge_id", None)
                         )
+                    elif getattr(submissions_manager, "last_tig_over_100", False):
+                        precommit_manager.note_tig_cap_hit()
         except Exception as exc:
             traceback.print_exc()
             logger.error("%s", exc)

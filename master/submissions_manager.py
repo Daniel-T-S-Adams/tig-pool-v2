@@ -41,6 +41,7 @@ class SubmissionsManager:
         self._last_precommit_post_ts = 0.0
         self._last_benchmark_post_ts = 0.0
         self._last_proof_post_ts = 0.0
+        self.last_tig_over_100 = False
         self._precommit_lock = threading.Lock()
         self._output_lock = threading.Lock()
 
@@ -127,6 +128,8 @@ class SubmissionsManager:
                 self._mark_submitted(submission_type, req)
                 return True
             logger.error(f"status {resp.status_code} when submitting {submission_type}: {body}")
+            if submission_type == "precommit" and "over 100 benchmarks" in body:
+                self.last_tig_over_100 = True
             return False
         logger.error(f"status {resp.status_code} when submitting {submission_type}")
         return False
@@ -134,12 +137,15 @@ class SubmissionsManager:
     def submit_precommit(self, req: SubmitPrecommitRequest) -> bool:
         """One precommit POST, gated to TIG's 5s limit. Retry once on 503."""
         with self._precommit_lock:
+            self.last_tig_over_100 = False
             for attempt in range(2):
                 self._wait_precommit_gate()
                 ok = bool(self._post("precommit", req))
                 self._last_precommit_post_ts = time.time()
                 if ok:
                     return True
+                if self.last_tig_over_100:
+                    return False
                 if attempt == 0:
                     logger.warning("precommit not accepted, retry in 5s")
                     time.sleep(5.0)
