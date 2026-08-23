@@ -333,6 +333,28 @@ def main() -> int:
         )
         cases.append(
             (
+                hold_xl(
+                    poller_earnable=1,
+                    hungry_xl_seats=3,
+                    leftover_jobs=7,
+                )
+                is False,
+                "surplus leftover jobs → Picas may take",
+            )
+        )
+        cases.append(
+            (
+                hold_xl(
+                    poller_earnable=1,
+                    hungry_xl_seats=3,
+                    leftover_jobs=2,
+                )
+                is True,
+                "scarce leftover jobs stay reserved for XL",
+            )
+        )
+        cases.append(
+            (
                 hold_xl(poller_earnable=1, hungry_xl_seats=3, sticky_own=True) is False,
                 "Pica still takes its own sticky job",
             )

@@ -261,15 +261,17 @@ def should_hold_leftover_for_xl(
     *,
     poller_earnable: int = 1,
     hungry_xl_seats: int = 0,
+    leftover_jobs: int = 0,
     sticky_own: bool = False,
     poller_is_cpu: bool = True,
     leftover_is_cpu: bool = True,
 ) -> bool:
     """True when a 1-seat CPU box must not take leftover CPU roots.
 
-    Hungry XL seats (EPYC empty concurrent slots) get the unassigned CPU
-    pile first. GPU leftovers are never held — idle cards must eat them.
-    The small CPU box still keeps its own sticky job.
+    Reserve leftovers only when the pile is scarce relative to hungry XL
+    *boxes* (not every empty seat). A warehouse of leftover jobs next to
+    idle Picas must not sit unused because two EPYCs still have a spare
+    slot. GPU leftovers are never held.
     """
     if sticky_own:
         return False
@@ -277,7 +279,13 @@ def should_hold_leftover_for_xl(
         return False
     if int(poller_earnable or 0) > 1:
         return False
-    return int(hungry_xl_seats or 0) > 0
+    hungry = int(hungry_xl_seats or 0)
+    if hungry <= 0:
+        return False
+    jobs = int(leftover_jobs or 0)
+    if jobs > hungry:
+        return False
+    return True
 
 
 def tier_concurrent_ceiling(tier: int, settings: Mapping[str, Any]) -> int:

@@ -1624,9 +1624,13 @@ class SlaveManager:
         active_by_slave,
         now_ms: int,
     ) -> int:
-        """Empty concurrent seats on other online CPU boxes with earnable > 1."""
+        """Hungry XL *boxes* that can take more CPU leftovers.
+
+        Ignores boxes that already have assigned work but load≈0 (stuck
+        download/submit). Counting their empty seats parked the Pica fleet.
+        """
         settings = cpu_tier_cap_settings(CONFIG)
-        total = 0
+        boxes = 0
         for name in online_slaves or ():
             if name == poller or not str(name).startswith("pool-cpu-"):
                 continue
@@ -1649,8 +1653,18 @@ class SlaveManager:
                     assigned = max(assigned, int(telem_active))
             except (TypeError, ValueError):
                 pass
-            total += max(0, int(earnable) - assigned)
-        return total
+            empty = max(0, int(earnable) - assigned)
+            if empty <= 0:
+                continue
+            if assigned > 0:
+                try:
+                    load = telem.get("load_1m")
+                    if load is not None and float(load) < 1.0:
+                        continue
+                except (TypeError, ValueError):
+                    pass
+            boxes += 1
+        return boxes
 
     def _cached_finish_root_benchmarks(self, slave_name: str, now_ms: int) -> Set[str]:
         cached = self._finish_root_cache.get(slave_name)
@@ -2233,6 +2247,7 @@ class SlaveManager:
         hungry_xl_seats = self._hungry_xl_cpu_seats(
             slave_name, online_slaves, active_by_slave, int(now)
         )
+        leftover_jobs = len(unassigned_by_bid)
 
         updates = []
         concurrent = []
@@ -2450,6 +2465,7 @@ class SlaveManager:
                             and should_hold_leftover_for_xl(
                                 poller_earnable=poller_earnable,
                                 hungry_xl_seats=hungry_xl_seats,
+                                leftover_jobs=leftover_jobs,
                                 sticky_own=(
                                     preferred == slave_name
                                     or bid in finish_root_bids
@@ -2822,6 +2838,7 @@ class SlaveManager:
             hungry_xl_seats = self._hungry_xl_cpu_seats(
                 slave_name, online_slaves, active_by_slave, now_i
             )
+            leftover_jobs = len(unassigned_by_bid)
 
             def has_artifacts(bid: str, batch_idx: int) -> bool:
                 return bool(artifact_hits.get((str(bid), int(batch_idx)), False))
@@ -3034,6 +3051,7 @@ class SlaveManager:
                             and should_hold_leftover_for_xl(
                                 poller_earnable=poller_earnable,
                                 hungry_xl_seats=hungry_xl_seats,
+                                leftover_jobs=leftover_jobs,
                                 sticky_own=(
                                     preferred == slave_name
                                     or bid in finish_root_bids
@@ -3094,6 +3112,7 @@ class SlaveManager:
                             and should_hold_leftover_for_xl(
                                 poller_earnable=poller_earnable,
                                 hungry_xl_seats=hungry_xl_seats,
+                                leftover_jobs=leftover_jobs,
                                 sticky_own=(
                                     preferred == slave_name
                                     or bid in finish_root_bids
