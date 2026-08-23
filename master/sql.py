@@ -39,7 +39,7 @@ class PostgresDB:
         self._minconn = max(1, int(os.environ.get("POSTGRES_POOL_MIN", "4")))
         self._maxconn = max(
             self._minconn,
-            int(os.environ.get("POSTGRES_POOL_MAX", "24")),
+            int(os.environ.get("POSTGRES_POOL_MAX", "48")),
         )
         # psycopg2's pool raises immediately when exhausted; wait briefly so
         # short get-batches bursts do not 500 the fleet.
@@ -105,6 +105,14 @@ class PostgresDB:
             if getattr(conn, "closed", 1):
                 self._pool.putconn(conn, close=True)
                 return
+            # SELECTs that never commit leave idle-in-transaction sockets
+            # holding row locks. The next get-batches wave then occupies
+            # every pool slot waiting on those locks.
+            if not getattr(conn, "autocommit", False):
+                try:
+                    conn.rollback()
+                except Exception:
+                    pass
             self._pool.putconn(conn)
         except Exception:
             try:
@@ -144,7 +152,9 @@ class PostgresDB:
         try:
             with conn.cursor(cursor_factory=RealDictCursor) as cur:
                 cur.execute(query, params)
-                return cur.fetchone()
+                row = cur.fetchone()
+            conn.commit()
+            return row
         except Exception as e:
             conn.rollback()
             logger.error("Error fetching row: %s", e)
@@ -157,7 +167,9 @@ class PostgresDB:
         try:
             with conn.cursor(cursor_factory=RealDictCursor) as cur:
                 cur.execute(query, params)
-                return cur.fetchall()
+                rows = cur.fetchall()
+            conn.commit()
+            return rows
         except Exception as e:
             conn.rollback()
             logger.error("Error fetching rows: %s", e)
