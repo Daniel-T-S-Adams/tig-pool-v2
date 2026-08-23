@@ -262,13 +262,18 @@ def should_hold_leftover_for_xl(
     poller_earnable: int = 1,
     hungry_xl_seats: int = 0,
     sticky_own: bool = False,
+    poller_is_cpu: bool = True,
+    leftover_is_cpu: bool = True,
 ) -> bool:
-    """True when a 1-seat box must not take leftover roots.
+    """True when a 1-seat CPU box must not take leftover CPU roots.
 
-    Hungry XL seats (EPYC empty concurrent slots) get the unassigned pile
-    first. The small box still keeps its own sticky job.
+    Hungry XL seats (EPYC empty concurrent slots) get the unassigned CPU
+    pile first. GPU leftovers are never held — idle cards must eat them.
+    The small CPU box still keeps its own sticky job.
     """
     if sticky_own:
+        return False
+    if not poller_is_cpu or not leftover_is_cpu:
         return False
     if int(poller_earnable or 0) > 1:
         return False

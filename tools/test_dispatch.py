@@ -236,6 +236,16 @@ def main() -> int:
         is False,
         "sticky owner is not held",
     )
+    check(
+        should_hold_leftover_for_xl(
+            poller_earnable=1,
+            hungry_xl_seats=4,
+            poller_is_cpu=False,
+            leftover_is_cpu=False,
+        )
+        is False,
+        "GPU leftover hold must not starve idle cards",
+    )
     return failed
 
 

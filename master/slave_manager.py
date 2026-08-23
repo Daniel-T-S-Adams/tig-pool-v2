@@ -160,6 +160,10 @@ def _slave_work_profile(slave_name: str) -> str:
     return ""
 
 
+def _algorithm_is_cpu(algorithm_id: str) -> bool:
+    return str(algorithm_id or "")[:4] not in ("c004", "c005", "c006")
+
+
 def _is_proof_batch_row(row: dict) -> bool:
     batch = row.get("batch") or {}
     return batch.get("sampled_nonces") is not None
@@ -2450,6 +2454,10 @@ class SlaveManager:
                                     preferred == slave_name
                                     or bid in finish_root_bids
                                 ),
+                                poller_is_cpu=_slave_work_profile(slave_name) == "cpu",
+                                leftover_is_cpu=_algorithm_is_cpu(
+                                    batch["settings"]["algorithm_id"]
+                                ),
                             )
                         ):
                             continue
@@ -3030,6 +3038,10 @@ class SlaveManager:
                                     preferred == slave_name
                                     or bid in finish_root_bids
                                 ),
+                                poller_is_cpu=_slave_work_profile(slave_name) == "cpu",
+                                leftover_is_cpu=_algorithm_is_cpu(
+                                    batch["settings"]["algorithm_id"]
+                                ),
                             )
                         ):
                             continue
@@ -3085,6 +3097,10 @@ class SlaveManager:
                                 sticky_own=(
                                     preferred == slave_name
                                     or bid in finish_root_bids
+                                ),
+                                poller_is_cpu=_slave_work_profile(slave_name) == "cpu",
+                                leftover_is_cpu=_algorithm_is_cpu(
+                                    batch["settings"]["algorithm_id"]
                                 ),
                             )
                         ):

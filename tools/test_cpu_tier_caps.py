@@ -349,6 +349,29 @@ def main() -> int:
                 "no hungry XL → Picas take leftovers",
             )
         )
+        cases.append(
+            (
+                hold_xl(
+                    poller_earnable=1,
+                    hungry_xl_seats=4,
+                    leftover_is_cpu=False,
+                )
+                is False,
+                "GPU leftovers are never held for XL CPUs",
+            )
+        )
+        cases.append(
+            (
+                hold_xl(
+                    poller_earnable=1,
+                    hungry_xl_seats=4,
+                    poller_is_cpu=False,
+                    leftover_is_cpu=False,
+                )
+                is False,
+                "idle GPU poller is never held for XL CPUs",
+            )
+        )
 
         # Capability rank: XL preferred for hard roots
         cs = _load_cap_sched()
