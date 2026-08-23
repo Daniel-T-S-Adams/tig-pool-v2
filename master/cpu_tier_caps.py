@@ -1,14 +1,11 @@
 """Per-tier CPU concurrent-batch ceilings for public pool members.
 
-Fail safe to concurrent=1. Larger machines (L/XL) may earn up to a small
-ceiling only when live telemetry shows real headroom (workers << cores and
-load is healthy). Core count alone never raises concurrency — stock slaves
-often set NUM_WORKERS ≈ nproc, so assuming headroom from cores recreates the
-Pica overload failure mode.
+Fail safe to concurrent=1 for S/M (32-thread Pica-class). L/XL scale from
+live NUM_WORKERS: one job per 32 workers, capped per tier. That feeds an
+EPYC-class box several batch-32 jobs without fattening num_bundles and
+without raising 7950X boxes above 1.
 
-Global adaptive_slave_caps.cpu_max_cap remains the fleet default for S/M;
-this module supplies an optional per-slave earnable override that cannot
-raise Pica-class (M) machines above 1.
+Load-shed still wins. No telemetry → stay at 1.
 """
 
 from __future__ import annotations
@@ -25,9 +22,10 @@ TIER_XL = 3
 TIER_NAMES = {TIER_S: "S", TIER_M: "M", TIER_L: "L", TIER_XL: "XL"}
 TIER_FROM_NAME = {v: k for k, v in TIER_NAMES.items()}
 
-DEFAULT_CPU_TIER_CAPS = {"S": 1, "M": 1, "L": 2, "XL": 2}
-DEFAULT_XL_HARD_CEILING = 2
-# cores / num_workers. 1.25 ≈ 80% workers (matches install.sh + member docs).
+DEFAULT_CPU_TIER_CAPS = {"S": 1, "M": 1, "L": 3, "XL": 6}
+DEFAULT_XL_ABSOLUTE_MAX = 8
+DEFAULT_WORKERS_PER_CPU_JOB = 32
+# cores / num_workers. Kept for tests / legacy headroom helper.
 DEFAULT_HEADROOM_RATIO = 1.25
 DEFAULT_LOAD_OK_MULT = 0.85
 DEFAULT_LOAD_SHED_MULT = 1.25
@@ -58,12 +56,15 @@ def cpu_tier_cap_settings(config: Optional[Mapping[str, Any]] = None) -> dict:
                     tier_caps[name] = max(1, int(value))
                 except (TypeError, ValueError):
                     pass
-    # XL hard ceiling: never above 2 unless feature flag allows 3.
-    allow_xl3 = _env_bool("CPU_TIER_ALLOW_XL_CAP_3", "false") or bool(
-        cfg.get("cpu_tier_allow_xl_cap_3")
-    )
-    xl_ceiling = 3 if allow_xl3 else DEFAULT_XL_HARD_CEILING
-    tier_caps["XL"] = min(int(tier_caps.get("XL", 2)), xl_ceiling)
+    try:
+        tier_caps["L"] = max(1, int(os.environ.get("CPU_TIER_L_MAX", str(tier_caps.get("L", 3)))))
+    except (TypeError, ValueError):
+        tier_caps["L"] = 3
+    try:
+        tier_caps["XL"] = max(1, int(os.environ.get("CPU_TIER_XL_MAX", str(tier_caps.get("XL", 6)))))
+    except (TypeError, ValueError):
+        tier_caps["XL"] = 6
+    tier_caps["XL"] = min(int(tier_caps.get("XL", 6)), DEFAULT_XL_ABSOLUTE_MAX)
 
     requires_telemetry = cfg.get("cpu_concurrent_requires_telemetry")
     if requires_telemetry is None:
@@ -73,6 +74,18 @@ def cpu_tier_cap_settings(config: Optional[Mapping[str, Any]] = None) -> dict:
 
     return {
         "cpu_tier_caps": tier_caps,
+        "workers_per_cpu_job": max(
+            8,
+            _parse_int(
+                cfg.get(
+                    "cpu_workers_per_job",
+                    os.environ.get(
+                        "CPU_WORKERS_PER_JOB", str(DEFAULT_WORKERS_PER_CPU_JOB)
+                    ),
+                )
+            )
+            or DEFAULT_WORKERS_PER_CPU_JOB,
+        ),
         "cpu_concurrent_requires_telemetry": requires_telemetry,
         "headroom_ratio": float(
             cfg.get(
@@ -441,6 +454,22 @@ def telemetry_requires_load_shed(
     return True
 
 
+def cpu_worker_scaled_jobs(
+    telemetry: Optional[Mapping[str, Any]],
+    settings: Mapping[str, Any],
+) -> int:
+    """How many batch-32 jobs this box can run from live worker count."""
+    telem = telemetry or {}
+    workers = _parse_int(telem.get("num_workers")) or _parse_int(telem.get("cores"))
+    if workers is None or workers <= 0:
+        return 1
+    per_job = max(
+        8,
+        int(settings.get("workers_per_cpu_job") or DEFAULT_WORKERS_PER_CPU_JOB),
+    )
+    return max(1, int(workers) // per_job)
+
+
 def cpu_earnable_concurrent_ceiling(
     *,
     tier: int,
@@ -448,18 +477,34 @@ def cpu_earnable_concurrent_ceiling(
     settings: Mapping[str, Any],
     load_shed_active: bool = False,
 ) -> int:
-    """Per-slave CPU concurrent ceiling (1 for S/M or no evidence; 0 while load-shed)."""
+    """Per-slave CPU concurrent ceiling (1 for S/M or no evidence; 0 while load-shed).
+
+    L/XL scale with live NUM_WORKERS (one job per 32 workers). A 192-thread
+    EPYC with 153 workers gets 4 jobs; a 32-thread 7950X stays at 1.
+    """
     # Load-shed must win even when tier ceiling is already 1 (fleet/Pica),
     # otherwise cooldown is a no-op and overloaded boxes keep receiving work.
     if load_shed_active or telemetry_requires_load_shed(telemetry or {}, settings):
         return 0
+    if int(tier) <= TIER_M:
+        return 1
     ceiling = tier_concurrent_ceiling(tier, settings)
     if ceiling <= 1:
         return 1
-    if settings.get("cpu_concurrent_requires_telemetry", True):
-        if not telemetry_has_cpu_headroom(telemetry or {}, settings):
-            return 1
-    return ceiling
+    telem = telemetry or {}
+    if settings.get("cpu_concurrent_requires_telemetry", True) and not telem:
+        return 1
+    cores = _parse_int(telem.get("cores"))
+    load_1m = telem.get("load_1m")
+    if cores is not None and load_1m is not None:
+        try:
+            if float(load_1m) > float(cores) * float(
+                settings.get("load_ok_mult") or DEFAULT_LOAD_OK_MULT
+            ):
+                return 1
+        except (TypeError, ValueError):
+            pass
+    return min(ceiling, cpu_worker_scaled_jobs(telem, settings))
 
 
 def effective_cpu_adaptive_max_cap(
@@ -471,10 +516,10 @@ def effective_cpu_adaptive_max_cap(
     settings: Mapping[str, Any],
     load_shed_active: bool = False,
 ) -> int:
-    """Bound for adaptive CPU max_cap: fleet default, with L/XL earnable override.
+    """Bound for adaptive CPU max_cap: fleet default, with L/XL worker scale.
 
-    S/M always stay at min(route, fleet, tier_earn=1). L/XL may exceed fleet
-    cpu_max_cap only when earnable ceiling > fleet (telemetry headroom).
+    S/M always stay at 1. L/XL may exceed fleet cpu_max_cap so a large
+    public box is not stuck at the 7950X one-job default.
     """
     route = max(0, int(route_cap))
     fleet = max(1, int(fleet_cpu_max_cap))

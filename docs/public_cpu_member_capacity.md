@@ -1,9 +1,10 @@
 # Public CPU member capacity (large machines)
 
 InnoPool keeps a **fleet-safe default of 1 concurrent batch** for public
-`pool-cpu-*` members (Pica-class). Larger machines are utilised mainly by
-**job fit** (hard roots prefer L/XL) and sticky absorption, not by assuming
-core count means more concurrent batches.
+S/M `pool-cpu-*` members (32-thread Pica-class). L/XL boxes scale from live
+`NUM_WORKERS`: one job per 32 workers, capped at 3 (L) / 6 (XL). An EPYC
+9654 with 153 workers gets 4 jobs; a 7950X stays at 1. `num_bundles` is
+unchanged.
 
 ## Why core count alone is not enough
 

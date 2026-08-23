@@ -49,7 +49,7 @@ def main() -> int:
         settings = settings_fn(
             {
                 "adaptive_slave_caps": {
-                    "cpu_tier_caps": {"S": 1, "M": 1, "L": 2, "XL": 2},
+                    "cpu_tier_caps": {"S": 1, "M": 1, "L": 3, "XL": 6},
                     "cpu_concurrent_requires_telemetry": True,
                 }
             }
@@ -141,8 +141,26 @@ def main() -> int:
         good = {"cores": 96, "num_workers": 32, "load_1m": 40, "free_ram_gb": 32}
         cases.append(
             (
-                earnable(tier=TIER_XL, telemetry=good, settings=settings) == 2,
-                "XL with headroom → 2",
+                earnable(tier=TIER_XL, telemetry=good, settings=settings) == 1,
+                "XL with only 32 workers → 1 job",
+            )
+        )
+        epyc = {"cores": 192, "num_workers": 153, "load_1m": 28, "free_ram_gb": 64}
+        cases.append(
+            (
+                earnable(tier=TIER_XL, telemetry=epyc, settings=settings) == 4,
+                "EPYC 153 workers → 4 jobs",
+            )
+        )
+        cases.append(
+            (
+                earnable(
+                    tier=TIER_XL,
+                    telemetry={**epyc, "load_1m": 180},
+                    settings=settings,
+                )
+                == 1,
+                "XL high load stays at 1",
             )
         )
         cases.append(
@@ -192,8 +210,13 @@ def main() -> int:
         )
         cases.append(
             (
-                earnable(tier=TIER_L, telemetry=good, settings=settings) == 2,
-                "L with headroom → 2",
+                earnable(
+                    tier=TIER_L,
+                    telemetry={"cores": 64, "num_workers": 80, "load_1m": 20, "free_ram_gb": 32},
+                    settings=settings,
+                )
+                == 2,
+                "L with 80 workers → 2",
             )
         )
 
@@ -230,11 +253,11 @@ def main() -> int:
                     route_cap=8,
                     fleet_cpu_max_cap=1,
                     tier=TIER_XL,
-                    telemetry=good,
+                    telemetry=epyc,
                     settings=settings,
                 )
-                == 2,
-                "XL with headroom can earn 2 above fleet max=1",
+                == 4,
+                "XL worker scale exceeds fleet max=1",
             )
         )
         cases.append(

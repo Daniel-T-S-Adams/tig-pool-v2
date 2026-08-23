@@ -204,10 +204,13 @@ def slave_display_cap(
 ) -> int:
     """Fill-rate denominator: jobs a box can run, not the warehouse route cap.
 
-    CPU stays one job per box. GPU uses reported workers when present,
-    otherwise that slave's allowed batch concurrency.
+    CPU: 32-thread class stays 1; larger NUM_WORKERS scale one job per 32
+    workers (same rule as master). GPU uses reported workers when present.
     """
     if str(profile or "") != "gpu":
+        workers = max(0, int(num_workers or 0))
+        if workers >= 64:
+            return max(1, min(6, workers // 32))
         return 1
     reported = max(0, int(num_workers or 0))
     allowed = max(0, int(route_cap or 0))

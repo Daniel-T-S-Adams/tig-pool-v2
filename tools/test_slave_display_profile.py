@@ -58,7 +58,8 @@ def main() -> int:
     check(profile("c3-slave-9", "gpu") == "gpu", "explicit worker_type gpu wins")
     check(profile("pool-gpu-abc", "cpu") == "cpu", "explicit worker_type cpu wins")
 
-    check(cap(profile="cpu", num_workers=32, route_cap=512) == 1, "CPU fill cap is one job")
+    check(cap(profile="cpu", num_workers=32, route_cap=512) == 1, "32-thread CPU fill cap is one job")
+    check(cap(profile="cpu", num_workers=153, route_cap=512) == 4, "EPYC CPU fill cap scales with workers")
     check(cap(profile="gpu", num_workers=1, route_cap=64) == 1, "reported 1 GPU stays 1")
     check(cap(profile="gpu", num_workers=4, route_cap=64) == 4, "reported GPU workers win")
     check(cap(profile="gpu", num_workers=0, route_cap=8) == 8, "no telemetry uses GPU route cap")

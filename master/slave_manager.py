@@ -1425,9 +1425,8 @@ class SlaveManager:
         the recent window, they earn more in-flight work. Trusted/operator
         slaves keep the route cap so local AWS/C3 tuning remains explicit.
 
-        Public CPU members: fleet cpu_max_cap stays the default (usually 1).
-        L/XL may earn a higher concurrent ceiling only with live telemetry
-        headroom (see master.cpu_tier_caps); core count alone never raises it.
+        Public CPU members: S/M stay at 1 job. L/XL scale with live
+        NUM_WORKERS (one job per 32 workers; see master.cpu_tier_caps).
 
         Sticky-overflow preferred-owner checks should pass log=False so every
         get-batches poll does not multiply adaptive-cap DEBUG spam.
@@ -1574,6 +1573,10 @@ class SlaveManager:
             # Each reported GPU worker can run one root batch. Route / gpu_max
             # still bound this so a public 1-cap slave cannot claim 64 slots.
             cap = max(int(cap or 0), min(int(workers), int(max_cap), int(route_cap)))
+        if profile == "cpu" and max_cap > 1:
+            # L/XL worker scale is the cap now, not a warmup target. Adaptive
+            # ramp from 1 would keep an EPYC on one batch-32 job like a 7950X.
+            cap = max(int(cap or 0), int(max_cap))
 
         if max_cap <= 0:
             cap = 0
