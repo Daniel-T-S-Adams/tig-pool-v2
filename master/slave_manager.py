@@ -612,9 +612,8 @@ def select_kept_assigned_batches(
 ) -> tuple[list, list]:
     """Prefer keeping proof batches when over capacity / proof-priority mode.
 
-    Roots for always_keep_root_benchmarks (jobs this slave must finish) are
-    kept ahead of the proof-only root budget so sticky leftovers are not
-    released while the owner is proving something else.
+    Last leftovers / always_keep roots take seats first so a 1-seat box
+    cannot drop the last root of a job to keep a proof.
 
     Returns (kept, excess).
     """
@@ -625,15 +624,15 @@ def select_kept_assigned_batches(
     roots = [b for b in assigned if not _is_proof_batch_row(b)]
     finish_roots = [b for b in roots if b["batch"]["benchmark_id"] in keep_bids]
     other_roots = [b for b in roots if b["batch"]["benchmark_id"] not in keep_bids]
-    kept_proofs = proofs[:max_concurrent]
-    room = max(0, max_concurrent - len(kept_proofs))
-    kept_finish = finish_roots[:room]
-    room_after_finish = max(0, room - len(kept_finish))
+    kept_finish = finish_roots[:max_concurrent]
+    room = max(0, max_concurrent - len(kept_finish))
+    kept_proofs = proofs[:room]
+    room_after_proofs = max(0, room - len(kept_proofs))
     # Apply even with no proof batches yet (awaiting sampling / merkle ready).
     if proof_priority:
-        root_budget = min(room_after_finish, max(0, int(max_roots_while_proofs)))
+        root_budget = min(room_after_proofs, max(0, int(max_roots_while_proofs)))
     else:
-        root_budget = room_after_finish
+        root_budget = room_after_proofs
     kept_roots = kept_finish + other_roots[:root_budget]
     kept = kept_proofs + kept_roots
     kept_ids = {
@@ -2662,16 +2661,15 @@ class SlaveManager:
             for bid, preferred in root_affinity.items():
                 if preferred == slave_name and bid in pending_unfinished_roots:
                     finish_root_bids.add(bid)
-        last_leftover_bids = leftover_finish_bids(
-            unassigned_by_bid,
-            unfinished_roots_by_job(self.batches),
-        )
-        finish_root_bids.update(last_leftover_bids)
-        overflow_benchmark_ids.update(last_leftover_bids)
-
         updates = []
         concurrent = []
         with self.lock:
+            last_leftover_bids = leftover_finish_bids(
+                unassigned_roots_by_job(self.batches),
+                unfinished_roots_by_job(self.batches),
+            )
+            finish_root_bids.update(last_leftover_bids)
+            overflow_benchmark_ids.update(last_leftover_bids)
             assigned = [
                 b for b in self.batches
                 if b.get("slave") == slave_name and b.get("end_time") is None
@@ -2880,12 +2878,11 @@ class SlaveManager:
                     if b.get("end_time") is not None:
                         continue
                     batch = b.get("batch") or {}
+                    bid = str(batch.get("benchmark_id") or "")
                     is_proof = batch.get("sampled_nonces") is not None
                     if ready_phase_key(str(batch.get("id") or ""), is_proof=is_proof) in self._ready_batch_ids:
                         continue
-                    finishes = leftover_finishes_job(
-                        unassigned_by_bid.get(str(batch.get("benchmark_id") or ""), 0)
-                    )
+                    finishes = bid in last_leftover_bids
                     if phase == "finish":
                         if is_proof or not finishes:
                             continue
@@ -2901,7 +2898,6 @@ class SlaveManager:
                         batch["settings"]["algorithm_id"],
                     ):
                         continue
-                    bid = batch["benchmark_id"]
                     if is_proof:
                         if not views.may_take_proof(
                             slave_name, bid, int(batch["batch_idx"])
@@ -2909,14 +2905,17 @@ class SlaveManager:
                             continue
                     else:
                         if (
-                            PROOF_PRIORITY_ENABLED
+                            not finishes
+                            and PROOF_PRIORITY_ENABLED
                             and has_proof_work
                             and bid not in finish_root_bids
                             and concurrent_roots >= root_cap_while_proofs
                         ):
                             continue
                         preferred = root_affinity.get(bid)
-                        if should_skip_root_for_slave(
+                        if (
+                            not finishes
+                            and should_skip_root_for_slave(
                             slave_name,
                             preferred,
                             online_slaves,
@@ -2924,10 +2923,10 @@ class SlaveManager:
                                 preferred and preferred in preferred_at_cap
                             ),
                             poller_idle=int(active_by_slave.get(slave_name) or 0) <= 0,
+                        )
+                            and bid not in overflow_benchmark_ids
                         ):
-                            # Allow overflow-unlocked leftovers.
-                            if bid not in overflow_benchmark_ids:
-                                continue
+                            continue
                         if should_hold_unowned_gpu_for_idle(
                             algorithm_id=batch["settings"]["algorithm_id"],
                             preferred_slave=preferred,
@@ -2939,7 +2938,8 @@ class SlaveManager:
                         if concurrent_by_bench.get(bid, 0) >= per_bench_cap:
                             continue
                         sticky_own = (
-                            bid in finish_root_bids
+                            finishes
+                            or bid in finish_root_bids
                             or root_affinity.get(bid) == slave_name
                         )
                         if not same_job_fill_allows(
@@ -2949,7 +2949,7 @@ class SlaveManager:
                             unassigned_on_job=unassigned_by_bid.get(str(bid), 0),
                         ):
                             continue
-                        if should_skip_crumb_for_empty_seat(
+                        if (not finishes) and should_skip_crumb_for_empty_seat(
                             remaining_nonces=batch_remaining_nonces(batch),
                             unassigned_on_job=unassigned_by_bid.get(str(bid), 0),
                             workers=poller_workers,
@@ -2990,7 +2990,7 @@ class SlaveManager:
                         WHERE benchmark_id = %s
                             AND batch_idx = %s
                             AND ready IS NULL
-                            AND (slave IS NULL OR slave = %s)
+                            AND (slave IS NULL OR slave = %s OR slave = %s)
                         """,
                         (
                             slave_name,
@@ -2999,6 +2999,7 @@ class SlaveManager:
                             batch["benchmark_id"],
                             batch["batch_idx"],
                             slave_name,
+                            owner,
                         ),
                     ))
                     concurrent.append(batch)
@@ -3321,17 +3322,16 @@ class SlaveManager:
                     for bid, preferred in root_affinity.items():
                         if preferred == slave_name and bid in pending_unfinished_roots:
                             finish_root_bids.add(bid)
-            last_leftover_bids = leftover_finish_bids(
-                unassigned_by_bid,
-                unfinished_roots_by_job(self.batches),
-            )
-            finish_root_bids.update(last_leftover_bids)
-            overflow_benchmark_ids.update(last_leftover_bids)
-
             def has_artifacts(bid: str, batch_idx: int) -> bool:
                 return bool(artifact_hits.get((str(bid), int(batch_idx)), False))
 
             with self.lock:
+                last_leftover_bids = leftover_finish_bids(
+                    unassigned_roots_by_job(self.batches),
+                    unfinished_roots_by_job(self.batches),
+                )
+                finish_root_bids.update(last_leftover_bids)
+                overflow_benchmark_ids.update(last_leftover_bids)
                 # Fair-share: cap how many concurrent batches any single benchmark may hold
                 # on this slave, so one benchmark can't drain every slot and starve the other
                 # challenges (the batches are ordered oldest-precommit-first). Default to a
@@ -3601,6 +3601,7 @@ class SlaveManager:
                         batch = b["batch"]
                         bid = batch["benchmark_id"]
                         is_proof = batch.get("sampled_nonces") is not None
+                        finishes = (not is_proof) and bid in last_leftover_bids
                         if len(concurrent) >= max_concurrent:
                             break
                         if (
@@ -3609,12 +3610,12 @@ class SlaveManager:
                             b["end_time"] is not None
                         ):
                             continue
-                        if slot_types and bid not in slot_benchmark_ids:
+                        if slot_types and bid not in slot_benchmark_ids and not finishes:
                             continue
                         if is_proof and not has_artifacts(bid, batch["batch_idx"]):
                             continue
                         preferred = root_affinity.get(bid)
-                        if (not is_proof) and should_skip_root_for_slave(
+                        if (not finishes) and (not is_proof) and should_skip_root_for_slave(
                             slave_name,
                             preferred,
                             online_slaves,
@@ -3633,7 +3634,7 @@ class SlaveManager:
                             ),
                         ):
                             continue
-                        if cap_enabled and (not is_proof):
+                        if cap_enabled and (not is_proof) and (not finishes):
                             _, _, hardness, _, job_age_ms, _ = _batch_meta(batch)
                             if should_skip_hard_for_weak(
                                 slave_tier=slave_tier,
@@ -3648,7 +3649,8 @@ class SlaveManager:
                             ):
                                 continue
                         if (
-                            PROOF_PRIORITY_ENABLED
+                            (not finishes)
+                            and PROOF_PRIORITY_ENABLED
                             and has_proof_work
                             and (not is_proof)
                             and bid not in finish_root_bids
@@ -3676,7 +3678,8 @@ class SlaveManager:
                             continue
                         if not is_proof:
                             sticky_own = (
-                                bid in finish_root_bids
+                                finishes
+                                or bid in finish_root_bids
                                 or root_affinity.get(bid) == slave_name
                             )
                             if not same_job_fill_allows(
@@ -3686,7 +3689,7 @@ class SlaveManager:
                                 unassigned_on_job=unassigned_by_bid.get(str(bid), 0),
                             ):
                                 continue
-                            if should_skip_crumb_for_empty_seat(
+                            if (not finishes) and should_skip_crumb_for_empty_seat(
                                 remaining_nonces=batch_remaining_nonces(batch),
                                 unassigned_on_job=unassigned_by_bid.get(str(bid), 0),
                                 workers=poller_workers,

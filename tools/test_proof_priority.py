@@ -107,17 +107,32 @@ def main() -> int:
     )
     cases.append(
         (
-            sum(1 for b in kept_fin if b["batch"]["sampled_nonces"] is not None) == 2,
-            "finish-keep still keeps proofs",
+            sum(1 for b in kept_fin if b["batch"]["sampled_nonces"] is not None) == 1,
+            "finish-keep keeps one proof after last leftovers",
         )
     )
     cases.append(
         (
-            sum(1 for b in kept_fin if b["batch"]["benchmark_id"] == "a") == 2,
-            "finish-keep retains own-job roots within room",
+            sum(1 for b in kept_fin if b["batch"]["benchmark_id"] == "a") == 3,
+            "finish-keep retains all own-job last leftovers",
         )
     )
     cases.append((len(excess_fin) == 1, f"finish-keep excess 1 got {len(excess_fin)}"))
+
+    kept_one, excess_one = fn(
+        [_row("last", 0, False), _row("p", 0, True)],
+        1,
+        proof_priority=True,
+        max_roots_while_proofs=0,
+        always_keep_root_benchmarks={"last"},
+    )
+    cases.append(
+        (
+            [b["batch"]["benchmark_id"] for b in kept_one] == ["last"]
+            and [b["batch"]["benchmark_id"] for b in excess_one] == ["p"],
+            "1-seat box keeps the last leftover and releases the proof",
+        )
+    )
 
     # Without proof priority, fill capacity preferring proofs first.
     kept2, excess2 = fn(assigned, 3, proof_priority=False, max_roots_while_proofs=2)
