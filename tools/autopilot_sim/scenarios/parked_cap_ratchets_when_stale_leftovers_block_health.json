@@ -1,0 +1,144 @@
+{
+  "name": "parked_cap_ratchets_when_stale_leftovers_block_health",
+  "lesson": "When idle-CPU override is already running 34 jobs on a parked 20, leftover stale roots must not freeze the floor. Autopilot records the proven live cap even with clean_windows=0.",
+  "clean_windows": 0,
+  "assertions": [
+    {
+      "expect_reason": "ratchet_parked_cap_to_proven_live"
+    },
+    {
+      "expect_max_direction": "up"
+    }
+  ],
+  "config": {
+    "max_concurrent_benchmarks": 20,
+    "resource_slots": {
+      "slots": {
+        "satisfiability_cpu": 10,
+        "vehicle_routing_cpu": 10
+      }
+    },
+    "per_challenge_max_benchmarks": {
+      "satisfiability": 10,
+      "vehicle_routing": 10
+    },
+    "adaptive_slave_caps": {
+      "cpu_max_cap": 6,
+      "gpu_max_cap": 1
+    },
+    "slaves": []
+  },
+  "report": {
+    "mode": "read_only",
+    "master_config_error": null,
+    "current_config": {
+      "max_concurrent_benchmarks": 20,
+      "resource_slots": {
+        "slots": {
+          "satisfiability_cpu": 10,
+          "vehicle_routing_cpu": 10
+        }
+      },
+      "per_challenge_max_benchmarks": {
+        "satisfiability": 10,
+        "vehicle_routing": 10
+      },
+      "adaptive_slave_caps": {
+        "cpu_max_cap": 6,
+        "gpu_max_cap": 1
+      },
+      "slaves": []
+    },
+    "slaves": [
+      {
+        "slave_name": "pool-cpu-pica-full-fleet",
+        "profile": "cpu",
+        "registered": true,
+        "registered_active": true,
+        "active_now": true,
+        "active_unfinished": 34,
+        "stale_roots": 0,
+        "stale_proofs": 0,
+        "completed_recent": 400,
+        "nonces_recent": 8000000
+      }
+    ],
+    "slots": {
+      "summary": [
+        {
+          "slot_type": "satisfiability_cpu",
+          "state": "busy",
+          "count": 20
+        }
+      ]
+    },
+    "challenges": [
+      {
+        "challenge_id": "satisfiability",
+        "compute_type": "cpu",
+        "active_benchmarks": 20,
+        "stale_roots": 8,
+        "stale_proofs": 0
+      },
+      {
+        "challenge_id": "vehicle_routing",
+        "compute_type": "cpu",
+        "active_benchmarks": 14,
+        "stale_roots": 4,
+        "stale_proofs": 0
+      }
+    ],
+    "stale_totals": {
+      "roots": 0,
+      "proofs": 0
+    },
+    "stranded_benchmarks": [
+      {
+        "benchmark_id": "6ad444c36264b188e160127894dba223",
+        "benchmark": "6ad444c362",
+        "challenge": "energy_arbitrage",
+        "pending_roots": 2,
+        "assigned_roots": 0,
+        "pending_proofs": 0,
+        "age_min": 66.6
+      }
+    ],
+    "reward_funnel": {
+      "summary": {
+        "safe_to_scale_workload": true,
+        "active_benchmarks": 35,
+        "benchmarks_seen": 31,
+        "root_ready_rate": 0.38,
+        "proof_conversion_rate": 0.84,
+        "stopped_rate": 0.04,
+        "avg_time_to_proof_submit_sec": 900,
+        "issues": []
+      }
+    },
+    "recommendations": [
+      {
+        "key": "max_concurrent_benchmarks",
+        "proposed": 44,
+        "signals": {
+          "slot_capacity": 44
+        }
+      },
+      {
+        "key": "resource_slots.slots",
+        "proposed": {
+          "satisfiability_cpu": 10,
+          "vehicle_routing_cpu": 10
+        },
+        "signals": {
+          "productive_idle_cpu": 0,
+          "productive_idle_gpu": 0,
+          "slot_idle": {
+            "cpu": 0
+          },
+          "stale_roots": 0,
+          "stale_proofs": 0
+        }
+      }
+    ]
+  }
+}

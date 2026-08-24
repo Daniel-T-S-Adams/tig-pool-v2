@@ -18,13 +18,16 @@ def _load_fns():
         "precommit_already_oversubscribed",
         "oversub_upscale_allowed",
         "idle_hole_blocks_cap_drain",
+        "should_ratchet_parked_cap_to_live",
+        "leftover_stranded_blocks_ratchet",
+        "health_block_reasons",
     }
     for node in module.body:
         if isinstance(node, ast.FunctionDef) and node.name in want:
             keep.append(node)
     if {n.name for n in keep} != want:
         raise RuntimeError(f"missing autopilot helpers: {want - {n.name for n in keep}}")
-    ns = {}
+    ns = {"PRODUCTIVE_IDLE_STALE_ROOT_TOLERANCE": 5}
     exec(compile(ast.Module(body=keep, type_ignores=[]), str(path), "exec"), ns, ns)
     return ns
 
@@ -126,6 +129,78 @@ def main() -> int:
     ]
     for kwargs, expect, label in drain_cases:
         got = hole_drain(**kwargs)
+        passed = got is expect
+        print(f"{'pass' if passed else 'FAIL'}: {label} -> {got}")
+        if not passed:
+            failed += 1
+    ratchet_live = ns["should_ratchet_parked_cap_to_live"]
+    leftover_stranded = ns["leftover_stranded_blocks_ratchet"]
+    health_block = ns["health_block_reasons"]
+    live_base = dict(
+        active_jobs=34,
+        current_max=20,
+        proposed_max=34,
+        has_unregistered=False,
+        unserved_stranded=[],
+    )
+    energy_leftover = [{"benchmark_id": "6ad444c362", "pending_roots": 2, "assigned_roots": 0}]
+    live_cases = [
+        (live_base, True, "full fleet 34/20 ratchets without idle CPUs"),
+        (
+            {**live_base, "unserved_stranded": energy_leftover},
+            True,
+            "one energy leftover does not pin the parked floor",
+        ),
+        ({**live_base, "active_jobs": 20}, False, "at parked cap is not a ratchet"),
+        ({**live_base, "active_jobs": 78, "proposed_max": 44}, False, "78/20 flood stays blocked"),
+        ({**live_base, "has_unregistered": True}, False, "unregistered still blocks ratchet"),
+        (
+            {
+                **live_base,
+                "unserved_stranded": [
+                    {"pending_roots": 80, "assigned_roots": 0},
+                    {"pending_roots": 45, "assigned_roots": 0},
+                    {"pending_roots": 40, "assigned_roots": 0},
+                ],
+            },
+            False,
+            "a pile of fat unserved jobs still blocks ratchet",
+        ),
+    ]
+    for kwargs, expect, label in live_cases:
+        ok_flag, reason = ratchet_live(**kwargs)
+        passed = ok_flag is expect
+        print(f"{'pass' if passed else 'FAIL'}: {label} -> {ok_flag} ({reason})")
+        if not passed:
+            failed += 1
+    blockers = health_block(
+        {
+            "stale_roots": 0,
+            "stale_proofs": 0,
+            "active_unregistered": [],
+            "unserved_stranded_benchmarks": energy_leftover,
+        }
+    )
+    passed = blockers["reasons"] == ["unserved_stranded"] and blockers["unserved_stranded"] == 1
+    print(f"{'pass' if passed else 'FAIL'}: leftover stranded names the health block -> {blockers}")
+    if not passed:
+        failed += 1
+    leftover_cases = [
+        ([], False, "no stranded"),
+        (energy_leftover, False, "2-root energy leftover is not a capacity hole"),
+        ([{"pending_roots": 80, "assigned_roots": 0}], True, "fat unserved job blocks"),
+        (
+            [
+                {"pending_roots": 2, "assigned_roots": 0},
+                {"pending_roots": 2, "assigned_roots": 0},
+                {"pending_roots": 2, "assigned_roots": 0},
+            ],
+            True,
+            "three leftover-looking jobs still block",
+        ),
+    ]
+    for items, expect, label in leftover_cases:
+        got = leftover_stranded(items)
         passed = got is expect
         print(f"{'pass' if passed else 'FAIL'}: {label} -> {got}")
         if not passed:

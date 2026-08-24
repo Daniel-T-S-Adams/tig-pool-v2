@@ -3055,6 +3055,89 @@ def oversub_upscale_allowed(
     return jobs <= max(proposed, cap * 2)
 
 
+def health_block_reasons(health: dict | None = None) -> dict:
+    """Name the dirt that keeps healthy=False / clean_windows=0."""
+    health = health or {}
+    unregistered = [
+        str(name) for name in (health.get("active_unregistered") or []) if name
+    ]
+    stranded = health.get("unserved_stranded_benchmarks") or []
+    stale_roots = int(health.get("stale_roots") or 0)
+    stale_proofs = int(health.get("stale_proofs") or 0)
+    reasons = []
+    if stale_roots > PRODUCTIVE_IDLE_STALE_ROOT_TOLERANCE:
+        reasons.append("stale_roots")
+    if stale_proofs > 0:
+        reasons.append("stale_proofs")
+    if unregistered:
+        reasons.append("active_unregistered")
+    if stranded:
+        reasons.append("unserved_stranded")
+    return {
+        "reasons": reasons,
+        "stale_roots": stale_roots,
+        "stale_proofs": stale_proofs,
+        "active_unregistered": unregistered,
+        "unserved_stranded": len(stranded),
+    }
+
+
+def leftover_stranded_blocks_ratchet(unserved_stranded) -> bool:
+    """Block only when stranded work looks like a real capacity hole.
+
+    One energy leftover sitting unassigned (2 pending roots, 67 min) is the
+    last-leftover assign bug. That must not pin the parked floor at 20.
+    A pile of fat unserved jobs still blocks.
+    """
+    items = list(unserved_stranded or [])
+    if not items:
+        return False
+    if len(items) > 2:
+        return True
+    for item in items:
+        pending = int(item.get("pending_roots") or 0)
+        assigned = int(item.get("assigned_roots") or 0)
+        if pending + assigned > 4:
+            return True
+    return False
+
+
+def should_ratchet_parked_cap_to_live(
+    *,
+    active_jobs: int,
+    current_max: int,
+    proposed_max: int,
+    has_unregistered: bool,
+    unserved_stranded=None,
+) -> tuple[bool, str]:
+    """Raise the parked floor toward jobs already running.
+
+    Idle-CPU scale never fires when the fleet is full at 34/20. The main
+    apply path then dies on leftover stranded work, so clean_windows stays 0
+    and the floor never moves. This path only records proven live work. It
+    does not need idle workers, clean windows, stale-root health, or a high
+    root-ready rate (leftovers tank that). Unregistered workers still block.
+    A last leftover (1-2 crumbs) does not.
+    """
+    if not precommit_already_oversubscribed(
+        active_jobs=active_jobs, current_max=current_max
+    ):
+        return False, "not_oversubscribed"
+    if not oversub_upscale_allowed(
+        active_jobs=active_jobs,
+        current_max=current_max,
+        proposed_max=proposed_max,
+    ):
+        return False, "oversub_flood"
+    if leftover_stranded_blocks_ratchet(unserved_stranded):
+        return False, "stranded_benchmarks_present"
+    if has_unregistered:
+        return False, "unregistered_active_work"
+    if int(proposed_max or 0) <= int(current_max or 0):
+        return False, "proposed_max_not_higher"
+    return True, "ratchet_parked_cap_to_proven_live"
+
+
 def idle_hole_blocks_cap_drain(
     *,
     idle_cpu: int = 0,
@@ -4838,6 +4921,59 @@ def _plan_config_change(report: dict, cfg: dict, clean_windows: int) -> dict:
             "proof_conversion_rate": funnel_summary.get("proof_conversion_rate"),
         }
 
+    allow_parked_ratchet, parked_ratchet_reason = should_ratchet_parked_cap_to_live(
+        active_jobs=active_jobs_for_idle,
+        current_max=current_max_for_idle,
+        proposed_max=proposed_max_for_idle,
+        has_unregistered=bool(health.get("active_unregistered")),
+        unserved_stranded=health.get("unserved_stranded_benchmarks"),
+    )
+    if allow_parked_ratchet:
+        up_step = max(1, min(IDLE_CPU_MAX_SCALE_UP_STEP, SURGE_MAX_BENCHMARK_UP_STEP if posture == "recovery" else IDLE_CPU_MAX_SCALE_UP_STEP))
+        if (proposed_max_for_idle - current_max_for_idle) >= SURGE_TARGET_GAP:
+            up_step = min(up_step, SURGE_MAX_BENCHMARK_UP_STEP)
+        next_max = _next_value_bounded(
+            current_max_for_idle,
+            proposed_max_for_idle,
+            up_step,
+            MAX_BENCHMARK_DOWN_STEP,
+        )
+        if next_max > current_max_for_idle:
+            new_cfg = json.loads(json.dumps(cfg))
+            new_cfg["max_concurrent_benchmarks"] = next_max
+            decision["reason"] = "ratchet_parked_cap_to_proven_live"
+            decision["changes"] = {
+                "max_concurrent_benchmarks": {
+                    "current": current_max_for_idle,
+                    "target": proposed_max_for_idle,
+                    "next": next_max,
+                    "up_step": up_step,
+                    "active_jobs": active_jobs_for_idle,
+                    "productive_idle_cpu": productive_idle_cpu,
+                    "slot_idle_cpu": slot_idle_cpu,
+                    "root_ready_rate": root_ready_rate,
+                    "proof_conversion_rate": funnel_summary.get("proof_conversion_rate"),
+                    "roots_pending": _roots_pending_total,
+                    "cpu_roots_pending": cpu_roots_pending_for_idle,
+                    "gpu_roots_pending": _gpu_roots_pending,
+                    "policy_posture": posture,
+                    "funnel_safe": funnel_safe,
+                    "gate_reason": parked_ratchet_reason,
+                    "health_blockers": health_block_reasons(health),
+                    "signals": max_rec_for_idle.get("signals") or {},
+                }
+            }
+            decision["config"] = new_cfg
+            return decision
+    else:
+        decision.setdefault("guardrails", {})["parked_cap_ratchet"] = {
+            "skipped": parked_ratchet_reason,
+            "current": current_max_for_idle,
+            "proposed": proposed_max_for_idle,
+            "active_jobs": active_jobs_for_idle,
+            "root_ready_rate": root_ready_rate,
+        }
+
     safety_cfg = json.loads(json.dumps(cfg))
     workload_safety_change, workload_safety_guard = _next_workload_change(
         safety_cfg,
@@ -4859,6 +4995,7 @@ def _plan_config_change(report: dict, cfg: dict, clean_windows: int) -> dict:
 
     if not health["healthy"] and not productive_capacity_scale and not safe_per_challenge_scale:
         decision["reason"] = "blocked_by_stale_or_unregistered_work"
+        decision["health_blockers"] = health_block_reasons(health)
         return decision
     if clean_windows < APPLY_MIN_CLEAN_WINDOWS and not productive_capacity_scale and not safe_per_challenge_scale:
         decision["reason"] = "waiting_for_clean_windows"
@@ -5288,13 +5425,18 @@ def maybe_run():
 
     _save_decision(report, decision)
     logger.info(
-        "autopilot mode=%s healthy=%s clean_windows=%s applied=%s reason=%s changes=%s",
+        "autopilot mode=%s healthy=%s clean_windows=%s applied=%s reason=%s changes=%s blockers=%s stale_roots=%s stale_proofs=%s unregistered=%s stranded=%s",
         AUTOPILOT_MODE,
         decision.get("healthy"),
         clean_windows,
         decision.get("applied"),
         decision.get("reason"),
         list((decision.get("changes") or {}).keys()),
+        (decision.get("health_blockers") or health_block_reasons(decision.get("health") or {})).get("reasons"),
+        (decision.get("health") or {}).get("stale_roots"),
+        (decision.get("health") or {}).get("stale_proofs"),
+        (decision.get("health") or {}).get("active_unregistered"),
+        len((decision.get("health") or {}).get("unserved_stranded_benchmarks") or []),
     )
     return decision
 
