@@ -249,6 +249,15 @@ def leftover_finishes_job(unassigned_on_job: int, already_assigned: bool = False
     return leftover == 1
 
 
+def leftover_finish_bids(unassigned_by_bid: Optional[dict] = None) -> set:
+    """Benchmark ids whose only remaining unassigned work is the last leftover."""
+    return {
+        str(bid)
+        for bid, n_unassigned in (unassigned_by_bid or {}).items()
+        if leftover_finishes_job(n_unassigned, already_assigned=False)
+    }
+
+
 def leftover_takeable_by_poller(
     bid: str,
     *,
@@ -413,11 +422,11 @@ def feed_leftover_rank(
     sticky_own: bool = False,
     is_proof: bool = False,
 ) -> tuple:
-    """Lower is better. Finish last leftovers first, then own, then fattest."""
-    if is_proof:
-        return (0, 0, 0, int(original_idx))
+    """Lower is better. Finish last leftovers first, then proofs, then own, then fattest."""
     if leftover_finishes_job(unassigned_on_job, already_assigned=False):
-        return (1, 0 if sticky_own else 1, 0, int(original_idx))
+        return (0, 0 if sticky_own else 1, 0, int(original_idx))
+    if is_proof:
+        return (1, 0, 0, int(original_idx))
     if sticky_own:
         return (2, 0, 0, int(original_idx))
     return (
@@ -2627,6 +2636,9 @@ class SlaveManager:
             for bid, preferred in root_affinity.items():
                 if preferred == slave_name and bid in pending_unfinished_roots:
                     finish_root_bids.add(bid)
+        last_leftover_bids = leftover_finish_bids(unassigned_by_bid)
+        finish_root_bids.update(last_leftover_bids)
+        overflow_benchmark_ids.update(last_leftover_bids)
 
         updates = []
         concurrent = []
@@ -2826,8 +2838,13 @@ class SlaveManager:
                 row for _, row in sorted(enumerate(self.batches), key=_fast_root_key)
             ]
 
-            # Pass 1: proofs this slave can build. Pass 2: ranked roots.
-            for want_proof, rows in ((True, self.batches), (False, root_rows)):
+            # Last leftover first so a 1-seat box does not take a proof while
+            # the only remaining root of another job sits unassigned.
+            for phase, rows in (
+                ("finish", root_rows),
+                ("proof", self.batches),
+                ("root", root_rows),
+            ):
                 for b in rows:
                     if len(concurrent) >= max_concurrent:
                         break
@@ -2837,7 +2854,16 @@ class SlaveManager:
                     is_proof = batch.get("sampled_nonces") is not None
                     if ready_phase_key(str(batch.get("id") or ""), is_proof=is_proof) in self._ready_batch_ids:
                         continue
-                    if is_proof != want_proof:
+                    finishes = leftover_finishes_job(
+                        unassigned_by_bid.get(str(batch.get("benchmark_id") or ""), 0)
+                    )
+                    if phase == "finish":
+                        if is_proof or not finishes:
+                            continue
+                    elif phase == "proof":
+                        if not is_proof:
+                            continue
+                    elif is_proof or finishes:
                         continue
                     if b.get("slave") == slave_name:
                         continue
@@ -3266,6 +3292,9 @@ class SlaveManager:
                     for bid, preferred in root_affinity.items():
                         if preferred == slave_name and bid in pending_unfinished_roots:
                             finish_root_bids.add(bid)
+            last_leftover_bids = leftover_finish_bids(unassigned_by_bid)
+            finish_root_bids.update(last_leftover_bids)
+            overflow_benchmark_ids.update(last_leftover_bids)
 
             def has_artifacts(bid: str, batch_idx: int) -> bool:
                 return bool(artifact_hits.get((str(bid), int(batch_idx)), False))

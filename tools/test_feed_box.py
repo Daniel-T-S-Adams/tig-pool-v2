@@ -39,6 +39,7 @@ def main() -> int:
         "leftover_feeds_box",
         "leftover_is_crumb",
         "leftover_finishes_job",
+        "leftover_finish_bids",
         "leftover_takeable_by_poller",
         "should_skip_crumb_for_empty_seat",
         "takeable_unassigned_by_bid",
@@ -58,6 +59,7 @@ def main() -> int:
     feeds = ns["leftover_feeds_box"]
     crumb = ns["leftover_is_crumb"]
     skip = ns["should_skip_crumb_for_empty_seat"]
+    finish_bids = ns["leftover_finish_bids"]
     has_fat = ns["claimable_has_fat_leftover"]
     rank = ns["feed_leftover_rank"]
     same_job = ns["same_job_fill_allows"]
@@ -267,9 +269,18 @@ def main() -> int:
 
     fat_rank = rank(unassigned_on_job=80, remaining_nonces=64, original_idx=9)
     last_rank = rank(unassigned_on_job=1, remaining_nonces=32, original_idx=0)
+    proof_rank = rank(unassigned_on_job=0, remaining_nonces=32, original_idx=1, is_proof=True)
     check(
         last_rank < fat_rank,
         "last leftover ranks before a fatter stranger job",
+    )
+    check(
+        last_rank < proof_rank,
+        "last leftover ranks before proofs",
+    )
+    check(
+        finish_bids({"last": 1, "fat": 80, "done": 0}) == {"last"},
+        "only the last leftover bid is a finish leftover",
     )
     own_rank = rank(
         unassigned_on_job=1, remaining_nonces=12, original_idx=0, sticky_own=True
