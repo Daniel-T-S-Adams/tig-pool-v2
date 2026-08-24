@@ -40,6 +40,7 @@ def main() -> int:
         "leftover_is_crumb",
         "leftover_finishes_job",
         "leftover_finish_bids",
+        "unfinished_roots_by_job",
         "leftover_takeable_by_poller",
         "should_skip_crumb_for_empty_seat",
         "takeable_unassigned_by_bid",
@@ -281,6 +282,10 @@ def main() -> int:
     check(
         finish_bids({"last": 1, "fat": 80, "done": 0}) == {"last"},
         "only the last leftover bid is a finish leftover",
+    )
+    check(
+        finish_bids({}, {"held": 1, "fat": 3}) == {"held"},
+        "assigned last leftover stays a finish leftover so it is not released",
     )
     own_rank = rank(
         unassigned_on_job=1, remaining_nonces=12, original_idx=0, sticky_own=True

@@ -249,13 +249,24 @@ def leftover_finishes_job(unassigned_on_job: int, already_assigned: bool = False
     return leftover == 1
 
 
-def leftover_finish_bids(unassigned_by_bid: Optional[dict] = None) -> set:
-    """Benchmark ids whose only remaining unassigned work is the last leftover."""
-    return {
+def leftover_finish_bids(
+    unassigned_by_bid: Optional[dict] = None,
+    unfinished_by_bid: Optional[dict] = None,
+) -> set:
+    """Jobs whose last leftover must stay assigned until the root is ready.
+
+    Unassigned last leftover: unassigned count is 1.
+    Assigned last leftover: unfinished count is 1 (unassigned is 0).
+    """
+    bids = {
         str(bid)
         for bid, n_unassigned in (unassigned_by_bid or {}).items()
         if leftover_finishes_job(n_unassigned, already_assigned=False)
     }
+    for bid, n_unfinished in (unfinished_by_bid or {}).items():
+        if int(n_unfinished or 0) == 1:
+            bids.add(str(bid))
+    return bids
 
 
 def leftover_takeable_by_poller(
@@ -486,6 +497,21 @@ def unassigned_roots_by_job(rows) -> Dict[str, int]:
         if (row or {}).get("end_time") is not None:
             continue
         if (row or {}).get("slave") is not None:
+            continue
+        bid = str(batch.get("benchmark_id") or "")
+        if bid:
+            out[bid] = out.get(bid, 0) + 1
+    return out
+
+
+def unfinished_roots_by_job(rows) -> Dict[str, int]:
+    """Unfinished root count per job, assigned or not."""
+    out: Dict[str, int] = {}
+    for row in rows or []:
+        batch = (row or {}).get("batch") or {}
+        if batch.get("sampled_nonces") is not None:
+            continue
+        if (row or {}).get("end_time") is not None:
             continue
         bid = str(batch.get("benchmark_id") or "")
         if bid:
@@ -2636,7 +2662,10 @@ class SlaveManager:
             for bid, preferred in root_affinity.items():
                 if preferred == slave_name and bid in pending_unfinished_roots:
                     finish_root_bids.add(bid)
-        last_leftover_bids = leftover_finish_bids(unassigned_by_bid)
+        last_leftover_bids = leftover_finish_bids(
+            unassigned_by_bid,
+            unfinished_roots_by_job(self.batches),
+        )
         finish_root_bids.update(last_leftover_bids)
         overflow_benchmark_ids.update(last_leftover_bids)
 
@@ -3292,7 +3321,10 @@ class SlaveManager:
                     for bid, preferred in root_affinity.items():
                         if preferred == slave_name and bid in pending_unfinished_roots:
                             finish_root_bids.add(bid)
-            last_leftover_bids = leftover_finish_bids(unassigned_by_bid)
+            last_leftover_bids = leftover_finish_bids(
+                unassigned_by_bid,
+                unfinished_roots_by_job(self.batches),
+            )
             finish_root_bids.update(last_leftover_bids)
             overflow_benchmark_ids.update(last_leftover_bids)
 
