@@ -42,6 +42,11 @@ def profile_has_hole(*, idle: int = 0, claimable: int = 0) -> bool:
     return idle_n > 0 and max(0, int(claimable or 0)) < idle_n
 
 
+def leftover_food(*, claimable: int = 0, unassigned: int = 0) -> int:
+    """Sticky leftovers still feed boxes. Claimable-only hid that pile."""
+    return max(0, int(claimable or 0), int(unassigned or 0))
+
+
 def dispatch_shorts(
     *,
     cpu_idle: int = 0,
@@ -51,15 +56,21 @@ def dispatch_shorts(
     gpu_claimable: int = 0,
     gpu_unowned: int = 0,
     next_job_buffer: int = NEXT_JOB_BUFFER,
+    allow_keep_ahead: bool = True,
 ) -> tuple[bool, bool]:
     """CPU/GPU short flags for this tick.
 
     An idle hole always wins. Keep-ahead (unowned < buffer) only runs on a
     busy profile when the other profile has no hole. Otherwise 100% busy
     CPUs keep taking creates while GPUs sit empty.
+
+    When the parked job cap is already exceeded, keep-ahead is off so the
+    warehouse can drain.
     """
     cpu_hole = profile_has_hole(idle=cpu_idle, claimable=cpu_claimable)
     gpu_hole = profile_has_hole(idle=gpu_idle, claimable=gpu_claimable)
+    if not allow_keep_ahead:
+        return cpu_hole, gpu_hole
     buf = max(0, int(next_job_buffer or 0))
     cpu_ahead = (not cpu_hole) and int(cpu_unowned or 0) < buf
     gpu_ahead = (not gpu_hole) and int(gpu_unowned or 0) < buf

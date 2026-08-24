@@ -12,6 +12,7 @@ sys.path.insert(0, str(ROOT))
 from master.dispatch import (  # noqa: E402
     creates_for_profile,
     dispatch_shorts,
+    leftover_food,
     extra_create_this_tick,
     lock_eligible_algorithms,
     next_create_profile,
@@ -73,6 +74,36 @@ def main() -> int:
     check(
         next_create_profile(cpu_short=False, gpu_short=False) == "",
         "neither short → skip create",
+    )
+    check(
+        leftover_food(claimable=0, unassigned=171) == 171,
+        "sticky unassigned leftovers still count as food",
+    )
+    check(
+        dispatch_shorts(
+            cpu_idle=0,
+            cpu_claimable=171,
+            cpu_unowned=1,
+            gpu_idle=0,
+            gpu_claimable=375,
+            gpu_unowned=0,
+            allow_keep_ahead=False,
+        )
+        == (False, False),
+        "over parked cap: leftovers exist → do not keep-ahead create",
+    )
+    check(
+        dispatch_shorts(
+            cpu_idle=1,
+            cpu_claimable=171,
+            cpu_unowned=1,
+            gpu_idle=0,
+            gpu_claimable=375,
+            gpu_unowned=0,
+            allow_keep_ahead=False,
+        )
+        == (False, False),
+        "one empty seat cannot punch a hole through 171 leftovers",
     )
     check(
         next_hole_profile(

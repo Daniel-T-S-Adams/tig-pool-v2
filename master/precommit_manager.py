@@ -15,6 +15,7 @@ from master.proof_affinity import SLAVE_ONLINE_MS, ensure_slave_seen_table
 from master.idle_tracker import CPU_IDLE_TRACKER, idle_window_settings
 from master.dispatch import (
     dispatch_shorts,
+    leftover_food,
     lock_eligible_algorithms,
     next_hole_profile,
     profile_has_hole,
@@ -1067,12 +1068,23 @@ class PrecommitManager:
                 governor.get("online_idle_cpu_slaves"),
             )
         )
-        cpu_claimable = int(governor.get("cpu_unassigned_claimable") or 0)
+        cpu_claimable = leftover_food(
+            claimable=int(governor.get("cpu_unassigned_claimable") or 0),
+            unassigned=int(governor.get("cpu_unassigned_roots") or 0),
+        )
         cpu_unowned = int(governor.get("unowned_cpu_root_jobs") or 0)
         gpu_idle = int(governor.get("online_idle_gpu_slaves") or 0)
-        gpu_claimable = int(governor.get("gpu_unassigned_claimable") or 0)
+        gpu_claimable = leftover_food(
+            claimable=int(governor.get("gpu_unassigned_claimable") or 0),
+            unassigned=int(governor.get("gpu_unassigned_roots") or 0),
+        )
         gpu_unowned = int(governor.get("unowned_gpu_root_jobs") or 0)
         next_buf = _keep_ahead_spare()
+        parked_cap = int(CONFIG.get("max_concurrent_benchmarks") or 0)
+        open_jobs = int(governor.get("cpu_active_jobs") or 0) + int(
+            governor.get("gpu_active_jobs") or 0
+        )
+        allow_keep_ahead = parked_cap <= 0 or open_jobs < parked_cap
         cpu_short, gpu_short = dispatch_shorts(
             cpu_idle=cpu_idle,
             cpu_claimable=cpu_claimable,
@@ -1081,6 +1093,7 @@ class PrecommitManager:
             gpu_claimable=gpu_claimable,
             gpu_unowned=gpu_unowned,
             next_job_buffer=next_buf,
+            allow_keep_ahead=allow_keep_ahead,
         )
         cpu_hole = profile_has_hole(idle=cpu_idle, claimable=cpu_claimable)
         gpu_hole = profile_has_hole(idle=gpu_idle, claimable=gpu_claimable)
@@ -1915,8 +1928,16 @@ class PrecommitManager:
                 proof_phase_jobs,
             )
         seat_hole = (
-            int(fleet_cap["cpu_empty"]) > int(fleet_cap["cpu_claimable"])
-            or int(fleet_cap["gpu_empty"]) > int(fleet_cap["gpu_claimable"])
+            int(fleet_cap["cpu_empty"])
+            > leftover_food(
+                claimable=int(fleet_cap["cpu_claimable"] or 0),
+                unassigned=int(governor.get("cpu_unassigned_roots") or 0),
+            )
+            or int(fleet_cap["gpu_empty"])
+            > leftover_food(
+                claimable=int(fleet_cap["gpu_claimable"] or 0),
+                unassigned=int(governor.get("gpu_unassigned_roots") or 0),
+            )
         )
         if not concurrent_create_allowed(
             root_phase_jobs=root_phase_jobs,
