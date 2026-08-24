@@ -130,6 +130,29 @@ def seat_per_bench_cap(*, max_concurrent: int = 1, configured: int = 0) -> int:
     return seats
 
 
+def drop_ready_ghost_rows(batches, ready_ids, *, now_ms):
+    """Drop in-memory rows for roots/proofs already submitted.
+
+    Fast get-batches is memory-only. A finished root can stay assigned here
+    (pica11 still listed _63) while SQL/ops shows a different live root (_64).
+    """
+    ready = set(ready_ids or ())
+    if not ready:
+        return list(batches), []
+    keep = []
+    dropped = []
+    for row in batches:
+        batch = row.get("batch") or {}
+        batch_id = str(batch.get("id") or "")
+        if batch_id and batch_id in ready:
+            row["end_time"] = now_ms
+            row["slave"] = None
+            dropped.append(batch_id)
+            continue
+        keep.append(row)
+    return keep, dropped
+
+
 def assigned_root_reclaimable(
     *,
     is_proof: bool = False,
@@ -705,6 +728,9 @@ class SlaveManager:
             250,
             int(os.environ.get("SLAVE_PURGE_INTERVAL_MS", "10000")),
         )
+        # Batch ids submitted this process. Fast get-batches never hits ready=
+        # in Postgres, so these must not be re-listed as live work.
+        self._ready_batch_ids: Set[str] = set()
         self._get_batches_inflight = 0
         self._get_batches_inflight_lock = Lock()
         self._get_batches_max_inflight = GET_BATCHES_MAX_INFLIGHT
@@ -2130,6 +2156,7 @@ class SlaveManager:
 
         if not ready_ids:
             return 0
+        self._ready_batch_ids.update(ready_ids)
 
         end_ms = int(time.time() * 1000)
         with self.lock:
@@ -2387,12 +2414,30 @@ class SlaveManager:
         )
 
     def _memory_assigned_batches(self, slave_name: str) -> list:
+        self._drop_ready_ghosts()
         with self.lock:
             return [
                 b["batch"]
                 for b in self.batches
                 if b.get("slave") == slave_name and b.get("end_time") is None
             ]
+
+    def _drop_ready_ghosts(self) -> list:
+        """Free seats held by already-submitted ids (no DB)."""
+        now_ms = int(time.time() * 1000)
+        with self.lock:
+            keep, dropped = drop_ready_ghost_rows(
+                self.batches, self._ready_batch_ids, now_ms=now_ms
+            )
+            if dropped:
+                self.batches = keep
+        if dropped:
+            logger.info(
+                "dropped %s ready ghost(s) from memory: %s",
+                len(dropped),
+                dropped[:8],
+            )
+        return dropped
 
     def _get_batches_fast(self, slave_name: str, slave: dict, now: float):
         """Permanent hot path: memory assign + background AssignViews only.
@@ -2401,6 +2446,7 @@ class SlaveManager:
         Roots are ranked from cached hardness/speed (no skip): slow slaves
         see easier tracks first; fast slaves see hard tracks first.
         """
+        self._drop_ready_ghosts()
         views = self._get_assign_views()
         route_cap = int(slave["max_concurrent_batches"])
         # Honor adaptive cap 0 (load-shed). `dict.get(k) or route` treats 0 as missing.
@@ -2735,6 +2781,8 @@ class SlaveManager:
                     if b.get("end_time") is not None:
                         continue
                     batch = b.get("batch") or {}
+                    if str(batch.get("id") or "") in self._ready_batch_ids:
+                        continue
                     is_proof = batch.get("sampled_nonces") is not None
                     if is_proof != want_proof:
                         continue
@@ -3674,6 +3722,8 @@ class SlaveManager:
             leaving a fresh end_time=None row that would otherwise keep filling
             max_concurrent=1. Always retire by id against the current list.
             """
+            if batch_id:
+                self._ready_batch_ids.add(str(batch_id))
             end_ms = int(time.time() * 1000)
             with self.lock:
                 keep = []

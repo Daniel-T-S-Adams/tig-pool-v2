@@ -168,6 +168,30 @@ def main() -> int:
         "14 idle GPUs, 0 GPU claimable, last create CPU → next create is GPU",
     )
 
+    ghost_ns = _load_fns("master/slave_manager.py", "drop_ready_ghost_rows")
+    ghost_keep, ghost_dropped = ghost_ns["drop_ready_ghost_rows"](
+        [
+            {
+                "slave": "pica11",
+                "end_time": None,
+                "batch": {"id": "job_63", "batch_idx": 63},
+            },
+            {
+                "slave": "pica11",
+                "end_time": None,
+                "batch": {"id": "job_64", "batch_idx": 64},
+            },
+        ],
+        {"job_63"},
+        now_ms=1,
+    )
+    check(
+        ghost_dropped == ["job_63"]
+        and [r["batch"]["id"] for r in ghost_keep] == ["job_64"]
+        and ghost_keep[0]["slave"] == "pica11",
+        "ready ghost _63 is dropped; live _64 stays assigned",
+    )
+
     auto_ns = _load_fns(
         "pool_manager/pool/autopilot.py",
         "idle_hole_blocks_cap_drain",
