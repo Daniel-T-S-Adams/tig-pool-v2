@@ -266,23 +266,29 @@ def main() -> int:
     )
 
     fat_rank = rank(unassigned_on_job=80, remaining_nonces=64, original_idx=9)
-    crumb_rank = rank(unassigned_on_job=1, remaining_nonces=12, original_idx=0)
+    last_rank = rank(unassigned_on_job=1, remaining_nonces=32, original_idx=0)
     check(
-        fat_rank < crumb_rank,
-        "80-unassigned job ranks before a 1-unassigned crumb",
+        last_rank < fat_rank,
+        "last leftover ranks before a fatter stranger job",
     )
     own_rank = rank(
         unassigned_on_job=1, remaining_nonces=12, original_idx=0, sticky_own=True
     )
-    check(own_rank < fat_rank, "own leftover ranks before a fatter stranger job")
+    check(own_rank < fat_rank, "own last leftover ranks before a fatter stranger job")
 
     check(
         same_job(fill_bid="A", bid="A", sticky_own=False) is True,
         "same-job fill allows the locked bid",
     )
     check(
-        same_job(fill_bid="A", bid="B", sticky_own=False) is False,
-        "after fill_bid=A, reject B unless sticky",
+        same_job(fill_bid="A", bid="B", sticky_own=False, unassigned_on_job=3)
+        is False,
+        "after fill_bid=A, reject a mid-job stranger leftover",
+    )
+    check(
+        same_job(fill_bid="A", bid="B", sticky_own=False, unassigned_on_job=1)
+        is True,
+        "last leftover may join even after fill_bid=A",
     )
     check(
         same_job(fill_bid="A", bid="B", sticky_own=True) is True,
@@ -299,9 +305,21 @@ def main() -> int:
             slave_name="pica",
             root_affinity={"fat": "other"},
             overflow_benchmark_ids=set(),
+            unassigned_on_job=80,
         )
         is False,
         "fat leftover locked to another owner is not takeable",
+    )
+    check(
+        takeable(
+            "last",
+            slave_name="pica",
+            root_affinity={"last": "other"},
+            overflow_benchmark_ids=set(),
+            unassigned_on_job=1,
+        )
+        is True,
+        "last leftover is takeable even when sticky-locked",
     )
     check(
         takeable(
@@ -338,14 +356,26 @@ def main() -> int:
     check(
         pick(
             ["crumb"],
-            {"crumb": 1, "fat": 80},
+            {"crumb": 3, "fat": 80},
             {"crumb": 12, "fat": 64},
             workers=25,
             empty_seats=1,
             has_fat_claimable=True,
         )
         == "",
-        "do not lock remaining seats onto a crumb when fat leftovers exist",
+        "do not lock remaining seats onto a mid-job crumb when fat leftovers exist",
+    )
+    check(
+        pick(
+            ["last"],
+            {"last": 1, "fat": 80},
+            {"last": 32, "fat": 64},
+            workers=25,
+            empty_seats=1,
+            has_fat_claimable=True,
+        )
+        == "last",
+        "held last leftover stays the fill lock so the job can finish",
     )
     check(
         pick(

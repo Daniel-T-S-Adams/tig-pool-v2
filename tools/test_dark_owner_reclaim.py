@@ -13,7 +13,7 @@ def _load_fn():
     source = path.read_text(encoding="utf-8")
     module = ast.parse(source)
     keep = []
-    want = {"batch_owner_stealable", "assigned_root_reclaimable"}
+    want = {"batch_owner_stealable", "assigned_root_reclaimable", "leftover_finishes_job"}
     for node in module.body:
         if isinstance(node, ast.FunctionDef) and node.name in want:
             keep.append(node)

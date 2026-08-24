@@ -51,6 +51,7 @@ def main() -> int:
     slave_ns = _load_fns(
         "master/slave_manager.py",
         "seat_per_bench_cap",
+        "leftover_finishes_job",
         "assigned_root_reclaimable",
         "batch_owner_stealable",
         extra_ns={
@@ -71,8 +72,14 @@ def main() -> int:
         "Pica seat cap stays 1",
     )
     check(
-        reclaim(is_proof=False, owner_active=4, owner_working=False) is True,
+        reclaim(is_proof=False, owner_active=4, owner_working=False, unassigned_on_job=2)
+        is True,
         "owner idle + assigned leftover is reclaimable",
+    )
+    check(
+        reclaim(is_proof=False, owner_active=0, owner_working=False, unassigned_on_job=0)
+        is False,
+        "assigned last leftover is not stolen mid-start",
     )
     check(
         reclaim(is_proof=True, owner_active=0, owner_working=False) is False,

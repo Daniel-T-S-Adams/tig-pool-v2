@@ -166,13 +166,17 @@ def assigned_root_reclaimable(
     is_proof: bool = False,
     owner_active: int | None = None,
     owner_working: bool | None = None,
+    unassigned_on_job: int = 0,
 ) -> bool:
     """True when an assigned root should be leftover for the next empty seat.
 
     Proofs stay with the artifact owner. Roots on an idle or not-working
     owner become claimable so 49 pending rows do not sit next to idle boxes.
+    The last leftover of a job stays put so it is not stolen mid-start.
     """
     if is_proof:
+        return False
+    if leftover_finishes_job(unassigned_on_job, already_assigned=True):
         return False
     if owner_active is not None and int(owner_active or 0) <= 0:
         return True
@@ -242,7 +246,7 @@ def leftover_finishes_job(unassigned_on_job: int, already_assigned: bool = False
     leftover = max(0, int(unassigned_on_job or 0))
     if already_assigned:
         return leftover <= 0
-    return leftover <= 1
+    return leftover == 1
 
 
 def leftover_takeable_by_poller(
@@ -251,8 +255,14 @@ def leftover_takeable_by_poller(
     slave_name: str = "",
     root_affinity: Optional[dict] = None,
     overflow_benchmark_ids: Optional[set] = None,
+    unassigned_on_job: int = 0,
 ) -> bool:
-    """Fat leftovers locked to another live owner do not justify skipping crumbs."""
+    """Fat leftovers locked to another live owner do not justify skipping crumbs.
+
+    The last leftover of a job is always takeable so it can finish.
+    """
+    if leftover_finishes_job(unassigned_on_job, already_assigned=False):
+        return True
     key = str(bid or "")
     if not key:
         return False
@@ -370,6 +380,7 @@ def takeable_unassigned_by_bid(
             slave_name=slave_name,
             root_affinity=root_affinity,
             overflow_benchmark_ids=overflow_benchmark_ids,
+            unassigned_on_job=int(n_unassigned or 0),
         ):
             out[str(bid)] = int(n_unassigned or 0)
     return out
@@ -402,13 +413,15 @@ def feed_leftover_rank(
     sticky_own: bool = False,
     is_proof: bool = False,
 ) -> tuple:
-    """Lower is better. Own leftovers first, then the fattest job."""
+    """Lower is better. Finish last leftovers first, then own, then fattest."""
     if is_proof:
         return (0, 0, 0, int(original_idx))
+    if leftover_finishes_job(unassigned_on_job, already_assigned=False):
+        return (1, 0 if sticky_own else 1, 0, int(original_idx))
     if sticky_own:
-        return (1, 0, 0, int(original_idx))
+        return (2, 0, 0, int(original_idx))
     return (
-        2,
+        3,
         -max(0, int(unassigned_on_job or 0)),
         -max(0, int(remaining_nonces or 0)),
         int(original_idx),
@@ -421,9 +434,15 @@ def same_job_fill_allows(
     bid: str = "",
     sticky_own: bool = False,
     is_proof: bool = False,
+    unassigned_on_job: int = 0,
 ) -> bool:
-    """Once this poll starts a fat job, stay on it."""
+    """Once this poll starts a fat job, stay on it.
+
+    Last leftovers may still join so a finishing job is not left sitting.
+    """
     if is_proof or sticky_own or not fill_bid:
+        return True
+    if leftover_finishes_job(unassigned_on_job, already_assigned=False):
         return True
     return str(bid or "") == str(fill_bid or "")
 
@@ -490,6 +509,8 @@ def pick_fill_bid(
             int(nonces.get(bid) or 0),
         ),
     )
+    if leftover_finishes_job(int(unassigned.get(best) or 0), already_assigned=False):
+        return best
     if has_fat_claimable and leftover_is_crumb(
         remaining_nonces=int(nonces.get(best) or 0),
         unassigned_on_job=int(unassigned.get(best) or 0),
@@ -632,6 +653,7 @@ def batch_owner_stealable(
     retry_ms: Optional[int] = None,
     owner_active: int | None = None,
     owner_working: bool | None = None,
+    unassigned_on_job: int = 0,
 ) -> bool:
     """True when an assigned batch may be given to another polling slave.
 
@@ -645,6 +667,7 @@ def batch_owner_stealable(
         is_proof=is_proof,
         owner_active=owner_active,
         owner_working=owner_working,
+        unassigned_on_job=unassigned_on_job,
     ):
         return True
     age = int(now_ms) - int(start_time)
@@ -2868,6 +2891,7 @@ class SlaveManager:
                             fill_bid=fill_bid,
                             bid=bid,
                             sticky_own=sticky_own,
+                            unassigned_on_job=unassigned_by_bid.get(str(bid), 0),
                         ):
                             continue
                         if should_skip_crumb_for_empty_seat(
@@ -2895,6 +2919,7 @@ class SlaveManager:
                         )
                         if owner
                         else None,
+                        unassigned_on_job=unassigned_by_bid.get(str(bid), 0),
                     ):
                         continue
                     b["slave"] = slave_name
@@ -3583,6 +3608,7 @@ class SlaveManager:
                             )
                             if owner
                             else None,
+                            unassigned_on_job=unassigned_by_bid.get(str(bid), 0),
                         ):
                             continue
                         if respect_cap and concurrent_by_bench.get(bid, 0) >= per_bench_cap:
@@ -3596,6 +3622,7 @@ class SlaveManager:
                                 fill_bid=fill_bid,
                                 bid=bid,
                                 sticky_own=sticky_own,
+                                unassigned_on_job=unassigned_by_bid.get(str(bid), 0),
                             ):
                                 continue
                             if should_skip_crumb_for_empty_seat(
