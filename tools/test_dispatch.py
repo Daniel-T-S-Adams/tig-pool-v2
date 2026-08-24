@@ -16,6 +16,7 @@ from master.dispatch import (  # noqa: E402
     leftover_jobs_cover_spare,
     leftover_jobs_or_fallback,
     leftovers_cover_spare,
+    profile_has_hole,
     ready_job_buffer_short,
     extra_create_this_tick,
     lock_eligible_algorithms,
@@ -81,7 +82,23 @@ def main() -> int:
     )
     check(
         leftover_food(claimable=0, unassigned=171) == 171,
-        "sticky unassigned leftovers still count as food",
+        "sticky helper still reports reserved leftovers",
+    )
+    check(
+        profile_has_hole(idle=10, claimable=0) is True,
+        "10 idle GPUs with 0 claimable is a hole",
+    )
+    check(
+        dispatch_shorts(
+            cpu_idle=1,
+            cpu_claimable=789,
+            cpu_unowned=0,
+            gpu_idle=10,
+            gpu_claimable=0,
+            gpu_unowned=0,
+        )
+        == (False, True),
+        "CPU leftover warehouse must not freeze idle GPU creates",
     )
     check(
         leftovers_cover_spare(claimable=572, spare=2) is True,

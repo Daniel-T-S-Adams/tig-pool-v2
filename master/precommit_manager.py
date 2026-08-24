@@ -902,6 +902,7 @@ def should_block_precommit_create(
     root_ready_benchmarks,
     settings=None,
     idle_cpu_needs_work=False,
+    idle_gpu_starved=False,
     ready_buffer_short=False,
 ):
     """Soft create-gate used by PrecommitManager and unit tests.
@@ -932,6 +933,12 @@ def should_block_precommit_create(
                     f"idle_cpu_override: root_ready_rate {root_ready_rate:.3f} "
                     f"< {min_root_ready_rate:.3f} but CPU has spare capacity "
                     f"and claimable roots below idle fleet size"
+                )
+            if idle_gpu_starved and settings.get("idle_cpu_override", True):
+                return False, (
+                    f"idle_gpu_override: root_ready_rate {root_ready_rate:.3f} "
+                    f"< {min_root_ready_rate:.3f} but idle GPUs have nothing "
+                    f"claimable"
                 )
             if ready_buffer_short and settings.get("idle_cpu_override", True):
                 return False, (
@@ -969,6 +976,7 @@ class PrecommitManager:
         self._idle_gpu_reserve_tick_ms = 0
         self._force_cpu_burst = False
         self._force_gpu_burst = False
+        self._force_gpu_hole = False
         self.last_idle_gpu_starved = False
         self.last_cpu_idle_hole = False
         self.last_dispatch_profile = ""
@@ -1080,16 +1088,10 @@ class PrecommitManager:
                 governor.get("online_idle_cpu_slaves"),
             )
         )
-        cpu_claimable = leftover_food(
-            claimable=int(governor.get("cpu_unassigned_claimable") or 0),
-            unassigned=int(governor.get("cpu_unassigned_roots") or 0),
-        )
+        cpu_claimable = int(governor.get("cpu_unassigned_claimable") or 0)
         cpu_unowned = int(governor.get("unowned_cpu_root_jobs") or 0)
         gpu_idle = int(governor.get("online_idle_gpu_slaves") or 0)
-        gpu_claimable = leftover_food(
-            claimable=int(governor.get("gpu_unassigned_claimable") or 0),
-            unassigned=int(governor.get("gpu_unassigned_roots") or 0),
-        )
+        gpu_claimable = int(governor.get("gpu_unassigned_claimable") or 0)
         gpu_unowned = int(governor.get("unowned_gpu_root_jobs") or 0)
         next_buf = _keep_ahead_spare()
         cpu_leftover_jobs = leftover_jobs_or_fallback(
@@ -1157,9 +1159,11 @@ class PrecommitManager:
         self._exclude_algorithm_ids = set()
         self._force_gpu_burst = profile == "gpu"
         self._force_cpu_burst = profile == "cpu"
+        self._force_gpu_hole = gpu_hole
         req = self.run()
         self._force_cpu_burst = False
         self._force_gpu_burst = False
+        self._force_gpu_hole = False
         self._exclude_algorithm_ids = set()
         created = []
         if req is not None:
@@ -1855,8 +1859,10 @@ class PrecommitManager:
             ),
             claimable=int(governor.get("cpu_unassigned_claimable") or 0),
         )
-        # Profile lock only. Do not grant an idle-hole override for
-        # keep-ahead — that minted jobs into a full leftover warehouse.
+        # Profile lock only. A GPU hole still grants the idle override so
+        # a CPU leftover warehouse cannot freeze empty cards.
+        if getattr(self, "_force_gpu_hole", False):
+            idle_gpu_starved = True
         self.last_idle_cpu_needs_work = idle_cpu_needs_work
         self.last_idle_gpu_needs_work = idle_gpu_needs_work
         self.last_idle_gpu_starved = idle_gpu_starved
@@ -1989,16 +1995,8 @@ class PrecommitManager:
                 proof_phase_jobs,
             )
         seat_hole = (
-            int(fleet_cap["cpu_empty"])
-            > leftover_food(
-                claimable=int(fleet_cap["cpu_claimable"] or 0),
-                unassigned=int(governor.get("cpu_unassigned_roots") or 0),
-            )
-            or int(fleet_cap["gpu_empty"])
-            > leftover_food(
-                claimable=int(fleet_cap["gpu_claimable"] or 0),
-                unassigned=int(governor.get("gpu_unassigned_roots") or 0),
-            )
+            int(fleet_cap["cpu_empty"]) > int(fleet_cap["cpu_claimable"] or 0)
+            or int(fleet_cap["gpu_empty"]) > int(fleet_cap["gpu_claimable"] or 0)
         )
         cpu_leftover_jobs = leftover_jobs_or_fallback(
             governor.get("cpu_leftover_jobs"),
@@ -2021,19 +2019,13 @@ class PrecommitManager:
         spare_short = (not seat_hole) and (
             ready_job_buffer_short(
                 idle=0,
-                claimable=leftover_food(
-                    claimable=int(governor.get("cpu_unassigned_claimable") or 0),
-                    unassigned=int(governor.get("cpu_unassigned_roots") or 0),
-                ),
+                claimable=int(governor.get("cpu_unassigned_claimable") or 0),
                 unowned_jobs=int(governor.get("unowned_cpu_root_jobs") or 0),
                 spare=keep_spare,
             )
             or ready_job_buffer_short(
                 idle=0,
-                claimable=leftover_food(
-                    claimable=int(governor.get("gpu_unassigned_claimable") or 0),
-                    unassigned=int(governor.get("gpu_unassigned_roots") or 0),
-                ),
+                claimable=int(governor.get("gpu_unassigned_claimable") or 0),
                 unowned_jobs=int(governor.get("unowned_gpu_root_jobs") or 0),
                 spare=keep_spare,
             )
@@ -2078,6 +2070,7 @@ class PrecommitManager:
                 governor.get("root_ready_benchmarks") or 0,
                 governor.get("settings"),
                 idle_cpu_needs_work=idle_cpu_needs_work,
+                idle_gpu_starved=idle_gpu_starved,
                 ready_buffer_short=spare_short,
             )
             if block:

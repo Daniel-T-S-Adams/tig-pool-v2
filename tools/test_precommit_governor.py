@@ -104,8 +104,17 @@ def main() -> int:
         if not ok:
             failed += 1
 
+    blocked, reason = should_block(73, 20, 6, settings, False, True)
+    ok = blocked is False and reason.startswith("idle_gpu_override:")
+    print(
+        f"{'pass' if ok else 'FAIL'}: idle GPUs override low root_ready_rate "
+        f"blocked={blocked} reason={reason!r}"
+    )
+    if not ok:
+        failed += 1
+
     blocked, reason = should_block(
-        73, 20, 6, settings, False, True
+        73, 20, 6, settings, False, False, True
     )
     ok = blocked is False and reason.startswith("ready_buffer:")
     print(
