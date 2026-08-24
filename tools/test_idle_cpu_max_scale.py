@@ -16,6 +16,7 @@ def _load_fns():
     want = {
         "should_idle_cpu_max_scale",
         "precommit_already_oversubscribed",
+        "oversub_upscale_allowed",
         "idle_hole_blocks_cap_drain",
     }
     for node in module.body:
@@ -32,6 +33,7 @@ def main() -> int:
     ns = _load_fns()
     fn = ns["should_idle_cpu_max_scale"]
     oversub = ns["precommit_already_oversubscribed"]
+    ratchet = ns["oversub_upscale_allowed"]
     hole_drain = ns["idle_hole_blocks_cap_drain"]
     base = dict(
         enabled=True,
@@ -81,6 +83,11 @@ def main() -> int:
             False,
             "78 open on parked 20 must not idle-upscale",
         ),
+        (
+            {**base, "current_max": 20, "proposed_max": 44, "active_jobs": 34},
+            True,
+            "34/20 healthy override may ratchet the parked floor",
+        ),
     ]
     failed = 0
     for kwargs, expect, label in cases:
@@ -96,6 +103,17 @@ def main() -> int:
     ]
     for (jobs, cap), expect, label in helper_cases:
         got = oversub(active_jobs=jobs, current_max=cap)
+        passed = got is expect
+        print(f"{'pass' if passed else 'FAIL'}: {label} -> {got}")
+        if not passed:
+            failed += 1
+    ratchet_cases = [
+        (dict(active_jobs=34, current_max=20, proposed_max=44), True, "34/20 may ratchet"),
+        (dict(active_jobs=78, current_max=20, proposed_max=44), False, "78/20 flood stays blocked"),
+        (dict(active_jobs=12, current_max=20, proposed_max=44), True, "under cap is not a flood"),
+    ]
+    for kwargs, expect, label in ratchet_cases:
+        got = ratchet(**kwargs)
         passed = got is expect
         print(f"{'pass' if passed else 'FAIL'}: {label} -> {got}")
         if not passed:

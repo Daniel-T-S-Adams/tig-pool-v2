@@ -3036,6 +3036,25 @@ def precommit_already_oversubscribed(
     return int(active_jobs or 0) > int(current_max or 0)
 
 
+def oversub_upscale_allowed(
+    *,
+    active_jobs: int = 0,
+    current_max: int = 0,
+    proposed_max: int = 0,
+) -> bool:
+    """Allow a parked-cap climb toward proven live jobs.
+
+    34/20 with idle-CPU override is already absorbed. Blocking every raise
+    pins the floor at 20 forever. 78/20 is a flood and must stay blocked.
+    """
+    jobs = int(active_jobs or 0)
+    cap = int(current_max or 0)
+    proposed = int(proposed_max or 0)
+    if jobs <= cap:
+        return True
+    return jobs <= max(proposed, cap * 2)
+
+
 def idle_hole_blocks_cap_drain(
     *,
     idle_cpu: int = 0,
@@ -3115,6 +3134,10 @@ def should_idle_cpu_max_scale(
         return False, "proposed_max_not_higher"
     if precommit_already_oversubscribed(
         active_jobs=active_jobs, current_max=current_max
+    ) and not oversub_upscale_allowed(
+        active_jobs=active_jobs,
+        current_max=current_max,
+        proposed_max=proposed_max,
     ):
         return False, "precommit_already_oversubscribed"
     # Only bump when the current ceiling is actually binding.
@@ -4730,6 +4753,14 @@ def _plan_config_change(report: dict, cfg: dict, clean_windows: int) -> dict:
     current_max_for_idle = int(cfg.get("max_concurrent_benchmarks") or 0)
     proposed_max_for_idle = int(max_rec_for_idle.get("proposed") or current_max_for_idle)
     active_jobs_for_idle = _active_unfinished_jobs()
+    if oversub_upscale_allowed(
+        active_jobs=active_jobs_for_idle,
+        current_max=current_max_for_idle,
+        proposed_max=max(proposed_max_for_idle, active_jobs_for_idle),
+    ) and precommit_already_oversubscribed(
+        active_jobs=active_jobs_for_idle, current_max=current_max_for_idle
+    ):
+        proposed_max_for_idle = max(proposed_max_for_idle, active_jobs_for_idle)
     root_ready_rate = funnel_summary.get("root_ready_rate")
     _roots_pending_total, cpu_roots_pending_for_idle, _gpu_roots_pending = (
         _profile_roots_pending(funnel_summary)
@@ -4874,8 +4905,16 @@ def _plan_config_change(report: dict, cfg: dict, clean_windows: int) -> dict:
                 "target": target,
                 "active_jobs": active_jobs,
             }
-        elif target > current and precommit_already_oversubscribed(
-            active_jobs=active_jobs, current_max=current
+        elif (
+            target > current
+            and precommit_already_oversubscribed(
+                active_jobs=active_jobs, current_max=current
+            )
+            and not oversub_upscale_allowed(
+                active_jobs=active_jobs,
+                current_max=current,
+                proposed_max=target,
+            )
         ):
             decision.setdefault("guardrails", {})["max_concurrent_benchmarks"] = {
                 "skipped": "precommit_already_oversubscribed",
