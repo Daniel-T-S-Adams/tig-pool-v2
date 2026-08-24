@@ -130,11 +130,17 @@ def seat_per_bench_cap(*, max_concurrent: int = 1, configured: int = 0) -> int:
     return seats
 
 
-def drop_ready_ghost_rows(batches, ready_ids, *, now_ms):
-    """Drop in-memory rows for roots/proofs already submitted.
+def ready_phase_key(batch_id, *, is_proof: bool) -> str:
+    """Root and proof share benchmark_id_idx. Ready must be per phase."""
+    return f"{'proof' if is_proof else 'root'}:{batch_id}"
 
-    Fast get-batches is memory-only. A finished root can stay assigned here
-    (pica11 still listed _63) while SQL/ops shows a different live root (_64).
+
+def drop_ready_ghost_rows(batches, ready_ids, *, now_ms):
+    """Drop in-memory rows for the same phase already submitted.
+
+    Fast get-batches is memory-only. A finished *root* can sit assigned here
+    while SQL/ops shows a different live root. A finished root must not drop
+    the proof that reuses the same id — that parked the fleet in COMPUTING PROOF.
     """
     ready = set(ready_ids or ())
     if not ready:
@@ -144,10 +150,12 @@ def drop_ready_ghost_rows(batches, ready_ids, *, now_ms):
     for row in batches:
         batch = row.get("batch") or {}
         batch_id = str(batch.get("id") or "")
-        if batch_id and batch_id in ready:
+        is_proof = batch.get("sampled_nonces") is not None
+        key = ready_phase_key(batch_id, is_proof=is_proof) if batch_id else ""
+        if key and key in ready:
             row["end_time"] = now_ms
             row["slave"] = None
-            dropped.append(batch_id)
+            dropped.append(key)
             continue
         keep.append(row)
     return keep, dropped
@@ -2152,7 +2160,7 @@ class SlaveManager:
                 (bid, bidx),
             )
             if row is not None:
-                ready_ids.add(batch_id)
+                ready_ids.add(ready_phase_key(batch_id, is_proof=is_proof))
 
         if not ready_ids:
             return 0
@@ -2164,7 +2172,9 @@ class SlaveManager:
             for row in self.batches:
                 batch = row.get("batch") or {}
                 batch_id = str(batch.get("id") or "")
-                if batch_id in ready_ids:
+                is_proof = batch.get("sampled_nonces") is not None
+                key = ready_phase_key(batch_id, is_proof=is_proof) if batch_id else ""
+                if key and key in ready_ids:
                     row["end_time"] = end_ms
                     continue
                 keep.append(row)
@@ -2781,9 +2791,9 @@ class SlaveManager:
                     if b.get("end_time") is not None:
                         continue
                     batch = b.get("batch") or {}
-                    if str(batch.get("id") or "") in self._ready_batch_ids:
-                        continue
                     is_proof = batch.get("sampled_nonces") is not None
+                    if ready_phase_key(str(batch.get("id") or ""), is_proof=is_proof) in self._ready_batch_ids:
+                        continue
                     if is_proof != want_proof:
                         continue
                     if b.get("slave") == slave_name:
@@ -3715,20 +3725,24 @@ class SlaveManager:
             
             return slave_name, b
 
-        def _retire_batch_id(batch_id: str):
-            """Mark every in-memory copy of batch_id finished and drop them.
+        def _retire_batch_id(batch_id: str, *, is_proof: bool = False):
+            """Mark in-memory copies of this phase finished and drop them.
 
-            run() can reload self.batches between find_batch and submit commit,
-            leaving a fresh end_time=None row that would otherwise keep filling
-            max_concurrent=1. Always retire by id against the current list.
+            Root and proof share an id. Retiring a submitted root must not
+            drop the proof row or remember the id as globally done.
             """
             if batch_id:
-                self._ready_batch_ids.add(str(batch_id))
+                self._ready_batch_ids.add(ready_phase_key(batch_id, is_proof=is_proof))
             end_ms = int(time.time() * 1000)
             with self.lock:
                 keep = []
                 for row in self.batches:
-                    if (row.get("batch") or {}).get("id") == batch_id:
+                    batch = row.get("batch") or {}
+                    if batch.get("id") != batch_id:
+                        keep.append(row)
+                        continue
+                    row_is_proof = batch.get("sampled_nonces") is not None
+                    if row_is_proof == is_proof:
                         row["end_time"] = end_ms
                         continue
                     keep.append(row)
@@ -3811,7 +3825,7 @@ class SlaveManager:
                         batch_id,
                         slave_name,
                     )
-                    _retire_batch_id(batch_id)
+                    _retire_batch_id(batch_id, is_proof=False)
                     return {"status": "OK", "note": "stale_assignment"}
                 b = {
                     "num_attempts": int(row.get("num_attempts") or 0),
@@ -3829,7 +3843,10 @@ class SlaveManager:
 
             if _is_infrastructure_error(error):
                 self._quarantine_slave(slave_name, error)
-                _retire_batch_id(batch_id)
+                _retire_batch_id(
+                    batch_id,
+                    is_proof=(b or {}).get("batch", {}).get("sampled_nonces") is not None,
+                )
                 return {"status": "QUARANTINED"}
 
             if b["num_attempts"] < CONFIG["max_batch_attempts"]:
@@ -3865,7 +3882,10 @@ class SlaveManager:
                     )
                 ]
             get_db_conn().execute_many(*queries)
-            _retire_batch_id(batch_id)
+            _retire_batch_id(
+                batch_id,
+                is_proof=b["batch"].get("sampled_nonces") is not None,
+            )
 
             return {"status": "OK"}
 
@@ -3882,7 +3902,7 @@ class SlaveManager:
                 slave_name = canonicalize_pool_slave_name(request.headers.get("User-Agent"))
                 self._require_authorized_slave(slave_name)
                 if _root_already_ready(benchmark_id, batch_idx):
-                    _retire_batch_id(batch_id)
+                    _retire_batch_id(batch_id, is_proof=False)
                     logger.debug(
                         "idempotent root accept for already-ready %s from %s",
                         batch_id,
@@ -3929,7 +3949,7 @@ class SlaveManager:
                             batch_id,
                             slave_name,
                         )
-                        _retire_batch_id(batch_id)
+                        _retire_batch_id(batch_id, is_proof=False)
                         return {"status": "OK", "note": "stale_closed_batch"}
                     expected_nonces = int(row["num_nonces"])
                 if len(solution_quality) != expected_nonces:
@@ -4003,7 +4023,7 @@ class SlaveManager:
                 )
             ]
             get_db_conn().execute_many(*queries)
-            _retire_batch_id(batch_id)
+            _retire_batch_id(batch_id, is_proof=False)
             return {"status": "OK"}
 
         @app.post('/submit-batch-proofs/{batch_id}')
@@ -4014,7 +4034,7 @@ class SlaveManager:
                 if exc.status_code == 408:
                     benchmark_id, batch_idx_s = batch_id.split("_", 1)
                     if _proofs_already_ready(benchmark_id, int(batch_idx_s)):
-                        _retire_batch_id(batch_id)
+                        _retire_batch_id(batch_id, is_proof=True)
                         logger.debug(
                             "idempotent proofs accept for already-ready %s from %s",
                             batch_id,
@@ -4057,7 +4077,7 @@ class SlaveManager:
                     )
                 )
             ])
-            _retire_batch_id(batch_id)
+            _retire_batch_id(batch_id, is_proof=True)
             return {"status": "OK"}
             
         thread = Thread(target=lambda: uvicorn.run(app, host="0.0.0.0", port=5115, access_log=False))  # nosec B104 — container binds all interfaces; nginx controls external exposure

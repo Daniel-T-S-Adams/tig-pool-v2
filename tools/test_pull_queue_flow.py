@@ -168,7 +168,12 @@ def main() -> int:
         "14 idle GPUs, 0 GPU claimable, last create CPU → next create is GPU",
     )
 
-    ghost_ns = _load_fns("master/slave_manager.py", "drop_ready_ghost_rows")
+    ghost_ns = _load_fns(
+        "master/slave_manager.py",
+        "drop_ready_ghost_rows",
+        "ready_phase_key",
+    )
+    ready_root_63 = ghost_ns["ready_phase_key"]("job_63", is_proof=False)
     ghost_keep, ghost_dropped = ghost_ns["drop_ready_ghost_rows"](
         [
             {
@@ -181,15 +186,25 @@ def main() -> int:
                 "end_time": None,
                 "batch": {"id": "job_64", "batch_idx": 64},
             },
+            {
+                "slave": "pica11",
+                "end_time": None,
+                "batch": {
+                    "id": "job_63",
+                    "batch_idx": 63,
+                    "sampled_nonces": [1],
+                },
+            },
         ],
-        {"job_63"},
+        {ready_root_63},
         now_ms=1,
     )
     check(
-        ghost_dropped == ["job_63"]
-        and [r["batch"]["id"] for r in ghost_keep] == ["job_64"]
+        ghost_dropped == ["root:job_63"]
+        and [r["batch"]["id"] for r in ghost_keep] == ["job_64", "job_63"]
+        and ghost_keep[1]["batch"].get("sampled_nonces") == [1]
         and ghost_keep[0]["slave"] == "pica11",
-        "ready ghost _63 is dropped; live _64 stays assigned",
+        "ready root ghost _63 is dropped; proof _63 and live root _64 stay",
     )
 
     auto_ns = _load_fns(
