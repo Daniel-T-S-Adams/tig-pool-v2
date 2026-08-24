@@ -97,6 +97,7 @@ def main() -> int:
             retry_ms=7_200_000,
             owner_active=3,
             owner_working=False,
+            unassigned_on_job=2,
         )
         is True,
         "next Pica/EPYC poll can claim an owner-idle assigned root",
@@ -179,6 +180,7 @@ def main() -> int:
         "master/slave_manager.py",
         "drop_ready_ghost_rows",
         "ready_phase_key",
+        "forget_ready_marks_for_pending",
     )
     ready_root_63 = ghost_ns["ready_phase_key"]("job_63", is_proof=False)
     ghost_keep, ghost_dropped = ghost_ns["drop_ready_ghost_rows"](
@@ -212,6 +214,41 @@ def main() -> int:
         and ghost_keep[1]["batch"].get("sampled_nonces") == [1]
         and ghost_keep[0]["slave"] == "pica11",
         "ready root ghost _63 is dropped; proof _63 and live root _64 stay",
+    )
+    leftover_106 = ghost_ns["ready_phase_key"](
+        "92f771d15115cd46d011a4da7cb3e5c7_106", is_proof=False
+    )
+    leftover_keep, leftover_dropped = ghost_ns["drop_ready_ghost_rows"](
+        [
+            {
+                "slave": None,
+                "end_time": None,
+                "batch": {
+                    "id": "92f771d15115cd46d011a4da7cb3e5c7_106",
+                    "batch_idx": 106,
+                    "benchmark_id": "92f771d15115cd46d011a4da7cb3e5c7",
+                },
+            }
+        ],
+        {leftover_106},
+        now_ms=1,
+    )
+    check(
+        leftover_dropped == []
+        and len(leftover_keep) == 1
+        and leftover_keep[0]["batch"]["batch_idx"] == 106
+        and leftover_keep[0].get("slave") is None,
+        "unassigned last leftover is not a ready ghost",
+    )
+    forgotten_ready, forgotten = ghost_ns["forget_ready_marks_for_pending"](
+        {leftover_106, "root:other_1"},
+        leftover_keep,
+    )
+    check(
+        leftover_106 not in forgotten_ready
+        and "root:other_1" in forgotten_ready
+        and leftover_106 in forgotten,
+        "SQL-pending leftover drops the stale ready mark",
     )
 
     auto_ns = _load_fns(

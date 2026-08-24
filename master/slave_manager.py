@@ -141,6 +141,9 @@ def drop_ready_ghost_rows(batches, ready_ids, *, now_ms):
     Fast get-batches is memory-only. A finished *root* can sit assigned here
     while SQL/ops shows a different live root. A finished root must not drop
     the proof that reuses the same id — that parked the fleet in COMPUTING PROOF.
+
+    Unassigned pending rows are not ghosts. A failed submit used to retire
+    the id, then this drop hid the last leftover forever (job 92f771d1 batch 106).
     """
     ready = set(ready_ids or ())
     if not ready:
@@ -153,12 +156,37 @@ def drop_ready_ghost_rows(batches, ready_ids, *, now_ms):
         is_proof = batch.get("sampled_nonces") is not None
         key = ready_phase_key(batch_id, is_proof=is_proof) if batch_id else ""
         if key and key in ready:
+            if not row.get("slave"):
+                keep.append(row)
+                continue
             row["end_time"] = now_ms
             row["slave"] = None
             dropped.append(key)
             continue
         keep.append(row)
     return keep, dropped
+
+
+def forget_ready_marks_for_pending(ready_ids, batches):
+    """SQL-pending rows are not ready. Drop stale retire marks.
+
+    Error retry releases the row in SQL then used to add the id to the ready
+    set. run() reloads the leftover, ghost-drop removes it, and no slave
+    ever sees it again.
+    """
+    ready = set(ready_ids or ())
+    forgotten = []
+    for row in batches or ():
+        batch = row.get("batch") or {}
+        batch_id = str(batch.get("id") or "")
+        if not batch_id:
+            continue
+        is_proof = batch.get("sampled_nonces") is not None
+        key = ready_phase_key(batch_id, is_proof=is_proof)
+        if key in ready:
+            ready.discard(key)
+            forgotten.append(key)
+    return ready, forgotten
 
 
 def assigned_root_reclaimable(
@@ -2356,6 +2384,15 @@ class SlaveManager:
         )
         with self.lock:
             self.batches = pending_batches
+            self._ready_batch_ids, forgotten = forget_ready_marks_for_pending(
+                self._ready_batch_ids, pending_batches
+            )
+        if forgotten:
+            logger.info(
+                "forgot %s stale ready mark(s) for SQL-pending work: %s",
+                len(forgotten),
+                forgotten[:8],
+            )
         logger.debug(f"Refreshed pending batches. Got {len(self.batches)}")
         now_ms = int(time.time() * 1000)
         try:
@@ -2880,7 +2917,11 @@ class SlaveManager:
                     batch = b.get("batch") or {}
                     bid = str(batch.get("benchmark_id") or "")
                     is_proof = batch.get("sampled_nonces") is not None
-                    if ready_phase_key(str(batch.get("id") or ""), is_proof=is_proof) in self._ready_batch_ids:
+                    if (
+                        b.get("slave")
+                        and ready_phase_key(str(batch.get("id") or ""), is_proof=is_proof)
+                        in self._ready_batch_ids
+                    ):
                         continue
                     finishes = bid in last_leftover_bids
                     if phase == "finish":
@@ -3841,6 +3882,7 @@ class SlaveManager:
 
             Root and proof share an id. Retiring a submitted root must not
             drop the proof row or remember the id as globally done.
+            Only call this when the phase is actually done (submitted or closed).
             """
             if batch_id:
                 self._ready_batch_ids.add(ready_phase_key(batch_id, is_proof=is_proof))
@@ -3858,6 +3900,26 @@ class SlaveManager:
                         continue
                     keep.append(row)
                 self.batches = keep
+
+        def _release_assigned_batch_id(batch_id: str, *, is_proof: bool = False):
+            """Unassign this phase so another slave can take it.
+
+            A failed attempt is not done. Adding it to _ready_batch_ids hid
+            last leftovers (92f771d1 batch 106) after SQL released them.
+            """
+            if batch_id:
+                self._ready_batch_ids.discard(ready_phase_key(batch_id, is_proof=is_proof))
+            with self.lock:
+                for row in self.batches:
+                    batch = row.get("batch") or {}
+                    if batch.get("id") != batch_id:
+                        continue
+                    row_is_proof = batch.get("sampled_nonces") is not None
+                    if row_is_proof != is_proof:
+                        continue
+                    row["slave"] = None
+                    row["start_time"] = None
+                    row["end_time"] = None
 
         def _root_already_ready(benchmark_id: str, batch_idx: int) -> bool:
             row = get_db_conn().fetch_one(
@@ -3931,12 +3993,14 @@ class SlaveManager:
                 )
                 if row is None:
                     # Truly stale — ack so the slave drops local result.json.
+                    # Do not retire: the batch may still be pending unassigned.
                     logger.warning(
                         "stale error submit for %s from %s (not assigned) — acking to clear slave loop",
                         batch_id,
                         slave_name,
                     )
-                    _retire_batch_id(batch_id, is_proof=False)
+                    _release_assigned_batch_id(batch_id, is_proof=False)
+                    _release_assigned_batch_id(batch_id, is_proof=True)
                     return {"status": "OK", "note": "stale_assignment"}
                 b = {
                     "num_attempts": int(row.get("num_attempts") or 0),
@@ -3954,14 +4018,15 @@ class SlaveManager:
 
             if _is_infrastructure_error(error):
                 self._quarantine_slave(slave_name, error)
-                _retire_batch_id(
+                _release_assigned_batch_id(
                     batch_id,
                     is_proof=(b or {}).get("batch", {}).get("sampled_nonces") is not None,
                 )
                 return {"status": "QUARANTINED"}
 
+            is_proof = b["batch"]["sampled_nonces"] is not None
             if b["num_attempts"] < CONFIG["max_batch_attempts"]:
-                table_name = "root_batch" if b["batch"]["sampled_nonces"] is None else "proofs_batch"  # nosec B608 — two hardcoded table names, no user input
+                table_name = "root_batch" if not is_proof else "proofs_batch"  # nosec B608 — two hardcoded table names, no user input
                 queries = [
                     (
                         f"""
@@ -3993,10 +4058,10 @@ class SlaveManager:
                     )
                 ]
             get_db_conn().execute_many(*queries)
-            _retire_batch_id(
-                batch_id,
-                is_proof=b["batch"].get("sampled_nonces") is not None,
-            )
+            if b["num_attempts"] < CONFIG["max_batch_attempts"]:
+                _release_assigned_batch_id(batch_id, is_proof=is_proof)
+            else:
+                _retire_batch_id(batch_id, is_proof=is_proof)
 
             return {"status": "OK"}
 
