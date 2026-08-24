@@ -104,6 +104,17 @@ def main() -> int:
         if not ok:
             failed += 1
 
+    blocked, reason = should_block(
+        73, 20, 6, settings, False, True
+    )
+    ok = blocked is False and reason.startswith("ready_buffer:")
+    print(
+        f"{'pass' if ok else 'FAIL'}: empty ready-job buffer overrides low "
+        f"root_ready_rate blocked={blocked} reason={reason!r}"
+    )
+    if not ok:
+        failed += 1
+
     blocked, reason = should_block(73, 20, 6, settings, True)
     ok = blocked is False and reason.startswith("idle_cpu_override:")
     print(
@@ -492,8 +503,8 @@ def main() -> int:
         gpu_spare_jobs=2,
         gpu_unassigned_claimable=32,
         leftover_jobs=1,
-    ) is True
-    print(f"{'pass' if ok else 'FAIL'}: one leftover GPU job still wants a replacement")
+    ) is False
+    print(f"{'pass' if ok else 'FAIL'}: leftover GPU roots are the next poll")
     if not ok:
         failed += 1
     ok = gpu_keep_ahead_fn(

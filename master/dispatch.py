@@ -41,13 +41,31 @@ def leftover_jobs_or_fallback(
 def leftover_jobs_cover_spare(
     *, leftover_jobs: int = 0, spare: int = NEXT_JOB_BUFFER
 ) -> bool:
-    """True when leftover *jobs* already are the 2-job spare pile.
-
-    Leftover *roots* must not be compared to that spare. 300 unassigned
-    roots on 8 leftover jobs is a warehouse; 32 roots on 1 leftover job
-    still needs a replacement before that job finishes.
-    """
+    """True when leftover *jobs* already are the 2-job spare pile."""
     return max(0, int(leftover_jobs or 0)) >= max(0, int(spare or 0))
+
+
+def ready_job_buffer_short(
+    *,
+    idle: int = 0,
+    claimable: int = 0,
+    unowned_jobs: int = 0,
+    spare: int = NEXT_JOB_BUFFER,
+) -> bool:
+    """True when the next idle poll would not find an already-fetched job.
+
+    Claimable leftovers *are* that job — do not mint on top of them.
+    When leftovers are gone, keep ``spare`` unowned jobs sitting so TIG
+    confirm has already finished before anyone goes idle.
+    """
+    idle_n = max(0, int(idle or 0))
+    claimable_n = max(0, int(claimable or 0))
+    buf = max(0, int(spare or 0))
+    if idle_n > 0 and claimable_n < idle_n:
+        return True
+    if claimable_n > 0:
+        return False
+    return int(unowned_jobs or 0) < buf
 
 
 def profile_needs_create(
@@ -60,22 +78,18 @@ def profile_needs_create(
 ) -> bool:
     """True when this profile should receive the next precommit.
 
-    Work follows the live fleet. Empty seats leftovers cannot feed are a
-    hole — workers joined, or the pull queue is smaller than the seats.
-    A busy fleet only wants a 2-job spare so the next finish does not
-    wait on TIG. Leftover jobs already in that spare are the work.
+    Empty seats leftovers cannot feed are a hole. A busy fleet only
+    mints when the pull queue is empty so the next finish already has
+    a confirmed job waiting. Leftover *jobs* still being worked are
+    not that waiting job — unowned jobs are.
     """
-    idle_n = max(0, int(idle or 0))
-    claimable_n = max(0, int(claimable or 0))
-    buf = max(0, int(next_job_buffer or 0))
-    if idle_n > 0 and claimable_n < idle_n:
-        return True
-    if leftover_jobs is not None:
-        if leftover_jobs_cover_spare(leftover_jobs=leftover_jobs, spare=buf):
-            return False
-    elif leftovers_cover_spare(claimable=claimable_n, spare=buf):
-        return False
-    return int(unowned_jobs or 0) < buf
+    del leftover_jobs
+    return ready_job_buffer_short(
+        idle=idle,
+        claimable=claimable,
+        unowned_jobs=unowned_jobs,
+        spare=next_job_buffer,
+    )
 
 
 def profile_has_hole(*, idle: int = 0, claimable: int = 0) -> bool:
@@ -105,14 +119,15 @@ def _keep_ahead_short(
     leftover_roots: int,
     spare: int,
 ) -> bool:
+    del leftover_jobs
     if hole:
         return False
-    if leftover_jobs is not None:
-        if leftover_jobs_cover_spare(leftover_jobs=leftover_jobs, spare=spare):
-            return False
-    elif leftovers_cover_spare(claimable=leftover_roots, spare=spare):
-        return False
-    return int(unowned or 0) < spare
+    return ready_job_buffer_short(
+        idle=0,
+        claimable=leftover_roots,
+        unowned_jobs=unowned,
+        spare=spare,
+    )
 
 
 def dispatch_shorts(

@@ -16,6 +16,7 @@ from master.dispatch import (  # noqa: E402
     leftover_jobs_cover_spare,
     leftover_jobs_or_fallback,
     leftovers_cover_spare,
+    ready_job_buffer_short,
     extra_create_this_tick,
     lock_eligible_algorithms,
     next_create_profile,
@@ -111,11 +112,23 @@ def main() -> int:
         "busy fleet with a leftover warehouse must not keep-ahead create",
     )
     check(
+        ready_job_buffer_short(idle=0, claimable=32, unowned_jobs=0) is False,
+        "32 leftover roots are the next poll — do not mint yet",
+    )
+    check(
+        ready_job_buffer_short(idle=0, claimable=0, unowned_jobs=0) is True,
+        "empty pull queue on a busy fleet needs 2 waiting jobs",
+    )
+    check(
+        ready_job_buffer_short(idle=0, claimable=0, unowned_jobs=2) is False,
+        "2 unowned jobs already sit ready for the next poll",
+    )
+    check(
         profile_needs_create(
             idle=0, claimable=32, leftover_jobs=1, unowned_jobs=0
         )
-        is True,
-        "one leftover job with 32 roots still wants a replacement",
+        is False,
+        "leftover roots on one job are already-fetched work",
     )
     check(
         profile_needs_create(
@@ -273,8 +286,8 @@ def main() -> int:
     check(
         dispatch_shorts(
             cpu_idle=0,
-            cpu_claimable=32,
-            cpu_leftover_jobs=1,
+            cpu_claimable=0,
+            cpu_leftover_jobs=0,
             cpu_unowned=0,
             gpu_idle=0,
             gpu_claimable=300,
@@ -282,7 +295,7 @@ def main() -> int:
             gpu_unowned=0,
         )
         == (True, False),
-        "CPU spare short while GPU leftover jobs cover",
+        "CPU pull queue empty while GPU leftovers cover the next GPU poll",
     )
     check(
         dispatch_shorts(

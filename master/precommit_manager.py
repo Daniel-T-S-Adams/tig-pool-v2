@@ -16,8 +16,8 @@ from master.idle_tracker import CPU_IDLE_TRACKER, idle_window_settings
 from master.dispatch import (
     dispatch_shorts,
     leftover_food,
-    leftover_jobs_cover_spare,
     leftover_jobs_or_fallback,
+    ready_job_buffer_short,
     lock_eligible_algorithms,
     next_hole_profile,
     profile_has_hole,
@@ -619,10 +619,9 @@ def compute_gpu_keep_ahead(
     if gpu_profile_blocked:
         return False
     spare_n = max(0, int(keep_ahead_spare or 0))
-    if leftover_jobs is not None:
-        if max(0, int(leftover_jobs or 0)) >= spare_n:
-            return False
-    elif max(0, int(gpu_unassigned_claimable or 0)) > spare_n:
+    if max(0, int(gpu_unassigned_claimable or 0)) > 0:
+        return False
+    if leftover_jobs is not None and max(0, int(leftover_jobs or 0)) >= spare_n:
         return False
     proving = max(0, int(gpu_jobs_in_proof_phase or 0))
     online = max(0, int(online_gpu_slaves or 0))
@@ -903,13 +902,15 @@ def should_block_precommit_create(
     root_ready_benchmarks,
     settings=None,
     idle_cpu_needs_work=False,
+    ready_buffer_short=False,
 ):
     """Soft create-gate used by PrecommitManager and unit tests.
 
     Per-profile pending/unassigned caps are enforced separately via
     profile_root_backlog_blocks (filter eligible algos). This function only
-    applies the soft root_ready_rate drain. Idle CPU with claimable roots below
-    idle capacity may override that soft gate so spare CPU workers are not left empty.
+    applies the soft root_ready_rate drain. An idle hole, or an empty
+    ready-job buffer (no leftovers, fewer than 2 unowned jobs), may
+    override so the next poll hits a job that TIG already confirmed.
 
     Legacy max_roots_pending is retained in settings for adaptive ceiling
     defaults only; it is not a global hard create-block anymore.
@@ -931,6 +932,11 @@ def should_block_precommit_create(
                     f"idle_cpu_override: root_ready_rate {root_ready_rate:.3f} "
                     f"< {min_root_ready_rate:.3f} but CPU has spare capacity "
                     f"and claimable roots below idle fleet size"
+                )
+            if ready_buffer_short and settings.get("idle_cpu_override", True):
+                return False, (
+                    f"ready_buffer: root_ready_rate {root_ready_rate:.3f} "
+                    f"< {min_root_ready_rate:.3f} but the pull queue is empty"
                 )
             return True, (
                 f"root_ready_rate {root_ready_rate:.3f} < {min_root_ready_rate:.3f} "
@@ -2013,17 +2019,23 @@ class PrecommitManager:
             spare=keep_spare,
         )
         spare_short = (not seat_hole) and (
-            (
-                not leftover_jobs_cover_spare(
-                    leftover_jobs=cpu_leftover_jobs, spare=keep_spare
-                )
-                and int(governor.get("unowned_cpu_root_jobs") or 0) < keep_spare
+            ready_job_buffer_short(
+                idle=0,
+                claimable=leftover_food(
+                    claimable=int(governor.get("cpu_unassigned_claimable") or 0),
+                    unassigned=int(governor.get("cpu_unassigned_roots") or 0),
+                ),
+                unowned_jobs=int(governor.get("unowned_cpu_root_jobs") or 0),
+                spare=keep_spare,
             )
-            or (
-                not leftover_jobs_cover_spare(
-                    leftover_jobs=gpu_leftover_jobs, spare=keep_spare
-                )
-                and int(governor.get("unowned_gpu_root_jobs") or 0) < keep_spare
+            or ready_job_buffer_short(
+                idle=0,
+                claimable=leftover_food(
+                    claimable=int(governor.get("gpu_unassigned_claimable") or 0),
+                    unassigned=int(governor.get("gpu_unassigned_roots") or 0),
+                ),
+                unowned_jobs=int(governor.get("unowned_gpu_root_jobs") or 0),
+                spare=keep_spare,
             )
         )
         if not concurrent_create_allowed(
@@ -2066,6 +2078,7 @@ class PrecommitManager:
                 governor.get("root_ready_benchmarks") or 0,
                 governor.get("settings"),
                 idle_cpu_needs_work=idle_cpu_needs_work,
+                ready_buffer_short=spare_short,
             )
             if block:
                 if idle_cpu_needs_work or idle_gpu_starved:
