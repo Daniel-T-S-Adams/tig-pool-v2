@@ -47,6 +47,8 @@ def main() -> int:
         "leftover_nonces_by_job",
         "unassigned_roots_by_job",
         "pick_fill_bid",
+        "assigned_crumb_should_release",
+        "split_assigned_crumbs",
         extra_ns={
             "Optional": __import__("typing").Optional,
             "Dict": __import__("typing").Dict,
@@ -64,6 +66,8 @@ def main() -> int:
     leftover_nonces = ns["leftover_nonces_by_job"]
     unassigned = ns["unassigned_roots_by_job"]
     workers = ns["poller_worker_count"]
+    release = ns["assigned_crumb_should_release"]
+    split_crumbs = ns["split_assigned_crumbs"]
 
     check(
         workers({"num_workers": 25}, is_gpu=False) == 25,
@@ -188,8 +192,22 @@ def main() -> int:
             has_fat_claimable=True,
             sticky_own=True,
         )
+        is True,
+        "sticky Pica still skips a crumb when fat leftovers exist",
+    )
+    check(
+        skip(
+            remaining_nonces=12,
+            unassigned_on_job=1,
+            workers=190,
+            empty_seats=5,
+            poller_assigned=0,
+            taking_this_poll=0,
+            has_fat_claimable=True,
+            sticky_own=True,
+        )
         is False,
-        "sticky owner still finishes scraps",
+        "sticky EPYC may finish a scrap when other seats exist",
     )
     check(
         skip(
@@ -346,6 +364,66 @@ def main() -> int:
         "unassigned root counts ignore assigned roots",
     )
     check(crumb(remaining_nonces=12, workers=25, empty_seats=1) is True, "12 < 25 is crumb")
+    check(
+        release(
+            remaining_nonces=12,
+            unassigned_on_job=1,
+            workers=25,
+            empty_seats=1,
+            has_fat_claimable=True,
+        )
+        is True,
+        "assigned 12-nonce crumb is released when fat leftovers exist",
+    )
+    check(
+        release(
+            remaining_nonces=64,
+            unassigned_on_job=1,
+            workers=25,
+            empty_seats=1,
+            has_fat_claimable=True,
+        )
+        is False,
+        "assigned 64-nonce leftover stays on a Pica",
+    )
+    check(
+        release(
+            remaining_nonces=12,
+            unassigned_on_job=1,
+            workers=25,
+            empty_seats=1,
+            has_fat_claimable=False,
+        )
+        is False,
+        "keep the crumb when nothing fat is claimable",
+    )
+    check(
+        release(
+            is_proof=True,
+            remaining_nonces=12,
+            workers=25,
+            empty_seats=1,
+            has_fat_claimable=True,
+        )
+        is False,
+        "never release a proof as a crumb",
+    )
+    kept, dropped = split_crumbs(
+        [
+            {"batch": {"benchmark_id": "crumb", "num_nonces": 12, "sampled_nonces": None}},
+            {"batch": {"benchmark_id": "fat", "num_nonces": 64, "sampled_nonces": None}},
+        ],
+        workers=25,
+        max_concurrent=1,
+        unassigned_by_bid={"crumb": 1, "fat": 80},
+        leftover_nonces_by_bid={"crumb": 12, "fat": 64},
+        has_fat_claimable=True,
+    )
+    check(
+        [r["batch"]["benchmark_id"] for r in dropped] == ["crumb"]
+        and [r["batch"]["benchmark_id"] for r in kept] == ["fat"],
+        "split drops the assigned crumb and keeps the fat root",
+    )
 
     return 2 if failed else 0
 

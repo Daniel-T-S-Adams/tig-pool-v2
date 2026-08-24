@@ -232,8 +232,14 @@ def should_skip_crumb_for_empty_seat(
     has_fat_claimable: bool = False,
     sticky_own: bool = False,
 ) -> bool:
-    """Crumbs must not take the only seat when fat leftovers exist."""
-    if is_proof or sticky_own:
+    """Crumbs must not take the only seat when fat leftovers exist.
+
+    Sticky finish of scraps is only allowed when the box has more than
+    one seat. A Pica's only seat must not stay on 12 nonces.
+    """
+    if is_proof:
+        return False
+    if sticky_own and int(empty_seats or 1) > 1:
         return False
     if int(poller_assigned or 0) + int(taking_this_poll or 0) > 0:
         return False
@@ -245,6 +251,58 @@ def should_skip_crumb_for_empty_seat(
         workers=workers,
         empty_seats=empty_seats,
     )
+
+
+def assigned_crumb_should_release(
+    *,
+    is_proof: bool = False,
+    remaining_nonces: int = 0,
+    unassigned_on_job: int = 0,
+    workers: int = 1,
+    empty_seats: int = 1,
+    has_fat_claimable: bool = False,
+) -> bool:
+    """Drop an already-assigned crumb so this poll can take fat work."""
+    if is_proof or not has_fat_claimable:
+        return False
+    return leftover_is_crumb(
+        remaining_nonces=remaining_nonces,
+        unassigned_on_job=unassigned_on_job,
+        workers=workers,
+        empty_seats=empty_seats,
+    )
+
+
+def split_assigned_crumbs(
+    kept,
+    *,
+    workers: int = 1,
+    max_concurrent: int = 1,
+    unassigned_by_bid: Optional[dict] = None,
+    leftover_nonces_by_bid: Optional[dict] = None,
+    has_fat_claimable: bool = False,
+) -> tuple:
+    """Move assigned crumbs out of kept when fat leftovers exist."""
+    keep = []
+    drop = []
+    leftovers = leftover_nonces_by_bid or {}
+    unassigned = unassigned_by_bid or {}
+    seats = max(1, int(max_concurrent or 1))
+    for row in kept or []:
+        batch = (row or {}).get("batch") or {}
+        bid = str(batch.get("benchmark_id") or "")
+        if assigned_crumb_should_release(
+            is_proof=batch.get("sampled_nonces") is not None,
+            remaining_nonces=batch_remaining_nonces(batch),
+            unassigned_on_job=int(unassigned.get(bid) or 0),
+            workers=workers,
+            empty_seats=seats,
+            has_fat_claimable=has_fat_claimable,
+        ):
+            drop.append(row)
+        else:
+            keep.append(row)
+    return keep, drop
 
 
 def takeable_unassigned_by_bid(
@@ -2504,6 +2562,35 @@ class SlaveManager:
                 max_roots_while_proofs=PROOF_PRIORITY_MAX_ROOTS,
                 always_keep_root_benchmarks=finish_root_bids,
             )
+            poller_workers = poller_worker_count(
+                self._slave_telemetry.get(slave_name) or {},
+                is_gpu=_slave_work_profile(slave_name) == "gpu",
+            )
+            leftover_nonces = leftover_nonces_by_job(self.batches)
+            if not unassigned_by_bid:
+                unassigned_by_bid = unassigned_roots_by_job(self.batches)
+            takeable_unassigned = takeable_unassigned_by_bid(
+                unassigned_by_bid,
+                slave_name=slave_name,
+                root_affinity=root_affinity,
+                overflow_benchmark_ids=overflow_benchmark_ids,
+            )
+            has_fat_claimable = claimable_has_fat_leftover(
+                unassigned_by_bid=takeable_unassigned,
+                leftover_nonces_by_bid=leftover_nonces,
+                workers=poller_workers,
+                empty_seats=max(1, int(max_concurrent or 1)),
+            )
+            kept_assigned, crumb_assigned = split_assigned_crumbs(
+                kept_assigned,
+                workers=poller_workers,
+                max_concurrent=max_concurrent,
+                unassigned_by_bid=unassigned_by_bid,
+                leftover_nonces_by_bid=leftover_nonces,
+                has_fat_claimable=has_fat_claimable,
+            )
+            if crumb_assigned:
+                excess_assigned = list(excess_assigned) + list(crumb_assigned)
             for b in excess_assigned:
                 batch = b["batch"]
                 table = (
@@ -2566,27 +2653,8 @@ class SlaveManager:
                 max_concurrent=max_concurrent,
                 configured=int(CONFIG.get("max_batches_per_benchmark") or 0),
             )
-            poller_workers = poller_worker_count(
-                self._slave_telemetry.get(slave_name) or {},
-                is_gpu=_slave_work_profile(slave_name) == "gpu",
-            )
-            leftover_nonces = leftover_nonces_by_job(self.batches)
-            if not unassigned_by_bid:
-                unassigned_by_bid = unassigned_roots_by_job(self.batches)
             empty_seats = max(0, int(max_concurrent) - len(kept_assigned))
-            takeable_unassigned = takeable_unassigned_by_bid(
-                unassigned_by_bid,
-                slave_name=slave_name,
-                root_affinity=root_affinity,
-                overflow_benchmark_ids=overflow_benchmark_ids,
-            )
             feed_empty_seats = max(1, empty_seats or int(max_concurrent or 1))
-            has_fat_claimable = claimable_has_fat_leftover(
-                unassigned_by_bid=takeable_unassigned,
-                leftover_nonces_by_bid=leftover_nonces,
-                workers=poller_workers,
-                empty_seats=feed_empty_seats,
-            )
             held_root_bids = [
                 str((b.get("batch") or {}).get("benchmark_id") or "")
                 for b in kept_assigned
@@ -3124,6 +3192,28 @@ class SlaveManager:
                     max_roots_while_proofs=PROOF_PRIORITY_MAX_ROOTS,
                     always_keep_root_benchmarks=finish_root_bids,
                 )
+                takeable_unassigned = takeable_unassigned_by_bid(
+                    unassigned_by_bid,
+                    slave_name=slave_name,
+                    root_affinity=root_affinity,
+                    overflow_benchmark_ids=overflow_benchmark_ids,
+                )
+                has_fat_claimable = claimable_has_fat_leftover(
+                    unassigned_by_bid=takeable_unassigned,
+                    leftover_nonces_by_bid=leftover_nonces,
+                    workers=poller_workers,
+                    empty_seats=max(1, int(max_concurrent or 1)),
+                )
+                kept_assigned, crumb_assigned = split_assigned_crumbs(
+                    kept_assigned,
+                    workers=poller_workers,
+                    max_concurrent=max_concurrent,
+                    unassigned_by_bid=unassigned_by_bid,
+                    leftover_nonces_by_bid=leftover_nonces,
+                    has_fat_claimable=has_fat_claimable,
+                )
+                if crumb_assigned:
+                    excess_assigned = list(excess_assigned) + list(crumb_assigned)
                 if excess_assigned:
                     logger.info(
                         f"releasing {len(excess_assigned)} excess batches from {slave_name} "
@@ -3163,19 +3253,7 @@ class SlaveManager:
                     concurrent_by_bench[bid] = concurrent_by_bench.get(bid, 0) + 1
 
                 empty_seats = max(0, int(max_concurrent) - len(kept_assigned))
-                takeable_unassigned = takeable_unassigned_by_bid(
-                    unassigned_by_bid,
-                    slave_name=slave_name,
-                    root_affinity=root_affinity,
-                    overflow_benchmark_ids=overflow_benchmark_ids,
-                )
                 feed_empty_seats = max(1, empty_seats or int(max_concurrent or 1))
-                has_fat_claimable = claimable_has_fat_leftover(
-                    unassigned_by_bid=takeable_unassigned,
-                    leftover_nonces_by_bid=leftover_nonces,
-                    workers=poller_workers,
-                    empty_seats=feed_empty_seats,
-                )
                 held_root_bids = [
                     str((b.get("batch") or {}).get("benchmark_id") or "")
                     for b in kept_assigned
