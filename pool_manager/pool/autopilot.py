@@ -3083,23 +3083,49 @@ def health_block_reasons(health: dict | None = None) -> dict:
 
 
 def leftover_stranded_blocks_ratchet(unserved_stranded) -> bool:
-    """Block only when stranded work looks like a real capacity hole.
+    """Block only fat jobs nobody is working.
 
-    One energy leftover sitting unassigned (2 pending roots, 67 min) is the
-    last-leftover assign bug. That must not pin the parked floor at 20.
-    A pile of fat unserved jobs still blocks.
+    Leftover crumbs on live jobs are normal pull-queue food. Treating
+    them as stranded pinned max_concurrent at 20 while 32 jobs already
+    ran. Unassigned fat jobs (no owner, more than a leftover batch)
+    still block.
     """
-    items = list(unserved_stranded or [])
-    if not items:
-        return False
-    if len(items) > 2:
-        return True
-    for item in items:
+    for item in list(unserved_stranded or []):
         pending = int(item.get("pending_roots") or 0)
         assigned = int(item.get("assigned_roots") or 0)
-        if pending + assigned > 4:
+        if assigned <= 0 and pending > 4:
             return True
     return False
+
+
+def should_raise_cap_for_seat_hole(
+    *,
+    idle_cpu: int = 0,
+    cpu_claimable: int = 0,
+    idle_gpu: int = 0,
+    gpu_claimable: int = 0,
+    current_max: int = 0,
+    active_jobs: int = 0,
+    has_unregistered: bool = False,
+    unresolved_ceiling: int = 85,
+) -> tuple[bool, str]:
+    """Raise max_concurrent when idle seats have nothing claimable.
+
+    Master honors the cap again. Autopilot must move it, or empty GPUs
+    sit idle while the badge says saturated.
+    """
+    if has_unregistered:
+        return False, "unregistered_active_work"
+    cpu_hole = int(idle_cpu or 0) > 0 and int(cpu_claimable or 0) < int(idle_cpu or 0)
+    gpu_hole = int(idle_gpu or 0) > 0 and int(gpu_claimable or 0) < int(idle_gpu or 0)
+    if not (cpu_hole or gpu_hole):
+        return False, "no_seat_hole"
+    ceiling = int(unresolved_ceiling or 0)
+    if ceiling > 0 and int(current_max or 0) >= ceiling:
+        return False, "tig_ceiling"
+    if int(active_jobs or 0) < int(current_max or 0):
+        return False, "cap_has_room"
+    return True, "seat_hole_at_cap"
 
 
 def should_ratchet_parked_cap_to_live(
@@ -4844,6 +4870,38 @@ def _plan_config_change(report: dict, cfg: dict, clean_windows: int) -> dict:
         active_jobs=active_jobs_for_idle, current_max=current_max_for_idle
     ):
         proposed_max_for_idle = max(proposed_max_for_idle, active_jobs_for_idle)
+    allow_hole_raise, hole_raise_reason = should_raise_cap_for_seat_hole(
+        idle_cpu=productive_idle_cpu,
+        cpu_claimable=int(funnel_summary.get("cpu_unassigned_claimable") or 0),
+        idle_gpu=productive_idle_gpu,
+        gpu_claimable=int(funnel_summary.get("gpu_unassigned_claimable") or 0),
+        current_max=current_max_for_idle,
+        active_jobs=active_jobs_for_idle,
+        has_unregistered=bool(health.get("active_unregistered")),
+        unresolved_ceiling=UPSTREAM_SAFE_MAX_BENCHMARKS,
+    )
+    if allow_hole_raise:
+        next_max = min(
+            int(UPSTREAM_SAFE_MAX_BENCHMARKS),
+            current_max_for_idle + max(1, IDLE_CPU_MAX_SCALE_UP_STEP),
+        )
+        if next_max > current_max_for_idle:
+            new_cfg = json.loads(json.dumps(cfg))
+            new_cfg["max_concurrent_benchmarks"] = next_max
+            decision["reason"] = "seat_hole_needs_cap"
+            decision["changes"] = {
+                "max_concurrent_benchmarks": {
+                    "current": current_max_for_idle,
+                    "target": next_max,
+                    "next": next_max,
+                    "active_jobs": active_jobs_for_idle,
+                    "productive_idle_cpu": productive_idle_cpu,
+                    "productive_idle_gpu": productive_idle_gpu,
+                    "gate_reason": hole_raise_reason,
+                }
+            }
+            decision["config"] = new_cfg
+            return decision
     root_ready_rate = funnel_summary.get("root_ready_rate")
     _roots_pending_total, cpu_roots_pending_for_idle, _gpu_roots_pending = (
         _profile_roots_pending(funnel_summary)

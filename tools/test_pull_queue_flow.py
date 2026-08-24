@@ -133,8 +133,8 @@ def main() -> int:
             unresolved_ceiling=85,
             seat_hole=True,
         )
-        is True,
-        "42 open / parked 20 / 27 idle CPU / 0 claimable → create allowed",
+        is False,
+        "42 open / parked 20 is over the autopilot cap even with a hole",
     )
     check(
         create_ok(
@@ -146,6 +146,17 @@ def main() -> int:
         )
         is False,
         "85 unresolved → create blocked",
+    )
+    check(
+        create_ok(
+            root_phase_jobs=25,
+            max_concurrent=27,
+            unresolved=25,
+            unresolved_ceiling=85,
+            seat_hole=True,
+        )
+        is True,
+        "25/27 under the autopilot cap still creates for a GPU hole",
     )
     pica_cap = eff_cap(
         max_concurrent=20, idle_needs_work=True, hole_deficit=4, max_hole_lift=16

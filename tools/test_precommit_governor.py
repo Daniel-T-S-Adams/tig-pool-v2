@@ -113,6 +113,15 @@ def main() -> int:
     if not ok:
         failed += 1
 
+    blocked, reason = should_block(746, 173, 60, settings, False, True)
+    ok = blocked is False and reason.startswith("idle_gpu_override:")
+    print(
+        f"{'pass' if ok else 'FAIL'}: 0.347 ready-rate still creates for empty GPUs "
+        f"blocked={blocked} reason={reason!r}"
+    )
+    if not ok:
+        failed += 1
+
     blocked, reason = should_block(
         73, 20, 6, settings, False, False, True
     )
@@ -528,6 +537,18 @@ def main() -> int:
     ok = gpu_keep_ahead_fn(
         unowned_gpu_root_jobs=0,
         gpu_spare_jobs=2,
+        gpu_unassigned_claimable=0,
+        leftover_jobs=8,
+    ) is True
+    print(
+        f"{'pass' if ok else 'FAIL'}: sticky leftover crumbs on live GPU jobs "
+        f"do not hide keep-ahead when claimable_gpu=0"
+    )
+    if not ok:
+        failed += 1
+    ok = gpu_keep_ahead_fn(
+        unowned_gpu_root_jobs=0,
+        gpu_spare_jobs=2,
         gpu_unassigned_claimable=381,
     ) is False
     print(f"{'pass' if ok else 'FAIL'}: GPU leftover warehouse covers keep-ahead")
@@ -619,11 +640,12 @@ def main() -> int:
         (dict(root_phase_jobs=20, proof_phase_jobs=13, max_concurrent=90, overlap_cap=8), True, "fleet-sized cap lets idle boxes get new jobs"),
         (dict(root_phase_jobs=10, proof_phase_jobs=0, max_concurrent=90, unresolved=85, unresolved_ceiling=85), False, "TIG unresolved ceiling blocks creates"),
         (dict(root_phase_jobs=10, proof_phase_jobs=0, max_concurrent=90, unresolved=84, unresolved_ceiling=85), True, "one slot under TIG ceiling still creates"),
-        (dict(root_phase_jobs=42, proof_phase_jobs=0, max_concurrent=20, unresolved=42, unresolved_ceiling=85, seat_hole=True), True, "42 open / parked 20 / seat hole still creates"),
+        (dict(root_phase_jobs=42, proof_phase_jobs=0, max_concurrent=20, unresolved=42, unresolved_ceiling=85, seat_hole=True), False, "seat hole does not walk around max_concurrent"),
         (dict(root_phase_jobs=42, proof_phase_jobs=0, max_concurrent=20, unresolved=85, unresolved_ceiling=85, seat_hole=True), False, "TIG 85 blocks even with a seat hole"),
         (dict(root_phase_jobs=42, proof_phase_jobs=0, max_concurrent=20, unresolved=42, unresolved_ceiling=85, seat_hole=False), False, "42/20 without a hole stays blocked"),
-        (dict(root_phase_jobs=35, proof_phase_jobs=0, max_concurrent=21, unresolved=35, unresolved_ceiling=85, spare_short=True), True, "spare short may top up over parked cap"),
+        (dict(root_phase_jobs=35, proof_phase_jobs=0, max_concurrent=21, unresolved=35, unresolved_ceiling=85, spare_short=True), False, "spare short does not walk around max_concurrent"),
         (dict(root_phase_jobs=35, proof_phase_jobs=0, max_concurrent=21, unresolved=85, unresolved_ceiling=85, spare_short=True), False, "TIG 85 blocks spare top-up"),
+        (dict(root_phase_jobs=24, proof_phase_jobs=0, max_concurrent=27, unresolved=24, unresolved_ceiling=85), True, "under the autopilot cap still creates"),
     ]
     for kwargs, expect, label in create_cases:
         got = create_ok(**kwargs)
@@ -806,8 +828,8 @@ def main() -> int:
     eff_cases = [
         (dict(max_concurrent=24, online_cpu=67, online_gpu=16, cpu_want_spare=2, gpu_want_spare=2, idle_needs_work=False), 24, "busy fleet honors a parked autopilot cap"),
         (dict(max_concurrent=24, online_cpu=67, online_gpu=16, idle_needs_work=True, hole_deficit=0), 24, "keep-ahead idle flag does not lift to fleet size"),
-        (dict(max_concurrent=24, online_cpu=67, online_gpu=16, idle_needs_work=True, hole_deficit=17, max_hole_lift=16), 40, "hole lifts by one burst, not 83 boxes"),
-        (dict(max_concurrent=20, online_cpu=66, online_gpu=18, idle_needs_work=True, hole_deficit=35, max_hole_lift=16), 36, "78-on-20 flood cannot reopen via empty XL seats"),
+        (dict(max_concurrent=24, online_cpu=67, online_gpu=16, idle_needs_work=True, hole_deficit=17, max_hole_lift=16), 24, "hole does not lift the autopilot cap"),
+        (dict(max_concurrent=20, online_cpu=66, online_gpu=18, idle_needs_work=True, hole_deficit=35, max_hole_lift=16), 20, "empty XL seats do not walk around the cap"),
         (dict(max_concurrent=35, online_cpu=0, online_gpu=0, cpu_want_spare=0, gpu_want_spare=0, idle_needs_work=True), 35, "unknown online does not drop the configured cap"),
         (dict(max_concurrent=120, online_cpu=67, online_gpu=16, idle_needs_work=True, hole_deficit=50, unresolved_ceiling=85), 85, "TIG ceiling still clamps a high configured cap"),
         (dict(max_concurrent=24, online_cpu=67, online_gpu=16, unresolved_ceiling=85), 24, "no idle hole keeps the parked cap under TIG ceiling"),
@@ -825,9 +847,9 @@ def main() -> int:
     epyc_cap = eff_cap(
         max_concurrent=20, idle_needs_work=True, hole_deficit=4, max_hole_lift=16
     )
-    ok = pica_cap == epyc_cap == 24
+    ok = pica_cap == epyc_cap == 20
     print(
-        f"{'pass' if ok else 'FAIL'}: 4 Pica seats and 1 EPYC×4 lift the parked cap the same "
+        f"{'pass' if ok else 'FAIL'}: 4 Pica seats and 1 EPYC×4 honor the same cap "
         f"pica={pica_cap} epyc={epyc_cap}"
     )
     if not ok:

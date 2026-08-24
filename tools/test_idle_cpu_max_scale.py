@@ -19,6 +19,7 @@ def _load_fns():
         "oversub_upscale_allowed",
         "idle_hole_blocks_cap_drain",
         "should_ratchet_parked_cap_to_live",
+        "should_raise_cap_for_seat_hole",
         "leftover_stranded_blocks_ratchet",
         "health_block_reasons",
     }
@@ -38,6 +39,7 @@ def main() -> int:
     oversub = ns["precommit_already_oversubscribed"]
     ratchet = ns["oversub_upscale_allowed"]
     hole_drain = ns["idle_hole_blocks_cap_drain"]
+    hole_raise = ns["should_raise_cap_for_seat_hole"]
     base = dict(
         enabled=True,
         productive_idle_cpu=4,
@@ -195,10 +197,33 @@ def main() -> int:
                 {"pending_roots": 2, "assigned_roots": 0},
                 {"pending_roots": 2, "assigned_roots": 0},
             ],
-            True,
-            "three leftover-looking jobs still block",
+            False,
+            "three leftover crumbs are not a capacity hole",
         ),
     ]
+    hole_raise_cases = [
+        (
+            dict(idle_gpu=10, gpu_claimable=0, current_max=23, active_jobs=32),
+            True,
+            "idle GPUs at a full cap raise max_concurrent",
+        ),
+        (
+            dict(idle_gpu=1, gpu_claimable=0, current_max=27, active_jobs=25),
+            False,
+            "cap still has room — master creates under it",
+        ),
+        (
+            dict(idle_gpu=0, gpu_claimable=0, current_max=27, active_jobs=27),
+            False,
+            "no idle hole does not raise the cap",
+        ),
+    ]
+    for kwargs, expect, label in hole_raise_cases:
+        ok_flag, reason = hole_raise(**kwargs)
+        passed = ok_flag is expect
+        print(f"{'pass' if passed else 'FAIL'}: {label} -> {ok_flag} ({reason})")
+        if not passed:
+            failed += 1
     for items, expect, label in leftover_cases:
         got = leftover_stranded(items)
         passed = got is expect

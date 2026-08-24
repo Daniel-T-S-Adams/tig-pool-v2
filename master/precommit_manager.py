@@ -612,16 +612,16 @@ def compute_gpu_keep_ahead(
     """True when the GPU 2-job spare pile is short. GPUs may all be busy.
 
     Spare target is a couple of replacements, capped by live GPU count.
-    Leftover *jobs* already in that pile are the work — leftover *roots*
-    on one finishing job must not hide a needed replacement.
+    Claimable leftovers *are* that pile. Sticky crumbs on live GPU jobs
+    are not — idle cards cannot pull them, so they must not hide a
+    replacement while claimable_gpu is 0.
     """
     del online_idle_gpu_slaves
+    del leftover_jobs
     if gpu_profile_blocked:
         return False
     spare_n = max(0, int(keep_ahead_spare or 0))
     if max(0, int(gpu_unassigned_claimable or 0)) > 0:
-        return False
-    if leftover_jobs is not None and max(0, int(leftover_jobs or 0)) >= spare_n:
         return False
     proving = max(0, int(gpu_jobs_in_proof_phase or 0))
     online = max(0, int(online_gpu_slaves or 0))
@@ -699,15 +699,17 @@ def effective_concurrent_cap(
     XL seats may add at most one burst-sized hole, never the whole fleet.
     Never climb past ``unresolved_ceiling`` (TIG 100 minus headroom).
     """
-    del online_cpu, online_gpu, cpu_want_spare, gpu_want_spare
+    del (
+        online_cpu,
+        online_gpu,
+        cpu_want_spare,
+        gpu_want_spare,
+        idle_needs_work,
+        hole_deficit,
+        max_hole_lift,
+    )
     cap = max(0, int(max_concurrent or 0))
     fill = cap
-    if idle_needs_work:
-        extra = min(
-            max(0, int(hole_deficit or 0)),
-            max(0, int(max_hole_lift or 0)),
-        )
-        fill = cap + extra
     ceiling = max(0, int(unresolved_ceiling or 0))
     if ceiling > 0 and fill > 0:
         fill = min(fill, ceiling)
@@ -728,19 +730,15 @@ def concurrent_create_allowed(
 ) -> bool:
     """True when another precommit may start.
 
-    Hard stop when local TIG-unresolved jobs (live, unsent, or skipped)
-    already sit at the safe ceiling. A real seat hole (empty seats above
-    claimable leftovers) may refill even if open jobs sit over the parked
-    cap — that is the 42/20 stall. A 2-job spare short is the same: the
-    parked cap must not freeze the replacement trickle while leftovers
-    are already down to one finishing job. Proof-phase overlap is only a
-    local pipeline hint and must not beat the TIG ceiling.
+    Autopilot owns max_concurrent. Master honors that number. Empty seats
+    must raise the cap via autopilot, not walk around it here. Hard stop
+    at the TIG unresolved ceiling. Proof-phase overlap is only a local
+    pipeline hint and must not beat that ceiling.
     """
+    del seat_hole, spare_short
     ceiling = int(unresolved_ceiling or 0)
     if ceiling > 0 and int(unresolved or 0) >= ceiling:
         return False
-    if seat_hole or spare_short:
-        return True
     cap = int(max_concurrent or 0)
     if cap <= 0:
         return True
@@ -1849,6 +1847,13 @@ class PrecommitManager:
         idle_cpu_needs_work = bool(governor.get("idle_cpu_needs_work"))
         idle_gpu_needs_work = bool(governor.get("idle_gpu_needs_work"))
         idle_gpu_starved = bool(governor.get("idle_gpu_starved"))
+        gpu_claimable_now = int(governor.get("gpu_unassigned_claimable") or 0)
+        gpu_unowned_now = int(governor.get("unowned_gpu_root_jobs") or 0)
+        if gpu_claimable_now <= 0 and (
+            idle_gpu_starved
+            or gpu_unowned_now < _keep_ahead_spare()
+        ):
+            idle_gpu_starved = True
         cpu_hole = cpu_idle_hole(
             idle=int(
                 governor.get("decision_idle_cpu_slaves")
