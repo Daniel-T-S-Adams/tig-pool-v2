@@ -38,6 +38,7 @@ def main() -> int:
         "poller_worker_count",
         "leftover_feeds_box",
         "leftover_is_crumb",
+        "leftover_finishes_job",
         "leftover_takeable_by_poller",
         "should_skip_crumb_for_empty_seat",
         "takeable_unassigned_by_bid",
@@ -128,7 +129,7 @@ def main() -> int:
     check(
         skip(
             remaining_nonces=12,
-            unassigned_on_job=1,
+            unassigned_on_job=3,
             workers=25,
             empty_seats=1,
             poller_assigned=0,
@@ -137,7 +138,35 @@ def main() -> int:
             sticky_own=False,
         )
         is True,
-        "empty Pica skips a 12-nonce crumb when fat leftovers exist",
+        "empty Pica skips a mid-job 12-nonce crumb when fat leftovers exist",
+    )
+    check(
+        skip(
+            remaining_nonces=24,
+            unassigned_on_job=1,
+            workers=25,
+            empty_seats=1,
+            poller_assigned=0,
+            taking_this_poll=0,
+            has_fat_claimable=True,
+            sticky_own=False,
+        )
+        is False,
+        "empty Pica takes the last leftover even when it is a crumb",
+    )
+    check(
+        skip(
+            remaining_nonces=16,
+            unassigned_on_job=1,
+            workers=25,
+            empty_seats=1,
+            poller_assigned=0,
+            taking_this_poll=0,
+            has_fat_claimable=True,
+            sticky_own=False,
+        )
+        is False,
+        "empty Pica takes a 16-nonce last leftover",
     )
     check(
         skip(
@@ -156,7 +185,7 @@ def main() -> int:
     check(
         skip(
             remaining_nonces=64,
-            unassigned_on_job=1,
+            unassigned_on_job=3,
             workers=190,
             empty_seats=5,
             poller_assigned=0,
@@ -165,7 +194,21 @@ def main() -> int:
             sticky_own=False,
         )
         is True,
-        "empty EPYC skips one 64-nonce leftover when a fat job exists",
+        "empty EPYC skips a mid-job 64-nonce leftover when a fat job exists",
+    )
+    check(
+        skip(
+            remaining_nonces=64,
+            unassigned_on_job=1,
+            workers=190,
+            empty_seats=5,
+            poller_assigned=0,
+            taking_this_poll=0,
+            has_fat_claimable=True,
+            sticky_own=False,
+        )
+        is False,
+        "empty EPYC takes the last leftover of a job",
     )
     check(
         skip(
@@ -192,8 +235,8 @@ def main() -> int:
             has_fat_claimable=True,
             sticky_own=True,
         )
-        is True,
-        "sticky Pica still skips a crumb when fat leftovers exist",
+        is False,
+        "sticky Pica takes the last leftover even when fat leftovers exist",
     )
     check(
         skip(
@@ -367,13 +410,24 @@ def main() -> int:
     check(
         release(
             remaining_nonces=12,
-            unassigned_on_job=1,
+            unassigned_on_job=2,
             workers=25,
             empty_seats=1,
             has_fat_claimable=True,
         )
         is True,
-        "assigned 12-nonce crumb is released when fat leftovers exist",
+        "assigned mid-job 12-nonce crumb is released when fat leftovers exist",
+    )
+    check(
+        release(
+            remaining_nonces=24,
+            unassigned_on_job=0,
+            workers=25,
+            empty_seats=1,
+            has_fat_claimable=True,
+        )
+        is False,
+        "assigned last leftover stays on the box so the job can finish",
     )
     check(
         release(
@@ -415,7 +469,7 @@ def main() -> int:
         ],
         workers=25,
         max_concurrent=1,
-        unassigned_by_bid={"crumb": 1, "fat": 80},
+        unassigned_by_bid={"crumb": 2, "fat": 80},
         leftover_nonces_by_bid={"crumb": 12, "fat": 64},
         has_fat_claimable=True,
     )

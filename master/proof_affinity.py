@@ -94,6 +94,8 @@ def should_sticky_leftover_fanout(
     del preferred_inflight_total, preferred_cap
     unassigned = max(0, int(unassigned_on_job or 0))
     keep = max(0, int(leftover_keep or 0))
+    if 0 < unassigned <= 1:
+        return True
     if unassigned <= keep:
         return False
     return int(idle_peers or 0) > 0

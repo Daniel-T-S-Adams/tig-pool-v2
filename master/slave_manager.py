@@ -233,6 +233,18 @@ def leftover_is_crumb(
     )
 
 
+def leftover_finishes_job(unassigned_on_job: int, already_assigned: bool = False) -> bool:
+    """True when this leftover is the last root that can finish the job.
+
+    Unassigned last leftover: unassigned root count is 1.
+    Already-assigned last leftover: unassigned root count is 0.
+    """
+    leftover = max(0, int(unassigned_on_job or 0))
+    if already_assigned:
+        return leftover <= 0
+    return leftover <= 1
+
+
 def leftover_takeable_by_poller(
     bid: str,
     *,
@@ -266,9 +278,12 @@ def should_skip_crumb_for_empty_seat(
     """Crumbs must not take the only seat when fat leftovers exist.
 
     Sticky finish of scraps is only allowed when the box has more than
-    one seat. A Pica's only seat must not stay on 12 nonces.
+    one seat. A Pica's only seat must not stay on 12 nonces — unless
+    that crumb is the last leftover and finishes the job.
     """
     if is_proof:
+        return False
+    if leftover_finishes_job(unassigned_on_job, already_assigned=False):
         return False
     if sticky_own and int(empty_seats or 1) > 1:
         return False
@@ -293,8 +308,13 @@ def assigned_crumb_should_release(
     empty_seats: int = 1,
     has_fat_claimable: bool = False,
 ) -> bool:
-    """Drop an already-assigned crumb so this poll can take fat work."""
+    """Drop an already-assigned crumb so this poll can take fat work.
+
+    Never drop the last leftover — that is the root that finishes the job.
+    """
     if is_proof or not has_fat_claimable:
+        return False
+    if leftover_finishes_job(unassigned_on_job, already_assigned=True):
         return False
     return leftover_is_crumb(
         remaining_nonces=remaining_nonces,

@@ -178,6 +178,17 @@ def main() -> int:
             "keep-count leftovers stay exclusive",
         )
     )
+    cases.append(
+        (
+            should_sticky_leftover_fanout(
+                unassigned_on_job=1,
+                leftover_keep=4,
+                idle_peers=0,
+            )
+            is True,
+            "last leftover unlocks so any CPU can finish the job",
+        )
+    )
 
     cases.append(
         (
