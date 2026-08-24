@@ -13,6 +13,7 @@ from master.dispatch import (  # noqa: E402
     creates_for_profile,
     dispatch_shorts,
     leftover_food,
+    leftovers_cover_spare,
     extra_create_this_tick,
     lock_eligible_algorithms,
     next_create_profile,
@@ -78,6 +79,18 @@ def main() -> int:
     check(
         leftover_food(claimable=0, unassigned=171) == 171,
         "sticky unassigned leftovers still count as food",
+    )
+    check(
+        leftovers_cover_spare(claimable=572, spare=2) is True,
+        "572 claimable leftovers already are the spare pile",
+    )
+    check(
+        leftovers_cover_spare(claimable=1, spare=2) is False,
+        "one leftover is still short of a 2-job spare",
+    )
+    check(
+        profile_needs_create(idle=0, claimable=572, unowned_jobs=0) is False,
+        "busy fleet with a leftover warehouse must not keep-ahead create",
     )
     check(
         dispatch_shorts(
@@ -212,8 +225,20 @@ def main() -> int:
         gpu_unowned=1,
     )
     check(
-        both_busy == (True, True),
-        "neither hole → both may keep-ahead",
+        both_busy == (False, False),
+        "leftover warehouse covers keep-ahead on a busy fleet",
+    )
+    both_busy_empty = dispatch_shorts(
+        cpu_idle=0,
+        cpu_claimable=0,
+        cpu_unowned=1,
+        gpu_idle=0,
+        gpu_claimable=0,
+        gpu_unowned=1,
+    )
+    check(
+        both_busy_empty == (True, True),
+        "neither hole and no leftovers → both may keep-ahead",
     )
     check(
         creates_for_profile(

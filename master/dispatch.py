@@ -31,9 +31,12 @@ def profile_needs_create(
     """
     idle_n = max(0, int(idle or 0))
     claimable_n = max(0, int(claimable or 0))
+    buf = max(0, int(next_job_buffer or 0))
     if idle_n > 0 and claimable_n < idle_n:
         return True
-    return int(unowned_jobs or 0) < max(0, int(next_job_buffer or 0))
+    if leftovers_cover_spare(claimable=claimable_n, spare=buf):
+        return False
+    return int(unowned_jobs or 0) < buf
 
 
 def profile_has_hole(*, idle: int = 0, claimable: int = 0) -> bool:
@@ -45,6 +48,15 @@ def profile_has_hole(*, idle: int = 0, claimable: int = 0) -> bool:
 def leftover_food(*, claimable: int = 0, unassigned: int = 0) -> int:
     """Sticky leftovers still feed boxes. Claimable-only hid that pile."""
     return max(0, int(claimable or 0), int(unassigned or 0))
+
+
+def leftovers_cover_spare(*, claimable: int = 0, spare: int = NEXT_JOB_BUFFER) -> bool:
+    """True when sitting leftovers already are the keep-ahead pile.
+
+    Keep-ahead counted unowned jobs only. Sticky leftovers then looked
+    like an empty warehouse, so creates kept minting into 1600 unassigned.
+    """
+    return max(0, int(claimable or 0)) > max(0, int(spare or 0))
 
 
 def dispatch_shorts(
@@ -72,8 +84,16 @@ def dispatch_shorts(
     if not allow_keep_ahead:
         return cpu_hole, gpu_hole
     buf = max(0, int(next_job_buffer or 0))
-    cpu_ahead = (not cpu_hole) and int(cpu_unowned or 0) < buf
-    gpu_ahead = (not gpu_hole) and int(gpu_unowned or 0) < buf
+    cpu_ahead = (
+        (not cpu_hole)
+        and int(cpu_unowned or 0) < buf
+        and not leftovers_cover_spare(claimable=cpu_claimable, spare=buf)
+    )
+    gpu_ahead = (
+        (not gpu_hole)
+        and int(gpu_unowned or 0) < buf
+        and not leftovers_cover_spare(claimable=gpu_claimable, spare=buf)
+    )
     cpu_short = cpu_hole or (cpu_ahead and not gpu_hole)
     gpu_short = gpu_hole or (gpu_ahead and not cpu_hole)
     return cpu_short, gpu_short

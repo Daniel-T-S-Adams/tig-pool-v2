@@ -386,9 +386,9 @@ def compute_idle_cpu_needs_work(
 ) -> bool:
     """True when precommit should bias toward CPU work for an underfed fleet.
 
-    Claimable leftover roots may feed boxes that are already idle. They do
-    not count as the next job for a box that is still proving. Keep-ahead
-    is a small spare pile, not one replacement per proving job.
+    Idle seats with fewer claimable leftovers than they can absorb still
+    create. A leftover warehouse already is the spare pile — do not mint
+    unowned jobs while that pile is above keep-ahead spare.
     """
     if not idle_cpu_override:
         return False
@@ -401,11 +401,14 @@ def compute_idle_cpu_needs_work(
     proving = max(0, int(cpu_jobs_in_proof_phase or 0))
     if idle > 0 and claimable < idle:
         return True
+    spare_n = max(0, int(keep_ahead_spare or 0))
+    if claimable > spare_n:
+        return False
     want = keep_ahead_want(
         idle=0,
         proving=proving,
         online=online_cpu_slaves,
-        spare=max(0, int(keep_ahead_spare or 0)),
+        spare=spare_n,
     )
     if want > 0 and int(unowned_cpu_root_jobs or 0) < want:
         return True
@@ -478,15 +481,13 @@ def idle_create_burst(
     cpu_online: int = 0,
     gpu_online: int = 0,
     remaining_cap_room: int | None = None,
+    trickle_cap: int = 2,
 ) -> int:
     """How many precommits to attempt this tick (including the first).
 
-    1 = normal single create. More while idle machines have fewer
-    claimable roots than they can absorb, or when claimable is empty
-    during a proving wave (unowned job counts do not feed finishers).
-    Caps at remaining unassigned room so this cannot rebuild a leftover
-    pile. Empty-claimable replacements scale with fleet/want, not a
-    fixed 4.
+    1 = normal single create. A real hole still refills, but only as a
+    trickle (spare pile of 2). A 16-job burst after the pile hits zero
+    is how unassigned yo-yos 0 → 900.
     """
     if not idle_cpu_needs_work and not idle_gpu_needs_work:
         return 1
@@ -548,7 +549,8 @@ def idle_create_burst(
         if cap_room <= 0:
             return 1
         sized = min(sized, cap_room)
-    return max(1, sized)
+    trickle = max(1, int(trickle_cap or 1))
+    return max(1, min(sized, trickle))
 
 
 def extra_creates_this_tick(
@@ -622,6 +624,9 @@ def compute_gpu_keep_ahead(
     Unowned jobs with no claimable roots do not feed a finishing card.
     """
     if gpu_profile_blocked:
+        return False
+    spare_n = max(0, int(keep_ahead_spare or 0))
+    if int(gpu_unassigned_claimable or 0) > spare_n:
         return False
     proving = max(0, int(gpu_jobs_in_proof_phase or 0))
     online = max(0, int(online_gpu_slaves or 0))
@@ -1853,7 +1858,7 @@ class PrecommitManager:
             idle_needs_work=idle_cpu_needs_work or idle_gpu_needs_work,
             unresolved_ceiling=unresolved_ceiling,
             hole_deficit=hole_deficit,
-            max_hole_lift=int(os.environ.get("PRECOMMIT_IDLE_BURST_MAX", "16")),
+            max_hole_lift=int(os.environ.get("PRECOMMIT_KEEP_AHEAD_SPARE", "2")),
         )
         overlap_cap = int(os.environ.get("PRECOMMIT_PROOF_OVERLAP", "8"))
         # Size the idle burst before any gate so extras can still run this
@@ -1878,8 +1883,9 @@ class PrecommitManager:
             cpu_unowned=int(governor.get("unowned_cpu_root_jobs") or 0),
             gpu_want_spare=gpu_want_spare,
             gpu_unowned=int(governor.get("unowned_gpu_root_jobs") or 0),
-            base_burst=int(os.environ.get("PRECOMMIT_IDLE_BURST", "4")),
-            max_burst=int(os.environ.get("PRECOMMIT_IDLE_BURST_MAX", "16")),
+            base_burst=int(os.environ.get("PRECOMMIT_KEEP_AHEAD_SPARE", "2")),
+            max_burst=int(os.environ.get("PRECOMMIT_KEEP_AHEAD_SPARE", "2")),
+            trickle_cap=int(os.environ.get("PRECOMMIT_KEEP_AHEAD_SPARE", "2")),
             cpu_unassigned_remaining=max(
                 0,
                 int(caps.get("cpu_unassigned_cap") or 0)

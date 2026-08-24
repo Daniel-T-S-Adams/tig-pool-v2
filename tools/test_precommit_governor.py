@@ -313,8 +313,8 @@ def main() -> int:
                 unowned_cpu_root_jobs=0,
                 online_cpu_slaves=16,
             ),
-            True,
-            "leftover claimable batches do not count as proving replacements",
+            False,
+            "leftover claimable batches already are the spare pile",
         ),
         (
             dict(
@@ -361,8 +361,24 @@ def main() -> int:
                 unowned_cpu_root_jobs=0,
                 online_cpu_slaves=67,
             ),
-            True,
-            "no unowned spare still requests keep-ahead",
+            False,
+            "10 leftover claimable roots cover keep-ahead",
+        ),
+        (
+            dict(
+                idle_cpu_override=True,
+                cpu_slots=43,
+                cpu_unassigned_claimable=572,
+                cpu_jobs_needing_roots=40,
+                cpu_create_target=43,
+                cpu_profile_blocked=False,
+                online_idle_cpu_slaves=2,
+                cpu_jobs_in_proof_phase=20,
+                unowned_cpu_root_jobs=0,
+                online_cpu_slaves=43,
+            ),
+            False,
+            "572 claimable / 2 idle must not mint more jobs",
         ),
         (
             dict(
@@ -469,6 +485,14 @@ def main() -> int:
         failed += 1
     ok = gpu_keep_ahead_fn(unowned_gpu_root_jobs=0, gpu_spare_jobs=2) is True
     print(f"{'pass' if ok else 'FAIL'}: spare pile short requests keep-ahead")
+    if not ok:
+        failed += 1
+    ok = gpu_keep_ahead_fn(
+        unowned_gpu_root_jobs=0,
+        gpu_spare_jobs=2,
+        gpu_unassigned_claimable=381,
+    ) is False
+    print(f"{'pass' if ok else 'FAIL'}: GPU leftover warehouse covers keep-ahead")
     if not ok:
         failed += 1
     ok = gpu_keep_ahead_fn(
@@ -1065,8 +1089,8 @@ def main() -> int:
                 max_burst=16,
                 cpu_unassigned_remaining=256,
             ),
-            16,
-            "48 idle / 0 claimable clamps to max_burst",
+            2,
+            "48 idle / 0 claimable is a 2-job trickle, not a 16-job dump",
         ),
         (
             burst(
@@ -1076,8 +1100,8 @@ def main() -> int:
                 max_burst=16,
                 cpu_unassigned_remaining=256,
             ),
-            4,
-            "small idle + empty claimable still uses the 4-job replacement wave",
+            2,
+            "small idle + empty claimable still trickles 2",
         ),
         (
             burst(
@@ -1098,8 +1122,8 @@ def main() -> int:
                 max_burst=16,
                 cpu_unassigned_remaining=256,
             ),
-            16,
-            "sitting leftovers do not shrink the idle burst past max_burst",
+            2,
+            "sitting leftovers still trickle at most 2",
         ),
         (
             burst(
@@ -1111,8 +1135,8 @@ def main() -> int:
                 max_burst=16,
                 cpu_unassigned_remaining=256,
             ),
-            16,
-            "proving keep-ahead deficit clamps to max_burst",
+            2,
+            "proving keep-ahead is a 2-job trickle",
         ),
         (
             burst(
@@ -1124,8 +1148,8 @@ def main() -> int:
                 max_burst=16,
                 cpu_unassigned_remaining=256,
             ),
-            3,
-            "small proving wave bursts only the spare deficit",
+            2,
+            "small proving wave still trickles 2",
         ),
         (
             burst(
@@ -1137,8 +1161,8 @@ def main() -> int:
                 max_burst=16,
                 cpu_unassigned_remaining=256,
             ),
-            16,
-            "leftovers covering idle still burst, clamped to max_burst",
+            2,
+            "leftovers covering idle do not dump 16 jobs",
         ),
         (
             burst(
@@ -1152,8 +1176,8 @@ def main() -> int:
                 cpu_unassigned_remaining=256,
                 cpu_online=77,
             ),
-            16,
-            "claimable 0 uses want but clamps to max_burst",
+            2,
+            "claimable 0 uses want but trickles 2",
         ),
         (
             burst(
@@ -1167,8 +1191,8 @@ def main() -> int:
                 cpu_unassigned_remaining=256,
                 cpu_online=200,
             ),
-            16,
-            "200-box fleet empty claimable clamps to max_burst",
+            2,
+            "200-box fleet empty claimable still trickles 2",
         ),
         (
             burst(
@@ -1181,8 +1205,23 @@ def main() -> int:
                 max_burst=16,
                 cpu_unassigned_remaining=256,
             ),
-            4,
-            "busy fleet + empty claimable + no want still starts base wave",
+            2,
+            "busy fleet + empty claimable still trickles 2",
+        ),
+        (
+            burst(
+                idle_cpu_needs_work=True,
+                idle_gpu_needs_work=True,
+                idle_cpu=6,
+                claimable_cpu=0,
+                idle_gpu=13,
+                claimable_gpu=0,
+                max_burst=16,
+                cpu_unassigned_remaining=256,
+                gpu_unassigned_remaining=32,
+            ),
+            2,
+            "19 empty seats after a drain do not dump a 16-job refill",
         ),
     ]
     for got, expect, label in burst_cases:
@@ -1233,8 +1272,8 @@ def main() -> int:
                 cpu_unassigned_remaining=256,
                 remaining_cap_room=10,
             ),
-            4,
-            "4 empty seats burst 4 whether Pica or EPYC",
+            2,
+            "4 empty seats still trickle 2",
         ),
     ]
     for got, expect, label in scale_cases:
