@@ -13,6 +13,8 @@ from master.dispatch import (  # noqa: E402
     creates_for_profile,
     dispatch_shorts,
     leftover_food,
+    leftover_jobs_cover_spare,
+    leftover_jobs_or_fallback,
     leftovers_cover_spare,
     extra_create_this_tick,
     lock_eligible_algorithms,
@@ -89,8 +91,52 @@ def main() -> int:
         "one leftover is still short of a 2-job spare",
     )
     check(
+        leftover_jobs_cover_spare(leftover_jobs=2, spare=2) is True,
+        "2 leftover jobs already are the spare pile",
+    )
+    check(
+        leftover_jobs_cover_spare(leftover_jobs=1, spare=2) is False,
+        "1 leftover job still needs a replacement",
+    )
+    check(
+        leftover_jobs_or_fallback(None, leftover_roots=300, unowned=0, spare=2) == 3,
+        "missing job census with a root warehouse must not look empty",
+    )
+    check(
+        leftover_jobs_or_fallback(1, leftover_roots=32, unowned=0, spare=2) == 1,
+        "counted leftover jobs win over leftover roots",
+    )
+    check(
         profile_needs_create(idle=0, claimable=572, unowned_jobs=0) is False,
         "busy fleet with a leftover warehouse must not keep-ahead create",
+    )
+    check(
+        profile_needs_create(
+            idle=0, claimable=32, leftover_jobs=1, unowned_jobs=0
+        )
+        is True,
+        "one leftover job with 32 roots still wants a replacement",
+    )
+    check(
+        profile_needs_create(
+            idle=0, claimable=300, leftover_jobs=8, unowned_jobs=0
+        )
+        is False,
+        "8 leftover jobs already are the warehouse",
+    )
+    check(
+        profile_needs_create(
+            idle=5, claimable=236, leftover_jobs=8, unowned_jobs=0
+        )
+        is False,
+        "new workers pull leftovers when food covers the seats",
+    )
+    check(
+        profile_needs_create(
+            idle=10, claimable=2, leftover_jobs=1, unowned_jobs=0
+        )
+        is True,
+        "fleet grew past leftover food → create",
     )
     check(
         dispatch_shorts(
@@ -223,6 +269,34 @@ def main() -> int:
         gpu_idle=0,
         gpu_claimable=4,
         gpu_unowned=1,
+    )
+    check(
+        dispatch_shorts(
+            cpu_idle=0,
+            cpu_claimable=32,
+            cpu_leftover_jobs=1,
+            cpu_unowned=0,
+            gpu_idle=0,
+            gpu_claimable=300,
+            gpu_leftover_jobs=8,
+            gpu_unowned=0,
+        )
+        == (True, False),
+        "CPU spare short while GPU leftover jobs cover",
+    )
+    check(
+        dispatch_shorts(
+            cpu_idle=0,
+            cpu_claimable=300,
+            cpu_leftover_jobs=8,
+            cpu_unowned=0,
+            gpu_idle=0,
+            gpu_claimable=200,
+            gpu_leftover_jobs=8,
+            gpu_unowned=0,
+        )
+        == (False, False),
+        "leftover jobs on both profiles drain as workers leave",
     )
     check(
         both_busy == (False, False),

@@ -269,8 +269,8 @@ def main() -> int:
                 cpu_profile_blocked=False,
                 online_idle_cpu_slaves=0,
             ),
-            True,
-            "no idle CPUs + zero claimable => legacy on",
+            False,
+            "no idle CPUs + zero claimable is keep-ahead, not an idle hole",
         ),
         (
             dict(
@@ -297,8 +297,8 @@ def main() -> int:
                 cpu_jobs_in_proof_phase=8,
                 online_cpu_slaves=16,
             ),
-            True,
-            "busy proving fleet with no unowned spare still needs work",
+            False,
+            "busy proving fleet keep-ahead is not an idle-hole override",
         ),
         (
             dict(
@@ -490,6 +490,24 @@ def main() -> int:
     ok = gpu_keep_ahead_fn(
         unowned_gpu_root_jobs=0,
         gpu_spare_jobs=2,
+        gpu_unassigned_claimable=32,
+        leftover_jobs=1,
+    ) is True
+    print(f"{'pass' if ok else 'FAIL'}: one leftover GPU job still wants a replacement")
+    if not ok:
+        failed += 1
+    ok = gpu_keep_ahead_fn(
+        unowned_gpu_root_jobs=0,
+        gpu_spare_jobs=2,
+        gpu_unassigned_claimable=381,
+        leftover_jobs=8,
+    ) is False
+    print(f"{'pass' if ok else 'FAIL'}: leftover GPU jobs already are the spare pile")
+    if not ok:
+        failed += 1
+    ok = gpu_keep_ahead_fn(
+        unowned_gpu_root_jobs=0,
+        gpu_spare_jobs=2,
         gpu_unassigned_claimable=381,
     ) is False
     print(f"{'pass' if ok else 'FAIL'}: GPU leftover warehouse covers keep-ahead")
@@ -584,6 +602,8 @@ def main() -> int:
         (dict(root_phase_jobs=42, proof_phase_jobs=0, max_concurrent=20, unresolved=42, unresolved_ceiling=85, seat_hole=True), True, "42 open / parked 20 / seat hole still creates"),
         (dict(root_phase_jobs=42, proof_phase_jobs=0, max_concurrent=20, unresolved=85, unresolved_ceiling=85, seat_hole=True), False, "TIG 85 blocks even with a seat hole"),
         (dict(root_phase_jobs=42, proof_phase_jobs=0, max_concurrent=20, unresolved=42, unresolved_ceiling=85, seat_hole=False), False, "42/20 without a hole stays blocked"),
+        (dict(root_phase_jobs=35, proof_phase_jobs=0, max_concurrent=21, unresolved=35, unresolved_ceiling=85, spare_short=True), True, "spare short may top up over parked cap"),
+        (dict(root_phase_jobs=35, proof_phase_jobs=0, max_concurrent=21, unresolved=85, unresolved_ceiling=85, spare_short=True), False, "TIG 85 blocks spare top-up"),
     ]
     for kwargs, expect, label in create_cases:
         got = create_ok(**kwargs)
