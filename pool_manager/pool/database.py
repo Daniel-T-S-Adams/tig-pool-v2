@@ -31,6 +31,10 @@ class SingleFlightCache:
 
     Dashboard polls and the autopilot loop must not each open a warehouse
     query. Overlapping /admin/ops/metrics calls were pinning the manager pool.
+
+    After the first success, an expired TTL returns the last snapshot
+    immediately and refreshes in the background so Cloudflare/nginx do not
+    wait on a 30s rebuild and return an HTML error page.
     """
 
     def __init__(self, ttl_s: float):
@@ -43,9 +47,31 @@ class SingleFlightCache:
         now = time.time()
         if not force and self._value is not None and now - self._ts < self.ttl_s:
             return self._value
+        if not force and self._value is not None:
+            self._schedule_refresh(builder)
+            return self._value
+        return self._build_locked(builder)
+
+    def _schedule_refresh(self, builder) -> None:
+        if not self._lock.acquire(blocking=False):
+            return
+
+        def _run():
+            try:
+                value = builder()
+                self._value = value
+                self._ts = time.time()
+            except Exception:
+                logger.warning("background cache refresh failed", exc_info=True)
+            finally:
+                self._lock.release()
+
+        threading.Thread(target=_run, name="cache-refresh", daemon=True).start()
+
+    def _build_locked(self, builder):
         with self._lock:
             now = time.time()
-            if not force and self._value is not None and now - self._ts < self.ttl_s:
+            if self._value is not None and now - self._ts < self.ttl_s:
                 return self._value
             try:
                 value = builder()

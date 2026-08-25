@@ -329,27 +329,56 @@
       node.className = "ops-pill " + (kind || "");
     }
 
+    function sanitizeApiError(text, status) {
+      const raw = String(text || "");
+      if (/^\s*<(!DOCTYPE|html|!--)/i.test(raw) || /no-js ie\d/i.test(raw)) {
+        return "HTTP " + (status || "?") + " from Cloudflare/nginx (HTML, not JSON)";
+      }
+      return raw.slice(0, 160);
+    }
+
     async function fetchAdmin(path) {
-      const res = await fetch(path, {
-        headers: { "X-Admin-Secret": secret },
-        cache: "no-store",
-      });
-      if (res.status === 401) {
-        sessionStorage.removeItem(STORAGE_KEY);
-        secret = "";
-        stopTimer();
-        showGate("Invalid admin secret.");
-        throw new Error("unauthorized");
-      }
-      if (!res.ok) {
-        let text = await res.text();
+      const ctrl = new AbortController();
+      const abortTimer = setTimeout(() => ctrl.abort(), 20000);
+      try {
+        const res = await fetch(path, {
+          headers: { "X-Admin-Secret": secret },
+          cache: "no-store",
+          signal: ctrl.signal,
+        });
+        if (res.status === 401) {
+          sessionStorage.removeItem(STORAGE_KEY);
+          secret = "";
+          stopTimer();
+          showGate("Invalid admin secret.");
+          throw new Error("unauthorized");
+        }
+        const raw = await res.text();
+        if (!res.ok) {
+          let text = raw;
+          try {
+            const j = JSON.parse(raw);
+            text = j.detail || j.message || raw;
+          } catch (_) {}
+          throw new Error(sanitizeApiError(text || ("HTTP " + res.status), res.status));
+        }
+        const ct = (res.headers.get("content-type") || "").toLowerCase();
+        if (ct && !ct.includes("application/json") && /^\s*</.test(raw)) {
+          throw new Error(sanitizeApiError(raw, res.status));
+        }
         try {
-          const j = JSON.parse(text);
-          text = j.detail || j.message || text;
-        } catch (_) {}
-        throw new Error((text || ("HTTP " + res.status)).slice(0, 240));
+          return JSON.parse(raw);
+        } catch (_) {
+          throw new Error(sanitizeApiError(raw, res.status));
+        }
+      } catch (err) {
+        if (err && err.name === "AbortError") {
+          throw new Error("request timed out");
+        }
+        throw err;
+      } finally {
+        clearTimeout(abortTimer);
       }
-      return res.json();
     }
 
     async function fetchMetrics() {
@@ -560,11 +589,14 @@
         : `<tr><td colspan="9" style="color:var(--muted);">No jobs with solution_quality in this window</td></tr>`;
     }
 
+    let lastGoodMetrics = null;
+
     async function tick() {
       if (tickBusy) return;
       tickBusy = true;
       try {
         const data = await fetchMetrics();
+        lastGoodMetrics = data;
         showApp();
         render(data);
         el("creates-note").dataset.lastError = "";
@@ -572,17 +604,22 @@
           renderHitRate(await fetchHitRate());
         } catch (hitErr) {
           if (String(hitErr.message) !== "unauthorized") {
-            el("hit-meta").textContent = "Hit-rate API error: " + (hitErr.message || hitErr);
-            el("hit-body").innerHTML = `<tr><td colspan="9" style="color:var(--muted);">Unavailable</td></tr>`;
+            el("hit-meta").textContent = "Hit-rate: " + sanitizeApiError(hitErr.message || hitErr);
           } else {
             throw hitErr;
           }
         }
       } catch (err) {
         if (String(err.message) !== "unauthorized") {
-          setPill(el("status-pill"), "error", "bad");
+          const brief = sanitizeApiError(err.message || err);
           const note = el("creates-note");
-          if (note) note.textContent = "API error: " + (err.message || err);
+          if (lastGoodMetrics) {
+            setPill(el("status-pill"), "stale", "warn");
+            if (note) note.textContent = "Last refresh failed: " + brief + " — showing last good snapshot.";
+          } else {
+            setPill(el("status-pill"), "error", "bad");
+            if (note) note.textContent = "API error: " + brief;
+          }
           console.error(err);
         }
       } finally {

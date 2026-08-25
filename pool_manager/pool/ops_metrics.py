@@ -23,6 +23,19 @@ from pool.idle_tracker import (
 logger = logging.getLogger("pool.ops_metrics")
 
 SLAVE_ONLINE_MS = int(os.environ.get("SLAVE_ONLINE_MS", "120000"))
+# One scan of online sticky owners, reused by dashboard + governor counts.
+# Correlated EXISTS over the leftover warehouse made /admin/ops/metrics miss
+# Cloudflare's budget and return an HTML error page to the ops dashboard.
+STICKY_ONLINE_OWNERS_CTE = """
+sticky_online_owners AS (
+    SELECT DISTINCT rb2.benchmark_id
+    FROM root_batch rb2
+    JOIN slave_seen ss ON ss.slave_name = rb2.slave
+    WHERE rb2.slave IS NOT NULL
+      AND (rb2.ready = true OR rb2.ready IS NULL)
+      AND ss.last_seen >= %s
+)
+"""
 CPU_CHALLENGE_IDS = ("c001", "c002", "c003", "c007", "c008")
 GPU_CHALLENGE_IDS = ("c004", "c005", "c006")
 
@@ -304,7 +317,8 @@ def _governor_view(
     cutoff_ms = now_ms - int(settings.get("window_ms") or (30 * 60 * 1000))
     online_cutoff = now_ms - SLAVE_ONLINE_MS
     row = db.fetch_one(
-        """
+        f"""
+        WITH {STICKY_ONLINE_OWNERS_CTE}
         SELECT
             (
                 SELECT COUNT(*)
@@ -390,61 +404,46 @@ def _governor_view(
                 SELECT COUNT(*)
                 FROM root_batch rb
                 JOIN job j ON j.benchmark_id = rb.benchmark_id
+                LEFT JOIN sticky_online_owners soo ON soo.benchmark_id = rb.benchmark_id
                 WHERE rb.ready IS NULL
                   AND rb.slave IS NULL
                   AND COALESCE(j.stopped, false) = false
                   AND j.end_time IS NULL
                   AND j.merkle_root_ready IS NULL
                   AND j.settings->>'challenge_id' IN %s
-                  AND NOT EXISTS (
-                    SELECT 1
-                    FROM root_batch rb2
-                    JOIN slave_seen ss ON ss.slave_name = rb2.slave
-                    WHERE rb2.benchmark_id = rb.benchmark_id
-                      AND rb2.slave IS NOT NULL
-                      AND (rb2.ready = true OR rb2.ready IS NULL)
-                      AND ss.last_seen >= %s
-                  )
+                  AND soo.benchmark_id IS NULL
             ) AS cpu_unassigned_claimable,
             (
                 SELECT COUNT(*)
                 FROM root_batch rb
                 JOIN job j ON j.benchmark_id = rb.benchmark_id
+                LEFT JOIN sticky_online_owners soo ON soo.benchmark_id = rb.benchmark_id
                 WHERE rb.ready IS NULL
                   AND rb.slave IS NULL
                   AND COALESCE(j.stopped, false) = false
                   AND j.end_time IS NULL
                   AND j.merkle_root_ready IS NULL
                   AND j.settings->>'challenge_id' IN %s
-                  AND NOT EXISTS (
-                    SELECT 1
-                    FROM root_batch rb2
-                    JOIN slave_seen ss ON ss.slave_name = rb2.slave
-                    WHERE rb2.benchmark_id = rb.benchmark_id
-                      AND rb2.slave IS NOT NULL
-                      AND (rb2.ready = true OR rb2.ready IS NULL)
-                      AND ss.last_seen >= %s
-                  )
+                  AND soo.benchmark_id IS NULL
             ) AS gpu_unassigned_claimable
         """,
         (
-            CPU_CHALLENGE_IDS,
-            GPU_CHALLENGE_IDS,
-            cutoff_ms,
-            cutoff_ms,
-            cutoff_ms,
-            cutoff_ms,
-            cutoff_ms,
-            cutoff_ms,
-            cutoff_ms,
-            cutoff_ms,
-            CPU_CHALLENGE_IDS,
-            CPU_CHALLENGE_IDS,
-            GPU_CHALLENGE_IDS,
-            CPU_CHALLENGE_IDS,
             online_cutoff,
+            CPU_CHALLENGE_IDS,
             GPU_CHALLENGE_IDS,
-            online_cutoff,
+            cutoff_ms,
+            cutoff_ms,
+            cutoff_ms,
+            cutoff_ms,
+            cutoff_ms,
+            cutoff_ms,
+            cutoff_ms,
+            cutoff_ms,
+            CPU_CHALLENGE_IDS,
+            CPU_CHALLENGE_IDS,
+            GPU_CHALLENGE_IDS,
+            CPU_CHALLENGE_IDS,
+            GPU_CHALLENGE_IDS,
         ),
     ) or {}
 
@@ -787,7 +786,7 @@ def _capability_inventory(now_ms: int) -> dict:
     }
 
 
-_OPS_CACHE = db.SingleFlightCache(float(os.environ.get("OPS_METRICS_CACHE_S", "12")))
+_OPS_CACHE = db.SingleFlightCache(float(os.environ.get("OPS_METRICS_CACHE_S", "20")))
 
 
 def build_ops_metrics() -> dict:
@@ -868,27 +867,18 @@ def _build_ops_metrics_uncached() -> dict:
     # Sticky-reserved = unassigned root on a job that still has an online
     # sticky owner (someone who already worked that benchmark). Claimable =
     # unassigned with no such online owner — free for idle newcomers.
-    sticky_owner_exists = """
-        EXISTS (
-            SELECT 1
-            FROM root_batch rb2
-            JOIN slave_seen ss ON ss.slave_name = rb2.slave
-            WHERE rb2.benchmark_id = rb.benchmark_id
-              AND rb2.slave IS NOT NULL
-              AND (rb2.ready = true OR rb2.ready IS NULL)
-              AND ss.last_seen >= %s
-        )
-    """
+    # Use one sticky CTE instead of a correlated EXISTS per leftover root.
 
     unassigned = db.fetch_all(
         f"""
+        WITH {STICKY_ONLINE_OWNERS_CTE}
         SELECT
             j.challenge,
             j.settings->>'challenge_id' AS challenge_id,
             j.settings->>'track_id' AS track,
             COUNT(*) AS unassigned_roots,
-            COUNT(*) FILTER (WHERE NOT ({sticky_owner_exists})) AS claimable_roots,
-            COUNT(*) FILTER (WHERE {sticky_owner_exists}) AS sticky_reserved_roots,
+            COUNT(*) FILTER (WHERE soo.benchmark_id IS NULL) AS claimable_roots,
+            COUNT(*) FILTER (WHERE soo.benchmark_id IS NOT NULL) AS sticky_reserved_roots,
             ROUND(MIN((EXTRACT(EPOCH FROM NOW()) * 1000 - COALESCE(j.start_time, rb.start_time, %s)) / 60000.0), 1)
                 AS oldest_job_age_min,
             ROUND(MIN(
@@ -899,6 +889,7 @@ def _build_ops_metrics_uncached() -> dict:
             ), 1) AS oldest_unassigned_age_min
         FROM root_batch rb
         JOIN job j ON j.benchmark_id = rb.benchmark_id
+        LEFT JOIN sticky_online_owners soo ON soo.benchmark_id = rb.benchmark_id
         WHERE rb.ready IS NULL
           AND rb.slave IS NULL
           AND COALESCE(j.stopped, false) = false
@@ -906,29 +897,32 @@ def _build_ops_metrics_uncached() -> dict:
         GROUP BY j.challenge, j.settings->>'challenge_id', j.settings->>'track_id'
         ORDER BY unassigned_roots DESC
         """,
-        (online_cutoff, online_cutoff, now_ms, now_ms),
+        (online_cutoff, now_ms, now_ms),
     )
 
     oldest_unassigned = db.fetch_one(
         f"""
+        WITH {STICKY_ONLINE_OWNERS_CTE}
         SELECT
             ROUND(MAX((EXTRACT(EPOCH FROM NOW()) * 1000 - COALESCE(j.start_time, %s)) / 60000.0), 1)
                 AS oldest_unassigned_root_age_min,
             COUNT(*) AS unassigned_root_total,
-            COUNT(*) FILTER (WHERE NOT ({sticky_owner_exists})) AS claimable_root_total,
-            COUNT(*) FILTER (WHERE {sticky_owner_exists}) AS sticky_reserved_root_total
+            COUNT(*) FILTER (WHERE soo.benchmark_id IS NULL) AS claimable_root_total,
+            COUNT(*) FILTER (WHERE soo.benchmark_id IS NOT NULL) AS sticky_reserved_root_total
         FROM root_batch rb
         JOIN job j ON j.benchmark_id = rb.benchmark_id
+        LEFT JOIN sticky_online_owners soo ON soo.benchmark_id = rb.benchmark_id
         WHERE rb.ready IS NULL
           AND rb.slave IS NULL
           AND COALESCE(j.stopped, false) = false
           AND j.end_time IS NULL
         """,
-        (now_ms, online_cutoff, online_cutoff),
+        (online_cutoff, now_ms),
     ) or {}
 
     sticky_jobs = db.fetch_all(
         f"""
+        WITH {STICKY_ONLINE_OWNERS_CTE}
         SELECT
             left(j.benchmark_id, 12) AS benchmark,
             j.benchmark_id,
@@ -949,16 +943,16 @@ def _build_ops_metrics_uncached() -> dict:
             ROUND((EXTRACT(EPOCH FROM NOW()) * 1000 - COALESCE(j.start_time, %s)) / 60000.0, 1) AS age_min
         FROM root_batch rb
         JOIN job j ON j.benchmark_id = rb.benchmark_id
+        JOIN sticky_online_owners soo ON soo.benchmark_id = rb.benchmark_id
         WHERE rb.ready IS NULL
           AND rb.slave IS NULL
           AND COALESCE(j.stopped, false) = false
           AND j.end_time IS NULL
-          AND {sticky_owner_exists}
         GROUP BY j.benchmark_id, j.challenge, j.settings, j.start_time
         ORDER BY sticky_reserved_roots DESC, age_min DESC
         LIMIT 12
         """,
-        (online_cutoff, now_ms, online_cutoff),
+        (online_cutoff, online_cutoff, now_ms),
     )
 
     fattest = db.fetch_all(
