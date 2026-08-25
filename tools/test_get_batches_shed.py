@@ -144,6 +144,14 @@ def main() -> int:
             owner_idle(1) is False,
             "busy preferred stays sticky",
         ),
+        (
+            owner_idle(8, owner_working=False) is True,
+            "telem-idle preferred unlocks even with assigned leftovers",
+        ),
+        (
+            owner_idle(0, owner_working=True) is True,
+            "zero assigned still unlocks a working-flag owner",
+        ),
     ]
     failed = 0
     for ok, label in cases:

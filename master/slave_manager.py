@@ -173,8 +173,17 @@ def get_batches_watchdog_should_exit(
     )
 
 
-def owner_idle_unlocks_sticky(active_count: int | None) -> bool:
-    """Fully-idle preferred owners must not warehouse leftover roots."""
+def owner_idle_unlocks_sticky(
+    active_count: int | None,
+    owner_working: bool | None = None,
+) -> bool:
+    """Preferred owners who are not actually working must not warehouse leftovers.
+
+    Master assigned-count alone is not enough: telem-idle boxes still hold
+    leftover rows in memory, look 'busy', and lock the rest of the fleet out.
+    """
+    if owner_working is False:
+        return True
     return int(active_count or 0) <= 0
 
 
@@ -360,10 +369,13 @@ def leftover_takeable_by_poller(
     root_affinity: Optional[dict] = None,
     overflow_benchmark_ids: Optional[set] = None,
     unassigned_on_job: int = 0,
+    preferred_online: bool | None = None,
+    preferred_releases: bool | None = None,
 ) -> bool:
-    """Fat leftovers locked to another live owner do not justify skipping crumbs.
+    """Fat leftovers locked to another live working owner do not skip crumbs.
 
     The last leftover of a job is always takeable so it can finish.
+    Offline or telem-idle preferred owners do not lock the pile.
     """
     if leftover_finishes_job(unassigned_on_job, already_assigned=False):
         return True
@@ -372,6 +384,8 @@ def leftover_takeable_by_poller(
         return False
     preferred = (root_affinity or {}).get(key)
     if not preferred or preferred == slave_name:
+        return True
+    if preferred_online is False or preferred_releases is True:
         return True
     overflow = overflow_benchmark_ids or set()
     return key in overflow or bid in overflow
@@ -476,15 +490,32 @@ def takeable_unassigned_by_bid(
     slave_name: str = "",
     root_affinity: Optional[dict] = None,
     overflow_benchmark_ids: Optional[set] = None,
+    online_slaves: Optional[set] = None,
+    active_by_slave: Optional[dict] = None,
+    working_by_slave: Optional[dict] = None,
 ) -> Dict[str, int]:
     out: Dict[str, int] = {}
     for bid, n_unassigned in (unassigned_by_bid or {}).items():
+        preferred = (root_affinity or {}).get(str(bid))
+        preferred_online = None
+        preferred_releases = None
+        if preferred and online_slaves is not None:
+            preferred_online = preferred in online_slaves
+        if preferred and (
+            active_by_slave is not None or working_by_slave is not None
+        ):
+            preferred_releases = owner_idle_unlocks_sticky(
+                (active_by_slave or {}).get(preferred),
+                (working_by_slave or {}).get(preferred),
+            )
         if leftover_takeable_by_poller(
             str(bid),
             slave_name=slave_name,
             root_affinity=root_affinity,
             overflow_benchmark_ids=overflow_benchmark_ids,
             unassigned_on_job=int(n_unassigned or 0),
+            preferred_online=preferred_online,
+            preferred_releases=preferred_releases,
         ):
             out[str(bid)] = int(n_unassigned or 0)
     return out
@@ -1312,7 +1343,8 @@ class SlaveManager:
             profile = _slave_work_profile(name)
             if not profile:
                 continue
-            if int(active_by_slave.get(name) or 0) == 0:
+            working = telem_slave_is_working(self._slave_telemetry.get(name) or {})
+            if owner_idle_unlocks_sticky(active_by_slave.get(name), working):
                 idle_by_profile[profile] = idle_by_profile.get(profile, 0) + 1
         for bid, n_unassigned in unassigned_by_bid.items():
             preferred = root_affinity.get(bid)
@@ -1320,7 +1352,12 @@ class SlaveManager:
                 continue
             profile = _slave_work_profile(preferred)
             idle_peers = max(0, int(idle_by_profile.get(profile) or 0))
-            if profile and int(active_by_slave.get(preferred) or 0) == 0:
+            pref_working = telem_slave_is_working(
+                self._slave_telemetry.get(preferred) or {}
+            )
+            if profile and owner_idle_unlocks_sticky(
+                active_by_slave.get(preferred), pref_working
+            ):
                 idle_peers = max(0, idle_peers - 1)
             if not should_sticky_leftover_fanout(
                 unassigned_on_job=n_unassigned,
@@ -2844,14 +2881,21 @@ class SlaveManager:
                     unassigned_job_age[bid] = job_age
                     unassigned_pref[bid] = preferred
             for bid, preferred in unassigned_pref.items():
-                if owner_idle_unlocks_sticky(active_by_slave.get(preferred)):
+                pref_working = telem_slave_is_working(
+                    self._slave_telemetry.get(str(preferred)) or {}
+                )
+                if owner_idle_unlocks_sticky(
+                    active_by_slave.get(preferred), pref_working
+                ):
                     overflow_benchmark_ids.add(bid)
                     preferred_at_cap.add(preferred)
                     continue
                 eff_idle_ms = int(STICKY_OVERFLOW_IDLE_MS)
                 if (
                     STICKY_OVERFLOW_OWNER_IDLE_MS > 0
-                    and int(active_by_slave.get(preferred) or 0) == 0
+                    and owner_idle_unlocks_sticky(
+                        active_by_slave.get(preferred), pref_working
+                    )
                 ):
                     eff_idle_ms = min(eff_idle_ms, int(STICKY_OVERFLOW_OWNER_IDLE_MS))
                 if not should_sticky_idle_overflow(
@@ -2929,11 +2973,18 @@ class SlaveManager:
             leftover_nonces = leftover_nonces_by_job(self.batches)
             if not unassigned_by_bid:
                 unassigned_by_bid = unassigned_roots_by_job(self.batches)
+            working_by_slave = {
+                name: telem_slave_is_working(self._slave_telemetry.get(name) or {})
+                for name in set(active_by_slave) | set(online_slaves) | {slave_name}
+            }
             takeable_unassigned = takeable_unassigned_by_bid(
                 unassigned_by_bid,
                 slave_name=slave_name,
                 root_affinity=root_affinity,
                 overflow_benchmark_ids=overflow_benchmark_ids,
+                online_slaves=online_slaves,
+                active_by_slave=active_by_slave,
+                working_by_slave=working_by_slave,
             )
             has_fat_claimable = claimable_has_fat_leftover(
                 unassigned_by_bid=takeable_unassigned,
@@ -3157,7 +3208,13 @@ class SlaveManager:
                             preferred_at_cap=bool(
                                 preferred and preferred in preferred_at_cap
                             ),
-                            poller_idle=int(active_by_slave.get(slave_name) or 0) <= 0,
+                            poller_idle=owner_idle_unlocks_sticky(
+                                active_by_slave.get(slave_name),
+                                working_by_slave.get(slave_name),
+                            ),
+                            preferred_working=working_by_slave.get(preferred)
+                            if preferred
+                            else None,
                         )
                             and bid not in overflow_benchmark_ids
                         ):
@@ -3456,7 +3513,12 @@ class SlaveManager:
                 for bid, preferred in unassigned_pref.items():
                     # Fully-idle preferred → unlock immediately so between-job
                     # gaps do not warehouse leftovers while the fleet sits empty.
-                    if owner_idle_unlocks_sticky(active_by_slave.get(preferred)):
+                    pref_working = telem_slave_is_working(
+                        self._slave_telemetry.get(str(preferred)) or {}
+                    )
+                    if owner_idle_unlocks_sticky(
+                        active_by_slave.get(preferred), pref_working
+                    ):
                         overflow_benchmark_ids.add(bid)
                         if preferred not in preferred_at_cap:
                             preferred_at_cap.add(preferred)
@@ -3464,7 +3526,9 @@ class SlaveManager:
                     eff_idle_ms = int(STICKY_OVERFLOW_IDLE_MS)
                     if (
                         STICKY_OVERFLOW_OWNER_IDLE_MS > 0
-                        and int(active_by_slave.get(preferred) or 0) == 0
+                        and owner_idle_unlocks_sticky(
+                            active_by_slave.get(preferred), pref_working
+                        )
                     ):
                         eff_idle_ms = min(eff_idle_ms, int(STICKY_OVERFLOW_OWNER_IDLE_MS))
                     if not should_sticky_idle_overflow(
@@ -3614,11 +3678,18 @@ class SlaveManager:
                     max_roots_while_proofs=PROOF_PRIORITY_MAX_ROOTS,
                     always_keep_root_benchmarks=finish_root_bids,
                 )
+                working_by_slave = {
+                    name: telem_slave_is_working(self._slave_telemetry.get(name) or {})
+                    for name in set(active_by_slave) | set(online_slaves) | {slave_name}
+                }
                 takeable_unassigned = takeable_unassigned_by_bid(
                     unassigned_by_bid,
                     slave_name=slave_name,
                     root_affinity=root_affinity,
                     overflow_benchmark_ids=overflow_benchmark_ids,
+                    online_slaves=online_slaves,
+                    active_by_slave=active_by_slave,
+                    working_by_slave=working_by_slave,
                 )
                 has_fat_claimable = claimable_has_fat_leftover(
                     unassigned_by_bid=takeable_unassigned,
@@ -3836,7 +3907,13 @@ class SlaveManager:
                             preferred_at_cap=bool(
                                 preferred and preferred in preferred_at_cap
                             ),
-                            poller_idle=int(active_by_slave.get(slave_name) or 0) <= 0,
+                            poller_idle=owner_idle_unlocks_sticky(
+                                active_by_slave.get(slave_name),
+                                working_by_slave.get(slave_name),
+                            ),
+                            preferred_working=working_by_slave.get(preferred)
+                            if preferred
+                            else None,
                         ):
                             if bid not in overflow_benchmark_ids:
                                 continue
@@ -3880,7 +3957,13 @@ class SlaveManager:
                             preferred_at_cap=bool(
                                 preferred and preferred in preferred_at_cap
                             ),
-                            poller_idle=int(active_by_slave.get(slave_name) or 0) <= 0,
+                            poller_idle=owner_idle_unlocks_sticky(
+                                active_by_slave.get(slave_name),
+                                working_by_slave.get(slave_name),
+                            ),
+                            preferred_working=working_by_slave.get(preferred)
+                            if preferred
+                            else None,
                         ):
                             if bid not in overflow_benchmark_ids:
                                 continue

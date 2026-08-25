@@ -42,6 +42,7 @@ def main() -> int:
         "leftover_finish_bids",
         "unfinished_roots_by_job",
         "leftover_takeable_by_poller",
+        "owner_idle_unlocks_sticky",
         "should_skip_crumb_for_empty_seat",
         "takeable_unassigned_by_bid",
         "claimable_has_fat_leftover",
@@ -325,6 +326,30 @@ def main() -> int:
         )
         is False,
         "fat leftover locked to another owner is not takeable",
+    )
+    check(
+        takeable(
+            "fat",
+            slave_name="pica",
+            root_affinity={"fat": "other"},
+            overflow_benchmark_ids=set(),
+            unassigned_on_job=80,
+            preferred_online=False,
+        )
+        is True,
+        "fat leftover on an offline owner is takeable",
+    )
+    check(
+        takeable(
+            "fat",
+            slave_name="pica",
+            root_affinity={"fat": "other"},
+            overflow_benchmark_ids=set(),
+            unassigned_on_job=80,
+            preferred_releases=True,
+        )
+        is True,
+        "fat leftover on a telem-idle owner is takeable",
     )
     check(
         takeable(

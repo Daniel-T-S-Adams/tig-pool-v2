@@ -132,6 +132,18 @@ def main() -> int:
     )
     cases.append(
         (
+            should_skip_root_for_slave(
+                "pool-cpu-b",
+                "pool-cpu-a",
+                online,
+                preferred_working=False,
+            )
+            is False,
+            "telem-idle preferred does not warehouse leftovers",
+        )
+    )
+    cases.append(
+        (
             should_sticky_leftover_fanout(
                 unassigned_on_job=98,
                 leftover_keep=4,

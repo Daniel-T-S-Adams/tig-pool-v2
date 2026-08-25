@@ -155,20 +155,21 @@ def should_skip_root_for_slave(
     sticky_enabled: bool = STICKY_ROOTS_ENABLED,
     preferred_at_cap: bool = False,
     poller_idle: bool = False,
+    preferred_working: bool | None = None,
 ) -> bool:
     """True when this polling slave must not take a root for a sticky job.
 
-    If the preferred owner is online, only that owner may take more roots.
-    If the preferred owner is dark, other live slaves may take over.
-    preferred_at_cap means the master released exclusive sticky lock for this
-    owner (at-cap overflow and/or aged idle-leftover reclaim). Dark preferred
-    owners are handled separately via online_slaves.
-    An idle poller must never be told 'no batches' while leftovers sit on a
-    busy owner — proofs stay with whoever actually ran each root.
+    If the preferred owner is online and working, only that owner may take
+    more roots. Dark or telem-idle preferred owners do not warehouse the
+    pile. preferred_at_cap means the master released exclusive sticky lock.
+    An idle poller must never be told 'no batches' while leftovers sit.
+    Proofs stay with whoever actually ran each root.
     """
     if not sticky_enabled:
         return False
     if poller_idle:
+        return False
+    if preferred_working is False:
         return False
     if not preferred_slave:
         return False
