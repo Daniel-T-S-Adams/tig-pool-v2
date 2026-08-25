@@ -120,6 +120,17 @@ def _min_bundles_for_track(
     return max(1, floor)
 
 
+def locked_algo_weight(
+    current_weight: int,
+    proposed_weight: int,
+    locked: bool | None = None,
+) -> int:
+    """Keep live-config weight when AUTOPILOT_WEIGHT_LOCK is on."""
+    if locked if locked is not None else WEIGHT_LOCK:
+        return int(current_weight or 0)
+    return int(proposed_weight or 0)
+
+
 def _max_challenge_benchmarks(challenge_id: str) -> int:
     """Autopilot ceiling for one challenge's per_challenge_max_benchmarks entry."""
     cid = str(challenge_id or "").split("_", 1)[0]
@@ -187,6 +198,14 @@ WORKLOAD_MIN_BUNDLES = int(os.environ.get("AUTOPILOT_WORKLOAD_MIN_BUNDLES", "4")
 # AUTOPILOT_MIN_BUNDLES_C004_N_QUERIES_7000=16. See _min_bundles_for_track.
 WORKLOAD_MIN_BATCH_SIZE = int(os.environ.get("AUTOPILOT_WORKLOAD_MIN_BATCH_SIZE", "8"))
 WORKLOAD_MIN_WEIGHT = int(os.environ.get("AUTOPILOT_WORKLOAD_MIN_WEIGHT", "1"))
+# Live-config algo_selection[].weight is operator-owned while this is on.
+# Workload still tunes bundles / batch_size / per-challenge caps.
+WEIGHT_LOCK = os.environ.get("AUTOPILOT_WEIGHT_LOCK", "true").lower() in (
+    "1",
+    "true",
+    "yes",
+    "on",
+)
 WORKLOAD_MAX_BUNDLE_STEP = int(os.environ.get("AUTOPILOT_WORKLOAD_MAX_BUNDLE_STEP", "1"))
 WORKLOAD_SAFETY_COOLDOWN_MS = int(os.environ.get("AUTOPILOT_WORKLOAD_SAFETY_COOLDOWN_MS", str(METRIC_WINDOW_MS)))
 WORKLOAD_CANARY_COOLDOWN_MS = int(os.environ.get("AUTOPILOT_WORKLOAD_CANARY_COOLDOWN_MS", str(METRIC_WINDOW_MS)))
@@ -2257,7 +2276,10 @@ def _workload_controller_targets(
                 action = "reduce_workload_until_proofs_convert"
                 reasons.append("proof conversion is below target")
                 target_bundles = _decrease_bundles(current_bundles, bundle_floor)
-                target_weight = max(1, current_weight - 1) if current_weight > 1 else current_weight
+                proposed_weight = max(1, current_weight - 1) if current_weight > 1 else current_weight
+                target_weight = locked_algo_weight(current_weight, proposed_weight)
+                if WEIGHT_LOCK and proposed_weight != current_weight:
+                    reasons.append("algo weight is locked; live-config value is kept")
             elif stopped_unhealthy:
                 action = "reduce_workload_until_stopped_rate_recovers"
                 reasons.append("stopped/expired benchmark rate is above target")
@@ -2348,6 +2370,7 @@ def _workload_controller_targets(
             )
         elif target_bundles > 0 and target_bundles < bundle_floor and not blocked_from_floor:
             target_bundles = bundle_floor
+        target_weight = locked_algo_weight(current_weight, target_weight)
 
         targets.append({
             "challenge_id": row.get("challenge_id"),
@@ -4169,7 +4192,10 @@ def _apply_workload_target(new_cfg: dict, target: dict) -> dict | None:
             }
 
     current_weight = int(current.get("weight") or algo.get("weight") or 0)
-    target_weight = int(desired.get("weight") or current_weight)
+    target_weight = locked_algo_weight(
+        current_weight,
+        int(desired.get("weight") or current_weight),
+    )
     if target_weight < current_weight:
         target_weight = max(WORKLOAD_MIN_WEIGHT, target_weight)
     if target_weight != current_weight:
@@ -4283,7 +4309,7 @@ def _rollback_last_canary(
             }
 
     weight_change = (last.get("changes") or {}).get("weight") or {}
-    if weight_change.get("current") is not None:
+    if not WEIGHT_LOCK and weight_change.get("current") is not None:
         current_weight = algo.get("weight")
         previous_weight = int(weight_change.get("current") or 0)
         if int(current_weight or 0) != previous_weight:
