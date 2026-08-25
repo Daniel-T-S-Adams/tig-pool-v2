@@ -2781,6 +2781,99 @@ class SlaveManager:
             )
         return dropped
 
+    def _fill_idle_from_leftovers(
+        self,
+        slave_name: str,
+        slave: dict,
+        now: float,
+        *,
+        max_concurrent: int,
+        deadline_mono: float | None,
+        root_affinity: dict,
+    ):
+        """Idle poller grabs matching unassigned leftovers. No ranking.
+
+        Returns None if this slave should use the normal path.
+        Returns (batches, sql_updates) when the idle fill ran.
+        """
+        if int(max_concurrent or 0) <= 0:
+            return None
+        telem = self._slave_telemetry.get(slave_name) or {}
+        if telem_slave_is_working(telem) is True:
+            return None
+        if self._peek_assigned_batches(slave_name):
+            return None
+        wait = min(self._get_batches_lock_wait_sec, 0.4)
+        if deadline_mono is not None:
+            remain = deadline_mono - time.monotonic()
+            if remain <= 0:
+                return self._peek_assigned_batches(slave_name), []
+            wait = min(wait, max(0.05, remain))
+        acquired = self.lock.acquire(timeout=wait)
+        if not acquired:
+            logger.warning("get-batches idle-fill lock timeout slave=%s", slave_name)
+            return self._peek_assigned_batches(slave_name), []
+        try:
+            already = [
+                b
+                for b in self.batches
+                if b.get("slave") == slave_name and b.get("end_time") is None
+            ]
+            if already:
+                return [b["batch"] for b in already], []
+            concurrent = []
+            updates = []
+            algo_re = slave.get("algorithm_id_regex") or ""
+            scanned = 0
+            for b in self.batches:
+                if deadline_mono is not None and time.monotonic() >= deadline_mono:
+                    break
+                if len(concurrent) >= max_concurrent:
+                    break
+                scanned += 1
+                if b.get("end_time") is not None or b.get("slave"):
+                    continue
+                batch = b.get("batch") or {}
+                if batch.get("sampled_nonces") is not None:
+                    continue
+                settings = batch.get("settings") or {}
+                algo = settings.get("algorithm_id") or ""
+                if not algo or not re.match(algo_re, algo):
+                    continue
+                b["slave"] = slave_name
+                b["start_time"] = now
+                b["num_attempts"] = int(b.get("num_attempts") or 0) + 1
+                updates.append((
+                    """
+                    UPDATE root_batch
+                    SET slave = %s,
+                        start_time = %s,
+                        num_attempts = %s
+                    WHERE benchmark_id = %s
+                        AND batch_idx = %s
+                        AND ready IS NULL
+                        AND slave IS NULL
+                    """,
+                    (
+                        slave_name,
+                        now,
+                        b["num_attempts"],
+                        batch.get("benchmark_id"),
+                        batch.get("batch_idx"),
+                    ),
+                ))
+                concurrent.append(batch)
+            if concurrent:
+                logger.info(
+                    "idle leftover fill slave=%s claimed=%s scanned=%s",
+                    slave_name,
+                    len(concurrent),
+                    scanned,
+                )
+            return concurrent, updates
+        finally:
+            self.lock.release()
+
     def _get_batches_fast(
         self,
         slave_name: str,
@@ -2806,6 +2899,16 @@ class SlaveManager:
             max_concurrent = route_cap
         root_affinity = self._root_affinity_map()
         online_slaves = self._online_slaves(int(now))
+        idle_fill = self._fill_idle_from_leftovers(
+            slave_name,
+            slave,
+            now,
+            max_concurrent=max_concurrent,
+            deadline_mono=deadline_mono,
+            root_affinity=root_affinity,
+        )
+        if idle_fill is not None and idle_fill[0]:
+            return idle_fill
 
         preferred_at_cap: Set[str] = set()
         overflow_benchmark_ids: Set[str] = set()
