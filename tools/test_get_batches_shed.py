@@ -30,11 +30,13 @@ def main() -> int:
         "owner_idle_unlocks_sticky",
         "get_batches_assign_over_deadline",
         "get_batches_watchdog_should_exit",
+        "get_batches_stall_should_exit",
     )
     should_shed = ns["should_shed_get_batches_poll"]
     owner_idle = ns["owner_idle_unlocks_sticky"]
     over_deadline = ns["get_batches_assign_over_deadline"]
     watchdog = ns["get_batches_watchdog_should_exit"]
+    stall = ns["get_batches_stall_should_exit"]
     extra = 4
     hard = 16
     cases = [
@@ -151,6 +153,66 @@ def main() -> int:
         (
             owner_idle(0, owner_working=True) is True,
             "zero assigned still unlocks a working-flag owner",
+        ),
+        (
+            stall(
+                last_mailbox_ok_mono=0.0,
+                now_mono=30.0,
+                stall_ms=30000,
+                inflight=1,
+            )
+            is True,
+            "stall exits after 30s without mailbox while inflight",
+        ),
+        (
+            stall(
+                last_mailbox_ok_mono=0.0,
+                now_mono=29.9,
+                stall_ms=30000,
+                inflight=1,
+            )
+            is False,
+            "stall does not flap under 30s",
+        ),
+        (
+            stall(
+                last_mailbox_ok_mono=0.0,
+                now_mono=60.0,
+                stall_ms=30000,
+                inflight=0,
+                last_assign_ms=2000,
+                slow_assign_ms=1500,
+            )
+            is True,
+            "stall exits on slow last assign even with inflight 0",
+        ),
+        (
+            stall(
+                last_mailbox_ok_mono=None,
+                now_mono=60.0,
+                stall_ms=30000,
+                inflight=2,
+                newest_poll_seen_ms=1,
+                now_ms=40000,
+                live_poll_stale_ms=30000,
+                had_live_pollers=True,
+            )
+            is True,
+            "stall exits when live pollers all went stale while inflight",
+        ),
+        (
+            stall(
+                last_mailbox_ok_mono=None,
+                now_mono=60.0,
+                stall_ms=30000,
+                inflight=0,
+                newest_poll_seen_ms=1,
+                now_ms=40000,
+                live_poll_stale_ms=30000,
+                had_live_pollers=True,
+            )
+            is False,
+            "stale pollers without inflight do not trip stall",
         ),
     ]
     failed = 0

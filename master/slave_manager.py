@@ -116,6 +116,24 @@ GET_BATCHES_SLOW_ASSIGN_MS = max(
 GET_BATCHES_WATCHDOG_MS = max(
     0, int(os.environ.get("GET_BATCHES_WATCHDOG_MS", "25000"))
 )
+# Mailbox HTTP must finish well under nginx's 8s / slave 60s.
+GET_BATCHES_HANDLER_DEADLINE_MS = max(
+    0, int(os.environ.get("GET_BATCHES_HANDLER_DEADLINE_MS", "2000"))
+)
+# Fleet stall: no successful mailbox poll, or live last_seen all went stale.
+GET_BATCHES_STALL_MS = max(
+    0, int(os.environ.get("GET_BATCHES_STALL_MS", "30000"))
+)
+GET_BATCHES_LIVE_POLL_STALE_MS = max(
+    0, int(os.environ.get("GET_BATCHES_LIVE_POLL_STALE_MS", "30000"))
+)
+# Background leftover feeder. HTTP never ranks or claims.
+GET_BATCHES_FEEDER_MS = max(
+    50, int(os.environ.get("GET_BATCHES_FEEDER_MS", "250"))
+)
+GET_BATCHES_FEEDER_HUNGRY_MS = max(
+    1_000, int(os.environ.get("GET_BATCHES_FEEDER_HUNGRY_MS", "15000"))
+)
 
 
 def should_shed_get_batches_poll(
@@ -171,6 +189,140 @@ def get_batches_watchdog_should_exit(
     return (float(now_mono) - float(oldest_start_mono)) * 1000.0 >= float(
         watchdog_ms
     )
+
+
+def get_batches_stall_should_exit(
+    *,
+    last_mailbox_ok_mono: float | None,
+    now_mono: float,
+    stall_ms: int,
+    inflight: int,
+    newest_poll_seen_ms: int | None = None,
+    now_ms: int = 0,
+    live_poll_stale_ms: int = 0,
+    had_live_pollers: bool = False,
+    last_assign_ms: int | None = None,
+    slow_assign_ms: int | None = None,
+) -> bool:
+    """True when the fleet looks wedged without a single 25s held poll.
+
+    last_assign high + no fresh mailbox, or every previously-live poller
+    went stale while handlers are still inflight.
+    """
+    if int(stall_ms or 0) <= 0:
+        return False
+    inflight_n = int(inflight or 0)
+    assign_slow = (
+        int(slow_assign_ms or 0) > 0
+        and int(last_assign_ms or 0) >= int(slow_assign_ms or 0)
+    )
+    mailbox_stale = False
+    if last_mailbox_ok_mono is not None:
+        mailbox_age_ms = (float(now_mono) - float(last_mailbox_ok_mono)) * 1000.0
+        mailbox_stale = mailbox_age_ms >= float(stall_ms) and (
+            inflight_n > 0 or assign_slow
+        )
+    pollers_stale = (
+        bool(had_live_pollers)
+        and newest_poll_seen_ms is not None
+        and int(live_poll_stale_ms or 0) > 0
+        and (int(now_ms) - int(newest_poll_seen_ms)) >= int(live_poll_stale_ms)
+        and inflight_n > 0
+    )
+    return mailbox_stale or pollers_stale
+
+
+def note_poll_seen(seen: Dict[str, int], slave_name: str, now_ms: int) -> None:
+    if not slave_name:
+        return
+    seen[str(slave_name)] = int(now_ms)
+
+
+def newest_poll_seen_ms(seen: Optional[Dict[str, int]]) -> Optional[int]:
+    if not seen:
+        return None
+    return max(int(v) for v in seen.values())
+
+
+def feed_leftovers_one_pass(
+    rows,
+    hungry: List[dict],
+    *,
+    now: float,
+    takeable_bids_by_slave: Optional[Dict[str, Set[str]]] = None,
+    proofs: bool = False,
+    may_take_proof=None,
+) -> List[dict]:
+    """Claim unassigned batches into empty seats with one leftover pass.
+
+    hungry items: {name, seats, algo_re}. Mutates claimed rows in place.
+    """
+    waiting = [
+        {
+            "name": str(item.get("name") or ""),
+            "seats": max(0, int(item.get("seats") or 0)),
+            "algo_re": item.get("algo_re") or "",
+        }
+        for item in (hungry or [])
+        if str(item.get("name") or "") and int(item.get("seats") or 0) > 0
+    ]
+    if not waiting or not rows:
+        return []
+    claimed: List[dict] = []
+    cursor = 0
+    for row in rows:
+        if row.get("end_time") is not None or row.get("slave"):
+            continue
+        batch = row.get("batch") or {}
+        is_proof = batch.get("sampled_nonces") is not None
+        if bool(proofs) != bool(is_proof):
+            continue
+        bid = str(batch.get("benchmark_id") or "")
+        settings = batch.get("settings") or {}
+        algo = settings.get("algorithm_id") or ""
+        if not bid or not algo:
+            continue
+        n = len(waiting)
+        picked = None
+        for offset in range(n):
+            item = waiting[(cursor + offset) % n]
+            if item["seats"] <= 0:
+                continue
+            if item["algo_re"] and not re.match(item["algo_re"], algo):
+                continue
+            allowed = takeable_bids_by_slave.get(item["name"]) if takeable_bids_by_slave else None
+            if allowed is not None and bid not in allowed:
+                continue
+            if proofs and may_take_proof is not None:
+                try:
+                    batch_idx = int(batch.get("batch_idx"))
+                except (TypeError, ValueError):
+                    continue
+                if not may_take_proof(item["name"], bid, batch_idx):
+                    continue
+            picked = item
+            cursor = (cursor + offset + 1) % n
+            break
+        if picked is None:
+            continue
+        picked["seats"] -= 1
+        row["slave"] = picked["name"]
+        row["start_time"] = now
+        row["num_attempts"] = int(row.get("num_attempts") or 0) + 1
+        claimed.append(
+            {
+                "slave": picked["name"],
+                "benchmark_id": bid,
+                "batch_idx": batch.get("batch_idx"),
+                "num_attempts": row["num_attempts"],
+                "is_proof": is_proof,
+                "start_time": now,
+            }
+        )
+        waiting = [item for item in waiting if item["seats"] > 0]
+        if not waiting:
+            break
+    return claimed
 
 
 def owner_idle_unlocks_sticky(
@@ -939,9 +1091,18 @@ class SlaveManager:
         self._get_batches_lock_wait_sec = GET_BATCHES_LOCK_WAIT_MS / 1000.0
         self._get_batches_slow_assign_ms = GET_BATCHES_SLOW_ASSIGN_MS
         self._get_batches_watchdog_ms = GET_BATCHES_WATCHDOG_MS
+        self._get_batches_handler_deadline_ms = GET_BATCHES_HANDLER_DEADLINE_MS
+        self._get_batches_stall_ms = GET_BATCHES_STALL_MS
+        self._get_batches_live_poll_stale_ms = GET_BATCHES_LIVE_POLL_STALE_MS
+        self._get_batches_feeder_sec = GET_BATCHES_FEEDER_MS / 1000.0
+        self._get_batches_feeder_hungry_ms = GET_BATCHES_FEEDER_HUNGRY_MS
         self._get_batches_last_assign_ms = 0
+        self._get_batches_last_mailbox_ok_mono: Optional[float] = None
+        self._get_batches_had_live_pollers = False
         self._get_batches_start_seq = 0
         self._get_batches_starts: Dict[int, float] = {}
+        self._poll_seen: Dict[str, int] = {}
+        self._poll_seen_lock = Lock()
         self._fanout_cache: tuple[Set[str], float] | None = None
         self._fanout_log_until: Dict[str, float] = {}
         self._assign_sql_q: SimpleQueue = SimpleQueue()
@@ -951,12 +1112,25 @@ class SlaveManager:
             daemon=True,
         )
         self._assign_sql_thread.start()
+        self._seen_sql_q: SimpleQueue = SimpleQueue()
+        self._seen_sql_thread = Thread(
+            target=self._seen_sql_loop,
+            name="slave-seen-sql",
+            daemon=True,
+        )
+        self._seen_sql_thread.start()
         self._get_batches_watchdog_thread = Thread(
             target=self._get_batches_watchdog_loop,
             name="get-batches-watchdog",
             daemon=True,
         )
         self._get_batches_watchdog_thread.start()
+        self._leftover_feeder_thread = Thread(
+            target=self._leftover_feeder_loop,
+            name="leftover-feeder",
+            daemon=True,
+        )
+        self._leftover_feeder_thread.start()
         self._assign_views_lock = Lock()
         self._assign_views = AssignViews()
         # Slot ID / starvation views — refreshed with slot maintenance only.
@@ -1017,9 +1191,8 @@ class SlaveManager:
             except (TypeError, ValueError):
                 num_workers = None
         self._slave_seen_touch_until[slave_name] = now_ms + self._slave_seen_touch_interval_ms
-        self._assign_sql_q.put(
+        self._seen_sql_q.put(
             (
-                "touch",
                 slave_name,
                 now_ms,
                 num_workers,
@@ -1045,12 +1218,9 @@ class SlaveManager:
                 except Empty:
                     break
             assigns = []
-            touches = []
             for item_kind, item in batch:
                 if item_kind == "assign":
                     assigns.extend(item[0] or [])
-                elif item_kind == "touch":
-                    touches.append(item)
             if assigns:
                 try:
                     get_db_conn().execute_many(*assigns)
@@ -1059,7 +1229,18 @@ class SlaveManager:
                         "background assign SQL failed (%s statements)",
                         len(assigns),
                     )
-            for touch in touches:
+
+    def _seen_sql_loop(self) -> None:
+        """Flush in-memory get-batches heartbeats. Never shares the assign queue."""
+        while True:
+            first = self._seen_sql_q.get()
+            batch = [first]
+            while True:
+                try:
+                    batch.append(self._seen_sql_q.get_nowait())
+                except Empty:
+                    break
+            for touch in batch:
                 try:
                     slave_name, now_ms, num_workers, state, active, cores = touch
                     self._ensure_slave_seen_table()
@@ -1083,21 +1264,43 @@ class SlaveManager:
             if int(self._get_batches_watchdog_ms or 0) <= 0:
                 continue
             now_mono = time.monotonic()
+            now_ms = int(time.time() * 1000)
             with self._get_batches_inflight_lock:
                 starts = list(self._get_batches_starts.values())
                 inflight = int(self._get_batches_inflight or 0)
+                last_assign_ms = int(self._get_batches_last_assign_ms or 0)
+                last_mailbox_ok = self._get_batches_last_mailbox_ok_mono
+                had_live = bool(self._get_batches_had_live_pollers)
             oldest = min(starts) if starts else None
+            with self._poll_seen_lock:
+                newest_seen = newest_poll_seen_ms(self._poll_seen)
             if get_batches_watchdog_should_exit(
                 oldest_start_mono=oldest,
                 now_mono=now_mono,
                 watchdog_ms=self._get_batches_watchdog_ms,
                 inflight=inflight,
+            ) or get_batches_stall_should_exit(
+                last_mailbox_ok_mono=last_mailbox_ok,
+                now_mono=now_mono,
+                stall_ms=self._get_batches_stall_ms,
+                inflight=inflight,
+                newest_poll_seen_ms=newest_seen,
+                now_ms=now_ms,
+                live_poll_stale_ms=self._get_batches_live_poll_stale_ms,
+                had_live_pollers=had_live,
+                last_assign_ms=last_assign_ms,
+                slow_assign_ms=self._get_batches_slow_assign_ms,
             ):
                 age_ms = int((now_mono - oldest) * 1000) if oldest is not None else 0
                 logger.critical(
-                    "get-batches wedged inflight=%s oldest=%sms — exiting for docker restart",
+                    "get-batches wedged inflight=%s oldest=%sms mailbox_age=%s "
+                    "last_assign=%sms — exiting for docker restart",
                     inflight,
                     age_ms,
+                    None
+                    if last_mailbox_ok is None
+                    else int((now_mono - last_mailbox_ok) * 1000),
+                    last_assign_ms,
                 )
                 os._exit(1)
 
@@ -2745,6 +2948,314 @@ class SlaveManager:
         except Exception:
             return []
 
+    def _note_mailbox_poll(self, slave_name: str, now_ms: int) -> None:
+        with self._poll_seen_lock:
+            note_poll_seen(self._poll_seen, slave_name, now_ms)
+        self._get_batches_had_live_pollers = True
+
+    def _slave_route(self, slave_name: str) -> Optional[dict]:
+        return next(
+            (
+                row
+                for row in (CONFIG.get("slaves") or [])
+                if re.match(row.get("name_regex") or r"$^", slave_name)
+            ),
+            None,
+        )
+
+    def _leftover_feeder_loop(self) -> None:
+        while True:
+            time.sleep(self._get_batches_feeder_sec)
+            try:
+                self._feed_hungry_slaves()
+            except Exception:
+                logger.exception("leftover feeder failed")
+
+    def _hungry_slave_items(self, now_ms: int, views) -> List[dict]:
+        cutoff = int(now_ms) - int(self._get_batches_feeder_hungry_ms)
+        with self._poll_seen_lock:
+            names = [
+                name
+                for name, seen in self._poll_seen.items()
+                if int(seen or 0) >= cutoff
+            ]
+        hungry = []
+        for slave_name in names:
+            route = self._slave_route(slave_name)
+            if not route:
+                continue
+            route_cap = self._route_cap_for_slave(slave_name)
+            if slave_name in views.adaptive_caps:
+                max_concurrent = max(0, min(route_cap, int(views.adaptive_caps[slave_name])))
+            else:
+                max_concurrent = route_cap
+            if max_concurrent <= 0:
+                continue
+            assigned = self._peek_assigned_batches(slave_name)
+            seats = max(0, int(max_concurrent) - len(assigned))
+            if seats <= 0:
+                continue
+            hungry.append(
+                {
+                    "name": slave_name,
+                    "seats": seats,
+                    "algo_re": route.get("algorithm_id_regex") or "",
+                }
+            )
+        return hungry
+
+    def _leftover_takeable_maps(self, now: float):
+        views = self._get_assign_views()
+        root_affinity = self._root_affinity_map()
+        online_slaves = self._online_slaves(int(now))
+        preferred_at_cap: Set[str] = set()
+        overflow_benchmark_ids: Set[str] = set()
+        active_by_slave: Dict[str, int] = {}
+        slaves_with_proof_work: Set[str] = set()
+        preferreds_with_unassigned: Set[str] = set()
+        unassigned_by_bid: Dict[str, int] = {}
+        if STICKY_ROOTS_ENABLED:
+            for row in self.batches:
+                if row.get("end_time") is not None:
+                    continue
+                owner = row.get("slave")
+                batch = row.get("batch") or {}
+                if owner:
+                    active_by_slave[str(owner)] = active_by_slave.get(str(owner), 0) + 1
+                    if batch.get("sampled_nonces") is not None:
+                        slaves_with_proof_work.add(str(owner))
+                elif batch.get("sampled_nonces") is None:
+                    bid = str(batch.get("benchmark_id") or "")
+                    if bid:
+                        unassigned_by_bid[bid] = unassigned_by_bid.get(bid, 0) + 1
+                    pref = root_affinity.get(bid) if bid else None
+                    if pref:
+                        preferreds_with_unassigned.add(str(pref))
+            if STICKY_OVERFLOW_AT_CAP:
+                for preferred in preferreds_with_unassigned:
+                    if not preferred or preferred not in online_slaves:
+                        continue
+                    pref_route = self._route_cap_for_slave(preferred)
+                    if preferred in views.adaptive_caps:
+                        pref_cap = max(0, min(pref_route, int(views.adaptive_caps[preferred])))
+                    else:
+                        pref_cap = pref_route
+                    if pref_route <= 0:
+                        continue
+                    if int(active_by_slave.get(preferred) or 0) >= min(pref_route, pref_cap):
+                        preferred_at_cap.add(preferred)
+                        continue
+                    if PROOF_PRIORITY_ENABLED and (
+                        preferred in slaves_with_proof_work
+                        or preferred in views.awaiting_proofs
+                    ):
+                        preferred_at_cap.add(preferred)
+            self._unlock_sticky_leftover_jobs(
+                unassigned_by_bid,
+                root_affinity,
+                online_slaves,
+                active_by_slave,
+                views.adaptive_caps if views is not None else {},
+                overflow_benchmark_ids,
+                preferred_at_cap,
+            )
+            if STICKY_OVERFLOW_IDLE_MS > 0:
+                inflight_pref_bids: Set[str] = set()
+                unassigned_job_age: Dict[str, int] = {}
+                unassigned_pref: Dict[str, str] = {}
+                for row in self.batches:
+                    batch = row.get("batch") or {}
+                    if batch.get("sampled_nonces") is not None:
+                        continue
+                    if row.get("end_time") is not None:
+                        continue
+                    bid = str(batch.get("benchmark_id") or "")
+                    preferred = root_affinity.get(bid)
+                    if not preferred or preferred not in online_slaves:
+                        continue
+                    if row.get("slave") == preferred:
+                        inflight_pref_bids.add(bid)
+                        continue
+                    if row.get("slave") is not None:
+                        continue
+                    job_start = batch.get("job_start_time")
+                    try:
+                        job_age = int(now) - int(job_start)
+                    except (TypeError, ValueError):
+                        continue
+                    prev = unassigned_job_age.get(bid)
+                    if prev is None or job_age > prev:
+                        unassigned_job_age[bid] = job_age
+                        unassigned_pref[bid] = preferred
+                for bid, preferred in unassigned_pref.items():
+                    pref_working = telem_slave_is_working(
+                        self._slave_telemetry.get(str(preferred)) or {}
+                    )
+                    if owner_idle_unlocks_sticky(
+                        active_by_slave.get(preferred), pref_working
+                    ):
+                        overflow_benchmark_ids.add(bid)
+                        preferred_at_cap.add(preferred)
+                        continue
+                    eff_idle_ms = int(STICKY_OVERFLOW_IDLE_MS)
+                    if (
+                        STICKY_OVERFLOW_OWNER_IDLE_MS > 0
+                        and owner_idle_unlocks_sticky(
+                            active_by_slave.get(preferred), pref_working
+                        )
+                    ):
+                        eff_idle_ms = min(eff_idle_ms, int(STICKY_OVERFLOW_OWNER_IDLE_MS))
+                    if not should_sticky_idle_overflow(
+                        preferred_slave=preferred,
+                        preferred_inflight_on_job=bid in inflight_pref_bids,
+                        has_unassigned=True,
+                        job_age_ms=unassigned_job_age[bid],
+                        idle_ms=eff_idle_ms,
+                        preferred_online=True,
+                    ):
+                        continue
+                    overflow_benchmark_ids.add(bid)
+                    preferred_at_cap.add(preferred)
+        working_by_slave = {
+            name: telem_slave_is_working(self._slave_telemetry.get(name) or {})
+            for name in set(active_by_slave) | set(online_slaves)
+        }
+        return (
+            views,
+            root_affinity,
+            online_slaves,
+            overflow_benchmark_ids,
+            unassigned_by_bid,
+            active_by_slave,
+            working_by_slave,
+        )
+
+    def _takeable_bids_for_hungry(
+        self,
+        hungry: List[dict],
+        *,
+        unassigned_by_bid: Dict[str, int],
+        root_affinity: Dict[str, str],
+        overflow_benchmark_ids: Set[str],
+        online_slaves: Set[str],
+        active_by_slave: Dict[str, int],
+        working_by_slave: Dict[str, bool],
+    ) -> Dict[str, Set[str]]:
+        out: Dict[str, Set[str]] = {}
+        for item in hungry:
+            name = item["name"]
+            takeable = takeable_unassigned_by_bid(
+                unassigned_by_bid,
+                slave_name=name,
+                root_affinity=root_affinity,
+                overflow_benchmark_ids=overflow_benchmark_ids,
+                online_slaves=online_slaves,
+                active_by_slave=active_by_slave,
+                working_by_slave=working_by_slave,
+            )
+            out[name] = set(takeable)
+        return out
+
+    def _feed_claim_sql(self, claimed: List[dict]) -> list:
+        updates = []
+        for item in claimed:
+            table = "proofs_batch" if item.get("is_proof") else "root_batch"
+            updates.append((
+                f"""
+                UPDATE {table}
+                SET slave = %s,
+                    start_time = %s,
+                    num_attempts = %s
+                WHERE benchmark_id = %s
+                    AND batch_idx = %s
+                    AND ready IS NULL
+                    AND slave IS NULL
+                """,
+                (
+                    item["slave"],
+                    item.get("start_time"),
+                    item["num_attempts"],
+                    item["benchmark_id"],
+                    item["batch_idx"],
+                ),
+            ))
+        return updates
+
+    def _feed_hungry_slaves(self) -> int:
+        now = time.time() * 1000
+        views = self._get_assign_views()
+        hungry = self._hungry_slave_items(int(now), views)
+        if not hungry:
+            return 0
+        (
+            views,
+            root_affinity,
+            online_slaves,
+            overflow_benchmark_ids,
+            unassigned_by_bid,
+            active_by_slave,
+            working_by_slave,
+        ) = self._leftover_takeable_maps(now)
+        takeable_by_slave = self._takeable_bids_for_hungry(
+            hungry,
+            unassigned_by_bid=unassigned_by_bid,
+            root_affinity=root_affinity,
+            overflow_benchmark_ids=overflow_benchmark_ids,
+            online_slaves=online_slaves,
+            active_by_slave=active_by_slave,
+            working_by_slave=working_by_slave,
+        )
+        wait = min(self._get_batches_lock_wait_sec, 0.2)
+        acquired = self.lock.acquire(timeout=wait)
+        if not acquired:
+            logger.warning("leftover feeder lock timeout")
+            return 0
+        claimed: List[dict] = []
+        try:
+            root_claimed = feed_leftovers_one_pass(
+                self.batches,
+                hungry,
+                now=now,
+                takeable_bids_by_slave=takeable_by_slave,
+                proofs=False,
+            )
+            seats_left = {item["name"]: item["seats"] for item in hungry}
+            for row in root_claimed:
+                name = row["slave"]
+                seats_left[name] = max(0, int(seats_left.get(name) or 0) - 1)
+            proof_hungry = [
+                {
+                    "name": item["name"],
+                    "seats": seats_left.get(item["name"], item["seats"]),
+                    "algo_re": item["algo_re"],
+                }
+                for item in hungry
+                if seats_left.get(item["name"], item["seats"]) > 0
+            ]
+            proof_claimed = feed_leftovers_one_pass(
+                self.batches,
+                proof_hungry,
+                now=now,
+                proofs=True,
+                may_take_proof=views.may_take_proof,
+            )
+            claimed = root_claimed + proof_claimed
+            for row in claimed:
+                row["start_time"] = now
+        finally:
+            self.lock.release()
+        if claimed:
+            self._enqueue_assign_sql(self._feed_claim_sql(claimed))
+            by_slave: Dict[str, int] = {}
+            for row in claimed:
+                by_slave[row["slave"]] = by_slave.get(row["slave"], 0) + 1
+            logger.info(
+                "leftover feeder claimed=%s slaves=%s",
+                len(claimed),
+                len(by_slave),
+            )
+        return len(claimed)
+
     def _memory_assigned_batches(self, slave_name: str) -> list:
         self._drop_ready_ghosts()
         acquired = self.lock.acquire(timeout=self._get_batches_lock_wait_sec)
@@ -2899,17 +3410,6 @@ class SlaveManager:
             max_concurrent = route_cap
         root_affinity = self._root_affinity_map()
         online_slaves = self._online_slaves(int(now))
-        idle_fill = self._fill_idle_from_leftovers(
-            slave_name,
-            slave,
-            now,
-            max_concurrent=max_concurrent,
-            deadline_mono=deadline_mono,
-            root_affinity=root_affinity,
-        )
-        if idle_fill is not None and idle_fill[0]:
-            return idle_fill
-
         preferred_at_cap: Set[str] = set()
         overflow_benchmark_ids: Set[str] = set()
         active_by_slave: Dict[str, int] = {}
@@ -3466,65 +3966,41 @@ class SlaveManager:
                 telemetry = {}
             if telemetry:
                 self._remember_slave_telemetry(slave_name, telemetry, int(now))
+            self._note_mailbox_poll(slave_name, int(now))
             self._touch_slave_seen(slave_name, int(now))
 
-            # Busy slaves shed at max_inflight. Idle slaves get assign slots
-            # so leftovers still get claimed, until the hang circuit breaker.
-            assigned_now = self._peek_assigned_batches(slave_name)
-            shed_only = False
-            poll_token = None
+            # Mailbox only: return already-assigned work. Leftover claiming is
+            # the leftover-feeder thread. HTTP must not rank or take self.lock.
             started_mono = time.monotonic()
+            poll_token = None
             with self._get_batches_inflight_lock:
-                if should_shed_get_batches_poll(
-                    inflight=self._get_batches_inflight,
-                    max_inflight=self._get_batches_max_inflight,
-                    assigned_count=len(assigned_now),
-                    hard_inflight=self._get_batches_hard_inflight,
-                    last_assign_ms=self._get_batches_last_assign_ms,
-                    slow_assign_ms=self._get_batches_slow_assign_ms,
+                self._get_batches_inflight += 1
+                self._get_batches_start_seq += 1
+                poll_token = self._get_batches_start_seq
+                self._get_batches_starts[poll_token] = started_mono
+            try:
+                mailbox = self._peek_assigned_batches(slave_name)
+                return JSONResponse(content=jsonable_encoder(mailbox))
+            except Exception as exc:
+                logger.warning("get-batches mailbox failed for %s: %s", slave_name, exc)
+                return JSONResponse(content=jsonable_encoder([]))
+            finally:
+                elapsed_ms = int((time.monotonic() - started_mono) * 1000)
+                with self._get_batches_inflight_lock:
+                    self._get_batches_inflight = max(0, self._get_batches_inflight - 1)
+                    if poll_token is not None:
+                        self._get_batches_starts.pop(poll_token, None)
+                    self._get_batches_last_assign_ms = elapsed_ms
+                    self._get_batches_last_mailbox_ok_mono = time.monotonic()
+                if (
+                    self._get_batches_handler_deadline_ms > 0
+                    and elapsed_ms >= self._get_batches_handler_deadline_ms
                 ):
-                    shed_only = True
-                else:
-                    self._get_batches_inflight += 1
-                    self._get_batches_start_seq += 1
-                    poll_token = self._get_batches_start_seq
-                    self._get_batches_starts[poll_token] = started_mono
-            if shed_only:
-                logger.debug(
-                    "get-batches shed slave=%s assigned=%s inflight=%s/%s hard=%s last_assign=%sms",
-                    slave_name,
-                    len(assigned_now),
-                    self._get_batches_inflight,
-                    self._get_batches_max_inflight,
-                    self._get_batches_hard_inflight,
-                    self._get_batches_last_assign_ms,
-                )
-                return JSONResponse(content=jsonable_encoder(assigned_now))
-            if GET_BATCHES_FAST:
-                try:
-                    deadline_mono = None
-                    if self._get_batches_assign_deadline_ms > 0:
-                        deadline_mono = started_mono + (
-                            self._get_batches_assign_deadline_ms / 1000.0
-                        )
-                    concurrent, updates = self._get_batches_fast(
-                        slave_name, slave, now, deadline_mono=deadline_mono
+                    logger.warning(
+                        "get-batches mailbox slow slave=%s elapsed=%sms",
+                        slave_name,
+                        elapsed_ms,
                     )
-                    if updates:
-                        self._enqueue_assign_sql(updates)
-                    return JSONResponse(content=jsonable_encoder(concurrent))
-                except Exception as exc:
-                    logger.warning("get-batches fast failed for %s: %s", slave_name, exc)
-                    return JSONResponse(
-                        content=jsonable_encoder(self._peek_assigned_batches(slave_name))
-                    )
-                finally:
-                    elapsed_ms = int((time.monotonic() - started_mono) * 1000)
-                    with self._get_batches_inflight_lock:
-                        self._get_batches_inflight = max(0, self._get_batches_inflight - 1)
-                        if poll_token is not None:
-                            self._get_batches_starts.pop(poll_token, None)
-                        self._get_batches_last_assign_ms = elapsed_ms
             slot_types = self._slot_types_for_slave(slave_name)
             slot_benchmark_ids = set()
             starved_slot_benchmarks = {}
