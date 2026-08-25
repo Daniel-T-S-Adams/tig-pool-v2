@@ -5,6 +5,7 @@ import re
 import time
 import random
 import math
+from queue import Empty, SimpleQueue
 from threading import Thread, Lock, Semaphore
 from dataclasses import dataclass
 from fastapi import FastAPI, Request, HTTPException
@@ -96,6 +97,25 @@ GET_BATCHES_MAX_INFLIGHT = max(
 GET_BATCHES_IDLE_EXTRA = max(
     0, int(os.environ.get("GET_BATCHES_IDLE_EXTRA", "4"))
 )
+# Absolute ceiling, idle included. 40 idle 1Hz polls all entering assign
+# serialized on self.lock + Postgres and wedged the fleet past 60s.
+GET_BATCHES_HARD_INFLIGHT = max(
+    0, int(os.environ.get("GET_BATCHES_HARD_INFLIGHT", "16"))
+)
+# Fail-fast assign. Slaves time out at 60s; nginx fails at 8s. Stay well under.
+GET_BATCHES_ASSIGN_DEADLINE_MS = max(
+    0, int(os.environ.get("GET_BATCHES_ASSIGN_DEADLINE_MS", "1500"))
+)
+GET_BATCHES_LOCK_WAIT_MS = max(
+    50, int(os.environ.get("GET_BATCHES_LOCK_WAIT_MS", "200"))
+)
+GET_BATCHES_SLOW_ASSIGN_MS = max(
+    0, int(os.environ.get("GET_BATCHES_SLOW_ASSIGN_MS", "1500"))
+)
+# Wedged handler older than this → process exit so Docker restarts master.
+GET_BATCHES_WATCHDOG_MS = max(
+    0, int(os.environ.get("GET_BATCHES_WATCHDOG_MS", "25000"))
+)
 
 
 def should_shed_get_batches_poll(
@@ -104,17 +124,53 @@ def should_shed_get_batches_poll(
     max_inflight: int,
     assigned_count: int,
     idle_extra: int | None = None,
+    hard_inflight: int | None = None,
+    last_assign_ms: int | None = None,
+    slow_assign_ms: int | None = None,
 ) -> bool:
     """True when this poll may skip new assignment and return current work only.
 
-    Busy slaves shed at max_inflight. Idle slaves are never shed: the fast
-    path is in-memory, and a 4-slot idle window left 40+ empty boxes returning
-    no work while leftovers sat on a few owners.
+    Busy slaves shed at max_inflight. Idle slaves keep assign slots so
+    leftovers still get claimed — unless inflight hits hard_inflight, or the
+    last assign was already slow. Those two are the hang circuit breaker.
     """
     del idle_extra
+    hard = int(hard_inflight or 0)
+    if hard > 0 and int(inflight or 0) >= hard:
+        return True
+    slow = int(slow_assign_ms or 0)
+    if slow > 0 and int(last_assign_ms or 0) >= slow:
+        return int(inflight or 0) >= max(1, int(max_inflight or 1))
     if int(assigned_count or 0) <= 0:
         return False
     return int(inflight or 0) >= max(1, int(max_inflight or 1))
+
+
+def get_batches_assign_over_deadline(
+    *,
+    started_mono: float,
+    now_mono: float,
+    deadline_ms: int,
+) -> bool:
+    if int(deadline_ms or 0) <= 0:
+        return False
+    return (float(now_mono) - float(started_mono)) * 1000.0 >= float(deadline_ms)
+
+
+def get_batches_watchdog_should_exit(
+    *,
+    oldest_start_mono: float | None,
+    now_mono: float,
+    watchdog_ms: int,
+    inflight: int,
+) -> bool:
+    if int(watchdog_ms or 0) <= 0:
+        return False
+    if int(inflight or 0) <= 0 or oldest_start_mono is None:
+        return False
+    return (float(now_mono) - float(oldest_start_mono)) * 1000.0 >= float(
+        watchdog_ms
+    )
 
 
 def owner_idle_unlocks_sticky(active_count: int | None) -> bool:
@@ -847,6 +903,27 @@ class SlaveManager:
         self._get_batches_inflight = 0
         self._get_batches_inflight_lock = Lock()
         self._get_batches_max_inflight = GET_BATCHES_MAX_INFLIGHT
+        self._get_batches_hard_inflight = GET_BATCHES_HARD_INFLIGHT
+        self._get_batches_assign_deadline_ms = GET_BATCHES_ASSIGN_DEADLINE_MS
+        self._get_batches_lock_wait_sec = GET_BATCHES_LOCK_WAIT_MS / 1000.0
+        self._get_batches_slow_assign_ms = GET_BATCHES_SLOW_ASSIGN_MS
+        self._get_batches_watchdog_ms = GET_BATCHES_WATCHDOG_MS
+        self._get_batches_last_assign_ms = 0
+        self._get_batches_start_seq = 0
+        self._get_batches_starts: Dict[int, float] = {}
+        self._assign_sql_q: SimpleQueue = SimpleQueue()
+        self._assign_sql_thread = Thread(
+            target=self._assign_sql_loop,
+            name="assign-sql",
+            daemon=True,
+        )
+        self._assign_sql_thread.start()
+        self._get_batches_watchdog_thread = Thread(
+            target=self._get_batches_watchdog_loop,
+            name="get-batches-watchdog",
+            daemon=True,
+        )
+        self._get_batches_watchdog_thread.start()
         self._assign_views_lock = Lock()
         self._assign_views = AssignViews()
         # Slot ID / starvation views — refreshed with slot maintenance only.
@@ -895,6 +972,8 @@ class SlaveManager:
 
     def _touch_slave_seen(self, slave_name: str, now_ms: int, num_workers=None):
         # Heartbeats at 1Hz were a major write storm. Touch at most every N ms/slave.
+        # Never SQL on the poll thread: a wedged pool used to hold every slave
+        # for POSTGRES_POOL_WAIT_SEC and look like a dead fleet.
         until = int(self._slave_seen_touch_until.get(slave_name) or 0)
         if now_ms < until:
             return
@@ -904,20 +983,90 @@ class SlaveManager:
                 num_workers = int(telem.get("num_workers") or 0) or None
             except (TypeError, ValueError):
                 num_workers = None
-        try:
-            self._ensure_slave_seen_table()
-            touch_slave_seen(
-                get_db_conn().execute,
+        self._slave_seen_touch_until[slave_name] = now_ms + self._slave_seen_touch_interval_ms
+        self._assign_sql_q.put(
+            (
+                "touch",
                 slave_name,
                 now_ms,
-                num_workers=num_workers,
-                telem_state=telem.get("state"),
-                telem_active=telem.get("active_batches"),
-                telem_cores=telem.get("cores"),
+                num_workers,
+                telem.get("state"),
+                telem.get("active_batches"),
+                telem.get("cores"),
             )
-            self._slave_seen_touch_until[slave_name] = now_ms + self._slave_seen_touch_interval_ms
-        except Exception as exc:
-            logger.warning("slave-seen touch failed for %s: %s", slave_name, exc)
+        )
+
+    def _enqueue_assign_sql(self, updates) -> None:
+        if not updates:
+            return
+        self._assign_sql_q.put(("assign", list(updates)))
+
+    def _assign_sql_loop(self) -> None:
+        while True:
+            kind, *payload = self._assign_sql_q.get()
+            batch = [(kind, payload)]
+            while True:
+                try:
+                    nxt_kind, *nxt = self._assign_sql_q.get_nowait()
+                    batch.append((nxt_kind, nxt))
+                except Empty:
+                    break
+            assigns = []
+            touches = []
+            for item_kind, item in batch:
+                if item_kind == "assign":
+                    assigns.extend(item[0] or [])
+                elif item_kind == "touch":
+                    touches.append(item)
+            if assigns:
+                try:
+                    get_db_conn().execute_many(*assigns)
+                except Exception:
+                    logger.exception(
+                        "background assign SQL failed (%s statements)",
+                        len(assigns),
+                    )
+            for touch in touches:
+                try:
+                    slave_name, now_ms, num_workers, state, active, cores = touch
+                    self._ensure_slave_seen_table()
+                    touch_slave_seen(
+                        get_db_conn().execute,
+                        slave_name,
+                        now_ms,
+                        num_workers=num_workers,
+                        telem_state=state,
+                        telem_active=active,
+                        telem_cores=cores,
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "background slave-seen touch failed: %s", exc
+                    )
+
+    def _get_batches_watchdog_loop(self) -> None:
+        while True:
+            time.sleep(2.0)
+            if int(self._get_batches_watchdog_ms or 0) <= 0:
+                continue
+            now_mono = time.monotonic()
+            with self._get_batches_inflight_lock:
+                starts = list(self._get_batches_starts.values())
+                inflight = int(self._get_batches_inflight or 0)
+            oldest = min(starts) if starts else None
+            if get_batches_watchdog_should_exit(
+                oldest_start_mono=oldest,
+                now_mono=now_mono,
+                watchdog_ms=self._get_batches_watchdog_ms,
+                inflight=inflight,
+            ):
+                age_ms = int((now_mono - oldest) * 1000) if oldest is not None else 0
+                logger.critical(
+                    "get-batches wedged inflight=%s oldest=%sms — exiting for docker restart",
+                    inflight,
+                    age_ms,
+                )
+                os._exit(1)
 
     def _online_slaves(self, now_ms: int, *, refresh: bool = False) -> Set[str]:
         cached = self._online_cache
@@ -2537,24 +2686,46 @@ class SlaveManager:
             len(views.authorized_slaves),
         )
 
+    def _peek_assigned_batches(self, slave_name: str) -> list:
+        """Best-effort assigned work without waiting on self.lock."""
+        try:
+            rows = self.batches
+            return [
+                b["batch"]
+                for b in rows
+                if b.get("slave") == slave_name and b.get("end_time") is None
+            ]
+        except Exception:
+            return []
+
     def _memory_assigned_batches(self, slave_name: str) -> list:
         self._drop_ready_ghosts()
-        with self.lock:
+        acquired = self.lock.acquire(timeout=self._get_batches_lock_wait_sec)
+        if not acquired:
+            return self._peek_assigned_batches(slave_name)
+        try:
             return [
                 b["batch"]
                 for b in self.batches
                 if b.get("slave") == slave_name and b.get("end_time") is None
             ]
+        finally:
+            self.lock.release()
 
     def _drop_ready_ghosts(self) -> list:
         """Free seats held by already-submitted ids (no DB)."""
         now_ms = int(time.time() * 1000)
-        with self.lock:
+        acquired = self.lock.acquire(timeout=self._get_batches_lock_wait_sec)
+        if not acquired:
+            return []
+        try:
             keep, dropped = drop_ready_ghost_rows(
                 self.batches, self._ready_batch_ids, now_ms=now_ms
             )
             if dropped:
                 self.batches = keep
+        finally:
+            self.lock.release()
         if dropped:
             logger.info(
                 "dropped %s ready ghost(s) from memory: %s",
@@ -2563,7 +2734,13 @@ class SlaveManager:
             )
         return dropped
 
-    def _get_batches_fast(self, slave_name: str, slave: dict, now: float):
+    def _get_batches_fast(
+        self,
+        slave_name: str,
+        slave: dict,
+        now: float,
+        deadline_mono: float | None = None,
+    ):
         """Permanent hot path: memory assign + background AssignViews only.
 
         No adaptive/capability/artifact/finish-root SQL on the request path.
@@ -2571,6 +2748,8 @@ class SlaveManager:
         see easier tracks first; fast slaves see hard tracks first.
         """
         self._drop_ready_ghosts()
+        if deadline_mono is not None and time.monotonic() >= deadline_mono:
+            return self._peek_assigned_batches(slave_name), []
         views = self._get_assign_views()
         route_cap = int(slave["max_concurrent_batches"])
         # Honor adaptive cap 0 (load-shed). `dict.get(k) or route` treats 0 as missing.
@@ -2700,7 +2879,13 @@ class SlaveManager:
                     finish_root_bids.add(bid)
         updates = []
         concurrent = []
-        with self.lock:
+        if deadline_mono is not None and time.monotonic() >= deadline_mono:
+            return self._peek_assigned_batches(slave_name), []
+        acquired = self.lock.acquire(timeout=self._get_batches_lock_wait_sec)
+        if not acquired:
+            logger.warning("get-batches assign lock timeout slave=%s", slave_name)
+            return self._peek_assigned_batches(slave_name), []
+        try:
             last_leftover_bids = leftover_finish_bids(
                 unassigned_roots_by_job(self.batches),
                 unfinished_roots_by_job(self.batches),
@@ -2904,12 +3089,21 @@ class SlaveManager:
 
             # Last leftover first so a 1-seat box does not take a proof while
             # the only remaining root of another job sits unassigned.
+            deadline_hit = False
             for phase, rows in (
                 ("finish", root_rows),
                 ("proof", self.batches),
                 ("root", root_rows),
             ):
+                if deadline_hit:
+                    break
                 for b in rows:
+                    if deadline_mono is not None and time.monotonic() >= deadline_mono:
+                        logger.warning(
+                            "get-batches assign deadline slave=%s", slave_name
+                        )
+                        deadline_hit = True
+                        break
                     if len(concurrent) >= max_concurrent:
                         break
                     if b.get("end_time") is not None:
@@ -3050,6 +3244,8 @@ class SlaveManager:
                         taking_roots += 1
                         if not fill_bid:
                             fill_bid = str(bid)
+        finally:
+            self.lock.release()
         if not concurrent:
             logger.debug("no batches available for %s (fast)", slave_name)
         return concurrent, updates
@@ -3104,42 +3300,63 @@ class SlaveManager:
                 self._remember_slave_telemetry(slave_name, telemetry, int(now))
             self._touch_slave_seen(slave_name, int(now))
 
-            # Busy slaves shed at max_inflight. Idle slaves get a few extra
-            # assign slots so ownerless roots still get claimed.
-            assigned_now = self._memory_assigned_batches(slave_name)
+            # Busy slaves shed at max_inflight. Idle slaves get assign slots
+            # so leftovers still get claimed, until the hang circuit breaker.
+            assigned_now = self._peek_assigned_batches(slave_name)
             shed_only = False
+            poll_token = None
+            started_mono = time.monotonic()
             with self._get_batches_inflight_lock:
                 if should_shed_get_batches_poll(
                     inflight=self._get_batches_inflight,
                     max_inflight=self._get_batches_max_inflight,
                     assigned_count=len(assigned_now),
+                    hard_inflight=self._get_batches_hard_inflight,
+                    last_assign_ms=self._get_batches_last_assign_ms,
+                    slow_assign_ms=self._get_batches_slow_assign_ms,
                 ):
                     shed_only = True
                 else:
                     self._get_batches_inflight += 1
+                    self._get_batches_start_seq += 1
+                    poll_token = self._get_batches_start_seq
+                    self._get_batches_starts[poll_token] = started_mono
             if shed_only:
                 logger.debug(
-                    "get-batches shed busy slave=%s assigned=%s inflight=%s/%s",
+                    "get-batches shed slave=%s assigned=%s inflight=%s/%s hard=%s last_assign=%sms",
                     slave_name,
                     len(assigned_now),
                     self._get_batches_inflight,
                     self._get_batches_max_inflight,
+                    self._get_batches_hard_inflight,
+                    self._get_batches_last_assign_ms,
                 )
                 return JSONResponse(content=jsonable_encoder(assigned_now))
             if GET_BATCHES_FAST:
                 try:
-                    concurrent, updates = self._get_batches_fast(slave_name, slave, now)
+                    deadline_mono = None
+                    if self._get_batches_assign_deadline_ms > 0:
+                        deadline_mono = started_mono + (
+                            self._get_batches_assign_deadline_ms / 1000.0
+                        )
+                    concurrent, updates = self._get_batches_fast(
+                        slave_name, slave, now, deadline_mono=deadline_mono
+                    )
                     if updates:
-                        get_db_conn().execute_many(*updates)
+                        self._enqueue_assign_sql(updates)
                     return JSONResponse(content=jsonable_encoder(concurrent))
                 except Exception as exc:
                     logger.warning("get-batches fast failed for %s: %s", slave_name, exc)
                     return JSONResponse(
-                        content=jsonable_encoder(self._memory_assigned_batches(slave_name))
+                        content=jsonable_encoder(self._peek_assigned_batches(slave_name))
                     )
                 finally:
+                    elapsed_ms = int((time.monotonic() - started_mono) * 1000)
                     with self._get_batches_inflight_lock:
                         self._get_batches_inflight = max(0, self._get_batches_inflight - 1)
+                        if poll_token is not None:
+                            self._get_batches_starts.pop(poll_token, None)
+                        self._get_batches_last_assign_ms = elapsed_ms
             slot_types = self._slot_types_for_slave(slave_name)
             slot_benchmark_ids = set()
             starved_slot_benchmarks = {}
@@ -3804,7 +4021,7 @@ class SlaveManager:
             if len(concurrent) == 0:
                 logger.debug(f"no batches available for {slave_name}")
             if len(updates) > 0:
-                get_db_conn().execute_many(*updates)
+                self._enqueue_assign_sql(updates)
             # Final safety net: never hand batches that are already ready in DB.
             # In-memory ghosts (submit/run race) can still sit in concurrent with
             # end_time=None even though root_batch.ready=true — that trapped
