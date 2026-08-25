@@ -107,7 +107,7 @@ GET_BATCHES_ASSIGN_DEADLINE_MS = max(
     0, int(os.environ.get("GET_BATCHES_ASSIGN_DEADLINE_MS", "1500"))
 )
 GET_BATCHES_LOCK_WAIT_MS = max(
-    50, int(os.environ.get("GET_BATCHES_LOCK_WAIT_MS", "200"))
+    50, int(os.environ.get("GET_BATCHES_LOCK_WAIT_MS", "750"))
 )
 GET_BATCHES_SLOW_ASSIGN_MS = max(
     0, int(os.environ.get("GET_BATCHES_SLOW_ASSIGN_MS", "1500"))
@@ -942,6 +942,8 @@ class SlaveManager:
         self._get_batches_last_assign_ms = 0
         self._get_batches_start_seq = 0
         self._get_batches_starts: Dict[int, float] = {}
+        self._fanout_cache: tuple[Set[str], float] | None = None
+        self._fanout_log_until: Dict[str, float] = {}
         self._assign_sql_q: SimpleQueue = SimpleQueue()
         self._assign_sql_thread = Thread(
             target=self._assign_sql_loop,
@@ -1338,6 +1340,11 @@ class SlaveManager:
         del adaptive_caps, preferred_at_cap
         if not unassigned_by_bid:
             return
+        now_mono = time.monotonic()
+        cached = self._fanout_cache
+        if cached is not None and now_mono < cached[1]:
+            overflow_benchmark_ids.update(cached[0])
+            return
         idle_by_profile = {"cpu": 0, "gpu": 0}
         for name in online_slaves or set():
             profile = _slave_work_profile(name)
@@ -1366,15 +1373,18 @@ class SlaveManager:
             ):
                 continue
             overflow_benchmark_ids.add(bid)
-            logger.debug(
-                "sticky leftover fanout preferred=%s bid=%s unassigned=%s "
-                "idle_peers=%s keep=%s",
-                preferred,
-                bid[:8],
-                n_unassigned,
-                idle_peers,
-                STICKY_LEFTOVER_KEEP,
-            )
+            if now_mono >= float(self._fanout_log_until.get(bid) or 0):
+                self._fanout_log_until[bid] = now_mono + 10.0
+                logger.debug(
+                    "sticky leftover fanout preferred=%s bid=%s unassigned=%s "
+                    "idle_peers=%s keep=%s",
+                    preferred,
+                    bid[:8],
+                    n_unassigned,
+                    idle_peers,
+                    STICKY_LEFTOVER_KEEP,
+                )
+        self._fanout_cache = (set(overflow_benchmark_ids), now_mono + 2.0)
 
     def _slot_types_for_slave(self, slave_name: str) -> List[str]:
         counts = self._resource_slot_counts()
@@ -2923,6 +2933,90 @@ class SlaveManager:
                     finish_root_bids.add(bid)
         updates = []
         concurrent = []
+        last_leftover_bids = leftover_finish_bids(
+            unassigned_roots_by_job(self.batches),
+            unfinished_roots_by_job(self.batches),
+        )
+        finish_root_bids.update(last_leftover_bids)
+        overflow_benchmark_ids.update(last_leftover_bids)
+        if not unassigned_by_bid:
+            unassigned_by_bid = unassigned_roots_by_job(self.batches)
+        leftover_nonces = leftover_nonces_by_job(self.batches)
+        working_by_slave = {
+            name: telem_slave_is_working(self._slave_telemetry.get(name) or {})
+            for name in set(active_by_slave) | set(online_slaves) | {slave_name}
+        }
+        takeable_unassigned = takeable_unassigned_by_bid(
+            unassigned_by_bid,
+            slave_name=slave_name,
+            root_affinity=root_affinity,
+            overflow_benchmark_ids=overflow_benchmark_ids,
+            online_slaves=online_slaves,
+            active_by_slave=active_by_slave,
+            working_by_slave=working_by_slave,
+        )
+        poller_workers = poller_worker_count(
+            self._slave_telemetry.get(slave_name) or {},
+            is_gpu=_slave_work_profile(slave_name) == "gpu",
+        )
+        has_fat_claimable = claimable_has_fat_leftover(
+            unassigned_by_bid=takeable_unassigned,
+            leftover_nonces_by_bid=leftover_nonces,
+            workers=poller_workers,
+            empty_seats=max(1, int(max_concurrent or 1)),
+        )
+        cap_enabled = bool(views.cap_enabled)
+        cap_views = views.cap_views or {}
+        job_meta = views.job_meta or {}
+
+        def _fast_root_key(item):
+            idx, row = item
+            batch = row.get("batch") or {}
+            bid = str(batch.get("benchmark_id") or "")
+            sticky_own = (
+                row.get("end_time") is None
+                and (
+                    bid in finish_root_bids
+                    or root_affinity.get(bid) == slave_name
+                )
+            )
+            feed = feed_leftover_rank(
+                unassigned_on_job=unassigned_by_bid.get(str(bid), 0),
+                remaining_nonces=batch_remaining_nonces(batch),
+                original_idx=idx,
+                sticky_own=sticky_own,
+                is_proof=batch.get("sampled_nonces") is not None,
+            )
+            if not cap_enabled or batch.get("sampled_nonces") is not None:
+                return feed
+            meta = job_meta.get(bid) or {}
+            challenge = batch.get("challenge") or meta.get("challenge") or ""
+            settings = batch.get("settings") or {}
+            track_id = settings.get("track_id") or meta.get("track_id") or ""
+            hardness = CAPABILITY_SCHEDULER.track_hardness(
+                challenge, track_id, views=cap_views
+            )
+            speed = CAPABILITY_SCHEDULER.slave_speed_ratio(
+                slave_name, challenge, track_id, views=cap_views
+            )
+            start_time = meta.get("start_time")
+            try:
+                job_age_ms = int(now) - int(start_time) if start_time is not None else 0
+            except (TypeError, ValueError):
+                job_age_ms = 0
+            rest = prefer_shorter_rank_key(
+                hardness=hardness,
+                slave_speed_ratio=speed,
+                job_age_ms=job_age_ms,
+                original_idx=idx,
+                sticky_own=sticky_own,
+                overflow=bid in overflow_benchmark_ids,
+            )
+            return feed + rest
+
+        root_rows = [
+            row for _, row in sorted(enumerate(self.batches), key=_fast_root_key)
+        ]
         if deadline_mono is not None and time.monotonic() >= deadline_mono:
             return self._peek_assigned_batches(slave_name), []
         acquired = self.lock.acquire(timeout=self._get_batches_lock_wait_sec)
@@ -2930,12 +3024,6 @@ class SlaveManager:
             logger.warning("get-batches assign lock timeout slave=%s", slave_name)
             return self._peek_assigned_batches(slave_name), []
         try:
-            last_leftover_bids = leftover_finish_bids(
-                unassigned_roots_by_job(self.batches),
-                unfinished_roots_by_job(self.batches),
-            )
-            finish_root_bids.update(last_leftover_bids)
-            overflow_benchmark_ids.update(last_leftover_bids)
             assigned = [
                 b for b in self.batches
                 if b.get("slave") == slave_name and b.get("end_time") is None
@@ -2965,32 +3053,6 @@ class SlaveManager:
                 proof_priority=PROOF_PRIORITY_ENABLED and has_proof_work,
                 max_roots_while_proofs=PROOF_PRIORITY_MAX_ROOTS,
                 always_keep_root_benchmarks=finish_root_bids,
-            )
-            poller_workers = poller_worker_count(
-                self._slave_telemetry.get(slave_name) or {},
-                is_gpu=_slave_work_profile(slave_name) == "gpu",
-            )
-            leftover_nonces = leftover_nonces_by_job(self.batches)
-            if not unassigned_by_bid:
-                unassigned_by_bid = unassigned_roots_by_job(self.batches)
-            working_by_slave = {
-                name: telem_slave_is_working(self._slave_telemetry.get(name) or {})
-                for name in set(active_by_slave) | set(online_slaves) | {slave_name}
-            }
-            takeable_unassigned = takeable_unassigned_by_bid(
-                unassigned_by_bid,
-                slave_name=slave_name,
-                root_affinity=root_affinity,
-                overflow_benchmark_ids=overflow_benchmark_ids,
-                online_slaves=online_slaves,
-                active_by_slave=active_by_slave,
-                working_by_slave=working_by_slave,
-            )
-            has_fat_claimable = claimable_has_fat_leftover(
-                unassigned_by_bid=takeable_unassigned,
-                leftover_nonces_by_bid=leftover_nonces,
-                workers=poller_workers,
-                empty_seats=max(1, int(max_concurrent or 1)),
             )
             kept_assigned, crumb_assigned = split_assigned_crumbs(
                 kept_assigned,
@@ -3083,60 +3145,6 @@ class SlaveManager:
                 1 for b in kept_assigned if not _is_proof_batch_row(b)
             )
             taking_roots = 0
-
-            # Rank roots: own leftovers, then fattest job, then hardness.
-            cap_enabled = bool(views.cap_enabled)
-            cap_views = views.cap_views or {}
-            job_meta = views.job_meta or {}
-
-            def _fast_root_key(item):
-                idx, row = item
-                batch = row.get("batch") or {}
-                bid = str(batch.get("benchmark_id") or "")
-                sticky_own = (
-                    row.get("end_time") is None
-                    and (
-                        bid in finish_root_bids
-                        or root_affinity.get(bid) == slave_name
-                    )
-                )
-                feed = feed_leftover_rank(
-                    unassigned_on_job=unassigned_by_bid.get(str(bid), 0),
-                    remaining_nonces=batch_remaining_nonces(batch),
-                    original_idx=idx,
-                    sticky_own=sticky_own,
-                    is_proof=batch.get("sampled_nonces") is not None,
-                )
-                if not cap_enabled or batch.get("sampled_nonces") is not None:
-                    return feed
-                meta = job_meta.get(bid) or {}
-                challenge = batch.get("challenge") or meta.get("challenge") or ""
-                settings = batch.get("settings") or {}
-                track_id = settings.get("track_id") or meta.get("track_id") or ""
-                hardness = CAPABILITY_SCHEDULER.track_hardness(
-                    challenge, track_id, views=cap_views
-                )
-                speed = CAPABILITY_SCHEDULER.slave_speed_ratio(
-                    slave_name, challenge, track_id, views=cap_views
-                )
-                start_time = meta.get("start_time")
-                try:
-                    job_age_ms = int(now) - int(start_time) if start_time is not None else 0
-                except (TypeError, ValueError):
-                    job_age_ms = 0
-                rest = prefer_shorter_rank_key(
-                    hardness=hardness,
-                    slave_speed_ratio=speed,
-                    job_age_ms=job_age_ms,
-                    original_idx=idx,
-                    sticky_own=sticky_own,
-                    overflow=bid in overflow_benchmark_ids,
-                )
-                return feed + rest
-
-            root_rows = [
-                row for _, row in sorted(enumerate(self.batches), key=_fast_root_key)
-            ]
 
             # Last leftover first so a 1-seat box does not take a proof while
             # the only remaining root of another job sits unassigned.
