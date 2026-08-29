@@ -6,6 +6,7 @@ FROM ghcr.io/tig-foundation/tig-monorepo/benchmarker/master:${TIG_VERSION}
 COPY sql.py /app/master/sql.py
 COPY assign_views.py /app/master/assign_views.py
 COPY slave_manager.py /app/master/slave_manager.py
+COPY infra_errors.py /app/master/infra_errors.py
 COPY precommit_manager.py /app/master/precommit_manager.py
 COPY job_manager.py /app/master/job_manager.py
 COPY dispatch.py /app/master/dispatch.py
