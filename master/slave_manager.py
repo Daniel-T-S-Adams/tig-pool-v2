@@ -17,6 +17,10 @@ from common.utils import *
 from typing import Dict, List, Optional, Set
 from master.sql import get_db_conn
 from master.client_manager import CONFIG
+from master.infra_errors import (
+    is_container_missing_error as _is_container_missing_error,
+    is_infrastructure_error as _is_infrastructure_error,
+)
 from master.capability_scheduler import (
     SCHEDULER as CAPABILITY_SCHEDULER,
     assign_rank_tuple,
@@ -984,24 +988,6 @@ def batch_owner_stealable(
     if slave in (online_slaves or set()):
         return False
     return age > int(dark_reclaim_ms)
-
-
-INFRASTRUCTURE_ERROR_PATTERNS = [
-    "cannot open shared object file",
-    "no such file or directory",
-    "algorithm library",
-    "downloading algorithm",
-    "challenge container",
-    "container not found",
-    "permission denied",
-    "docker",
-    "mount",
-]
-
-
-def _is_infrastructure_error(error: str) -> bool:
-    text = (error or "").lower()
-    return any(pattern in text for pattern in INFRASTRUCTURE_ERROR_PATTERNS)
 
 
 def _slave_profile(slave_name: str) -> str:
