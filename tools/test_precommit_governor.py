@@ -53,6 +53,8 @@ def main() -> int:
         "profile_burst_lock",
         "should_reserve_idle_gpu_create",
         "has_positive_weight_for_profile",
+        "gpu_inflight_root_ceiling",
+        "gpu_fleet_create_allowed",
     )
     should_block = ns["should_block_precommit_create"]
     compute_caps = ns["compute_profile_root_caps"]
@@ -80,6 +82,8 @@ def main() -> int:
     burst_lock = ns["profile_burst_lock"]
     reserve_gpu = ns["should_reserve_idle_gpu_create"]
     has_weighted = ns["has_positive_weight_for_profile"]
+    gpu_ceiling = ns["gpu_inflight_root_ceiling"]
+    gpu_fleet_ok = ns["gpu_fleet_create_allowed"]
 
     settings = {
         "enabled": True,
@@ -512,6 +516,31 @@ def main() -> int:
     print(f"{'pass' if ok else 'FAIL'}: empty GPU cards are starved")
     if not ok:
         failed += 1
+    ok = gpu_ceiling(online_gpu=15, spare=1) == 16
+    print(f"{'pass' if ok else 'FAIL'}: GPU fleet ceiling is cards + 1 spare")
+    if not ok:
+        failed += 1
+    ok = gpu_fleet_ok(gpu_root_jobs=16, online_gpu=15) is False
+    print(f"{'pass' if ok else 'FAIL'}: 16 GPU root jobs on 15 cards blocks creates")
+    if not ok:
+        failed += 1
+    ok = gpu_fleet_ok(gpu_root_jobs=15, online_gpu=15) is True
+    print(f"{'pass' if ok else 'FAIL'}: 15 GPU root jobs on 15 cards allows the spare")
+    if not ok:
+        failed += 1
+    ok = gpu_fleet_ok(gpu_root_jobs=25, online_gpu=0) is True
+    print(f"{'pass' if ok else 'FAIL'}: missing GPU headcount does not invent a block")
+    if not ok:
+        failed += 1
+    ok = gpu_keep_ahead_fn(
+        unowned_gpu_root_jobs=0,
+        gpu_spare_jobs=2,
+        online_gpu_slaves=15,
+        gpu_root_jobs=16,
+    ) is False
+    print(f"{'pass' if ok else 'FAIL'}: keep-ahead stops at the GPU fleet ceiling")
+    if not ok:
+        failed += 1
     ok = gpu_keep_ahead_fn(unowned_gpu_root_jobs=0, gpu_spare_jobs=2) is True
     print(f"{'pass' if ok else 'FAIL'}: spare pile short requests keep-ahead")
     if not ok:
@@ -787,6 +816,62 @@ def main() -> int:
             )
             is True,
             "keep-ahead may exceed cap by the spare count only",
+        ),
+        (
+            under_cap(
+                "c004",
+                pending_counts={"c004": 3, "c005": 3, "c006": 3},
+                root_phase_counts={"c004": 6, "c005": 5, "c006": 5},
+                submitted={},
+                per_challenge_max={"c004": 6, "c005": 6, "c006": 6},
+                gpu_root_jobs=16,
+                online_gpu=15,
+            )
+            is False,
+            "GPU fleet ceiling blocks creates at 15 cards + 1 spare",
+        ),
+        (
+            under_cap(
+                "c004",
+                pending_counts={"c004": 3},
+                root_phase_counts={"c004": 10},
+                submitted={},
+                per_challenge_max={"c004": 6},
+                idle_gpu_needs_work=True,
+                idle_gpu_slaves=6,
+                gpu_root_jobs=16,
+                online_gpu=15,
+            )
+            is False,
+            "idle GPU lift does not walk around the fleet ceiling",
+        ),
+        (
+            under_cap(
+                "c001",
+                pending_counts={"c001": 4},
+                root_phase_counts={"c001": 4},
+                submitted={},
+                per_challenge_max={"c001": 4},
+                idle_cpu_needs_work=True,
+                idle_cpu_slaves=20,
+                gpu_root_jobs=16,
+                online_gpu=15,
+            )
+            is True,
+            "GPU fleet ceiling does not lift or block CPU creates",
+        ),
+        (
+            under_cap(
+                "c004",
+                pending_counts={"c004": 2},
+                root_phase_counts={"c004": 2, "c005": 2, "c006": 2},
+                submitted={},
+                per_challenge_max={"c004": 6},
+                gpu_root_jobs=6,
+                online_gpu=15,
+            )
+            is True,
+            "GPU creates still allowed under the fleet ceiling",
         ),
     ]
     for ok, label in cap_cases:

@@ -860,6 +860,49 @@ def _slave_work_profile(slave_name: str) -> str:
     return ""
 
 
+def gpu_assign_inflight_cap(
+    proposed: int,
+    *,
+    workers=None,
+    route_cap: int = 0,
+    cfg=None,
+) -> int:
+    """Hard ceiling: one in-flight root batch per GPU worker (max two).
+
+    Adaptive throughput/runtime caps and trusted route caps used to
+    warehouse 8-13 jobs on a 1-wide card. Callers must only apply this
+    to ``pool-gpu-*``. CPU caps are not clamped here.
+    """
+    try:
+        want = int(proposed or 0)
+    except (TypeError, ValueError):
+        want = 0
+    if want <= 0:
+        return 0
+    cfg = cfg or {}
+    try:
+        per_worker = int(cfg.get("gpu_inflight_per_worker", 1) or 1)
+    except (TypeError, ValueError):
+        per_worker = 1
+    if per_worker < 1:
+        per_worker = 1
+    elif per_worker > 2:
+        per_worker = 2
+    try:
+        worker_n = int(workers) if workers not in (None, "") else 0
+    except (TypeError, ValueError):
+        worker_n = 0
+    if worker_n <= 0:
+        worker_n = 1
+    hard = worker_n * per_worker
+    try:
+        route = int(route_cap or 0)
+    except (TypeError, ValueError):
+        route = 0
+    ceiling = hard if route <= 0 else min(hard, route)
+    return min(want, ceiling)
+
+
 def _algorithm_is_cpu(algorithm_id: str) -> bool:
     return str(algorithm_id or "")[:4] not in ("c004", "c005", "c006")
 
@@ -2012,6 +2055,26 @@ class SlaveManager:
             (state, benchmark_id)
         )
 
+    def _clamp_gpu_assign_cap(self, slave_name: str, proposed: int) -> int:
+        """GPU-only: never warehouse more than 1-2 in-flight batches per card."""
+        try:
+            want = int(proposed or 0)
+        except (TypeError, ValueError):
+            want = 0
+        if _slave_work_profile(slave_name) != "gpu":
+            return want
+        telem = self._slave_telemetry.get(slave_name) or {}
+        try:
+            workers = int(telem.get("num_workers") or 0) or None
+        except (TypeError, ValueError):
+            workers = None
+        return gpu_assign_inflight_cap(
+            want,
+            workers=workers,
+            route_cap=want,
+            cfg=CONFIG.get("adaptive_slave_caps") or {},
+        )
+
     def _route_cap_for_slave(self, slave_name: str) -> int:
         """Configured max_concurrent_batches for the slave route matching name."""
         matched = next(
@@ -2025,9 +2088,10 @@ class SlaveManager:
         if not matched:
             return 0
         try:
-            return max(0, int(matched.get("max_concurrent_batches") or 0))
+            cap = max(0, int(matched.get("max_concurrent_batches") or 0))
         except (TypeError, ValueError):
             return 0
+        return self._clamp_gpu_assign_cap(slave_name, cap)
 
     def _remember_slave_telemetry(self, slave_name: str, telemetry: dict, now_ms: int) -> None:
         """Store optional get-batches telemetry and arm CPU load-shed cooldown."""
@@ -2335,9 +2399,9 @@ class SlaveManager:
 
         cfg = CONFIG.get("adaptive_slave_caps", {})
         if not cfg or cfg.get("enabled") is False:
-            return route_cap
+            return self._clamp_gpu_assign_cap(slave_name, route_cap)
         if not slave_name.startswith("pool-") or self._is_trusted_slave(slave_name):
-            return route_cap
+            return self._clamp_gpu_assign_cap(slave_name, route_cap)
 
         profile = _slave_profile(slave_name)
         default_min = 1 if profile == "gpu" else 4
@@ -2466,6 +2530,9 @@ class SlaveManager:
             # Each reported GPU worker can run one root batch. Route / gpu_max
             # still bound this so a public 1-cap slave cannot claim 64 slots.
             cap = max(int(cap or 0), min(int(workers), int(max_cap), int(route_cap)))
+        # Real GPUs are 1-wide. Do not let throughput/runtime warehouse jobs.
+        if _slave_work_profile(slave_name) == "gpu":
+            cap = self._clamp_gpu_assign_cap(slave_name, cap)
         if profile == "cpu" and max_cap > 1:
             # L/XL worker scale is the cap now, not a warmup target. Adaptive
             # ramp from 1 would keep an EPYC on one batch-32 job like a 7950X.
@@ -3001,6 +3068,7 @@ class SlaveManager:
                 max_concurrent = max(0, min(route_cap, int(views.adaptive_caps[slave_name])))
             else:
                 max_concurrent = route_cap
+            max_concurrent = self._clamp_gpu_assign_cap(slave_name, max_concurrent)
             if max_concurrent <= 0:
                 continue
             assigned = self._peek_assigned_batches(slave_name)
@@ -3420,6 +3488,7 @@ class SlaveManager:
             max_concurrent = max(0, min(route_cap, int(views.adaptive_caps[slave_name])))
         else:
             max_concurrent = route_cap
+        max_concurrent = self._clamp_gpu_assign_cap(slave_name, max_concurrent)
         root_affinity = self._root_affinity_map()
         online_slaves = self._online_slaves(int(now))
         preferred_at_cap: Set[str] = set()

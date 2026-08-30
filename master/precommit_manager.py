@@ -40,6 +40,8 @@ logger = logging.getLogger(os.path.splitext(os.path.basename(__file__))[0])
 
 CPU_CHALLENGE_IDS = ("c001", "c002", "c003", "c007", "c008")
 GPU_CHALLENGE_IDS = ("c004", "c005", "c006")
+# One replacement job above live GPU headcount. Not a create target.
+GPU_FLEET_SPARE = 1
 
 
 def _env_bool(name, default="true"):
@@ -583,6 +585,31 @@ def resolve_tick_burst(*values) -> int:
     return best
 
 
+def gpu_inflight_root_ceiling(*, online_gpu: int = 0, spare: int = 1) -> int:
+    """Live GPU cards plus a single replacement job."""
+    return max(0, int(online_gpu or 0)) + max(0, int(spare or 0))
+
+
+def gpu_fleet_create_allowed(
+    *,
+    gpu_root_jobs: int = 0,
+    online_gpu: int = 0,
+    spare: int = 1,
+) -> bool:
+    """True when another GPU root job may start.
+
+    Ceiling is live cards + spare. Missing headcount (online_gpu=0)
+    does not block — callers without fleet data stay on per-challenge
+    caps only. CPU creates never call this.
+    """
+    online = max(0, int(online_gpu or 0))
+    if online <= 0:
+        return True
+    return int(gpu_root_jobs or 0) < gpu_inflight_root_ceiling(
+        online_gpu=online, spare=spare
+    )
+
+
 def compute_idle_gpu_starved(
     *,
     gpu_unassigned_claimable: int = 0,
@@ -608,6 +635,8 @@ def compute_gpu_keep_ahead(
     gpu_unassigned_claimable: int = 0,
     keep_ahead_spare: int = 2,
     leftover_jobs: int | None = None,
+    gpu_root_jobs: int = 0,
+    gpu_fleet_spare: int = 1,
 ) -> bool:
     """True when the GPU 2-job spare pile is short. GPUs may all be busy.
 
@@ -619,6 +648,12 @@ def compute_gpu_keep_ahead(
     del online_idle_gpu_slaves
     del leftover_jobs
     if gpu_profile_blocked:
+        return False
+    if not gpu_fleet_create_allowed(
+        gpu_root_jobs=gpu_root_jobs,
+        online_gpu=online_gpu_slaves,
+        spare=gpu_fleet_spare,
+    ):
         return False
     spare_n = max(0, int(keep_ahead_spare or 0))
     if max(0, int(gpu_unassigned_claimable or 0)) > 0:
@@ -654,6 +689,8 @@ def compute_idle_gpu_needs_work(
     online_gpu_slaves: int = 0,
     keep_ahead_spare: int = 2,
     leftover_jobs: int | None = None,
+    gpu_root_jobs: int = 0,
+    gpu_fleet_spare: int = 1,
 ) -> bool:
     """True when GPUs need more claimable work, including a keep-ahead spare.
 
@@ -677,6 +714,8 @@ def compute_idle_gpu_needs_work(
         gpu_unassigned_claimable=gpu_unassigned_claimable,
         keep_ahead_spare=keep_ahead_spare,
         leftover_jobs=leftover_jobs,
+        gpu_root_jobs=gpu_root_jobs,
+        gpu_fleet_spare=gpu_fleet_spare,
     )
 
 
@@ -768,6 +807,9 @@ def challenge_under_create_cap(
     idle_cpu_slaves: int = 0,
     max_idle_lift: int = 16,
     cpu_ids: tuple = ("c001", "c002", "c003", "c007", "c008"),
+    gpu_root_jobs: int | None = None,
+    online_gpu: int = 0,
+    gpu_fleet_spare: int = 1,
 ) -> bool:
     """True when this challenge may receive another precommit.
 
@@ -782,6 +824,16 @@ def challenge_under_create_cap(
     cap = per_challenge_max.get(cid)
     if cap is None:
         return True
+    if cid in gpu_ids and gpu_root_jobs is not None:
+        submitted_gpu = 0
+        for gid in gpu_ids:
+            submitted_gpu += int((submitted or {}).get(gid, 0) or 0)
+        if not gpu_fleet_create_allowed(
+            gpu_root_jobs=int(gpu_root_jobs or 0) + submitted_gpu,
+            online_gpu=online_gpu,
+            spare=gpu_fleet_spare,
+        ):
+            return False
     starved = bool(idle_gpu_starved) or (
         bool(idle_gpu_needs_work) and not bool(gpu_keep_ahead)
     )
@@ -1390,7 +1442,7 @@ class PrecommitManager:
                 """
                 SELECT
                     (
-                        SELECT COUNT(*)
+            SELECT COUNT(*) 
                         FROM root_batch rb
                         JOIN job j ON j.benchmark_id = rb.benchmark_id
                         WHERE rb.ready IS NULL
@@ -1694,6 +1746,7 @@ class PrecommitManager:
             cpu_jobs_in_proof_phase = int(row.get("cpu_jobs_in_proof_phase") or 0)
             gpu_active_jobs = int(row.get("gpu_active_jobs") or 0)
             gpu_jobs_in_proof_phase = int(row.get("gpu_jobs_in_proof_phase") or 0)
+            gpu_jobs_needing_roots = max(0, gpu_active_jobs - gpu_jobs_in_proof_phase)
             unowned_gpu_root_jobs = int(row.get("unowned_gpu_root_jobs") or 0)
             unowned_cpu_root_jobs = int(row.get("unowned_cpu_root_jobs") or 0)
             cpu_leftover_jobs = int(row.get("cpu_leftover_jobs") or 0)
@@ -1766,6 +1819,7 @@ class PrecommitManager:
                 "cpu_jobs_needing_roots": cpu_jobs_needing_roots,
                 "cpu_jobs_in_proof_phase": cpu_jobs_in_proof_phase,
                 "gpu_active_jobs": gpu_active_jobs,
+                "gpu_jobs_needing_roots": gpu_jobs_needing_roots,
                 "gpu_jobs_in_proof_phase": gpu_jobs_in_proof_phase,
                 "unowned_gpu_root_jobs": unowned_gpu_root_jobs,
                 "unowned_cpu_root_jobs": unowned_cpu_root_jobs,
@@ -1799,6 +1853,7 @@ class PrecommitManager:
                     gpu_unassigned_claimable=gpu_unassigned_claimable,
                     keep_ahead_spare=_keep_ahead_spare(),
                     leftover_jobs=gpu_leftover_jobs,
+                    gpu_root_jobs=gpu_jobs_needing_roots,
                 ),
                 "idle_gpu_needs_work": compute_idle_gpu_needs_work(
                     gpu_unassigned_claimable=gpu_unassigned_claimable,
@@ -1810,6 +1865,7 @@ class PrecommitManager:
                     online_gpu_slaves=online_gpu_slaves,
                     keep_ahead_spare=_keep_ahead_spare(),
                     leftover_jobs=gpu_leftover_jobs,
+                    gpu_root_jobs=gpu_jobs_needing_roots,
                 ),
             }
         except Exception as exc:
@@ -1849,9 +1905,14 @@ class PrecommitManager:
         idle_gpu_starved = bool(governor.get("idle_gpu_starved"))
         gpu_claimable_now = int(governor.get("gpu_unassigned_claimable") or 0)
         gpu_unowned_now = int(governor.get("unowned_gpu_root_jobs") or 0)
-        if gpu_claimable_now <= 0 and (
-            idle_gpu_starved
-            or gpu_unowned_now < _keep_ahead_spare()
+        idle_gpu_now = int(governor.get("online_idle_gpu_slaves") or 0)
+        # Keep-ahead (unowned < spare) is not starvation. Promoting it while
+        # every card is busy ignored proof-phase jobs and minted past the
+        # per-challenge cap. Only empty cards may take the idle lift.
+        if (
+            idle_gpu_now > 0
+            and gpu_claimable_now <= 0
+            and (idle_gpu_starved or gpu_unowned_now < _keep_ahead_spare())
         ):
             idle_gpu_starved = True
         cpu_hole = cpu_idle_hole(
@@ -2179,6 +2240,12 @@ class PrecommitManager:
                 idle_gpu_slaves=idle_gpu_slaves,
                 idle_cpu_needs_work=idle_cpu_needs_work,
                 idle_cpu_slaves=idle_cpu_slaves,
+                gpu_root_jobs=sum(
+                    int(root_phase_counts.get(cid, 0) or 0)
+                    for cid in GPU_CHALLENGE_IDS
+                ),
+                online_gpu=int(governor.get("online_gpu_slaves") or 0),
+                gpu_fleet_spare=GPU_FLEET_SPARE,
             )
         ]
         # TIG hygiene: skip banned / not-yet-active / failed-binary algorithms.
@@ -2555,7 +2622,7 @@ class PrecommitManager:
             _pinned = _track_algo_map.get(t_id)
             if _pinned is not None and _pinned != a_id:
                 selection["track_settings"][t_id] = {}
-
+        
         for t_id in set(challenge_config["active_tracks"]):
             for k in set(selection["track_settings"][t_id]) - {"num_bundles", "hyperparameters", "fuel_budget"}:
                 selection["track_settings"][t_id].pop(k)
