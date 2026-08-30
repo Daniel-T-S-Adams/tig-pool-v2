@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""GPU assign cap is 1-2 in-flight batches per card. CPU is not clamped."""
+"""GPU assign cap is 1-2 in-flight batches per card. CPU uses cpu_assign_inflight_cap."""
 
 from __future__ import annotations
 

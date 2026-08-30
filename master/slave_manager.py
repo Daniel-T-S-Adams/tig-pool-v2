@@ -27,6 +27,7 @@ from master.capability_scheduler import (
 )
 from master.assign_views import AssignViews
 from master.cpu_tier_caps import (
+    cpu_assign_inflight_cap,
     cpu_earnable_from_live,
     cpu_tier_cap_settings,
     effective_cpu_adaptive_max_cap,
@@ -2124,6 +2125,43 @@ class SlaveManager:
             cfg=CONFIG.get("adaptive_slave_caps") or {},
         )
 
+    def _clamp_cpu_assign_cap(self, slave_name: str, proposed: int) -> int:
+        """CPU: S/M stay at 1 in-flight root; L/XL keep earnable seats."""
+        try:
+            want = int(proposed or 0)
+        except (TypeError, ValueError):
+            want = 0
+        if _slave_work_profile(slave_name) != "cpu":
+            return want
+        if want <= 0:
+            return 0
+        telem = self._slave_telemetry.get(slave_name) or {}
+        has_size = False
+        for key in ("cores", "num_workers"):
+            if telem.get(key) not in (None, ""):
+                has_size = True
+                break
+        trusted_without_telem = (not has_size) and self._is_trusted_slave(slave_name)
+        now_ms = int(time.time() * 1000)
+        return cpu_assign_inflight_cap(
+            want,
+            cores=telem.get("cores"),
+            workers=telem.get("num_workers"),
+            load_1m=telem.get("load_1m"),
+            route_cap=want,
+            settings=cpu_tier_cap_settings(CONFIG),
+            load_shed_active=now_ms < int(
+                self._cpu_load_shed_until.get(slave_name) or 0
+            ),
+            trusted_without_telem=trusted_without_telem,
+        )
+
+    def _clamp_assign_cap(self, slave_name: str, proposed: int) -> int:
+        """Apply the GPU or CPU in-flight warehouse ceiling."""
+        if _slave_work_profile(slave_name) == "gpu":
+            return self._clamp_gpu_assign_cap(slave_name, proposed)
+        return self._clamp_cpu_assign_cap(slave_name, proposed)
+
     def _route_cap_for_slave(self, slave_name: str) -> int:
         """Configured max_concurrent_batches for the slave route matching name."""
         matched = next(
@@ -2140,7 +2178,7 @@ class SlaveManager:
             cap = max(0, int(matched.get("max_concurrent_batches") or 0))
         except (TypeError, ValueError):
             return 0
-        return self._clamp_gpu_assign_cap(slave_name, cap)
+        return self._clamp_assign_cap(slave_name, cap)
 
     def _remember_slave_telemetry(self, slave_name: str, telemetry: dict, now_ms: int) -> None:
         """Store optional get-batches telemetry and arm CPU load-shed cooldown."""
@@ -2448,9 +2486,9 @@ class SlaveManager:
 
         cfg = CONFIG.get("adaptive_slave_caps", {})
         if not cfg or cfg.get("enabled") is False:
-            return self._clamp_gpu_assign_cap(slave_name, route_cap)
+            return self._clamp_assign_cap(slave_name, route_cap)
         if not slave_name.startswith("pool-") or self._is_trusted_slave(slave_name):
-            return self._clamp_gpu_assign_cap(slave_name, route_cap)
+            return self._clamp_assign_cap(slave_name, route_cap)
 
         profile = _slave_profile(slave_name)
         default_min = 1 if profile == "gpu" else 4
@@ -2591,6 +2629,7 @@ class SlaveManager:
             cap = 0
         else:
             cap = max(1, min(max_cap, cap))
+        cap = self._clamp_assign_cap(slave_name, cap)
         if use_cache:
             self._adaptive_cap_cache[cache_key] = (
                 cap,
@@ -3117,7 +3156,7 @@ class SlaveManager:
                 max_concurrent = max(0, min(route_cap, int(views.adaptive_caps[slave_name])))
             else:
                 max_concurrent = route_cap
-            max_concurrent = self._clamp_gpu_assign_cap(slave_name, max_concurrent)
+            max_concurrent = self._clamp_assign_cap(slave_name, max_concurrent)
             if max_concurrent <= 0:
                 continue
             assigned = self._peek_assigned_batches(slave_name)
@@ -3545,7 +3584,7 @@ class SlaveManager:
             max_concurrent = max(0, min(route_cap, int(views.adaptive_caps[slave_name])))
         else:
             max_concurrent = route_cap
-        max_concurrent = self._clamp_gpu_assign_cap(slave_name, max_concurrent)
+        max_concurrent = self._clamp_assign_cap(slave_name, max_concurrent)
         root_affinity = self._root_affinity_map()
         online_slaves = self._online_slaves(int(now))
         preferred_at_cap: Set[str] = set()

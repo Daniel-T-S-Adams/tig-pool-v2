@@ -206,6 +206,48 @@ def cpu_earnable_from_live(
     )
 
 
+def cpu_assign_inflight_cap(
+    proposed: int,
+    *,
+    cores: Any = None,
+    workers: Any = None,
+    load_1m: Any = None,
+    route_cap: int = 0,
+    settings: Optional[Mapping[str, Any]] = None,
+    load_shed_active: bool = False,
+    trusted_without_telem: bool = False,
+) -> int:
+    """Hard ceiling: S/M CPU boxes get 1 in-flight root; L/XL keep earnable seats.
+
+    Adaptive cache misses and the pool-cpu route cap of 32 used to warehouse
+    6-10 jobs on a 32-thread Pica. Trusted coordinators with no size telem
+    keep ``proposed`` so an AWS Batch poller is not collapsed to 1.
+    """
+    try:
+        want = int(proposed or 0)
+    except (TypeError, ValueError):
+        want = 0
+    if want <= 0:
+        return 0
+    if trusted_without_telem:
+        return want
+    earnable = cpu_earnable_from_live(
+        cores=cores,
+        workers=workers,
+        load_1m=load_1m,
+        settings=settings,
+        load_shed_active=load_shed_active,
+    )
+    if earnable <= 0:
+        return 0
+    try:
+        route = int(route_cap or 0)
+    except (TypeError, ValueError):
+        route = 0
+    ceiling = earnable if route <= 0 else min(earnable, route)
+    return min(want, ceiling)
+
+
 def cpu_empty_seats(
     *,
     cores: Any = None,
