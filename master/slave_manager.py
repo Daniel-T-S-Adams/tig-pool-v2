@@ -412,17 +412,26 @@ def assigned_root_reclaimable(
     owner_active: int | None = None,
     owner_working: bool | None = None,
     unassigned_on_job: int = 0,
+    assigned_age_ms: int = 0,
+    owner_other_roots: int = 0,
+    last_leftover_steal_ms: int = 10 * 60 * 1000,
 ) -> bool:
     """True when an assigned root should be leftover for the next empty seat.
 
     Proofs stay with the artifact owner. Roots on an idle or not-working
     owner become claimable so 49 pending rows do not sit next to idle boxes.
-    The last leftover of a job stays put so it is not stolen mid-start.
+    A last leftover stays put mid-start. If the owner keeps warehousing
+    other roots past grace, steal so the job can finish on an empty box.
     """
     if is_proof:
         return False
     if leftover_finishes_job(unassigned_on_job, already_assigned=True):
-        return False
+        if int(owner_other_roots or 0) <= 0:
+            return False
+        steal_after = max(0, int(last_leftover_steal_ms or 0))
+        if steal_after <= 0:
+            return False
+        return int(assigned_age_ms or 0) >= steal_after
     if owner_active is not None and int(owner_active or 0) <= 0:
         return True
     if owner_working is False:
@@ -480,6 +489,41 @@ def leftover_is_crumb(
         workers=workers,
         empty_seats=empty_seats,
     )
+
+
+def slave_holds_last_leftover(assigned, last_leftover_bids) -> bool:
+    """True when this box already owns the last root of some job."""
+    bids = last_leftover_bids or set()
+    if not bids:
+        return False
+    for row in assigned or []:
+        if not isinstance(row, dict):
+            continue
+        batch = row.get("batch") if "batch" in row else row
+        if not isinstance(batch, dict):
+            continue
+        if batch.get("sampled_nonces") is not None:
+            continue
+        bid = str(batch.get("benchmark_id") or "")
+        if bid and bid in bids:
+            return True
+    return False
+
+
+def should_skip_foreign_root_for_last_leftover(
+    *,
+    holds_last_leftover: bool = False,
+    candidate_is_last_leftover: bool = False,
+    is_proof: bool = False,
+) -> bool:
+    """Finish the last leftover before taking knapsack / other mid-job roots.
+
+    XL may still run several jobs when none of them is one root from done.
+    Proofs and another job's last leftover may still join.
+    """
+    if is_proof or candidate_is_last_leftover:
+        return False
+    return bool(holds_last_leftover)
 
 
 def leftover_finishes_job(unassigned_on_job: int, already_assigned: bool = False) -> bool:
@@ -1007,14 +1051,19 @@ def batch_owner_stealable(
     """
     if slave is None or start_time is None:
         return True
+    age = int(now_ms) - int(start_time)
+    other = 0
+    if owner_active is not None:
+        other = max(0, int(owner_active or 0) - 1)
     if assigned_root_reclaimable(
         is_proof=is_proof,
         owner_active=owner_active,
         owner_working=owner_working,
         unassigned_on_job=unassigned_on_job,
+        assigned_age_ms=age,
+        owner_other_roots=other,
     ):
         return True
-    age = int(now_ms) - int(start_time)
     effective_retry = (
         int(retry_ms)
         if retry_ms is not None
@@ -3072,6 +3121,14 @@ class SlaveManager:
             if max_concurrent <= 0:
                 continue
             assigned = self._peek_assigned_batches(slave_name)
+            if slave_holds_last_leftover(
+                assigned,
+                leftover_finish_bids(
+                    unassigned_roots_by_job(self.batches),
+                    unfinished_roots_by_job(self.batches),
+                ),
+            ):
+                continue
             seats = max(0, int(max_concurrent) - len(assigned))
             if seats <= 0:
                 continue
@@ -3829,6 +3886,9 @@ class SlaveManager:
                 1 for b in kept_assigned if not _is_proof_batch_row(b)
             )
             taking_roots = 0
+            held_last_leftover = slave_holds_last_leftover(
+                kept_assigned, last_leftover_bids
+            )
 
             # Last leftover first so a 1-seat box does not take a proof while
             # the only remaining root of another job sits unassigned.
@@ -3861,6 +3921,12 @@ class SlaveManager:
                     ):
                         continue
                     finishes = bid in last_leftover_bids
+                    if should_skip_foreign_root_for_last_leftover(
+                        holds_last_leftover=held_last_leftover,
+                        candidate_is_last_leftover=finishes,
+                        is_proof=is_proof,
+                    ):
+                        continue
                     if phase == "finish":
                         if is_proof or not finishes:
                             continue
@@ -4405,6 +4471,9 @@ class SlaveManager:
                         b["num_attempts"] = max(0, b["num_attempts"] - 1)
 
                 concurrent = [b["batch"] for b in kept_assigned]
+                held_last_leftover = slave_holds_last_leftover(
+                    kept_assigned, last_leftover_bids
+                )
                 concurrent_by_bench = {}
                 concurrent_roots = sum(
                     1 for batch in concurrent if batch.get("sampled_nonces") is None
@@ -4605,6 +4674,12 @@ class SlaveManager:
                         bid = batch["benchmark_id"]
                         is_proof = batch.get("sampled_nonces") is not None
                         finishes = (not is_proof) and bid in last_leftover_bids
+                        if should_skip_foreign_root_for_last_leftover(
+                            holds_last_leftover=held_last_leftover,
+                            candidate_is_last_leftover=finishes,
+                            is_proof=is_proof,
+                        ):
+                            continue
                         if len(concurrent) >= max_concurrent:
                             break
                         if (

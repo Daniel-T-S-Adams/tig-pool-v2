@@ -54,6 +54,8 @@ def main() -> int:
         "leftover_finishes_job",
         "assigned_root_reclaimable",
         "batch_owner_stealable",
+        "slave_holds_last_leftover",
+        "should_skip_foreign_root_for_last_leftover",
         extra_ns={
             "Optional": __import__("typing").Optional,
             "Set": __import__("typing").Set,
@@ -63,6 +65,8 @@ def main() -> int:
     per_bench = slave_ns["seat_per_bench_cap"]
     reclaim = slave_ns["assigned_root_reclaimable"]
     stealable = slave_ns["batch_owner_stealable"]
+    holds_last = slave_ns["slave_holds_last_leftover"]
+    skip_foreign = slave_ns["should_skip_foreign_root_for_last_leftover"]
     check(
         per_bench(max_concurrent=5, configured=0) == 5,
         "EPYC earnable 5 may take 5 roots of one job (no idle-peer spray)",
@@ -116,6 +120,78 @@ def main() -> int:
         )
         is False,
         "working owner keeps a fresh assigned root",
+    )
+    check(
+        holds_last(
+            [{"benchmark_id": "8ef39f", "sampled_nonces": None}],
+            {"8ef39f"},
+        )
+        is True,
+        "assigned last leftover is detected on the owner",
+    )
+    check(
+        skip_foreign(holds_last_leftover=True, candidate_is_last_leftover=False)
+        is True,
+        "owner of a last leftover does not take a new foreign root",
+    )
+    check(
+        skip_foreign(holds_last_leftover=True, candidate_is_last_leftover=True)
+        is False,
+        "another job's last leftover may still join",
+    )
+    check(
+        skip_foreign(holds_last_leftover=True, is_proof=True)
+        is False,
+        "proofs are not blocked by a last leftover",
+    )
+    check(
+        skip_foreign(holds_last_leftover=False, candidate_is_last_leftover=False)
+        is False,
+        "XL with no last leftover may still take several jobs",
+    )
+    check(
+        reclaim(
+            is_proof=False,
+            owner_active=5,
+            owner_working=True,
+            unassigned_on_job=0,
+            assigned_age_ms=11 * 60 * 1000,
+            owner_other_roots=4,
+        )
+        is True,
+        "stale last leftover is stealable when the owner is warehousing",
+    )
+    check(
+        stealable(
+            now_ms=now,
+            slave="working-owner",
+            start_time=now - (11 * 60 * 1000),
+            algorithm_id="c007_a033",
+            online_slaves={"pica", "working-owner"},
+            is_proof=False,
+            retry_ms=7_200_000,
+            owner_active=5,
+            owner_working=True,
+            unassigned_on_job=0,
+        )
+        is True,
+        "next Pica can steal a 11-min last leftover from a busy XL",
+    )
+    check(
+        stealable(
+            now_ms=now,
+            slave="working-owner",
+            start_time=now - (11 * 60 * 1000),
+            algorithm_id="c007_a033",
+            online_slaves={"pica", "working-owner"},
+            is_proof=False,
+            retry_ms=7_200_000,
+            owner_active=1,
+            owner_working=True,
+            unassigned_on_job=0,
+        )
+        is False,
+        "last leftover is not stolen while it is the owner's only root",
     )
 
     pre_ns = _load_fns(
