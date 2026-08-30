@@ -49,6 +49,7 @@ def ready_job_buffer_short(
     *,
     idle: int = 0,
     claimable: int = 0,
+    leftover_jobs: int | None = None,
     unowned_jobs: int = 0,
     spare: int = NEXT_JOB_BUFFER,
 ) -> bool:
@@ -60,10 +61,15 @@ def ready_job_buffer_short(
     """
     idle_n = max(0, int(idle or 0))
     claimable_n = max(0, int(claimable or 0))
+    leftover_n = (
+        max(0, int(leftover_jobs or 0))
+        if leftover_jobs is not None
+        else claimable_n
+    )
     buf = max(0, int(spare or 0))
-    if idle_n > 0 and claimable_n < idle_n:
+    if idle_n > 0 and leftover_n < idle_n:
         return True
-    if claimable_n > 0:
+    if leftover_n > 0:
         return False
     return int(unowned_jobs or 0) < buf
 
@@ -80,21 +86,25 @@ def profile_needs_create(
 
     Empty seats leftovers cannot feed are a hole. A busy fleet only
     mints when the pull queue is empty so the next finish already has
-    a confirmed job waiting. Leftover *jobs* still being worked are
-    not that waiting job — unowned jobs are.
+    a confirmed job waiting. Leftover *jobs* are the food — leftover
+    root rows of a few fat jobs are not a warehouse.
     """
-    del leftover_jobs
     return ready_job_buffer_short(
         idle=idle,
         claimable=claimable,
+        leftover_jobs=leftover_jobs,
         unowned_jobs=unowned_jobs,
         spare=next_job_buffer,
     )
 
 
-def profile_has_hole(*, idle: int = 0, claimable: int = 0) -> bool:
+def profile_has_hole(
+    *, idle: int = 0, claimable: int = 0, leftover_jobs: int | None = None
+) -> bool:
     """True when idle boxes of this profile have nothing they can pull."""
     idle_n = max(0, int(idle or 0))
+    if leftover_jobs is not None:
+        return idle_n > 0 and max(0, int(leftover_jobs or 0)) < idle_n
     return idle_n > 0 and max(0, int(claimable or 0)) < idle_n
 
 
@@ -119,12 +129,12 @@ def _keep_ahead_short(
     leftover_roots: int,
     spare: int,
 ) -> bool:
-    del leftover_jobs
     if hole:
         return False
     return ready_job_buffer_short(
         idle=0,
         claimable=leftover_roots,
+        leftover_jobs=leftover_jobs,
         unowned_jobs=unowned,
         spare=spare,
     )
@@ -146,20 +156,30 @@ def dispatch_shorts(
     """CPU/GPU short flags for this tick.
 
     An idle hole always wins — that is workers joining or a pull queue
-    smaller than the seats. Keep-ahead only tops up a 2-job spare when
-    leftover jobs are already below that spare. It must not mint because
-    unowned jobs look empty while 8 leftover jobs still sit in the pile.
+    smaller than the seats. CPU keep-ahead counts unowned leftover jobs,
+    not leftover root crumbs on jobs already being worked. GPU keep-ahead
+    still treats leftover jobs as the spare pile.
     """
-    cpu_hole = profile_has_hole(idle=cpu_idle, claimable=cpu_claimable)
-    gpu_hole = profile_has_hole(idle=gpu_idle, claimable=gpu_claimable)
+    cpu_food = cpu_unowned if cpu_leftover_jobs is not None else None
+    gpu_food = gpu_unowned if gpu_leftover_jobs is not None else None
+    cpu_hole = profile_has_hole(
+        idle=cpu_idle,
+        claimable=cpu_claimable,
+        leftover_jobs=cpu_food,
+    )
+    gpu_hole = profile_has_hole(
+        idle=gpu_idle,
+        claimable=gpu_claimable,
+        leftover_jobs=gpu_food,
+    )
     if not allow_keep_ahead:
         return cpu_hole, gpu_hole
     buf = max(0, int(next_job_buffer or 0))
     cpu_ahead = _keep_ahead_short(
         hole=cpu_hole,
         unowned=cpu_unowned,
-        leftover_jobs=cpu_leftover_jobs,
-        leftover_roots=cpu_claimable,
+        leftover_jobs=cpu_food,
+        leftover_roots=0 if cpu_leftover_jobs is not None else cpu_claimable,
         spare=buf,
     )
     gpu_ahead = _keep_ahead_short(

@@ -325,8 +325,35 @@ def main() -> int:
             gpu_leftover_jobs=8,
             gpu_unowned=0,
         )
+        == (True, False),
+        "CPU crumbs on working jobs do not freeze keep-ahead; GPU leftovers still do",
+    )
+    check(
+        dispatch_shorts(
+            cpu_idle=0,
+            cpu_claimable=300,
+            cpu_leftover_jobs=8,
+            cpu_unowned=8,
+            gpu_idle=0,
+            gpu_claimable=200,
+            gpu_leftover_jobs=8,
+            gpu_unowned=8,
+        )
         == (False, False),
-        "leftover jobs on both profiles drain as workers leave",
+        "unowned leftover jobs already are the keep-ahead spare",
+    )
+    check(
+        dispatch_shorts(
+            cpu_idle=20,
+            cpu_claimable=910,
+            cpu_leftover_jobs=7,
+            cpu_unowned=4,
+            gpu_idle=0,
+            gpu_claimable=0,
+            gpu_unowned=0,
+        )
+        == (True, False),
+        "910 leftover roots / 4 unowned leftover jobs + idle 20 is a CPU hole",
     )
     check(
         both_busy == (False, False),

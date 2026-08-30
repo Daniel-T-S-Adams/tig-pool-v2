@@ -56,6 +56,7 @@ def main() -> int:
         "batch_owner_stealable",
         "slave_holds_last_leftover",
         "should_skip_foreign_root_for_last_leftover",
+        "retain_started_cpu_excess",
         extra_ns={
             "Optional": __import__("typing").Optional,
             "Set": __import__("typing").Set,
@@ -67,6 +68,24 @@ def main() -> int:
     stealable = slave_ns["batch_owner_stealable"]
     holds_last = slave_ns["slave_holds_last_leftover"]
     skip_foreign = slave_ns["should_skip_foreign_root_for_last_leftover"]
+    retain = slave_ns["retain_started_cpu_excess"]
+    started, unstarted = retain(
+        [{"start_time": 1, "batch": {"benchmark_id": "a"}}, {"start_time": None, "batch": {"benchmark_id": "b"}}],
+        is_cpu=True,
+    )
+    check(
+        [r["batch"]["benchmark_id"] for r in started] == ["a"]
+        and [r["batch"]["benchmark_id"] for r in unstarted] == ["b"],
+        "started CPU excess stays assigned; unstarted is released",
+    )
+    kept_gpu, drop_gpu = retain(
+        [{"start_time": 1, "batch": {"benchmark_id": "g"}}],
+        is_cpu=False,
+    )
+    check(
+        kept_gpu == [] and [r["batch"]["benchmark_id"] for r in drop_gpu] == ["g"],
+        "GPU excess is not retained by the CPU started-batch hold",
+    )
     check(
         per_bench(max_concurrent=5, configured=0) == 5,
         "EPYC earnable 5 may take 5 roots of one job (no idle-peer spray)",

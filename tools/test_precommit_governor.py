@@ -31,6 +31,7 @@ def main() -> int:
         "compute_cpu_unassigned_cap",
         "compute_gpu_unassigned_cap",
         "profile_root_backlog_blocks",
+        "_leftover_jobs_block_profile",
         "should_block_precommit_create",
         "compute_idle_cpu_needs_work",
         "keep_ahead_want",
@@ -238,6 +239,44 @@ def main() -> int:
     if not ok:
         failed += 1
 
+    # Leftover JOBS are the warehouse, not leftover ROOT rows.
+    leftover_blocks = profile_blocks(
+        cpu_roots_pending=1116,
+        gpu_roots_pending=10,
+        cpu_unassigned_roots=910,
+        gpu_unassigned_roots=0,
+        cpu_leftover_jobs=7,
+        gpu_leftover_jobs=0,
+        leftover_job_block=16,
+        caps={"cpu_pending_cap": 1024, "gpu_pending_cap": 512,
+              "cpu_unassigned_cap": 376, "gpu_unassigned_cap": 32},
+    )
+    ok = (not leftover_blocks["cpu"]) and (not leftover_blocks["gpu"])
+    print(
+        f"{'pass' if ok else 'FAIL'}: 910 leftover roots / 7 leftover jobs "
+        f"do not freeze CPU creates leftover_blocks={leftover_blocks}"
+    )
+    if not ok:
+        failed += 1
+
+    leftover_blocks = profile_blocks(
+        cpu_roots_pending=200,
+        gpu_roots_pending=10,
+        cpu_unassigned_roots=80,
+        gpu_unassigned_roots=0,
+        cpu_leftover_jobs=16,
+        leftover_job_block=16,
+        caps={"cpu_pending_cap": 240, "gpu_pending_cap": 432,
+              "cpu_unassigned_cap": 64, "gpu_unassigned_cap": 32},
+    )
+    ok = leftover_blocks["cpu"] and (not leftover_blocks["gpu"])
+    print(
+        f"{'pass' if ok else 'FAIL'}: leftover JOB warehouse still freezes CPU "
+        f"leftover_blocks={leftover_blocks}"
+    )
+    if not ok:
+        failed += 1
+
     # Idle-CPU bias: claimable must cover the idle fleet, not just be non-zero.
     idle_cases = [
         (
@@ -252,6 +291,21 @@ def main() -> int:
             ),
             True,
             "zero claimable + idle CPUs => needs work",
+        ),
+        (
+            dict(
+                idle_cpu_override=True,
+                cpu_slots=96,
+                cpu_unassigned_claimable=910,
+                cpu_leftover_jobs=7,
+                unowned_cpu_root_jobs=4,
+                cpu_jobs_needing_roots=15,
+                cpu_create_target=96,
+                cpu_profile_blocked=False,
+                online_idle_cpu_slaves=20,
+            ),
+            True,
+            "910 leftover roots / 4 unowned leftover jobs + idle 20 => still needs work",
         ),
         (
             dict(

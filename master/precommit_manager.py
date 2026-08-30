@@ -248,14 +248,38 @@ def compute_profile_root_caps(
     }
 
 
+def _leftover_jobs_block_profile(
+    leftover_jobs: int | None,
+    *,
+    job_block: int,
+    label: str,
+) -> str | None:
+    """Root-row piles of a few fat jobs are not a create warehouse."""
+    if leftover_jobs is None:
+        return None
+    jobs = max(0, int(leftover_jobs or 0))
+    cap = max(1, int(job_block or 16))
+    if jobs >= cap:
+        return f"{label} leftover jobs {jobs} >= {cap}"
+    return ""
+
+
 def profile_root_backlog_blocks(
     cpu_roots_pending: int,
     gpu_roots_pending: int,
     cpu_unassigned_roots: int,
     gpu_unassigned_roots: int,
     caps: dict,
+    cpu_leftover_jobs: int | None = None,
+    gpu_leftover_jobs: int | None = None,
+    leftover_job_block: int = 16,
 ) -> dict:
-    """Which challenge profiles must not receive new precommits right now."""
+    """Which challenge profiles must not receive new precommits right now.
+
+    After 1-wide S/M assign, a handful of fat leftover *jobs* can show
+    800+ unassigned root rows. Blocking on those rows froze CPU creates
+    while boxes chewed crumbs. Job count is the warehouse signal.
+    """
     cpu_pending = int(cpu_roots_pending or 0)
     gpu_pending = int(gpu_roots_pending or 0)
     cpu_unassigned = int(cpu_unassigned_roots or 0)
@@ -264,25 +288,38 @@ def profile_root_backlog_blocks(
     gpu_pending_cap = int(caps.get("gpu_pending_cap") or 0)
     cpu_unassigned_cap = int(caps.get("cpu_unassigned_cap") or 0)
     gpu_unassigned_cap = int(caps.get("gpu_unassigned_cap") or 0)
+    job_cap = max(1, int(leftover_job_block or 16))
 
     cpu_reasons = []
     gpu_reasons = []
-    if cpu_unassigned_cap and cpu_unassigned >= cpu_unassigned_cap:
-        cpu_reasons.append(
-            f"cpu unassigned roots {cpu_unassigned} >= {cpu_unassigned_cap}"
-        )
-    if cpu_pending_cap and cpu_pending >= cpu_pending_cap:
-        cpu_reasons.append(
-            f"cpu root backlog {cpu_pending} >= adaptive cap {cpu_pending_cap}"
-        )
-    if gpu_unassigned_cap and gpu_unassigned >= gpu_unassigned_cap:
-        gpu_reasons.append(
-            f"gpu unassigned roots {gpu_unassigned} >= {gpu_unassigned_cap}"
-        )
-    if gpu_pending_cap and gpu_pending >= gpu_pending_cap:
-        gpu_reasons.append(
-            f"gpu root backlog {gpu_pending} >= adaptive cap {gpu_pending_cap}"
-        )
+    cpu_job_gate = _leftover_jobs_block_profile(
+        cpu_leftover_jobs, job_block=job_cap, label="cpu"
+    )
+    gpu_job_gate = _leftover_jobs_block_profile(
+        gpu_leftover_jobs, job_block=job_cap, label="gpu"
+    )
+    if cpu_job_gate is None:
+        if cpu_unassigned_cap and cpu_unassigned >= cpu_unassigned_cap:
+            cpu_reasons.append(
+                f"cpu unassigned roots {cpu_unassigned} >= {cpu_unassigned_cap}"
+            )
+        if cpu_pending_cap and cpu_pending >= cpu_pending_cap:
+            cpu_reasons.append(
+                f"cpu root backlog {cpu_pending} >= adaptive cap {cpu_pending_cap}"
+            )
+    elif cpu_job_gate:
+        cpu_reasons.append(cpu_job_gate)
+    if gpu_job_gate is None:
+        if gpu_unassigned_cap and gpu_unassigned >= gpu_unassigned_cap:
+            gpu_reasons.append(
+                f"gpu unassigned roots {gpu_unassigned} >= {gpu_unassigned_cap}"
+            )
+        if gpu_pending_cap and gpu_pending >= gpu_pending_cap:
+            gpu_reasons.append(
+                f"gpu root backlog {gpu_pending} >= adaptive cap {gpu_pending_cap}"
+            )
+    elif gpu_job_gate:
+        gpu_reasons.append(gpu_job_gate)
     return {
         "cpu": bool(cpu_reasons),
         "gpu": bool(gpu_reasons),
@@ -387,18 +424,18 @@ def compute_idle_cpu_needs_work(
     unowned_cpu_root_jobs: int = 0,
     online_cpu_slaves: int = 0,
     keep_ahead_spare: int = 2,
+    cpu_leftover_jobs: int | None = None,
 ) -> bool:
     """True when empty CPU seats have less leftover food than they can absorb.
 
-    That is the only governor override. Keep-ahead (busy fleet, 2-job spare)
-    must not punch the soft-gate — that is how 42 jobs landed on a full
-    leftover warehouse. Unused keep-ahead args stay so old call sites work.
+    Food is leftover *jobs*, not leftover root rows. A 7-job pile with
+    900 batches is one-wide work for 7 boxes, not a warehouse. Unused
+    keep-ahead args stay so old call sites work.
     """
     del (
         cpu_jobs_needing_roots,
         cpu_create_target,
         cpu_jobs_in_proof_phase,
-        unowned_cpu_root_jobs,
         online_cpu_slaves,
         keep_ahead_spare,
     )
@@ -409,8 +446,11 @@ def compute_idle_cpu_needs_work(
     if cpu_profile_blocked:
         return False
     idle = max(0, int(online_idle_cpu_slaves or 0))
-    claimable = max(0, int(cpu_unassigned_claimable or 0))
-    return idle > 0 and claimable < idle
+    if cpu_leftover_jobs is not None:
+        food = max(0, int(unowned_cpu_root_jobs or 0))
+    else:
+        food = max(0, int(cpu_unassigned_claimable or 0))
+    return idle > 0 and food < idle
 
 
 def idle_decision_count(sustained: int = 0, instant: int = 0) -> int:
@@ -874,9 +914,13 @@ def should_force_cpu_only(
     return bool((not gpu_starved) and (not cpu_profile_blocked))
 
 
-def cpu_idle_hole(*, idle: int = 0, claimable: int = 0) -> bool:
+def cpu_idle_hole(
+    *, idle: int = 0, claimable: int = 0, leftover_jobs: int | None = None
+) -> bool:
     """True when live CPU boxes are empty and have nothing to claim."""
     idle_n = max(0, int(idle or 0))
+    if leftover_jobs is not None:
+        return idle_n > 0 and max(0, int(leftover_jobs or 0)) < idle_n
     return idle_n > 0 and int(claimable or 0) < idle_n
 
 
@@ -1171,8 +1215,8 @@ class PrecommitManager:
             next_job_buffer=next_buf,
             allow_keep_ahead=allow_keep_ahead,
         )
-        cpu_hole = profile_has_hole(idle=cpu_idle, claimable=cpu_claimable)
-        gpu_hole = profile_has_hole(idle=gpu_idle, claimable=gpu_claimable)
+        cpu_hole = profile_has_hole(idle=cpu_idle, leftover_jobs=cpu_unowned)
+        gpu_hole = profile_has_hole(idle=gpu_idle, leftover_jobs=gpu_unowned)
         profile = next_hole_profile(
             cpu_hole=cpu_hole,
             gpu_hole=gpu_hole,
@@ -1395,6 +1439,11 @@ class PrecommitManager:
                 int(snap.get("cpu_unassigned_claimable") or 0),
                 int(snap.get("gpu_unassigned_claimable") or 0),
                 caps,
+                cpu_leftover_jobs=int(snap.get("cpu_leftover_jobs") or 0),
+                gpu_leftover_jobs=int(snap.get("gpu_leftover_jobs") or 0),
+                leftover_job_block=int(
+                    os.environ.get("PRECOMMIT_LEFTOVER_JOB_BLOCK", "16")
+                ),
             )
         profile_blocks = snap.get("profile_blocks") or {"cpu": False, "gpu": False}
         idle_cpu_needs_work = compute_idle_cpu_needs_work(
@@ -1409,6 +1458,7 @@ class PrecommitManager:
             unowned_cpu_root_jobs=int(snap.get("unowned_cpu_root_jobs") or 0),
             online_cpu_slaves=max(online_cpu, int(snap.get("online_cpu_slaves") or 0)),
             keep_ahead_spare=_keep_ahead_spare(),
+            cpu_leftover_jobs=int(snap.get("cpu_leftover_jobs") or 0),
         )
         snap["online_idle_cpu_slaves"] = instant
         snap["online_idle_cpu_slaves_instant"] = instant
@@ -1802,6 +1852,11 @@ class PrecommitManager:
                 cpu_unassigned_claimable,
                 gpu_unassigned_claimable,
                 profile_caps,
+                cpu_leftover_jobs=int(row.get("cpu_leftover_jobs") or 0),
+                gpu_leftover_jobs=int(row.get("gpu_leftover_jobs") or 0),
+                leftover_job_block=int(
+                    os.environ.get("PRECOMMIT_LEFTOVER_JOB_BLOCK", "16")
+                ),
             )
             # Instant idle from SQL; sustained overlay applied below.
             snapshot = {
@@ -1924,6 +1979,7 @@ class PrecommitManager:
                 )
             ),
             claimable=int(governor.get("cpu_unassigned_claimable") or 0),
+            leftover_jobs=int(governor.get("unowned_cpu_root_jobs") or 0),
         )
         # Profile lock only. A GPU hole still grants the idle override so
         # a CPU leftover warehouse cannot freeze empty cards.
@@ -2085,13 +2141,13 @@ class PrecommitManager:
         spare_short = (not seat_hole) and (
             ready_job_buffer_short(
                 idle=0,
-                claimable=int(governor.get("cpu_unassigned_claimable") or 0),
+                leftover_jobs=int(governor.get("unowned_cpu_root_jobs") or 0),
                 unowned_jobs=int(governor.get("unowned_cpu_root_jobs") or 0),
                 spare=keep_spare,
             )
             or ready_job_buffer_short(
                 idle=0,
-                claimable=int(governor.get("gpu_unassigned_claimable") or 0),
+                leftover_jobs=gpu_leftover_jobs,
                 unowned_jobs=int(governor.get("unowned_gpu_root_jobs") or 0),
                 spare=keep_spare,
             )

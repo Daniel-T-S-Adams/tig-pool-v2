@@ -1011,6 +1011,27 @@ def select_kept_assigned_batches(
     return kept, excess
 
 
+def retain_started_cpu_excess(excess: list, *, is_cpu: bool) -> tuple[list, list]:
+    """Keep already-started CPU batches; only requeue ones that never ran.
+
+    Releasing in-flight S/M work dumped hundreds of leftover roots, froze
+    CPU creates, and left slaves busy on jobs the master no longer owned.
+    """
+    if not is_cpu:
+        return [], list(excess or [])
+    keep = []
+    drop = []
+    for row in excess or []:
+        if not isinstance(row, dict):
+            drop.append(row)
+            continue
+        if row.get("start_time") is not None:
+            keep.append(row)
+        else:
+            drop.append(row)
+    return keep, drop
+
+
 def _batch_retry_time(algorithm_id: str) -> int:
     """Return the retry timeout (ms) for a given algorithm_id.
 
@@ -3844,6 +3865,12 @@ class SlaveManager:
             )
             if crumb_assigned:
                 excess_assigned = list(excess_assigned) + list(crumb_assigned)
+            kept_started, excess_assigned = retain_started_cpu_excess(
+                excess_assigned,
+                is_cpu=_slave_work_profile(slave_name) == "cpu",
+            )
+            if kept_started:
+                kept_assigned = list(kept_assigned) + list(kept_started)
             for b in excess_assigned:
                 batch = b["batch"]
                 table = (
@@ -4480,6 +4507,12 @@ class SlaveManager:
                 )
                 if crumb_assigned:
                     excess_assigned = list(excess_assigned) + list(crumb_assigned)
+                kept_started, excess_assigned = retain_started_cpu_excess(
+                    excess_assigned,
+                    is_cpu=_slave_work_profile(slave_name) == "cpu",
+                )
+                if kept_started:
+                    kept_assigned = list(kept_assigned) + list(kept_started)
                 if excess_assigned:
                     logger.info(
                         f"releasing {len(excess_assigned)} excess batches from {slave_name} "
