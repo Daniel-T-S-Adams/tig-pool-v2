@@ -421,18 +421,23 @@ def assigned_root_reclaimable(
 
     Proofs stay with the artifact owner. Roots on an idle or not-working
     owner become claimable so 49 pending rows do not sit next to idle boxes.
-    A last leftover stays put mid-start. If the owner keeps warehousing
-    other roots past grace, steal so the job can finish on an empty box.
+    A last leftover stays put mid-start. After grace it is stolen when the
+    owner is telem-idle, not working, or still warehousing other roots, so a
+    dropped last leftover cannot pin the job until the hour retry.
     """
     if is_proof:
         return False
     if leftover_finishes_job(unassigned_on_job, already_assigned=True):
-        if int(owner_other_roots or 0) <= 0:
-            return False
         steal_after = max(0, int(last_leftover_steal_ms or 0))
-        if steal_after <= 0:
+        if steal_after <= 0 or int(assigned_age_ms or 0) < steal_after:
             return False
-        return int(assigned_age_ms or 0) >= steal_after
+        if int(owner_other_roots or 0) > 0:
+            return True
+        if owner_active is not None and int(owner_active or 0) <= 0:
+            return True
+        if owner_working is False:
+            return True
+        return False
     if owner_active is not None and int(owner_active or 0) <= 0:
         return True
     if owner_working is False:

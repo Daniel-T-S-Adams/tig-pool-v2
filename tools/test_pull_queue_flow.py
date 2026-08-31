@@ -105,6 +105,28 @@ def main() -> int:
         "assigned last leftover is not stolen mid-start",
     )
     check(
+        reclaim(
+            is_proof=False,
+            owner_active=0,
+            owner_working=False,
+            unassigned_on_job=0,
+            assigned_age_ms=10 * 60 * 1000,
+        )
+        is True,
+        "aged last leftover on idle owner is stealable",
+    )
+    check(
+        reclaim(
+            is_proof=False,
+            owner_active=1,
+            owner_working=True,
+            unassigned_on_job=0,
+            assigned_age_ms=10 * 60 * 1000,
+        )
+        is False,
+        "aged last leftover stays with a working owner",
+    )
+    check(
         reclaim(is_proof=True, owner_active=0, owner_working=False) is False,
         "proofs stay with the artifact owner",
     )
@@ -139,6 +161,38 @@ def main() -> int:
         )
         is False,
         "working owner keeps a fresh assigned root",
+    )
+    check(
+        stealable(
+            now_ms=now,
+            slave="ghost-owner",
+            start_time=now - 5_000,
+            algorithm_id="c004_x",
+            online_slaves={"pica", "ghost-owner"},
+            is_proof=False,
+            retry_ms=3_600_000,
+            owner_active=0,
+            owner_working=False,
+            unassigned_on_job=0,
+        )
+        is False,
+        "fresh last leftover stays put mid-start",
+    )
+    check(
+        stealable(
+            now_ms=now,
+            slave="ghost-owner",
+            start_time=now - (10 * 60 * 1000),
+            algorithm_id="c004_x",
+            online_slaves={"pica", "ghost-owner"},
+            is_proof=False,
+            retry_ms=3_600_000,
+            owner_active=0,
+            owner_working=False,
+            unassigned_on_job=0,
+        )
+        is True,
+        "next Pica poll can claim an aged idle last leftover",
     )
     check(
         holds_last(
