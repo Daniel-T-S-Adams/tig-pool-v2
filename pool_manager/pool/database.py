@@ -43,13 +43,16 @@ class SingleFlightCache:
         self._value = None
         self._ts = 0.0
 
-    def get(self, builder, force: bool = False):
+    def get(self, builder, force: bool = False, placeholder=None):
         now = time.time()
         if not force and self._value is not None and now - self._ts < self.ttl_s:
             return self._value
         if not force and self._value is not None:
             self._schedule_refresh(builder)
             return self._value
+        if placeholder is not None and not force:
+            self._schedule_refresh(builder)
+            return self._value if self._value is not None else placeholder
         return self._build_locked(builder)
 
     def _schedule_refresh(self, builder) -> None:

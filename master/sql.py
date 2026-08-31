@@ -120,10 +120,12 @@ class PostgresDB:
             except Exception:
                 pass
 
-    def execute_many(self, *args) -> None:
+    def execute_many(self, *args, lock_timeout: Optional[str] = None) -> None:
         conn = self._checkout()
         try:
             with conn.cursor() as cur:
+                if lock_timeout:
+                    cur.execute("SET LOCAL lock_timeout = %s", (lock_timeout,))
                 for query in args:
                     cur.execute(*query)
             conn.commit()

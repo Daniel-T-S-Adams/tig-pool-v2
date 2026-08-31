@@ -12,9 +12,17 @@ services:
       - ./postgres/init.sql:/docker-entrypoint-initdb.d/init.sql
     networks:
       - innopool
+    # Warehouse JOINs + 100+ slave heartbeats blow the Docker default 64MB
+    # /dev/shm (DiskFull on DSM resize) and freeze master + manager.
+    shm_size: 1g
     # Default 100 is too small once master holds ~48 and manager used to
     # open a socket per query. Command-line -c overrides the data-dir conf.
     command: ["postgres", "-c", "max_connections=200"]
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "3"
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER}"]
       interval: 5s
@@ -28,6 +36,11 @@ services:
         TIG_VERSION: ${TIG_VERSION}
     container_name: innopool_master
     restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "3"
     environment:
       - POSTGRES_USER=${POSTGRES_USER}
       - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
@@ -164,6 +177,11 @@ services:
       context: ./pool_manager
     container_name: innopool_manager
     restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "3"
     env_file:
       - .env
     environment:

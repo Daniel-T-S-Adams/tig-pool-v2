@@ -344,6 +344,31 @@ def _fleet_onboarding_payload(token: str, worker_type: str) -> dict:
 # ── public stats ───────────────────────────────────────────────────────────────
 
 _STATS_CACHE = db.SingleFlightCache(float(os.environ.get("POOL_STATS_CACHE_S", "10")))
+_HEALTH_CACHE = db.SingleFlightCache(float(os.environ.get("POOL_HEALTH_CACHE_S", "8")))
+
+
+def _health_unavailable():
+    return {
+        "generated_at_ms": int(time.time() * 1000),
+        "status": "caution",
+        "gate": "unknown",
+        "posture": "degraded",
+        "active_slave_counts": {"cpu": 0, "gpu": 0},
+        "worker_trust": {
+            "cpu": {"capacity_eligible": 0, "probation": 0, "low_spec_override": 0},
+            "gpu": {"capacity_eligible": 0, "probation": 0, "low_spec_override": 0},
+        },
+        "current": {
+            "max_concurrent_benchmarks": None,
+            "cpu_slots": 0,
+            "gpu_slots_total": 0,
+        },
+        "stale_totals": {"roots": 0, "proofs": 0},
+        "reward_funnel": {},
+        "latest_coinbase": None,
+        "challenges": [],
+        "degraded": True,
+    }
 
 
 @router.get("/stats")
@@ -645,6 +670,10 @@ def get_pool_earnings():
 @router.get("/health")
 def get_pool_health():
     """Public, sanitized pool health summary for the dashboard."""
+    return _HEALTH_CACHE.get(_get_pool_health_uncached, placeholder=_health_unavailable())
+
+
+def _get_pool_health_uncached():
     report = autopilot.build_report()
     readiness = report.get("scale_readiness") or {}
     stale_totals = report.get("stale_totals") or {}

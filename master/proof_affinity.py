@@ -12,9 +12,28 @@ dark. These helpers:
 
 from __future__ import annotations
 
+import logging
 import os
 import re
+import threading
 from typing import Callable, Dict, Iterable, Optional, Set
+
+logger = logging.getLogger(os.path.splitext(os.path.basename(__file__))[0])
+_SLAVE_SEEN_READY = False
+_SLAVE_SEEN_LOCK = threading.Lock()
+_SLAVE_SEEN_STATEMENTS = (
+    """
+        CREATE TABLE IF NOT EXISTS slave_seen (
+            slave_name TEXT PRIMARY KEY,
+            last_seen BIGINT NOT NULL
+        )
+        """,
+    "CREATE INDEX IF NOT EXISTS idx_slave_seen_last_seen ON slave_seen(last_seen)",
+    "ALTER TABLE slave_seen ADD COLUMN IF NOT EXISTS num_workers INTEGER",
+    "ALTER TABLE slave_seen ADD COLUMN IF NOT EXISTS telem_state TEXT",
+    "ALTER TABLE slave_seen ADD COLUMN IF NOT EXISTS telem_active INTEGER",
+    "ALTER TABLE slave_seen ADD COLUMN IF NOT EXISTS telem_cores INTEGER",
+)
 
 # pool-cpu6a10… / pool-gpu6a10… (missing hyphen after cpu|gpu).
 _POOL_NAME_MISSING_HYPHEN = re.compile(
@@ -182,22 +201,36 @@ def should_skip_root_for_slave(
     return True
 
 
+def reset_slave_seen_ready_for_tests() -> None:
+    global _SLAVE_SEEN_READY
+    _SLAVE_SEEN_READY = False
+
+
 def ensure_slave_seen_table(execute: Callable) -> None:
-    execute(
-        """
-        CREATE TABLE IF NOT EXISTS slave_seen (
-            slave_name TEXT PRIMARY KEY,
-            last_seen BIGINT NOT NULL
-        )
-        """
-    )
-    execute(
-        "CREATE INDEX IF NOT EXISTS idx_slave_seen_last_seen ON slave_seen(last_seen)"
-    )
-    execute("ALTER TABLE slave_seen ADD COLUMN IF NOT EXISTS num_workers INTEGER")
-    execute("ALTER TABLE slave_seen ADD COLUMN IF NOT EXISTS telem_state TEXT")
-    execute("ALTER TABLE slave_seen ADD COLUMN IF NOT EXISTS telem_active INTEGER")
-    execute("ALTER TABLE slave_seen ADD COLUMN IF NOT EXISTS telem_cores INTEGER")
+    """Create slave_seen once. Never sit on ACCESS EXCLUSIVE on the hot path.
+
+    job_manager / precommit / get-batches used to ALTER this table every loop.
+    With 100+ 1Hz heartbeats that lock convoy freezes assigns and the dashboard.
+    """
+    global _SLAVE_SEEN_READY
+    if _SLAVE_SEEN_READY:
+        return
+    with _SLAVE_SEEN_LOCK:
+        if _SLAVE_SEEN_READY:
+            return
+        try:
+            db = getattr(execute, "__self__", None)
+            if db is not None and hasattr(db, "execute_many"):
+                db.execute_many(
+                    *[(sql,) for sql in _SLAVE_SEEN_STATEMENTS],
+                    lock_timeout="2s",
+                )
+            else:
+                for sql in _SLAVE_SEEN_STATEMENTS:
+                    execute(sql)
+            _SLAVE_SEEN_READY = True
+        except Exception as exc:
+            logger.warning("slave_seen schema ensure deferred: %s", exc)
 
 
 def touch_slave_seen(

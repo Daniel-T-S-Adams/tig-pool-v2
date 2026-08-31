@@ -5530,14 +5530,31 @@ _report_lock = threading.Lock()
 _report_cache: dict[str, Any] = {"ts": 0, "report": None}
 
 
+def _degraded_report(now_ms: int) -> dict:
+    return {
+        "generated_at_ms": now_ms,
+        "scale_readiness": {"gate": "unknown", "posture": "degraded"},
+        "stale_totals": {"roots": 0, "proofs": 0},
+        "active_slave_counts": {"cpu": 0, "gpu": 0},
+        "current_config": {},
+        "reward_funnel": {"summary": {}},
+        "slaves": [],
+        "challenges": [],
+        "degraded": True,
+    }
+
+
 def build_report(*, force: bool = False) -> dict:
     now_ms = int(time.time() * 1000)
-    if not force:
-        cached = _report_cache.get("report")
-        ts = int(_report_cache.get("ts") or 0)
-        if cached is not None and now_ms - ts < _REPORT_CACHE_MS:
+    cached = _report_cache.get("report")
+    ts = int(_report_cache.get("ts") or 0)
+    if not force and cached is not None and now_ms - ts < _REPORT_CACHE_MS:
+        return cached
+    if not _report_lock.acquire(blocking=False):
+        if cached is not None:
             return cached
-    with _report_lock:
+        return _degraded_report(now_ms)
+    try:
         now_ms = int(time.time() * 1000)
         if not force:
             cached = _report_cache.get("report")
@@ -5548,6 +5565,8 @@ def build_report(*, force: bool = False) -> dict:
         _report_cache["report"] = report
         _report_cache["ts"] = int(time.time() * 1000)
         return report
+    finally:
+        _report_lock.release()
 
 
 def _build_report_uncached() -> dict:

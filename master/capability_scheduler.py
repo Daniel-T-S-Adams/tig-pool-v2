@@ -15,6 +15,8 @@ import re
 import time
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
+from master.proof_affinity import ensure_slave_seen_table
+
 logger = logging.getLogger("capability_scheduler")
 
 TIER_S = 0
@@ -804,9 +806,9 @@ class CapabilityScheduler:
             except Exception as exc:
                 logger.debug("ensure slave_track_ema failed: %s", exc)
             try:
-                execute("ALTER TABLE slave_seen ADD COLUMN IF NOT EXISTS telem_cores INTEGER")
+                ensure_slave_seen_table(execute)
             except Exception as exc:
-                logger.debug("ensure slave_seen.telem_cores failed: %s", exc)
+                logger.debug("ensure slave_seen failed: %s", exc)
 
         window_ms = 2 * 60 * 60 * 1000
         since_ms = now_ms - window_ms
