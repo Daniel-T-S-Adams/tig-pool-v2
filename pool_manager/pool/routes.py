@@ -856,8 +856,9 @@ def get_member_stats(wallet_address: str):
     slave_activity = {}
     if slave_list:
         placeholders = ",".join(["%s"] * len(slave_list))  # nosec B608 — generates parameterized %s markers only, no user input interpolated
-        algo_stats = db.fetch_all(
-            f"""
+        try:
+            algo_stats = db.fetch_all(
+                f"""
             SELECT
                 j.challenge,
                 j.algorithm,
@@ -871,10 +872,10 @@ def get_member_stats(wallet_address: str):
             GROUP BY j.challenge, j.algorithm
             ORDER BY nonces DESC
             """,
-            tuple(slave_list),
-        )
-        activity_rows = db.fetch_all(
-            f"""
+                tuple(slave_list),
+            )
+            activity_rows = db.fetch_all(
+                f"""
             WITH root_activity AS (
                 SELECT
                     slave,
@@ -901,9 +902,13 @@ def get_member_stats(wallet_address: str):
             FROM root_activity r
             FULL OUTER JOIN proof_activity p ON p.slave = r.slave
             """,
-            tuple(slave_list) + tuple(slave_list),
-        )
-        slave_activity = {r["slave_name"]: r for r in activity_rows}
+                tuple(slave_list) + tuple(slave_list),
+            )
+            slave_activity = {r["slave_name"]: r for r in activity_rows}
+        except Exception as exc:
+            logger.warning("member stats warehouse skipped: %s", exc)
+            algo_stats = []
+            slave_activity = {}
 
     earnings_payload = worker_earnings.build_worker_earnings(
         pool_fee=POOL_FEE,

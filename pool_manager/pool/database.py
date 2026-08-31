@@ -15,6 +15,13 @@ _conn_params = {
     "dbname": os.environ.get("POSTGRES_DB", "innopool"),
     "user": os.environ.get("POSTGRES_USER", "postgres"),
     "password": os.environ.get("POSTGRES_PASSWORD", ""),
+    # Dashboard/health must fail fast. 14-minute warehouse queries are what
+    # made /api/health time out when extra workers joined.
+    "options": os.environ.get(
+        "MANAGER_POSTGRES_OPTIONS",
+        "-c statement_timeout=10000 -c lock_timeout=2000 "
+        "-c idle_in_transaction_session_timeout=15000",
+    ),
 }
 
 # Distinct from master's POSTGRES_POOL_MAX (48). env_file would otherwise

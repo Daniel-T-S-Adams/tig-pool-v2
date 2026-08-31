@@ -34,6 +34,14 @@ class PostgresDB:
             "user": user,
             "password": password,
         }
+        # Per-session backstop so one warehouse query cannot pin a pool slot
+        # for 14 minutes when the leftover table grows with the fleet.
+        options = os.environ.get(
+            "POSTGRES_OPTIONS",
+            "-c statement_timeout=45000 -c idle_in_transaction_session_timeout=20000",
+        )
+        if options:
+            self.conn_params["options"] = options
         self._pool: Optional[pool.ThreadedConnectionPool] = None
         self._pool_lock = threading.Lock()
         self._minconn = max(1, int(os.environ.get("POSTGRES_POOL_MIN", "4")))

@@ -1167,6 +1167,7 @@ class SlaveManager:
         )
         # Optional get-batches telemetry (Phase C) + load-shed cooldown per slave.
         self._slave_telemetry: Dict[str, dict] = {}
+        self._telem_log_until: Dict[str, int] = {}
         self._cpu_load_shed_until: Dict[str, int] = {}
         # When idle+hot but last_idle_ms missing, track local idle-hot start.
         self._cpu_idle_hot_since: Dict[str, int] = {}
@@ -2210,23 +2211,27 @@ class SlaveManager:
         """Store optional get-batches telemetry and arm CPU load-shed cooldown."""
         if not telemetry:
             return
+        prev = self._slave_telemetry.get(slave_name) or {}
         stored = dict(telemetry)
         stored["received_at_ms"] = int(now_ms)
         self._slave_telemetry[slave_name] = stored
         if stored.get("slave_version") or stored.get("state") is not None:
-            logger.debug(
-                "slave telemetry %s version=%s state=%s active=%s pending=%s last_idle_ms=%s "
-                "cores=%s workers=%s load_1m=%s",
-                slave_name,
-                stored.get("slave_version"),
-                stored.get("state"),
-                stored.get("active_batches"),
-                stored.get("pending_batches"),
-                stored.get("last_idle_ms"),
-                stored.get("cores"),
-                stored.get("num_workers"),
-                stored.get("load_1m"),
-            )
+            state_changed = str(prev.get("state")) != str(stored.get("state"))
+            if state_changed or int(now_ms) >= int(self._telem_log_until.get(slave_name) or 0):
+                logger.debug(
+                    "slave telemetry %s version=%s state=%s active=%s pending=%s last_idle_ms=%s "
+                    "cores=%s workers=%s load_1m=%s",
+                    slave_name,
+                    stored.get("slave_version"),
+                    stored.get("state"),
+                    stored.get("active_batches"),
+                    stored.get("pending_batches"),
+                    stored.get("last_idle_ms"),
+                    stored.get("cores"),
+                    stored.get("num_workers"),
+                    stored.get("load_1m"),
+                )
+                self._telem_log_until[slave_name] = int(now_ms) + 60_000
         tier_settings = cpu_tier_cap_settings(CONFIG)
         if not tier_settings.get("live_telemetry_enabled", True):
             return
