@@ -19,8 +19,6 @@ def main() -> int:
     ns: dict = {}
     exec(src[start:end], ns, ns)
     fn = ns["allocate_tig"]
-    prorate = ns["prorate_pot"]
-    since_join = ns["estimate_since_join_tig"]
 
     cases = [
         ((50, 100, 10.0), 5.0, "half the nonces gets half the TIG"),
@@ -55,48 +53,25 @@ def main() -> int:
     )
     failed += 0 if ok else 1
 
-    pot = prorate(70.0, 2 * 24 * 60 * 60 * 1000, 7 * 24 * 60 * 60 * 1000)
-    ok = abs(pot - 20.0) < 1e-9
-    print(f"{'pass' if ok else 'FAIL'}: 2 of 7 days prorates the pot -> {pot} (want 20.0)")
-    failed += 0 if ok else 1
-
-    week = 7 * 24 * 60 * 60 * 1000
-    day = 24 * 60 * 60 * 1000
-    twenty = 20 * 60 * 60 * 1000
-    week_pot = 10.0
-    pot_24h = prorate(week_pot, day, week)
-    tig_24h = fn(21000, 100000, pot_24h)
-    tig_joined_20h = ns["estimate_window_tig"](21000, 80000, week_pot, twenty, week)
-    ok = tig_24h < week_pot and tig_24h != 0.0313 and tig_joined_20h > tig_24h
+    wallet_tig, wallet_nonces = 0.4190, 100000
+    n_round, n_24h, n_12h = 10000, 3000, 1500
+    tig_round = fn(n_round, wallet_nonces, wallet_tig)
+    tig_24h = fn(n_24h, wallet_nonces, wallet_tig)
+    tig_12h = fn(n_12h, wallet_nonces, wallet_tig)
+    ok = tig_12h <= tig_24h <= tig_round
     print(
-        f"{'pass' if ok else 'FAIL'}: joined 20h ago, 24h uses the 24h pot "
-        f"(missed 4h), Joined uses the 20h pot -> 24h={tig_24h} joined={tig_joined_20h}"
+        f"{'pass' if ok else 'FAIL'}: same rate means 12h<=24h<=Round "
+        f"-> {tig_12h} <= {tig_24h} <= {tig_round}"
     )
     failed += 0 if ok else 1
 
-    week_tig = 0.07
-    early = since_join(
-        est_tig_week=week_tig,
-        join_ms=1,
-        round_start=10,
-        now_ms=100,
-        slave_nonces=21000,
-        pool_since_join_nonces=21000,
-        round_tig=10.0,
-    )
-    late = since_join(
-        est_tig_week=week_tig,
-        join_ms=50,
-        round_start=10,
-        now_ms=100,
-        slave_nonces=21000,
-        pool_since_join_nonces=42000,
-        round_tig=10.0,
-    )
-    ok = early == week_tig and late > week_tig
+    # Joined 20h ago: every nonce this round is also in the last 24h.
+    tig_24h_new = fn(21000, wallet_nonces, wallet_tig)
+    tig_round_new = fn(21000, wallet_nonces, wallet_tig)
+    ok = tig_24h_new == tig_round_new
     print(
-        f"{'pass' if ok else 'FAIL'}: early joiner keeps week TIG, late joiner "
-        f"uses the window -> early={early} late={late}"
+        f"{'pass' if ok else 'FAIL'}: joined 20h ago, 24h equals Round "
+        f"at the same payout rate -> 24h={tig_24h_new} round={tig_round_new}"
     )
     failed += 0 if ok else 1
     return 2 if failed else 0

@@ -135,10 +135,10 @@
         <div class="slave-earnings-grid" style="display:grid;grid-template-columns:54px minmax(0,1fr) 72px 72px 78px 78px 100px 78px;gap:8px;padding:0 0 6px;color:var(--muted);font-size:10px;font-weight:700;letter-spacing:.4px;text-transform:uppercase;">
           <span>Type</span>
           <span>Worker</span>
-          <span style="text-align:right;" title="Estimated TIG from work in the last 24 hours">24h</span>
-          <span style="text-align:right;" title="Estimated TIG from work in the last 12 hours">12h</span>
-          <span style="text-align:right;" title="This round, since round start">Round</span>
-          <span style="text-align:right;" title="Estimated TIG after this worker joined">Joined</span>
+          <span style="text-align:right;" title="This slave's week payout rate × work in the last 24 hours">24h</span>
+          <span style="text-align:right;" title="This slave's week payout rate × work in the last 12 hours">12h</span>
+          <span style="text-align:right;" title="This slave's share of the wallet's current-round payout">Round</span>
+          <span style="text-align:right;" title="Same as Round: all of this slave's round work is since it first finished a batch">Joined</span>
           <span style="text-align:right;">Trust</span>
           <span style="text-align:right;">Status</span>
         </div>
@@ -177,7 +177,7 @@
       <!-- Info callout -->
       <div style="margin-bottom:24px; padding:14px 18px; border-left:3px solid #63b3ed; background:rgba(99,179,237,0.07); border-radius:0 8px 8px 0; font-size:13px; color:#93c5fd; line-height:1.7;">
         <span style="font-weight:700; color:#bfdbfe; display:block; margin-bottom:4px;">How rewards work</span>
-        Your Round Allocation % is set on-chain every ~50 blocks. At the end of each weekly round the operator claims the TIG earned, and the protocol sends your share directly to your wallet. Claimed TIG has a 28-day withdrawal lock before it can be moved. <strong>TIG since joined</strong> is an estimate of what accrued after your workers plugged in — the week number is still what gets paid.
+        Your Round Allocation % is set on-chain every ~50 blocks. At the end of each weekly round the operator claims the TIG earned, and the protocol sends your share directly to your wallet. Claimed TIG has a 28-day withdrawal lock before it can be moved. <strong>24h / 12h / Joined</strong> use that same payout rate on work in each window, so they cannot exceed Round.
       </div>
 
       <!-- Recent activity + pool context side by side -->
@@ -613,10 +613,10 @@
         }
         row.appendChild(nameWrap);
 
-        appendTigCell(row, slave.est_tig_24h, "Last 24 hours");
-        appendTigCell(row, slave.est_tig_12h, "Last 12 hours");
-        appendTigCell(row, slave.est_tig_round, "Since round start");
-        appendTigCell(row, slave.est_tig_since_join ?? slave.est_tig_round, "Since this worker joined");
+        appendTigCell(row, slave.est_tig_24h, "Week payout rate × work in the last 24 hours");
+        appendTigCell(row, slave.est_tig_12h, "Week payout rate × work in the last 12 hours");
+        appendTigCell(row, slave.est_tig_round, "This slave's share of the wallet's current-round payout");
+        appendTigCell(row, slave.est_tig_since_join ?? slave.est_tig_round, "Same rate × all work since this slave's first batch this round");
 
         const trustEl = document.createElement("div");
         const trust = slaveTrustStatus(slave);
