@@ -41,6 +41,7 @@ def main() -> int:
         "leftover_finishes_job",
         "leftover_finish_bids",
         "unfinished_roots_by_job",
+        "cpu_pack_seats_open",
         "leftover_takeable_by_poller",
         "owner_idle_unlocks_sticky",
         "should_skip_crumb_for_empty_seat",
@@ -420,6 +421,51 @@ def main() -> int:
         )
         is True,
         "empty CPU box may take a sticky leftover pile",
+    )
+    check(
+        takeable(
+            "fat",
+            slave_name="pool-cpu-home-s02",
+            root_affinity={"fat": "pool-cpu-home-s05"},
+            overflow_benchmark_ids=set(),
+            unassigned_on_job=80,
+            poller_idle=False,
+            poller_is_gpu=False,
+            poller_empty_seats=5,
+            poller_max_concurrent=6,
+        )
+        is True,
+        "XL with spare seats may take a sticky leftover pile",
+    )
+    check(
+        takeable(
+            "fat",
+            slave_name="pica",
+            root_affinity={"fat": "other"},
+            overflow_benchmark_ids=set(),
+            unassigned_on_job=80,
+            poller_idle=False,
+            poller_is_gpu=False,
+            poller_empty_seats=0,
+            poller_max_concurrent=1,
+        )
+        is False,
+        "1-seat Pica holding work does not steal a sticky leftover",
+    )
+    check(
+        takeable(
+            "fat",
+            slave_name="pool-gpu-busy",
+            root_affinity={"fat": "pool-gpu-owner"},
+            overflow_benchmark_ids=set(),
+            unassigned_on_job=55,
+            poller_idle=False,
+            poller_is_gpu=True,
+            poller_empty_seats=1,
+            poller_max_concurrent=2,
+        )
+        is False,
+        "GPU prefetch seat does not steal sticky leftovers",
     )
     idle_gpu_map = takeable_map(
         {"fat": 55, "crumb": 1},

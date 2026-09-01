@@ -516,18 +516,46 @@ def slave_holds_last_leftover(assigned, last_leftover_bids) -> bool:
     return False
 
 
+def cpu_pack_seats_open(
+    *,
+    poller_is_gpu: bool = False,
+    empty_seats: int = 0,
+    max_concurrent: int = 1,
+) -> bool:
+    """True when a multi-seat CPU box still has room to pack leftovers.
+
+    1-seat S/M stay False so a Pica finishes its last crumb first. GPU stays
+    False so leftover-hold / prefetch seats are unchanged.
+    """
+    if poller_is_gpu:
+        return False
+    try:
+        return int(max_concurrent or 1) > 1 and int(empty_seats or 0) > 0
+    except (TypeError, ValueError):
+        return False
+
+
 def should_skip_foreign_root_for_last_leftover(
     *,
     holds_last_leftover: bool = False,
     candidate_is_last_leftover: bool = False,
     is_proof: bool = False,
+    empty_seats: int = 0,
+    max_concurrent: int = 1,
+    poller_is_gpu: bool = False,
 ) -> bool:
     """Finish the last leftover before taking knapsack / other mid-job roots.
 
-    XL may still run several jobs when none of them is one root from done.
-    Proofs and another job's last leftover may still join.
+    1-seat S/M stay parked on that crumb. L/XL with spare seats may pack
+    more SAT leftovers. Proofs and another job's last leftover may still join.
     """
     if is_proof or candidate_is_last_leftover:
+        return False
+    if cpu_pack_seats_open(
+        poller_is_gpu=poller_is_gpu,
+        empty_seats=empty_seats,
+        max_concurrent=max_concurrent,
+    ):
         return False
     return bool(holds_last_leftover)
 
@@ -576,17 +604,26 @@ def leftover_takeable_by_poller(
     preferred_at_cap: bool = False,
     poller_idle: bool = False,
     poller_is_gpu: bool = False,
+    poller_empty_seats: int = 0,
+    poller_max_concurrent: int = 1,
 ) -> bool:
     """Fat leftovers locked to another live working owner do not skip crumbs.
 
     The last leftover of a job is always takeable so it can finish.
     Offline or telem-idle preferred owners do not lock the pile.
-    An empty GPU or CPU box, or any poller when the owner is already
-    at its assign cap, must take leftovers instead of sitting idle.
+    An empty GPU or CPU box, a multi-seat CPU with spare seats, or any
+    poller when the owner is already at its assign cap, must take leftovers
+    instead of sitting idle.
     """
     if leftover_finishes_job(unassigned_on_job, already_assigned=False):
         return True
     if poller_idle:
+        return True
+    if cpu_pack_seats_open(
+        poller_is_gpu=poller_is_gpu,
+        empty_seats=poller_empty_seats,
+        max_concurrent=poller_max_concurrent,
+    ):
         return True
     if preferred_at_cap:
         return True
@@ -707,6 +744,8 @@ def takeable_unassigned_by_bid(
     preferred_at_cap: Optional[set] = None,
     poller_idle: bool = False,
     poller_is_gpu: bool = False,
+    poller_empty_seats: int = 0,
+    poller_max_concurrent: int = 1,
 ) -> Dict[str, int]:
     out: Dict[str, int] = {}
     at_cap_owners = preferred_at_cap or set()
@@ -734,6 +773,8 @@ def takeable_unassigned_by_bid(
             preferred_at_cap=bool(preferred and preferred in at_cap_owners),
             poller_idle=poller_idle,
             poller_is_gpu=poller_is_gpu,
+            poller_empty_seats=poller_empty_seats,
+            poller_max_concurrent=poller_max_concurrent,
         ):
             out[str(bid)] = int(n_unassigned or 0)
     return out
@@ -3244,21 +3285,26 @@ class SlaveManager:
             if max_concurrent <= 0:
                 continue
             assigned = self._peek_assigned_batches(slave_name)
+            seats = max(0, int(max_concurrent) - len(assigned))
+            if seats <= 0:
+                continue
             if slave_holds_last_leftover(
                 assigned,
                 leftover_finish_bids(
                     unassigned_roots_by_job(self.batches),
                     unfinished_roots_by_job(self.batches),
                 ),
+            ) and not cpu_pack_seats_open(
+                poller_is_gpu=_slave_work_profile(slave_name) == "gpu",
+                empty_seats=seats,
+                max_concurrent=max_concurrent,
             ):
-                continue
-            seats = max(0, int(max_concurrent) - len(assigned))
-            if seats <= 0:
                 continue
             hungry.append(
                 {
                     "name": slave_name,
                     "seats": seats,
+                    "max_concurrent": int(max_concurrent),
                     "algo_re": route.get("algorithm_id_regex") or "",
                 }
             )
@@ -3417,6 +3463,8 @@ class SlaveManager:
                 preferred_at_cap=preferred_at_cap,
                 poller_idle=int(active_by_slave.get(name) or 0) <= 0,
                 poller_is_gpu=_slave_work_profile(name) == "gpu",
+                poller_empty_seats=int(item.get("seats") or 0),
+                poller_max_concurrent=int(item.get("max_concurrent") or 1),
             )
             out[name] = set(takeable)
         return out
@@ -3903,6 +3951,8 @@ class SlaveManager:
             name: telem_slave_is_working(self._slave_telemetry.get(name) or {})
             for name in set(active_by_slave) | set(online_slaves) | {slave_name}
         }
+        poller_is_gpu = _slave_work_profile(slave_name) == "gpu"
+        poller_assigned = int(active_by_slave.get(slave_name) or 0)
         takeable_unassigned = takeable_unassigned_by_bid(
             unassigned_by_bid,
             slave_name=slave_name,
@@ -3911,10 +3961,14 @@ class SlaveManager:
             online_slaves=online_slaves,
             active_by_slave=active_by_slave,
             working_by_slave=working_by_slave,
+            poller_idle=poller_assigned <= 0,
+            poller_is_gpu=poller_is_gpu,
+            poller_empty_seats=max(0, int(max_concurrent) - poller_assigned),
+            poller_max_concurrent=int(max_concurrent),
         )
         poller_workers = poller_worker_count(
             self._slave_telemetry.get(slave_name) or {},
-            is_gpu=_slave_work_profile(slave_name) == "gpu",
+            is_gpu=poller_is_gpu,
         )
         has_fat_claimable = claimable_has_fat_leftover(
             unassigned_by_bid=takeable_unassigned,
@@ -4147,6 +4201,9 @@ class SlaveManager:
                         holds_last_leftover=held_last_leftover,
                         candidate_is_last_leftover=finishes,
                         is_proof=is_proof,
+                        empty_seats=empty_seats,
+                        max_concurrent=max_concurrent,
+                        poller_is_gpu=poller_is_gpu,
                     ):
                         continue
                     if phase == "finish":
@@ -4533,9 +4590,10 @@ class SlaveManager:
             leftover_nonces = leftover_nonces_by_job(self.batches)
             if not unassigned_by_bid:
                 unassigned_by_bid = unassigned_roots_by_job(self.batches)
+            poller_is_gpu = _slave_work_profile(slave_name) == "gpu"
             poller_workers = poller_worker_count(
                 self._slave_telemetry.get(slave_name) or {},
-                is_gpu=_slave_work_profile(slave_name) == "gpu",
+                is_gpu=poller_is_gpu,
             )
 
             now_i = int(now)
@@ -4646,6 +4704,10 @@ class SlaveManager:
                     online_slaves=online_slaves,
                     active_by_slave=active_by_slave,
                     working_by_slave=working_by_slave,
+                    poller_idle=len(assigned) <= 0,
+                    poller_is_gpu=poller_is_gpu,
+                    poller_empty_seats=max(0, int(max_concurrent) - len(assigned)),
+                    poller_max_concurrent=int(max_concurrent),
                 )
                 has_fat_claimable = claimable_has_fat_leftover(
                     unassigned_by_bid=takeable_unassigned,
@@ -4906,6 +4968,9 @@ class SlaveManager:
                             holds_last_leftover=held_last_leftover,
                             candidate_is_last_leftover=finishes,
                             is_proof=is_proof,
+                            empty_seats=empty_seats,
+                            max_concurrent=max_concurrent,
+                            poller_is_gpu=poller_is_gpu,
                         ):
                             continue
                         if len(concurrent) >= max_concurrent:

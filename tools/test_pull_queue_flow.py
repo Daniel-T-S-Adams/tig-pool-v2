@@ -54,6 +54,7 @@ def main() -> int:
         "leftover_finishes_job",
         "assigned_root_reclaimable",
         "batch_owner_stealable",
+        "cpu_pack_seats_open",
         "slave_holds_last_leftover",
         "should_skip_foreign_root_for_last_leftover",
         "retain_started_cpu_excess",
@@ -221,6 +222,47 @@ def main() -> int:
         skip_foreign(holds_last_leftover=False, candidate_is_last_leftover=False)
         is False,
         "XL with no last leftover may still take several jobs",
+    )
+    check(
+        skip_foreign(
+            holds_last_leftover=True,
+            candidate_is_last_leftover=False,
+            empty_seats=5,
+            max_concurrent=6,
+        )
+        is False,
+        "XL with spare seats may pack SAT leftovers while holding a last crumb",
+    )
+    check(
+        skip_foreign(
+            holds_last_leftover=True,
+            candidate_is_last_leftover=False,
+            empty_seats=0,
+            max_concurrent=6,
+        )
+        is True,
+        "full XL still finishes its last leftover before a new foreign root",
+    )
+    check(
+        skip_foreign(
+            holds_last_leftover=True,
+            candidate_is_last_leftover=False,
+            empty_seats=1,
+            max_concurrent=1,
+        )
+        is True,
+        "1-seat Pica stays parked on its last leftover",
+    )
+    check(
+        skip_foreign(
+            holds_last_leftover=True,
+            candidate_is_last_leftover=False,
+            empty_seats=1,
+            max_concurrent=2,
+            poller_is_gpu=True,
+        )
+        is True,
+        "GPU prefetch seat stays parked on a last leftover",
     )
     check(
         reclaim(
