@@ -60,6 +60,14 @@ def main() -> int:
     print(f"{'pass' if ok else 'FAIL'}: 2 of 7 days prorates the pot -> {pot} (want 20.0)")
     failed += 0 if ok else 1
 
+    same_day = fn(21000, 21000, 0.0313)
+    ok = same_day == 0.0313
+    print(
+        f"{'pass' if ok else 'FAIL'}: all work in the last 24h means 24h equals Round "
+        f"-> {same_day} (want 0.0313)"
+    )
+    failed += 0 if ok else 1
+
     week_tig = 0.07
     early = since_join(
         est_tig_week=week_tig,
