@@ -1,18 +1,14 @@
 """
 Display-only per-slave TIG estimates.
 
-TIG pays once per round, per wallet. The only rate that matches what a
-benchmarker will be paid is:
+Day / hour figures use the pool's current TIG-per-nonce:
 
-    tig_per_nonce = wallet_coinbase / wallet_nonces_this_round
+    rate = pool_member_tig / pool_nonces_this_round
+    24h = machine_nonces_24h * rate
+    1h  = machine_nonces_1h * rate
 
-Round / 24h / 12h / Joined all use that same rate:
-
-    TIG = nonces_in_window * tig_per_nonce
-
-So 12h <= 24h <= Round. A box that joined 20h ago has all of its round
-nonces inside 24h, so 24h equals Round. That is not a bigger pot — it is
-the same payout, all earned in the last day.
+That is the same check as: pool TIG so far, nonces since round start,
+nonces this machine computed in the window.
 """
 from __future__ import annotations
 
@@ -286,11 +282,10 @@ def build_worker_earnings(
         row["wallet_share_pct"] = (
             round((row["nonces"] / w_nonces) * 100, 4) if w_nonces > 0 else 0.0
         )
-        row["est_tig"] = allocate_tig(row["nonces"], w_nonces, wallet_tig)
-        # Same payout rate for every window. Never mix in other wallets' TIG.
-        row["est_tig_1h"] = allocate_tig(row["nonces_1h"], w_nonces, wallet_tig)
-        row["est_tig_12h"] = allocate_tig(row["nonces_12h"], w_nonces, wallet_tig)
-        row["est_tig_24h"] = allocate_tig(row["nonces_24h"], w_nonces, wallet_tig)
+        row["est_tig"] = allocate_tig(row["nonces"], total_nonces, member_tig)
+        row["est_tig_1h"] = allocate_tig(row["nonces_1h"], total_nonces, member_tig)
+        row["est_tig_12h"] = allocate_tig(row["nonces_12h"], total_nonces, member_tig)
+        row["est_tig_24h"] = allocate_tig(row["nonces_24h"], total_nonces, member_tig)
         row["est_tig_since_join"] = row["est_tig"]
 
     workers.sort(key=lambda r: (-float(r["est_tig"]), -int(r["nonces"]), r["slave_name"] or ""))
@@ -304,9 +299,8 @@ def build_worker_earnings(
         "total_nonces": total_nonces,
         "worker_count": len(workers),
         "note": (
-            "Round is this wallet's current-round payout. "
-            "12h / 24h / Joined are that same TIG per nonce, counted only "
-            "for work in the window. They always sum toward Round, never above it."
+            "24h and 1h are this machine's nonces in that window "
+            "times (pool TIG so far / pool nonces this round)."
         ),
         "workers": workers,
     }

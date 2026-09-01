@@ -53,25 +53,15 @@ def main() -> int:
     )
     failed += 0 if ok else 1
 
-    wallet_tig, wallet_nonces = 0.4190, 100000
-    n_round, n_24h, n_12h = 10000, 3000, 1500
-    tig_round = fn(n_round, wallet_nonces, wallet_tig)
-    tig_24h = fn(n_24h, wallet_nonces, wallet_tig)
-    tig_12h = fn(n_12h, wallet_nonces, wallet_tig)
-    ok = tig_12h <= tig_24h <= tig_round
+    pool_tig, pool_nonces = 166.07, 23_591_822
+    hive02_24h = fn(147_020, pool_nonces, pool_tig)
+    hive02_1h = fn(6_900, pool_nonces, pool_tig)
+    expect_24h = round(166.07 * 147_020 / 23_591_822, 6)
+    expect_1h = round(166.07 * 6_900 / 23_591_822, 6)
+    ok = hive02_24h == expect_24h and hive02_1h == expect_1h and hive02_1h <= hive02_24h
     print(
-        f"{'pass' if ok else 'FAIL'}: same rate means 12h<=24h<=Round "
-        f"-> {tig_12h} <= {tig_24h} <= {tig_round}"
-    )
-    failed += 0 if ok else 1
-
-    # Joined 20h ago: every nonce this round is also in the last 24h.
-    tig_24h_new = fn(21000, wallet_nonces, wallet_tig)
-    tig_round_new = fn(21000, wallet_nonces, wallet_tig)
-    ok = tig_24h_new == tig_round_new
-    print(
-        f"{'pass' if ok else 'FAIL'}: joined 20h ago, 24h equals Round "
-        f"at the same payout rate -> 24h={tig_24h_new} round={tig_round_new}"
+        f"{'pass' if ok else 'FAIL'}: hive02 24h/1h at pool rate "
+        f"-> 24h={hive02_24h} (want {expect_24h}), 1h={hive02_1h} (want {expect_1h})"
     )
     failed += 0 if ok else 1
     return 2 if failed else 0
