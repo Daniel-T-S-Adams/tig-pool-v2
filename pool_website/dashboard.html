@@ -100,32 +100,6 @@
       </div>
     </div>
 
-    <div class="card worker-earnings-card" style="margin-top:24px;">
-      <h2>Worker earnings <span class="section-sub" style="display:inline;margin-left:8px;font-weight:500;">this round · approximate</span></h2>
-      <p id="worker-earnings-note" class="section-sub" style="margin:8px 0 14px;">This week is the real wallet payout. Since joined / 24h / 1h estimate TIG accrued in that window only.</p>
-      <div class="table-scroll worker-earnings-scroll">
-        <table class="data-table compact">
-          <thead>
-            <tr>
-              <th>Worker</th>
-              <th>Type</th>
-              <th>Nonces</th>
-              <th>Wallet share</th>
-              <th title="Current-round wallet payout split">This week</th>
-              <th title="Estimated TIG accrued after this worker joined">Since joined</th>
-              <th title="Estimated TIG from work in the last 24 hours">24h</th>
-              <th title="Estimated TIG from work in the last hour">1h</th>
-            </tr>
-          </thead>
-          <tbody id="worker-earnings-body">
-            <tr><td colspan="8" class="loading">Loading worker earnings...</td></tr>
-          </tbody>
-        </table>
-      </div>
-    </div>
-
-    <hr class="divider dashboard-divider" />
-
     <h2 class="section-title">Member Dashboard</h2>
     <p class="section-sub" style="margin-bottom:24px;">Enter your wallet address to view your contribution stats.</p>
 
@@ -158,10 +132,13 @@
           <span>Registered Slaves</span>
           <span id="d-slave-count">—</span>
         </div>
-        <div style="display:grid;grid-template-columns:74px minmax(0,1fr) 92px 108px 78px;gap:10px;padding:0 0 6px;color:var(--muted);font-size:10px;font-weight:700;letter-spacing:.4px;text-transform:uppercase;">
+        <div class="slave-earnings-grid" style="display:grid;grid-template-columns:54px minmax(0,1fr) 72px 72px 78px 78px 100px 78px;gap:8px;padding:0 0 6px;color:var(--muted);font-size:10px;font-weight:700;letter-spacing:.4px;text-transform:uppercase;">
           <span>Type</span>
           <span>Worker</span>
-          <span style="text-align:right;">Since joined</span>
+          <span style="text-align:right;" title="Estimated TIG from work in the last 24 hours">24h</span>
+          <span style="text-align:right;" title="Estimated TIG from work in the last 12 hours">12h</span>
+          <span style="text-align:right;" title="This round, since round start">Round</span>
+          <span style="text-align:right;" title="Estimated TIG after this worker joined">Joined</span>
           <span style="text-align:right;">Trust</span>
           <span style="text-align:right;">Status</span>
         </div>
@@ -334,41 +311,6 @@
         .replace(/</g, "&lt;")
         .replace(/>/g, "&gt;")
         .replace(/"/g, "&quot;");
-    }
-
-    async function loadWorkerEarnings() {
-      const body = document.getElementById("worker-earnings-body");
-      const note = document.getElementById("worker-earnings-note");
-      try {
-        const resp = await fetch("/api/worker-earnings");
-        if (!resp.ok) throw new Error("worker earnings request failed");
-        const data = await resp.json();
-        const workers = data.workers || [];
-        const fee = data.pool_fee_pct == null ? "" : ` Pool fee ${data.pool_fee_pct}%.`;
-        note.textContent =
-          `${data.note || "Approximate split of this round’s member TIG by completed root nonces."}` +
-          ` Round ${data.round ?? "—"} · ${fmtTig(data.pool_member_tig)} TIG to members so far.${fee}`;
-
-        if (!workers.length) {
-          body.innerHTML = '<tr><td colspan="8" class="loading">No registered workers yet</td></tr>';
-          return;
-        }
-
-        body.innerHTML = workers.map((row) => `
-          <tr>
-            <td class="mono" title="${escapeHtml(row.slave_name || "")}">${escapeHtml(row.slave_name || "—")}</td>
-            <td>${(row.worker_type || "cpu").toUpperCase()}</td>
-            <td>${fmtNum(row.nonces || 0)}</td>
-            <td>${Number(row.wallet_share_pct || 0).toFixed(2)}%</td>
-            <td class="mono" title="This week's wallet payout split">${fmtTig(row.est_tig)}</td>
-            <td class="mono" title="Estimated TIG after this worker joined">${fmtTig(row.est_tig_since_join)}</td>
-            <td class="mono">${fmtTig(row.est_tig_24h)}</td>
-            <td class="mono">${fmtTig(row.est_tig_1h)}</td>
-          </tr>
-        `).join("");
-      } catch (_) {
-        body.innerHTML = '<tr><td colspan="8" class="loading">Could not load worker earnings</td></tr>';
-      }
     }
 
     async function loadPoolHealth() {
@@ -614,10 +556,24 @@
       return name.replace(/^pool-(cpu|gpu)-/, "");
     }
 
+    function appendTigCell(row, value, title) {
+      const el = document.createElement("div");
+      el.className = "mono";
+      el.textContent = fmtTig(value);
+      el.title = title || "";
+      el.style.cssText = "justify-self:end;font-weight:700;color:var(--cyan);";
+      row.appendChild(el);
+    }
+
     function renderSlaves(data) {
-      const slaves = data.slaves && data.slaves.length
+      const wanted = (data.wallet_address || "").toLowerCase();
+      const raw = data.slaves && data.slaves.length
         ? data.slaves
         : [{ slave_name: data.slave_name, active: data.active }];
+      const slaves = raw.filter((slave) => {
+        const wallet = (slave.wallet_address || data.wallet_address || "").toLowerCase();
+        return !wanted || !wallet || wallet === wanted;
+      });
       const enabledCount = slaves.filter(s => s.active).length;
       const workingCount = slaves.filter(s => slaveRuntimeStatus(s).key === "working").length;
       const cpuCount = slaves.filter(s => inferSlaveType(s) === "cpu").length;
@@ -634,7 +590,7 @@
       visibleSlaves.forEach((slave) => {
         const type = inferSlaveType(slave);
         const row = document.createElement("div");
-        row.style.cssText = "display:grid;grid-template-columns:74px minmax(0,1fr) 92px 108px 78px;gap:10px;align-items:center;padding:7px 0;border-top:1px solid rgba(255,255,255,0.05);font-size:12px;";
+        row.style.cssText = "display:grid;grid-template-columns:54px minmax(0,1fr) 72px 72px 78px 78px 100px 78px;gap:8px;align-items:center;padding:7px 0;border-top:1px solid rgba(255,255,255,0.05);font-size:12px;";
 
         const typeEl = document.createElement("div");
         typeEl.textContent = type.toUpperCase();
@@ -657,17 +613,10 @@
         }
         row.appendChild(nameWrap);
 
-        const tigEl = document.createElement("div");
-        tigEl.className = "mono";
-        tigEl.textContent = fmtTig(slave.est_tig_since_join ?? slave.est_tig_round);
-        tigEl.title = [
-          `Since joined: ${fmtTig(slave.est_tig_since_join ?? slave.est_tig_round)} TIG`,
-          `This week (payout): ${fmtTig(slave.est_tig_round)} TIG`,
-          `Last 24h: ${fmtTig(slave.est_tig_24h)} · last 1h: ${fmtTig(slave.est_tig_1h)}`,
-          `${fmtNum(slave.nonces_round || 0)} nonces this round · ${Number(slave.share_pct_round || 0).toFixed(2)}% of this wallet`,
-        ].join(" · ");
-        tigEl.style.cssText = "justify-self:end;font-weight:700;color:var(--cyan);";
-        row.appendChild(tigEl);
+        appendTigCell(row, slave.est_tig_24h, "Last 24 hours");
+        appendTigCell(row, slave.est_tig_12h, "Last 12 hours");
+        appendTigCell(row, slave.est_tig_round, "Since round start");
+        appendTigCell(row, slave.est_tig_since_join ?? slave.est_tig_round, "Since this worker joined");
 
         const trustEl = document.createElement("div");
         const trust = slaveTrustStatus(slave);
@@ -800,9 +749,7 @@
     }
 
     loadPoolHealth();
-    loadWorkerEarnings();
     setInterval(loadPoolHealth, REFRESH_MS);
-    setInterval(loadWorkerEarnings, REFRESH_MS);
   </script>
 </body>
 </html>

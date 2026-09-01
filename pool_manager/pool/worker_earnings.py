@@ -20,6 +20,7 @@ _cache: dict = {"data": None, "ts": 0.0}
 
 
 HOUR_MS = 60 * 60 * 1000
+TWELVE_MS = 12 * HOUR_MS
 DAY_MS = 24 * HOUR_MS
 
 
@@ -113,6 +114,7 @@ _NONCE_EXPR = "LEAST(j.batch_size, j.num_nonces - rb.batch_idx * j.batch_size)"
 
 def _slave_work_windows(since_ms: int, now_ms: int) -> dict[str, dict]:
     h1 = int(now_ms) - HOUR_MS
+    h12 = int(now_ms) - TWELVE_MS
     h24 = int(now_ms) - DAY_MS
     rows = db.fetch_all(
         f"""
@@ -121,6 +123,7 @@ def _slave_work_windows(since_ms: int, now_ms: int) -> dict[str, dict]:
             COUNT(*) AS batches,
             COALESCE(SUM({_NONCE_EXPR}), 0) AS nonces,
             COALESCE(SUM({_NONCE_EXPR}) FILTER (WHERE rb.end_time >= %s), 0) AS nonces_1h,
+            COALESCE(SUM({_NONCE_EXPR}) FILTER (WHERE rb.end_time >= %s), 0) AS nonces_12h,
             COALESCE(SUM({_NONCE_EXPR}) FILTER (WHERE rb.end_time >= %s), 0) AS nonces_24h,
             MIN(rb.end_time) AS first_ms
         FROM root_batch rb
@@ -130,13 +133,14 @@ def _slave_work_windows(since_ms: int, now_ms: int) -> dict[str, dict]:
           AND rb.slave IS NOT NULL
         GROUP BY rb.slave
         """,
-        (h1, h24, since_ms),
+        (h1, h12, h24, since_ms),
     )
     return {
         str(r["slave_name"]): {
             "batches": int(r["batches"] or 0),
             "nonces": int(r["nonces"] or 0),
             "nonces_1h": int(r["nonces_1h"] or 0),
+            "nonces_12h": int(r["nonces_12h"] or 0),
             "nonces_24h": int(r["nonces_24h"] or 0),
             "first_ms": _to_ms(r.get("first_ms")),
         }
@@ -222,6 +226,7 @@ def build_worker_earnings(
     workers = []
     total_nonces = 0
     pool_nonces_1h = 0
+    pool_nonces_12h = 0
     pool_nonces_24h = 0
     wallet_nonces: dict[str, int] = {}
     for member in members:
@@ -232,15 +237,18 @@ def build_worker_earnings(
             "batches": 0,
             "nonces": 0,
             "nonces_1h": 0,
+            "nonces_12h": 0,
             "nonces_24h": 0,
             "first_ms": None,
         }
         nonces = int(stats["nonces"])
         nonces_1h = int(stats.get("nonces_1h") or 0)
+        nonces_12h = int(stats.get("nonces_12h") or 0)
         nonces_24h = int(stats.get("nonces_24h") or 0)
         wallet = (member.get("wallet_address") or "").strip().lower()
         total_nonces += nonces
         pool_nonces_1h += nonces_1h
+        pool_nonces_12h += nonces_12h
         pool_nonces_24h += nonces_24h
         if wallet:
             wallet_nonces[wallet] = wallet_nonces.get(wallet, 0) + nonces
@@ -255,6 +263,7 @@ def build_worker_earnings(
                 "batches": int(stats["batches"]),
                 "nonces": nonces,
                 "nonces_1h": nonces_1h,
+                "nonces_12h": nonces_12h,
                 "nonces_24h": nonces_24h,
             }
         )
@@ -284,6 +293,13 @@ def build_worker_earnings(
             pool_nonces_1h,
             member_tig,
             min(HOUR_MS, elapsed_ms),
+            elapsed_ms,
+        )
+        row["est_tig_12h"] = estimate_window_tig(
+            row["nonces_12h"],
+            pool_nonces_12h,
+            member_tig,
+            min(TWELVE_MS, elapsed_ms),
             elapsed_ms,
         )
         row["est_tig_24h"] = estimate_window_tig(

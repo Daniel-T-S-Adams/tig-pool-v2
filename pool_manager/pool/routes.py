@@ -584,18 +584,18 @@ def get_worker_earnings():
     )
     public_workers = []
     for row in payload.get("workers") or []:
+        if not row.get("active"):
+            continue
         public_workers.append(
             {
                 "slave_name": row.get("slave_name"),
                 "worker_type": _infer_worker_type(row.get("slave_name") or "", row.get("worker_type")),
-                "active": bool(row.get("active")),
+                "active": True,
                 "batches": int(row.get("batches") or 0),
                 "nonces": int(row.get("nonces") or 0),
                 "nonces_1h": int(row.get("nonces_1h") or 0),
                 "nonces_24h": int(row.get("nonces_24h") or 0),
                 "joined_ms": int(row.get("joined_ms") or 0) or None,
-                "share_pct": float(row.get("share_pct") or 0),
-                "wallet_share_pct": float(row.get("wallet_share_pct") or 0),
                 "est_tig": float(row.get("est_tig") or 0),
                 "est_tig_since_join": float(row.get("est_tig_since_join") or 0),
                 "est_tig_24h": float(row.get("est_tig_24h") or 0),
@@ -608,7 +608,7 @@ def get_worker_earnings():
         "pool_member_tig": payload.get("pool_member_tig"),
         "pool_fee_pct": payload.get("pool_fee_pct"),
         "total_nonces": payload.get("total_nonces"),
-        "worker_count": payload.get("worker_count"),
+        "worker_count": len(public_workers),
         "note": payload.get("note"),
         "workers": public_workers,
     }
@@ -987,8 +987,10 @@ def get_member_stats(wallet_address: str):
                 "batches_round": int((earnings_by_slave.get(r["slave_name"]) or {}).get("batches") or 0),
                 "share_pct_round": float((earnings_by_slave.get(r["slave_name"]) or {}).get("wallet_share_pct") or 0),
                 "est_tig_round": float((earnings_by_slave.get(r["slave_name"]) or {}).get("est_tig") or 0),
+                "wallet_address": r.get("wallet_address") or member["wallet_address"],
                 "est_tig_since_join": float((earnings_by_slave.get(r["slave_name"]) or {}).get("est_tig_since_join") or 0),
                 "est_tig_24h": float((earnings_by_slave.get(r["slave_name"]) or {}).get("est_tig_24h") or 0),
+                "est_tig_12h": float((earnings_by_slave.get(r["slave_name"]) or {}).get("est_tig_12h") or 0),
                 "est_tig_1h": float((earnings_by_slave.get(r["slave_name"]) or {}).get("est_tig_1h") or 0),
                 "joined_ms": int((earnings_by_slave.get(r["slave_name"]) or {}).get("joined_ms") or 0) or None,
             }
