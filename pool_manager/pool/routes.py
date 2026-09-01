@@ -591,9 +591,15 @@ def get_worker_earnings():
                 "active": bool(row.get("active")),
                 "batches": int(row.get("batches") or 0),
                 "nonces": int(row.get("nonces") or 0),
+                "nonces_1h": int(row.get("nonces_1h") or 0),
+                "nonces_24h": int(row.get("nonces_24h") or 0),
+                "joined_ms": int(row.get("joined_ms") or 0) or None,
                 "share_pct": float(row.get("share_pct") or 0),
                 "wallet_share_pct": float(row.get("wallet_share_pct") or 0),
                 "est_tig": float(row.get("est_tig") or 0),
+                "est_tig_since_join": float(row.get("est_tig_since_join") or 0),
+                "est_tig_24h": float(row.get("est_tig_24h") or 0),
+                "est_tig_1h": float(row.get("est_tig_1h") or 0),
             }
         )
     return {
@@ -981,6 +987,10 @@ def get_member_stats(wallet_address: str):
                 "batches_round": int((earnings_by_slave.get(r["slave_name"]) or {}).get("batches") or 0),
                 "share_pct_round": float((earnings_by_slave.get(r["slave_name"]) or {}).get("wallet_share_pct") or 0),
                 "est_tig_round": float((earnings_by_slave.get(r["slave_name"]) or {}).get("est_tig") or 0),
+                "est_tig_since_join": float((earnings_by_slave.get(r["slave_name"]) or {}).get("est_tig_since_join") or 0),
+                "est_tig_24h": float((earnings_by_slave.get(r["slave_name"]) or {}).get("est_tig_24h") or 0),
+                "est_tig_1h": float((earnings_by_slave.get(r["slave_name"]) or {}).get("est_tig_1h") or 0),
+                "joined_ms": int((earnings_by_slave.get(r["slave_name"]) or {}).get("joined_ms") or 0) or None,
             }
             for r in members
         ],

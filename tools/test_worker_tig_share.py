@@ -19,6 +19,8 @@ def main() -> int:
     ns: dict = {}
     exec(src[start:end], ns, ns)
     fn = ns["allocate_tig"]
+    prorate = ns["prorate_pot"]
+    since_join = ns["estimate_since_join_tig"]
 
     cases = [
         ((50, 100, 10.0), 5.0, "half the nonces gets half the TIG"),
@@ -50,6 +52,37 @@ def main() -> int:
     print(
         f"{'pass' if ok else 'FAIL'}: wallet rows sum to that wallet's TIG "
         f"-> a={a1}+{a2}={a1+a2} (want {wallet_a_tig}), b={b1}"
+    )
+    failed += 0 if ok else 1
+
+    pot = prorate(70.0, 2 * 24 * 60 * 60 * 1000, 7 * 24 * 60 * 60 * 1000)
+    ok = abs(pot - 20.0) < 1e-9
+    print(f"{'pass' if ok else 'FAIL'}: 2 of 7 days prorates the pot -> {pot} (want 20.0)")
+    failed += 0 if ok else 1
+
+    week_tig = 0.07
+    early = since_join(
+        est_tig_week=week_tig,
+        join_ms=1,
+        round_start=10,
+        now_ms=100,
+        slave_nonces=21000,
+        pool_since_join_nonces=21000,
+        round_tig=10.0,
+    )
+    late = since_join(
+        est_tig_week=week_tig,
+        join_ms=50,
+        round_start=10,
+        now_ms=100,
+        slave_nonces=21000,
+        pool_since_join_nonces=42000,
+        round_tig=10.0,
+    )
+    ok = early == week_tig and late > week_tig
+    print(
+        f"{'pass' if ok else 'FAIL'}: early joiner keeps week TIG, late joiner "
+        f"uses the window -> early={early} late={late}"
     )
     failed += 0 if ok else 1
     return 2 if failed else 0

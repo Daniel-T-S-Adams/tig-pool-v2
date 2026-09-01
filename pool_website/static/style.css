@@ -488,11 +488,14 @@ code, pre, .mono {
 .dashboard-divider { margin: 4px 0 44px; }
 .worker-earnings-card { min-width: 0; }
 .worker-earnings-scroll { max-height: 480px; }
-.worker-earnings-card .data-table.compact th:nth-child(1) { width: 44%; }
-.worker-earnings-card .data-table.compact th:nth-child(2) { width: 10%; }
-.worker-earnings-card .data-table.compact th:nth-child(3) { width: 16%; }
-.worker-earnings-card .data-table.compact th:nth-child(4) { width: 12%; }
-.worker-earnings-card .data-table.compact th:nth-child(5) { width: 18%; }
+.worker-earnings-card .data-table.compact th:nth-child(1) { width: 22%; }
+.worker-earnings-card .data-table.compact th:nth-child(2) { width: 7%; }
+.worker-earnings-card .data-table.compact th:nth-child(3) { width: 11%; }
+.worker-earnings-card .data-table.compact th:nth-child(4) { width: 10%; }
+.worker-earnings-card .data-table.compact th:nth-child(5) { width: 12%; }
+.worker-earnings-card .data-table.compact th:nth-child(6) { width: 13%; }
+.worker-earnings-card .data-table.compact th:nth-child(7) { width: 12%; }
+.worker-earnings-card .data-table.compact th:nth-child(8) { width: 13%; }
 .worker-earnings-card .data-table.compact td:nth-child(1) {
   overflow: hidden;
   text-overflow: ellipsis;
@@ -549,7 +552,7 @@ code, pre, .mono {
 
 /* ── Dashboard compact stats ───────────────────────────────────────────── */
 .dash-stats {
-  display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px;
+  display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 12px;
   margin-bottom: 20px;
 }
 @media (max-width: 700px) { .dash-stats { grid-template-columns: repeat(2, 1fr); } }
