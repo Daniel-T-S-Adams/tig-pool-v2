@@ -917,11 +917,14 @@ def gpu_assign_inflight_cap(
     route_cap: int = 0,
     cfg=None,
 ) -> int:
-    """Hard ceiling: one in-flight root batch per GPU worker (max two).
+    """Hard ceiling: one running GPU batch plus at most one prefetch.
 
-    Adaptive throughput/runtime caps and trusted route caps used to
-    warehouse 8-13 jobs on a 1-wide card. Callers must only apply this
-    to ``pool-gpu-*``. CPU caps are not clamped here.
+    ``workers`` / ``NUM_WORKERS`` are local nonce threads, not assign
+    width. A card still executes one batch at a time. Advertising 4
+    workers used to warehouse 4 whole jobs on that serialized card.
+
+    Adaptive throughput/runtime caps used to warehouse 8-13 jobs.
+    Callers must only apply this to ``pool-gpu-*``.
     """
     try:
         want = int(proposed or 0)
@@ -931,20 +934,17 @@ def gpu_assign_inflight_cap(
         return 0
     cfg = cfg or {}
     try:
-        per_worker = int(cfg.get("gpu_inflight_per_worker", 1) or 1)
+        # Default 2 = one running + one prefetch so the card does not
+        # go idle between batches. Cap at 2 regardless of advertised
+        # worker count.
+        per_card = int(cfg.get("gpu_inflight_per_worker", 2) or 2)
     except (TypeError, ValueError):
-        per_worker = 1
-    if per_worker < 1:
-        per_worker = 1
-    elif per_worker > 2:
-        per_worker = 2
-    try:
-        worker_n = int(workers) if workers not in (None, "") else 0
-    except (TypeError, ValueError):
-        worker_n = 0
-    if worker_n <= 0:
-        worker_n = 1
-    hard = worker_n * per_worker
+        per_card = 2
+    if per_card < 1:
+        per_card = 1
+    elif per_card > 2:
+        per_card = 2
+    hard = per_card
     try:
         route = int(route_cap or 0)
     except (TypeError, ValueError):
@@ -2133,7 +2133,7 @@ class SlaveManager:
         )
 
     def _clamp_gpu_assign_cap(self, slave_name: str, proposed: int) -> int:
-        """GPU-only: never warehouse more than 1-2 in-flight batches per card."""
+        """GPU-only: one running batch plus at most one prefetch."""
         try:
             want = int(proposed or 0)
         except (TypeError, ValueError):
@@ -2626,11 +2626,6 @@ class SlaveManager:
         completed = int(stats.get("completed_recent") or 0)
         active = int(stats.get("active_unfinished") or 0)
         avg_runtime_ms = float(stats.get("avg_runtime_ms") or 0)
-        workers = None
-        try:
-            workers = int((telemetry or {}).get("num_workers") or 0) or None
-        except (TypeError, ValueError):
-            workers = None
 
         if completed < warmup_completed:
             cap = min_cap
@@ -2644,11 +2639,8 @@ class SlaveManager:
         else:
             cap = min_cap
 
-        if profile == "gpu" and workers:
-            # Each reported GPU worker can run one root batch. Route / gpu_max
-            # still bound this so a public 1-cap slave cannot claim 64 slots.
-            cap = max(int(cap or 0), min(int(workers), int(max_cap), int(route_cap)))
-        # Real GPUs are 1-wide. Do not let throughput/runtime warehouse jobs.
+        # Real GPUs run one batch at a time. NUM_WORKERS is local nonce
+        # threads, not assign width. Do not raise cap to advertised workers.
         if _slave_work_profile(slave_name) == "gpu":
             cap = self._clamp_gpu_assign_cap(slave_name, cap)
         if profile == "cpu" and max_cap > 1:
