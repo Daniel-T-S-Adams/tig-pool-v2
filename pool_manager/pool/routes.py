@@ -514,10 +514,39 @@ def _fetch_round_coinbase_map(api_url: str, player_id: str, round_num: int, is_f
         return None, None
 
 
+def _current_round_nonce_share(wallet: str) -> tuple[int, int]:
+    """This wallet's nonces and the pool total for the current round."""
+    start_raw = db.get_setting("current_round_start_ms", None) or db.get_setting("current_round_start", None)
+    try:
+        start_ms = int(start_raw) if start_raw is not None else None
+    except (TypeError, ValueError):
+        start_ms = None
+    if start_ms is None:
+        return 0, 0
+    rows = db.fetch_all(
+        """
+        SELECT wallet_address, SUM(nonces_computed) AS nonces
+        FROM pool_contributions
+        WHERE snapshot_end_ms >= %s
+        GROUP BY wallet_address
+        """,
+        (start_ms,),
+    ) or []
+    pool_nonces = 0
+    wallet_nonces = 0
+    for row in rows:
+        n = int(row.get("nonces") or 0)
+        pool_nonces += n
+        if (row.get("wallet_address") or "").lower() == wallet:
+            wallet_nonces += n
+    return wallet_nonces, pool_nonces
+
+
 def _member_earnings(wallet: str, rounds: int) -> dict:
     """
-    Round-by-round breakdown of what one wallet actually earned from this pool's
-    coinbase distributions, straight from TIG's on-chain record — not an estimate.
+    Round-by-round earnings. The in-progress round is nonce share of
+    pool TIG after delegators: address_nonces / pool_nonces * pool_tig.
+    Finished rounds stay on TIG's recorded coinbase.
     """
     wallet = (wallet or "").strip().lower()
     if not wallet.startswith("0x") or len(wallet) < 10:
@@ -550,16 +579,25 @@ def _member_earnings(wallet: str, rounds: int) -> dict:
         pool_total_tig, coinbase_map = _fetch_round_coinbase_map(api_url, player_id, round_num, is_final)
         if coinbase_map is None:
             continue
-        wallet_tig = coinbase_map.get(wallet, 0.0)
-        pool_coinbase_total = round(sum(coinbase_map.values()), 6) if coinbase_map else 0.0
-        pct = round((wallet_tig / pool_coinbase_total) * 100, 2) if pool_coinbase_total else 0.0
+        pool_tig = round(sum(coinbase_map.values()), 6) if coinbase_map else round(float(pool_total_tig or 0), 6)
+        if is_final:
+            wallet_tig = float(coinbase_map.get(wallet, 0.0) or 0)
+            pct = round((wallet_tig / pool_tig) * 100, 2) if pool_tig else 0.0
+        else:
+            wallet_nonces, pool_nonces = _current_round_nonce_share(wallet)
+            wallet_tig = (
+                round(pool_tig * (wallet_nonces / pool_nonces), 6)
+                if pool_tig > 0 and pool_nonces > 0
+                else 0.0
+            )
+            pct = round((wallet_nonces / pool_nonces) * 100, 2) if pool_nonces else 0.0
         total_wallet_tig += wallet_tig
         history.append(
             {
                 "round": round_num,
                 "final": is_final,
                 "wallet_tig": round(wallet_tig, 6),
-                "pool_coinbase_total_tig": pool_coinbase_total,
+                "pool_coinbase_total_tig": pool_tig,
                 "wallet_pct_of_coinbase": pct,
             }
         )

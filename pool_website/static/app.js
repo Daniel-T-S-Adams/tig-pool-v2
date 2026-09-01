@@ -80,7 +80,7 @@ async function checkMemberEarnings() {
     return;
   }
 
-  status.textContent = "Looking up on-chain earnings…";
+  status.textContent = "Looking up earnings…";
   table.style.display = "none";
   body.innerHTML = "";
 

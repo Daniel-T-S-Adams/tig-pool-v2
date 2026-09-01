@@ -107,11 +107,11 @@
 
   <!-- Check My Earnings -->
   <section class="section" id="earnings-lookup">
-    <p class="section-sub">Straight from TIG's on-chain record — not an estimate</p>
+    <p class="section-sub">Your share of pool TIG this round</p>
     <h2 class="section-title">Check My Earnings</h2>
     <div class="card mt">
-      <p style="margin-top:0;">Paste your wallet address to see exactly what this pool's coinbase distribution has recorded for you, round by round. This is the same data TIG uses to pay out claims.</p>
-      <p style="color:var(--muted); font-size:13px;">Note: when you claim on TIG, it pays out <em>all</em> of your currently unclaimed balance at once — not strictly one round. So your total claimed amount may span more than one round shown below, and can differ from any single round's figure here.</p>
+      <p style="margin-top:0;">The in-progress round is your nonces ÷ pool nonces × pool TIG after delegators. That is what you have earned so far this week. Finished rounds use TIG's recorded claim split.</p>
+      <p style="color:var(--muted); font-size:13px;">Note: when you claim on TIG, it pays out <em>all</em> of your currently unclaimed balance at once — not strictly one round.</p>
       <div style="display:flex; gap:10px; flex-wrap:wrap; margin:16px 0;">
         <input id="earnings-wallet-input" type="text" placeholder="0x..." class="mono"
                style="flex:1; min-width:280px; padding:10px 14px; border-radius:8px; border:1px solid var(--border); background:var(--surface2); color:var(--text);" />
