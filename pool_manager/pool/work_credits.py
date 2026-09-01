@@ -15,7 +15,11 @@ stopped without a proof submit (junk / never-converted).
 """
 from __future__ import annotations
 
+import time
 from typing import Any, Iterable, Mapping, Optional
+
+_SHADOW_TTL_S = 60.0
+_shadow_cache: dict[str, Any] = {"ts": 0.0, "data": None}
 
 GPU_CHALLENGES = frozenset(
     {"vector_search", "hypergraph", "neuralnet_optimizer"}
@@ -85,15 +89,24 @@ def credits_for_nonces(
     sec_per_nonce: float,
     *,
     cap_mult: float = CAP_MULT,
+    cap_ref_sec: Optional[float] = None,
 ) -> float:
-    """Effort credits for one completed root pile. Cap the per-nonce weight."""
+    """Effort credits for one completed root pile.
+
+    ``cap_ref_sec`` defaults to ``sec_per_nonce``. Wall-clock scoring should
+    pass the table weight as the ref so a hung box cannot exceed CAP_MULT
+    times the fleet/prior rate.
+    """
     n = max(0.0, float(nonces or 0))
     if n <= 0:
         return 0.0
     weight = max(0.0, float(sec_per_nonce or 0))
-    cap = max(weight, weight * float(cap_mult or CAP_MULT)) if weight > 0 else 0.0
-    if cap > 0:
-        weight = min(weight, cap)
+    try:
+        ref = float(cap_ref_sec) if cap_ref_sec not in (None, "") else weight
+    except (TypeError, ValueError):
+        ref = weight
+    if ref > 0 and cap_mult:
+        weight = min(weight, ref * float(cap_mult))
     return round(n * weight, 6)
 
 
@@ -180,16 +193,30 @@ def load_weight_table(ema_rows: Iterable[Mapping[str, Any]] | None) -> dict[tupl
     return table
 
 
-def seconds_for(weights: Mapping[tuple[str, str], Mapping], challenge: str, track_id: str = "") -> float:
+def weight_meta(
+    weights: Mapping[tuple[str, str], Mapping],
+    challenge: str,
+    track_id: str = "",
+) -> dict:
     chal = str(challenge or "")
     track = str(track_id or "")
-    row = weights.get((chal, track)) or weights.get((chal, ""))
-    if row:
-        try:
-            return float(row["sec_per_nonce"])
-        except (KeyError, TypeError, ValueError):
-            pass
-    return prior_seconds_per_nonce(chal, track)
+    row = (weights or {}).get((chal, track)) or (weights or {}).get((chal, "")) or {}
+    try:
+        sec = float(row.get("sec_per_nonce"))
+    except (TypeError, ValueError):
+        sec = 0.0
+    if sec <= 0:
+        sec = prior_seconds_per_nonce(chal, track)
+        return {"sec_per_nonce": sec, "source": "prior", "samples": 0}
+    return {
+        "sec_per_nonce": sec,
+        "source": str(row.get("source") or "prior"),
+        "samples": int(row.get("samples") or 0),
+    }
+
+
+def seconds_for(weights: Mapping[tuple[str, str], Mapping], challenge: str, track_id: str = "") -> float:
+    return float(weight_meta(weights, challenge, track_id)["sec_per_nonce"])
 
 
 def ensure_contribution_credit_columns() -> None:
@@ -226,8 +253,161 @@ def fetch_weight_table():
     return load_weight_table(rows)
 
 
-def build_shadow_report(*, pool_fee: float, round_start_ms: int | None, top_n: int = 20) -> dict:
-    """Compare nonce split vs effort-credit split. Does not call /set-coinbase."""
+def _work_sql(since_ms: int | None) -> tuple[str, tuple]:
+    """One row per slave × track × junk-bucket, with wall-clock ms."""
+    where = """
+        rb.ready = true
+        AND rb.slave IS NOT NULL
+    """
+    params: tuple = ()
+    if since_ms is not None:
+        where += " AND rb.end_time >= %s"
+        params = (int(since_ms),)
+    sql = f"""
+        SELECT
+            rb.slave,
+            j.challenge,
+            COALESCE(j.settings->>'track_id', '') AS track_id,
+            (j.stopped IS TRUE AND j.proof_submitted IS NOT TRUE) AS junk,
+            SUM(LEAST(j.batch_size, j.num_nonces - rb.batch_idx * j.batch_size)) AS nonces,
+            COUNT(*) AS batches,
+            COUNT(DISTINCT j.benchmark_id) AS jobs,
+            SUM(
+                CASE
+                    WHEN rb.start_time IS NOT NULL
+                     AND rb.end_time IS NOT NULL
+                     AND rb.end_time > rb.start_time
+                    THEN rb.end_time - rb.start_time
+                    ELSE 0
+                END
+            ) AS runtime_ms
+        FROM root_batch rb
+        JOIN job j ON rb.benchmark_id = j.benchmark_id
+        WHERE {where}
+        GROUP BY rb.slave, j.challenge, COALESCE(j.settings->>'track_id', ''),
+                 (j.stopped IS TRUE AND j.proof_submitted IS NOT TRUE)
+    """
+    return sql, params
+
+
+def _pct(part: float, whole: float) -> float:
+    if whole <= 0:
+        return 0.0
+    return round(100.0 * float(part) / float(whole), 2)
+
+
+def _share_table(
+    amounts: Mapping[str, float],
+    nonce_frac: Mapping[str, float],
+    member_share: float,
+    *,
+    extra: Mapping[str, Mapping[str, float]] | None = None,
+) -> list[dict]:
+    frac = fractions_from_amounts(amounts, member_share)
+    keys = set(nonce_frac) | set(frac)
+    rows = []
+    for key in keys:
+        n = float(nonce_frac.get(key, 0.0))
+        c = float(frac.get(key, 0.0))
+        row = {
+            "id": key,
+            "nonce_share": n,
+            "credit_share": c,
+            "delta": round(c - n, 6),
+            "amount": round(float(amounts.get(key, 0.0)), 3),
+        }
+        if extra and key in extra:
+            row.update(extra[key])
+        rows.append(row)
+    rows.sort(key=lambda r: (-abs(float(r["delta"])), -float(r["amount"])))
+    return rows
+
+
+def _verdict(payload: dict) -> dict:
+    """Machine-readable judgement so a pasted report is enough."""
+    wallets = payload.get("wallets_combined") or []
+    challenges = payload.get("challenges") or []
+    biggest = wallets[0] if wallets else {}
+    gpu_nonce = sum(float(r.get("nonce_pct") or 0) for r in challenges if r.get("profile") == "gpu")
+    gpu_wt = sum(float(r.get("wt_pct") or 0) for r in challenges if r.get("profile") == "gpu")
+    gpu_act = sum(float(r.get("act_pct") or 0) for r in challenges if r.get("profile") == "gpu")
+    wt_hours = float(payload.get("weight_hours") or 0)
+    act_hours = float(payload.get("actual_hours") or 0)
+    ratio = (wt_hours / act_hours) if act_hours > 0 else None
+    notes = []
+    max_swing = abs(float(biggest.get("delta_wt") or biggest.get("delta") or 0))
+    if ratio is not None and ratio > 1.5:
+        notes.append(
+            f"Table weights pay {ratio:.2f}x actual wall hours — EMA/prior is hot "
+            "(GPU likely overpaid vs real card time)."
+        )
+    elif ratio is not None and ratio < 0.7:
+        notes.append(
+            f"Table weights pay {ratio:.2f}x actual wall hours — weights are cold "
+            "(slow SAT/VRPTW still underpaid)."
+        )
+    else:
+        notes.append(
+            "Weight hours and actual hours agree closely — the table is calibrated "
+            "enough to judge mix luck."
+        )
+    if gpu_wt - gpu_nonce > 15:
+        notes.append(
+            f"GPU is {gpu_nonce:.1f}% of nonces but {gpu_wt:.1f}% of weight-credits "
+            f"({gpu_act:.1f}% of actual-credits). Combined-pot effort-pay moves TIG "
+            "from CPU nonce farms to GPU hours."
+        )
+    if max_swing >= 0.15:
+        notes.append(
+            f"Largest wallet swing is {max_swing:.1%} — too big to cut over without "
+            "agreeing CPU and GPU should share one pot."
+        )
+    sat = next((r for r in challenges if r.get("challenge") == "satisfiability"), None)
+    knap = next((r for r in challenges if r.get("challenge") == "knapsack"), None)
+    if sat and knap and float(sat.get("act_sec") or 0) > float(knap.get("act_sec") or 0) * 2:
+        notes.append(
+            "Actual s/nonce: SAT is much slower than knapsack. Raw nonces underpay "
+            "SAT/VRPTW mix luck. Effort-pay is fairer on CPU if WT≈ACT."
+        )
+    agree = True
+    for row in wallets:
+        if abs(float(row.get("delta_wt") or 0) - float(row.get("delta_act") or 0)) > 0.05:
+            agree = False
+            break
+    if wallets:
+        notes.append(
+            "WT and ACT wallet shares "
+            + ("agree — method is stable." if agree else "disagree — do not cut over; fix weights first.")
+        )
+    return {
+        "largest_wallet": biggest.get("wallet_address"),
+        "largest_swing": round(max_swing, 4),
+        "gpu_nonce_pct": round(gpu_nonce, 2),
+        "gpu_weight_credit_pct": round(gpu_wt, 2),
+        "gpu_actual_credit_pct": round(gpu_act, 2),
+        "weight_over_actual": round(ratio, 3) if ratio is not None else None,
+        "notes": notes,
+    }
+
+
+def build_shadow_report(
+    *,
+    pool_fee: float,
+    round_start_ms: int | None,
+    top_n: int = 20,
+    force: bool = False,
+) -> dict:
+    """Compare nonce vs weight/prior/actual credits. Does not call /set-coinbase."""
+    now = time.time()
+    cached = _shadow_cache.get("data")
+    if (
+        not force
+        and cached is not None
+        and now - float(_shadow_cache.get("ts") or 0) < _SHADOW_TTL_S
+        and cached.get("round_start_ms") == round_start_ms
+    ):
+        return cached
+
     from . import database as db
 
     ensure_contribution_credit_columns()
@@ -244,26 +424,6 @@ def build_shadow_report(*, pool_fee: float, round_start_ms: int | None, top_n: i
             """,
             (int(round_start_ms),),
         )
-        work_rows = db.fetch_all(
-            """
-            SELECT
-                rb.slave,
-                j.challenge,
-                COALESCE(j.settings->>'track_id', '') AS track_id,
-                j.stopped,
-                j.proof_submitted,
-                SUM(LEAST(j.batch_size, j.num_nonces - rb.batch_idx * j.batch_size)) AS nonces,
-                COUNT(*) AS batches
-            FROM root_batch rb
-            JOIN job j ON rb.benchmark_id = j.benchmark_id
-            WHERE rb.ready = true
-              AND rb.end_time >= %s
-              AND rb.slave IS NOT NULL
-            GROUP BY rb.slave, j.challenge, COALESCE(j.settings->>'track_id', ''),
-                     j.benchmark_id, j.stopped, j.proof_submitted
-            """,
-            (int(round_start_ms),),
-        )
     else:
         nonce_rows = db.fetch_all(
             """
@@ -272,24 +432,8 @@ def build_shadow_report(*, pool_fee: float, round_start_ms: int | None, top_n: i
             GROUP BY wallet_address
             """
         )
-        work_rows = db.fetch_all(
-            """
-            SELECT
-                rb.slave,
-                j.challenge,
-                COALESCE(j.settings->>'track_id', '') AS track_id,
-                j.stopped,
-                j.proof_submitted,
-                SUM(LEAST(j.batch_size, j.num_nonces - rb.batch_idx * j.batch_size)) AS nonces,
-                COUNT(*) AS batches
-            FROM root_batch rb
-            JOIN job j ON rb.benchmark_id = j.benchmark_id
-            WHERE rb.ready = true
-              AND rb.slave IS NOT NULL
-            GROUP BY rb.slave, j.challenge, COALESCE(j.settings->>'track_id', ''),
-                     j.benchmark_id, j.stopped, j.proof_submitted
-            """
-        )
+    work_sql, work_params = _work_sql(round_start_ms)
+    work_rows = db.fetch_all(work_sql, work_params)
 
     members = db.fetch_all(
         "SELECT slave_name, wallet_address FROM pool_members WHERE active = true"
@@ -301,92 +445,235 @@ def build_shadow_report(*, pool_fee: float, round_start_ms: int | None, top_n: i
         for r in (nonce_rows or [])
         if r.get("wallet_address")
     }
-    credit_amounts: dict[str, float] = {}
-    challenge_nonce: dict[str, float] = {}
-    challenge_credit: dict[str, float] = {}
-    converted_jobs = 0
-    scored_jobs = 0
+
+    wallet_wt: dict[str, float] = {}
+    wallet_pri: dict[str, float] = {}
+    wallet_act: dict[str, float] = {}
+    slave_nonce: dict[str, float] = {}
+    slave_wt: dict[str, float] = {}
+    slave_act: dict[str, float] = {}
+    slave_wallet: dict[str, str] = {}
+    cpu_nonce: dict[str, float] = {}
+    cpu_wt: dict[str, float] = {}
+    gpu_nonce: dict[str, float] = {}
+    gpu_wt: dict[str, float] = {}
+    chal: dict[str, dict] = {}
+    track: dict[tuple[str, str], dict] = {}
+
+    scored_groups = 0
+    discounted_jobs = 0
+    total_jobs = 0
+    total_batches = 0
+    total_runtime_s = 0.0
+
     for row in work_rows or []:
-        wallet = slave_map.get(row.get("slave"))
+        slave = str(row.get("slave") or "")
+        wallet = slave_map.get(slave)
         if not wallet:
             continue
+        challenge = str(row.get("challenge") or "")
+        track_id = str(row.get("track_id") or "")
+        nonces = float(row.get("nonces") or 0)
+        runtime_ms = float(row.get("runtime_ms") or 0)
+        jobs = int(row.get("jobs") or 0)
+        batches = int(row.get("batches") or 0)
+        junk = bool(row.get("junk"))
         scored = score_root_group(
-            nonces=float(row.get("nonces") or 0),
-            challenge=str(row.get("challenge") or ""),
-            track_id=str(row.get("track_id") or ""),
+            nonces=nonces,
+            challenge=challenge,
+            track_id=track_id,
             weights=weights,
-            stopped=bool(row.get("stopped")),
-            proof_submitted=bool(row.get("proof_submitted")),
+            runtime_ms=runtime_ms,
+            stopped=junk,
+            proof_submitted=not junk,
         )
-        scored_jobs += 1
+        scored_groups += 1
+        total_jobs += jobs
+        total_batches += batches
+        total_runtime_s += runtime_ms / 1000.0
         if scored["conversion"] < 1.0:
-            converted_jobs += 1
-        credit_amounts[wallet] = credit_amounts.get(wallet, 0.0) + scored["credits_converted"]
-        chal = str(row.get("challenge") or "")
-        challenge_nonce[chal] = challenge_nonce.get(chal, 0.0) + scored["nonces"]
-        challenge_credit[chal] = challenge_credit.get(chal, 0.0) + scored["credits_converted"]
+            discounted_jobs += jobs
+
+        wt = scored["credits_weight"]
+        pri = scored["credits_prior"]
+        act = scored["credits_actual"]
+        wallet_wt[wallet] = wallet_wt.get(wallet, 0.0) + wt
+        wallet_pri[wallet] = wallet_pri.get(wallet, 0.0) + pri
+        wallet_act[wallet] = wallet_act.get(wallet, 0.0) + act
+        slave_nonce[slave] = slave_nonce.get(slave, 0.0) + nonces
+        slave_wt[slave] = slave_wt.get(slave, 0.0) + wt
+        slave_act[slave] = slave_act.get(slave, 0.0) + act
+        slave_wallet[slave] = wallet
+        pot_n, pot_w = (gpu_nonce, gpu_wt) if is_gpu_challenge(challenge) else (cpu_nonce, cpu_wt)
+        pot_n[wallet] = pot_n.get(wallet, 0.0) + nonces
+        pot_w[wallet] = pot_w.get(wallet, 0.0) + wt
+
+        c = chal.setdefault(
+            challenge,
+            {
+                "nonces": 0.0,
+                "runtime_s": 0.0,
+                "wt": 0.0,
+                "pri": 0.0,
+                "act": 0.0,
+                "source": scored["source"],
+                "samples": scored["samples"],
+                "prior_sec": scored["prior_sec"],
+            },
+        )
+        c["nonces"] += nonces
+        c["runtime_s"] += runtime_ms / 1000.0
+        c["wt"] += wt
+        c["pri"] += pri
+        c["act"] += act
+
+        t = track.setdefault(
+            (challenge, track_id),
+            {
+                "nonces": 0.0,
+                "runtime_s": 0.0,
+                "wt": 0.0,
+                "act": 0.0,
+                "weight_sec": scored["weight_sec"],
+                "prior_sec": scored["prior_sec"],
+                "source": scored["source"],
+                "samples": scored["samples"],
+            },
+        )
+        t["nonces"] += nonces
+        t["runtime_s"] += runtime_ms / 1000.0
+        t["wt"] += wt
+        t["act"] += act
 
     nonce_frac = fractions_from_amounts(nonce_amounts, member_share)
-    credit_frac = fractions_from_amounts(credit_amounts, member_share)
-    wallets = set(nonce_frac) | set(credit_frac)
-    compare = []
-    for wallet in wallets:
+    wt_frac = fractions_from_amounts(wallet_wt, member_share)
+    pri_frac = fractions_from_amounts(wallet_pri, member_share)
+    act_frac = fractions_from_amounts(wallet_act, member_share)
+
+    wallets_combined = []
+    for wallet in set(nonce_frac) | set(wt_frac) | set(act_frac) | set(pri_frac):
         n = float(nonce_frac.get(wallet, 0.0))
-        c = float(credit_frac.get(wallet, 0.0))
-        compare.append(
+        w = float(wt_frac.get(wallet, 0.0))
+        a = float(act_frac.get(wallet, 0.0))
+        p = float(pri_frac.get(wallet, 0.0))
+        wallets_combined.append(
             {
                 "wallet_address": wallet,
                 "nonce_share": n,
-                "credit_share": c,
-                "delta": round(c - n, 6),
+                "weight_share": w,
+                "actual_share": a,
+                "prior_share": p,
+                "delta_wt": round(w - n, 6),
+                "delta_act": round(a - n, 6),
                 "nonces": int(nonce_amounts.get(wallet, 0)),
-                "credits": round(credit_amounts.get(wallet, 0.0), 3),
+                "weight_credits": round(wallet_wt.get(wallet, 0.0), 1),
+                "actual_credits": round(wallet_act.get(wallet, 0.0), 1),
             }
         )
-    compare.sort(key=lambda r: (-abs(float(r["delta"])), -float(r["credits"])))
+    wallets_combined.sort(key=lambda r: (-abs(float(r["delta_wt"])), -float(r["weight_credits"])))
 
-    total_n = sum(challenge_nonce.values()) or 1.0
-    total_c = sum(challenge_credit.values()) or 1.0
+    slave_nonce_frac = fractions_from_amounts(slave_nonce, member_share)
+    slave_wt_frac = fractions_from_amounts(slave_wt, member_share)
+    slave_act_frac = fractions_from_amounts(slave_act, member_share)
+    slaves = []
+    for name in slave_nonce:
+        n = float(slave_nonce_frac.get(name, 0.0))
+        w = float(slave_wt_frac.get(name, 0.0))
+        a = float(slave_act_frac.get(name, 0.0))
+        slaves.append(
+            {
+                "slave_name": name,
+                "wallet_address": slave_wallet.get(name, ""),
+                "profile": "gpu" if str(name).startswith("pool-gpu-") else "cpu",
+                "nonces": int(slave_nonce.get(name, 0)),
+                "nonce_share": n,
+                "weight_share": w,
+                "actual_share": a,
+                "delta_wt": round(w - n, 6),
+                "delta_act": round(a - n, 6),
+            }
+        )
+    slaves.sort(key=lambda r: (-abs(float(r["delta_wt"])), -int(r["nonces"])))
+
+    total_n = sum(v["nonces"] for v in chal.values()) or 1.0
+    total_wt = sum(v["wt"] for v in chal.values()) or 1.0
+    total_act = sum(v["act"] for v in chal.values()) or 1.0
+    total_pri = sum(v["pri"] for v in chal.values()) or 1.0
     challenges = []
-    for chal in sorted(set(challenge_nonce) | set(challenge_credit)):
+    for name, v in sorted(chal.items()):
+        act_sec = (v["runtime_s"] / v["nonces"]) if v["nonces"] else 0.0
+        wt_sec = (v["wt"] / v["nonces"]) if v["nonces"] else 0.0
         challenges.append(
             {
-                "challenge": chal,
-                "profile": "gpu" if is_gpu_challenge(chal) else "cpu",
-                "nonce_pct": round(100.0 * challenge_nonce.get(chal, 0.0) / total_n, 2),
-                "credit_pct": round(100.0 * challenge_credit.get(chal, 0.0) / total_c, 2),
-                "sec_per_nonce": seconds_for(weights, chal, ""),
+                "challenge": name,
+                "profile": "gpu" if is_gpu_challenge(name) else "cpu",
+                "nonce_pct": _pct(v["nonces"], total_n),
+                "wt_pct": _pct(v["wt"], total_wt),
+                "act_pct": _pct(v["act"], total_act),
+                "pri_pct": _pct(v["pri"], total_pri),
+                "prior_sec": round(v["prior_sec"], 4),
+                "effective_sec": round(wt_sec, 4),
+                "act_sec": round(act_sec, 4),
+                "source": v["source"],
+                "samples": v["samples"],
             }
         )
 
-    weight_rows = [
-        {
-            "challenge": chal,
-            "track_id": track,
-            "sec_per_nonce": round(float(meta["sec_per_nonce"]), 4),
-            "source": meta.get("source"),
-            "samples": int(meta.get("samples") or 0),
-        }
-        for (chal, track), meta in sorted(weights.items())
-        if track == "" or int(meta.get("samples") or 0) > 0
-    ]
+    tracks = []
+    for (name, tid), v in sorted(track.items(), key=lambda kv: -kv[1]["wt"]):
+        if v["nonces"] <= 0:
+            continue
+        act_sec = (v["runtime_s"] / v["nonces"]) if v["nonces"] else 0.0
+        tracks.append(
+            {
+                "challenge": name,
+                "track_id": tid,
+                "profile": "gpu" if is_gpu_challenge(name) else "cpu",
+                "nonce_pct": _pct(v["nonces"], total_n),
+                "wt_pct": _pct(v["wt"], total_wt),
+                "act_pct": _pct(v["act"], total_act),
+                "prior_sec": round(v["prior_sec"], 4),
+                "weight_sec": round(v["weight_sec"], 4),
+                "act_sec": round(act_sec, 4),
+                "source": v["source"],
+                "samples": v["samples"],
+            }
+        )
 
-    return {
+    cpu_nonce_frac = fractions_from_amounts(cpu_nonce, member_share)
+    gpu_nonce_frac = fractions_from_amounts(gpu_nonce, member_share)
+    limit = max(1, int(top_n))
+    payload = {
         "mode": "shadow",
         "live_payout": "nonces",
         "note": (
             "Live /set-coinbase is still raw root nonces. "
-            "credit_share is the effort-weighted would-be split."
+            "WT=table weight (EMA/prior). ACT=capped wall-clock. "
+            "PRI=hardcoded prior only. If WT≈ACT, weights are calibrated. "
+            "CPU/GPU pots are separate what-ifs; combined is one pie."
         ),
         "member_share": member_share,
         "round_start_ms": round_start_ms,
-        "scored_jobs": scored_jobs,
-        "conversion_discounted_jobs": converted_jobs,
-        "wallets": len(compare),
+        "scored_groups": scored_groups,
+        "jobs": total_jobs,
+        "batches": total_batches,
+        "discounted_jobs": discounted_jobs,
+        "actual_hours": round(total_runtime_s / 3600.0, 2),
+        "weight_hours": round(sum(wallet_wt.values()) / 3600.0, 2),
+        "prior_hours": round(sum(wallet_pri.values()) / 3600.0, 2),
+        "wallets": len(wallets_combined),
         "challenges": challenges,
-        "weights": weight_rows,
-        "top_delta": compare[: max(1, int(top_n))],
+        "tracks": tracks[:40],
+        "wallets_combined": wallets_combined,
+        "wallets_cpu": _share_table(cpu_wt, cpu_nonce_frac, member_share)[:limit],
+        "wallets_gpu": _share_table(gpu_wt, gpu_nonce_frac, member_share)[:limit],
+        "top_slaves": slaves[:limit],
+        "top_delta": wallets_combined[:limit],
     }
+    payload["verdict"] = _verdict(payload)
+    _shadow_cache["data"] = payload
+    _shadow_cache["ts"] = now
+    return payload
 
 
 def score_root_group(
@@ -395,22 +682,40 @@ def score_root_group(
     challenge: str,
     track_id: str = "",
     weights: Mapping[tuple[str, str], Mapping] | None = None,
+    runtime_ms: float = 0.0,
     stopped: bool = False,
     proof_submitted: bool = False,
     conversion_floor: float = CONVERSION_FLOOR,
 ) -> dict[str, float]:
-    """Score one (slave, job) or (slave, track) pile of completed root nonces."""
-    sec = seconds_for(weights or {}, challenge, track_id)
-    raw = credits_for_nonces(nonces, sec)
+    """Score one slave×track pile. Returns weight, prior, and capped-actual credits."""
+    n = float(nonces or 0)
+    meta = weight_meta(weights or {}, challenge, track_id)
+    weight_sec = float(meta["sec_per_nonce"])
+    prior_sec = prior_seconds_per_nonce(challenge, track_id)
+    actual_sec = 0.0
+    if n > 0 and runtime_ms and float(runtime_ms) > 0:
+        actual_sec = float(runtime_ms) / 1000.0 / n
     conv = conversion_factor(
         stopped=bool(stopped),
         proof_submitted=bool(proof_submitted),
         floor=conversion_floor,
     )
+    wt = credits_for_nonces(n, weight_sec) * conv
+    pri = credits_for_nonces(n, prior_sec) * conv
+    act = credits_for_nonces(n, actual_sec, cap_ref_sec=weight_sec or prior_sec) * conv
+    raw = credits_for_nonces(n, weight_sec)
     return {
-        "nonces": float(nonces or 0),
-        "sec_per_nonce": sec,
+        "nonces": n,
+        "sec_per_nonce": weight_sec,
+        "weight_sec": weight_sec,
+        "prior_sec": prior_sec,
+        "actual_sec": actual_sec,
+        "source": meta["source"],
+        "samples": meta["samples"],
         "credits": raw,
         "conversion": conv,
-        "credits_converted": round(raw * conv, 6),
+        "credits_converted": round(wt, 6),
+        "credits_weight": round(wt, 6),
+        "credits_prior": round(pri, 6),
+        "credits_actual": round(act, 6),
     }

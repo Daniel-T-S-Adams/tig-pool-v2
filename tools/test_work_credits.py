@@ -110,6 +110,19 @@ def main() -> int:
         "same nonces -> same live share (the unfair status quo)",
     )
 
+    check(
+        credits_for_nonces(10, 10.0, cap_ref_sec=2.0) == 60.0,
+        "actual 10s/nonce capped at 3x table 2s = 6s -> 60 credits",
+    )
+    hung = score_root_group(
+        nonces=10,
+        challenge="satisfiability",
+        runtime_ms=100_000,
+    )
+    check(hung["actual_sec"] == 10.0, "100s / 10 nonces = 10s actual")
+    check(hung["credits_actual"] == 60.0, "hung SAT actual capped at 3x prior 2s")
+    check(hung["credits_weight"] == 20.0, "SAT weight credits stay 10*2")
+
     return 2 if failed else 0
 
 

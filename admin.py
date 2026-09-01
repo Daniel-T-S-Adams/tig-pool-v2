@@ -643,36 +643,119 @@ def cmd_compute_types(args):
     print(f"\nupdate-config: {resp}")
 
 def cmd_payout_shadow(args):
-    report = _get("/admin/payout-shadow")
+    path = "/admin/payout-shadow"
+    if "--force" in args:
+        path += "?force=true"
+    report = _get(path)
     if "--json" in args:
         print(json.dumps(report, indent=2, sort_keys=True))
         return
+    v = report.get("verdict") or {}
     print("Payout shadow (live /set-coinbase still uses nonces)")
     print(f"  live payout : {report.get('live_payout')}")
     print(f"  member share: {report.get('member_share')}")
-    print(f"  scored jobs : {report.get('scored_jobs')}")
-    print(f"  discounted  : {report.get('conversion_discounted_jobs')} jobs (stopped, no proof)")
-    print(f"  wallets     : {report.get('wallets')}")
+    print(
+        f"  jobs/batches: {report.get('jobs')} / {report.get('batches')}  "
+        f"groups={report.get('scored_groups')}  junk={report.get('discounted_jobs')}"
+    )
+    print(
+        f"  hours       : actual={report.get('actual_hours')}  "
+        f"weight={report.get('weight_hours')}  prior={report.get('prior_hours')}"
+    )
+    print(
+        f"  GPU pie     : nonce={v.get('gpu_nonce_pct')}%  "
+        f"WT={v.get('gpu_weight_credit_pct')}%  ACT={v.get('gpu_actual_credit_pct')}%"
+    )
+    print(f"  WT/ACT hours: {v.get('weight_over_actual')}")
     print()
-    print(f"{'CHALLENGE':<22} {'TYPE':<4} {'NONCE %':>8} {'CREDIT %':>9} {'SEC/N':>7}")
-    print("-" * 56)
+    print("VERDICT")
+    for note in v.get("notes") or []:
+        print(f"  - {note}")
+    print()
+    print(
+        f"{'CHALLENGE':<22} {'TYP':<3} {'NONCE':>6} {'WT':>6} {'ACT':>6} {'PRI':>6} "
+        f"{'PRIOR':>6} {'EFF':>6} {'ACTUAL':>7} {'SRC':<6}"
+    )
+    print("-" * 88)
     for row in report.get("challenges") or []:
         print(
             f"{str(row.get('challenge') or ''):<22} "
-            f"{str(row.get('profile') or ''):<4} "
-            f"{float(row.get('nonce_pct') or 0):>8.2f} "
-            f"{float(row.get('credit_pct') or 0):>9.2f} "
-            f"{float(row.get('sec_per_nonce') or 0):>7.2f}"
+            f"{str(row.get('profile') or ''):<3} "
+            f"{float(row.get('nonce_pct') or 0):>6.1f} "
+            f"{float(row.get('wt_pct') or 0):>6.1f} "
+            f"{float(row.get('act_pct') or 0):>6.1f} "
+            f"{float(row.get('pri_pct') or 0):>6.1f} "
+            f"{float(row.get('prior_sec') or 0):>6.2f} "
+            f"{float(row.get('effective_sec') or 0):>6.2f} "
+            f"{float(row.get('act_sec') or 0):>7.2f} "
+            f"{str(row.get('source') or ''):<6}"
         )
     print()
-    print(f"{'WALLET':<44} {'NONCE':>8} {'CREDIT':>8} {'DELTA':>8}")
-    print("-" * 72)
-    for row in report.get("top_delta") or []:
+    print("TRACKS (by weight credits)")
+    print(
+        f"{'CHAL':<16} {'TRACK':<22} {'NONCE':>6} {'WT':>6} {'ACT':>6} "
+        f"{'WSEC':>6} {'ASEC':>6} {'SRC':<6} {'N':>4}"
+    )
+    print("-" * 90)
+    for row in report.get("tracks") or []:
+        if float(row.get("nonce_pct") or 0) < 0.05 and float(row.get("wt_pct") or 0) < 0.5:
+            continue
+        print(
+            f"{str(row.get('challenge') or ''):<16} "
+            f"{str(row.get('track_id') or ''):<22} "
+            f"{float(row.get('nonce_pct') or 0):>6.1f} "
+            f"{float(row.get('wt_pct') or 0):>6.1f} "
+            f"{float(row.get('act_pct') or 0):>6.1f} "
+            f"{float(row.get('weight_sec') or 0):>6.2f} "
+            f"{float(row.get('act_sec') or 0):>6.2f} "
+            f"{str(row.get('source') or ''):<6} "
+            f"{int(row.get('samples') or 0):>4}"
+        )
+    print()
+    print("WALLETS combined pot  (NONCE=live  WT=table  ACT=wall-clock  PRI=prior-only)")
+    print(f"{'WALLET':<44} {'NONCE':>7} {'WT':>7} {'ACT':>7} {'PRI':>7} {'dWT':>7} {'dACT':>7}")
+    print("-" * 90)
+    for row in report.get("wallets_combined") or []:
         print(
             f"{str(row.get('wallet_address') or ''):<44} "
-            f"{float(row.get('nonce_share') or 0):>8.4f} "
-            f"{float(row.get('credit_share') or 0):>8.4f} "
-            f"{float(row.get('delta') or 0):>+8.4f}"
+            f"{float(row.get('nonce_share') or 0):>7.3f} "
+            f"{float(row.get('weight_share') or 0):>7.3f} "
+            f"{float(row.get('actual_share') or 0):>7.3f} "
+            f"{float(row.get('prior_share') or 0):>7.3f} "
+            f"{float(row.get('delta_wt') or 0):>+7.3f} "
+            f"{float(row.get('delta_act') or 0):>+7.3f}"
+        )
+
+    def _pot(title, rows):
+        print()
+        print(title)
+        print(f"{'WALLET':<44} {'NONCE':>7} {'WT':>7} {'dWT':>7}")
+        print("-" * 70)
+        for row in rows or []:
+            print(
+                f"{str(row.get('id') or row.get('wallet_address') or ''):<44} "
+                f"{float(row.get('nonce_share') or 0):>7.3f} "
+                f"{float(row.get('credit_share') or 0):>7.3f} "
+                f"{float(row.get('delta') or 0):>+7.3f}"
+            )
+
+    _pot("WALLETS CPU-only pot", report.get("wallets_cpu"))
+    _pot("WALLETS GPU-only pot", report.get("wallets_gpu"))
+    print()
+    print("TOP SLAVES by |weight-nonce|  (shows mix luck inside a wallet)")
+    print(f"{'SLAVE':<40} {'TYP':<3} {'NONCE':>7} {'WT':>7} {'ACT':>7} {'dWT':>7}")
+    print("-" * 80)
+    for row in report.get("top_slaves") or []:
+        name = str(row.get("slave_name") or "")
+        if len(name) > 40:
+            name = name[:18] + "…" + name[-21:]
+        print(
+            f"{name:<40} "
+            f"{str(row.get('profile') or ''):<3} "
+            f"{float(row.get('nonce_share') or 0):>7.3f} "
+            f"{float(row.get('weight_share') or 0):>7.3f} "
+            f"{float(row.get('actual_share') or 0):>7.3f} "
+            f"{float(row.get('delta_wt') or 0):>+7.3f}"
         )
     print()
     print(report.get("note") or "")
