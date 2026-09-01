@@ -60,11 +60,17 @@ def main() -> int:
     print(f"{'pass' if ok else 'FAIL'}: 2 of 7 days prorates the pot -> {pot} (want 20.0)")
     failed += 0 if ok else 1
 
-    same_day = fn(21000, 21000, 0.0313)
-    ok = same_day == 0.0313
+    week = 7 * 24 * 60 * 60 * 1000
+    day = 24 * 60 * 60 * 1000
+    twenty = 20 * 60 * 60 * 1000
+    week_pot = 10.0
+    pot_24h = prorate(week_pot, day, week)
+    tig_24h = fn(21000, 100000, pot_24h)
+    tig_joined_20h = ns["estimate_window_tig"](21000, 80000, week_pot, twenty, week)
+    ok = tig_24h < week_pot and tig_24h != 0.0313 and tig_joined_20h > tig_24h
     print(
-        f"{'pass' if ok else 'FAIL'}: all work in the last 24h means 24h equals Round "
-        f"-> {same_day} (want 0.0313)"
+        f"{'pass' if ok else 'FAIL'}: joined 20h ago, 24h uses the 24h pot "
+        f"(missed 4h), Joined uses the 20h pot -> 24h={tig_24h} joined={tig_joined_20h}"
     )
     failed += 0 if ok else 1
 

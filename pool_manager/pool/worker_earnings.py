@@ -190,6 +190,7 @@ def build_worker_earnings(
 
     start_ms = round_start_ms()
     now_ms = int(now * 1000)
+    elapsed_ms = max(1, now_ms - int(start_ms))
     round_id_raw = db.get_setting("current_round_id", None)
     try:
         round_num = int(round_id_raw) if round_id_raw is not None else None
@@ -224,6 +225,9 @@ def build_worker_earnings(
 
     workers = []
     total_nonces = 0
+    pool_nonces_1h = 0
+    pool_nonces_12h = 0
+    pool_nonces_24h = 0
     wallet_nonces: dict[str, int] = {}
     for member in members:
         name = member.get("slave_name")
@@ -243,6 +247,9 @@ def build_worker_earnings(
         nonces_24h = int(stats.get("nonces_24h") or 0)
         wallet = (member.get("wallet_address") or "").strip().lower()
         total_nonces += nonces
+        pool_nonces_1h += nonces_1h
+        pool_nonces_12h += nonces_12h
+        pool_nonces_24h += nonces_24h
         if wallet:
             wallet_nonces[wallet] = wallet_nonces.get(wallet, 0) + nonces
         workers.append(
@@ -279,12 +286,49 @@ def build_worker_earnings(
             round((row["nonces"] / w_nonces) * 100, 4) if w_nonces > 0 else 0.0
         )
         row["est_tig"] = allocate_tig(row["nonces"], w_nonces, wallet_tig)
-        # 12h / 24h / joined are slices of this slave's own week TIG.
-        # If they only worked today, 24h and joined match Round.
-        row["est_tig_1h"] = allocate_tig(row["nonces_1h"], row["nonces"], row["est_tig"])
-        row["est_tig_12h"] = allocate_tig(row["nonces_12h"], row["nonces"], row["est_tig"])
-        row["est_tig_24h"] = allocate_tig(row["nonces_24h"], row["nonces"], row["est_tig"])
-        row["est_tig_since_join"] = row["est_tig"]
+
+    late_joiners = any(int(row["joined_ms"]) > start_ms for row in workers)
+    buckets = _pool_nonce_buckets(start_ms) if late_joiners else []
+
+    for row in workers:
+        # 12h / 24h / joined are share of TIG that accrued in that window,
+        # not a restatement of the week payout. A box that joined 20h ago
+        # still has 24h credit against the last 24h pot (including 4h it missed).
+        row["est_tig_1h"] = estimate_window_tig(
+            row["nonces_1h"],
+            pool_nonces_1h,
+            member_tig,
+            min(HOUR_MS, elapsed_ms),
+            elapsed_ms,
+        )
+        row["est_tig_12h"] = estimate_window_tig(
+            row["nonces_12h"],
+            pool_nonces_12h,
+            member_tig,
+            min(TWELVE_MS, elapsed_ms),
+            elapsed_ms,
+        )
+        row["est_tig_24h"] = estimate_window_tig(
+            row["nonces_24h"],
+            pool_nonces_24h,
+            member_tig,
+            min(DAY_MS, elapsed_ms),
+            elapsed_ms,
+        )
+        join_ms = int(row["joined_ms"])
+        pool_since_join = _sum_buckets_since(buckets, join_ms)
+        if pool_since_join <= 0 and total_nonces > 0 and join_ms > start_ms:
+            window_ms = max(0, now_ms - join_ms)
+            pool_since_join = int(round(total_nonces * min(1.0, window_ms / elapsed_ms)))
+        row["est_tig_since_join"] = estimate_since_join_tig(
+            est_tig_week=row["est_tig"],
+            join_ms=join_ms,
+            round_start=start_ms,
+            now_ms=now_ms,
+            slave_nonces=row["nonces"],
+            pool_since_join_nonces=pool_since_join,
+            round_tig=member_tig,
+        )
 
     workers.sort(key=lambda r: (-float(r["est_tig"]), -int(r["nonces"]), r["slave_name"] or ""))
 
@@ -297,9 +341,10 @@ def build_worker_earnings(
         "total_nonces": total_nonces,
         "worker_count": len(workers),
         "note": (
-            "Approximate. Round is this wallet's current-round payout split. "
-            "24h / 12h are the part of that same TIG from work in that window. "
-            "Joined matches Round when all of this slave's round work is after it showed up."
+            "Approximate. Round is the real week payout split. "
+            "24h / 12h / Joined estimate TIG that accrued in that window only. "
+            "A worker that joined 20h ago still uses the last-24h pot for 24h, "
+            "and the last-20h pot for Joined."
         ),
         "workers": workers,
     }
