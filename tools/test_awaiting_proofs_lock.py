@@ -3,6 +3,27 @@
 
 from __future__ import annotations
 
+import ast
+import pathlib
+
+
+def _load_proof_fns(*names: str):
+    path = pathlib.Path(__file__).resolve().parents[1] / "master" / "proof_affinity.py"
+    source = path.read_text(encoding="utf-8")
+    module = ast.parse(source)
+    keep = []
+    for node in module.body:
+        if isinstance(node, ast.FunctionDef) and node.name in names:
+            keep.append(node)
+    if {n.name for n in keep} != set(names):
+        raise RuntimeError(f"missing: {set(names) - {n.name for n in keep}}")
+    ns = {
+        "Optional": __import__("typing").Optional,
+        "SAMPLING_GAP_RESERVE_MS": 180_000,
+    }
+    exec(compile(ast.Module(body=keep, type_ignores=[]), str(path), "exec"), ns, ns)
+    return ns
+
 
 def should_awaiting_proof_lock(
     *,
@@ -138,6 +159,68 @@ def main() -> int:
             "own proof work still zeros root_cap",
         ),
     ]
+    gap_ns = _load_proof_fns(
+        "job_counts_as_sampling_gap_reserve",
+        "sampling_gap_root_intake_cap",
+    )
+    gap_job = gap_ns["job_counts_as_sampling_gap_reserve"]
+    intake = gap_ns["sampling_gap_root_intake_cap"]
+    cases.extend(
+        [
+            (
+                gap_job(
+                    has_unfinished_roots=False,
+                    merkle_proofs_ready=False,
+                    proof_batch_count=0,
+                    owner_has_ready_root=True,
+                    latest_ready_root_age_ms=60_000,
+                    reserve_ms=180_000,
+                )
+                is True,
+                "fresh last root reserves a seat for TIG samples",
+            ),
+            (
+                gap_job(
+                    has_unfinished_roots=False,
+                    merkle_proofs_ready=False,
+                    proof_batch_count=0,
+                    owner_has_ready_root=True,
+                    latest_ready_root_age_ms=10 * 60 * 1000,
+                    reserve_ms=180_000,
+                )
+                is False,
+                "stale sampling gap releases the reserved seat",
+            ),
+            (
+                gap_job(
+                    has_unfinished_roots=False,
+                    merkle_proofs_ready=False,
+                    proof_batch_count=2,
+                    owner_has_ready_root=True,
+                    latest_ready_root_age_ms=10_000,
+                    reserve_ms=180_000,
+                )
+                is False,
+                "once proofs_batch exists the reserve ends",
+            ),
+            (
+                intake(max_concurrent=1, assigned=0, gap_jobs=1) == 0,
+                "1-seat box holds the seat instead of taking a new job",
+            ),
+            (
+                intake(max_concurrent=6, assigned=5, gap_jobs=1) == 5,
+                "XL keeps 5 running jobs and does not refill the finished seat",
+            ),
+            (
+                intake(max_concurrent=6, assigned=0, gap_jobs=1) == 5,
+                "XL with one finished job may still pack 5 other seats",
+            ),
+            (
+                intake(max_concurrent=2, assigned=1, gap_jobs=1) == 1,
+                "GPU prefetch seat stays reserved for the proof",
+            ),
+        ]
+    )
     failed = 0
     for ok, label in cases:
         print(f"{'pass' if ok else 'FAIL'}: {label}")

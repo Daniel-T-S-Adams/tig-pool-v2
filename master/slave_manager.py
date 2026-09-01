@@ -39,11 +39,13 @@ from master.cpu_tier_caps import (
 )
 from master.proof_affinity import (
 
+    SAMPLING_GAP_RESERVE_MS,
     STICKY_ROOTS_ENABLED,
     canonicalize_pool_slave_name,
     ensure_slave_seen_table,
     fetch_online_slaves,
     preferred_root_slave,
+    sampling_gap_root_intake_cap,
     should_hold_unowned_gpu_for_idle,
     should_sticky_leftover_fanout,
     should_skip_root_for_slave,
@@ -2893,6 +2895,46 @@ class SlaveManager:
         self._awaiting_proofs_cache[slave_name] = (ok, now_ms + self._awaiting_proofs_cache_ms)
         return ok
 
+    def _sampling_gap_jobs_by_slave(
+        self, slave_names: List[str], now_ms: int
+    ) -> Dict[str, int]:
+        """Owned jobs with all roots in, no proofs_batch yet, still inside reserve."""
+        names = [str(n) for n in slave_names if n]
+        if not names or int(SAMPLING_GAP_RESERVE_MS) <= 0:
+            return {}
+        cutoff = int(now_ms) - int(SAMPLING_GAP_RESERVE_MS)
+        rows = get_db_conn().fetch_all(
+            """
+            SELECT r.slave AS slave_name, COUNT(DISTINCT j.benchmark_id) AS n
+            FROM job j
+            INNER JOIN root_batch r
+              ON r.benchmark_id = j.benchmark_id
+             AND r.slave IN %s
+             AND r.ready = true
+             AND r.end_time IS NOT NULL
+             AND r.end_time >= %s
+            WHERE j.stopped IS NULL
+              AND j.end_time IS NULL
+              AND j.merkle_proofs_ready IS NULL
+              AND NOT EXISTS (
+                SELECT 1 FROM root_batch u
+                WHERE u.benchmark_id = j.benchmark_id
+                  AND u.ready IS NULL
+              )
+              AND NOT EXISTS (
+                SELECT 1 FROM proofs_batch p
+                WHERE p.benchmark_id = j.benchmark_id
+              )
+            GROUP BY r.slave
+            """,
+            (tuple(names), cutoff),
+        ) or []
+        return {
+            str(row["slave_name"]): int(row.get("n") or 0)
+            for row in rows
+            if row.get("slave_name")
+        }
+
     def _slave_has_root_artifacts(self, slave_name: str, benchmark_id: str, batch_idx: int) -> bool:
         """Proofs must be built by the slave that produced that exact root batch.
 
@@ -3288,26 +3330,46 @@ class SlaveManager:
             seats = max(0, int(max_concurrent) - len(assigned))
             if seats <= 0:
                 continue
-            if slave_holds_last_leftover(
-                assigned,
-                leftover_finish_bids(
-                    unassigned_roots_by_job(self.batches),
-                    unfinished_roots_by_job(self.batches),
-                ),
-            ) and not cpu_pack_seats_open(
-                poller_is_gpu=_slave_work_profile(slave_name) == "gpu",
-                empty_seats=seats,
-                max_concurrent=max_concurrent,
-            ):
-                continue
             hungry.append(
                 {
                     "name": slave_name,
                     "seats": seats,
                     "max_concurrent": int(max_concurrent),
+                    "assigned": len(assigned),
                     "algo_re": route.get("algorithm_id_regex") or "",
+                    "assigned_rows": assigned,
                 }
             )
+        if hungry:
+            gap_by_slave = self._sampling_gap_jobs_by_slave(
+                [item["name"] for item in hungry], now_ms
+            )
+            kept = []
+            for item in hungry:
+                root_cap = sampling_gap_root_intake_cap(
+                    max_concurrent=item["max_concurrent"],
+                    assigned=item["assigned"],
+                    gap_jobs=int(gap_by_slave.get(item["name"]) or 0),
+                )
+                seats = max(0, int(root_cap) - int(item["assigned"]))
+                if seats <= 0:
+                    continue
+                assigned_rows = item.pop("assigned_rows")
+                if slave_holds_last_leftover(
+                    assigned_rows,
+                    leftover_finish_bids(
+                        unassigned_roots_by_job(self.batches),
+                        unfinished_roots_by_job(self.batches),
+                    ),
+                ) and not cpu_pack_seats_open(
+                    poller_is_gpu=_slave_work_profile(item["name"]) == "gpu",
+                    empty_seats=seats,
+                    max_concurrent=item["max_concurrent"],
+                ):
+                    continue
+                item["seats"] = seats
+                kept.append(item)
+            hungry = kept
         return hungry
 
     def _leftover_takeable_maps(self, now: float):
@@ -3613,18 +3675,18 @@ class SlaveManager:
             return 0
         claimed: List[dict] = []
         try:
-            root_claimed = feed_leftovers_one_pass(
+            proof_claimed = feed_leftovers_one_pass(
                 self.batches,
                 hungry,
                 now=now,
-                takeable_bids_by_slave=takeable_by_slave,
-                proofs=False,
+                proofs=True,
+                may_take_proof=views.may_take_proof,
             )
             seats_left = {item["name"]: item["seats"] for item in hungry}
-            for row in root_claimed:
+            for row in proof_claimed:
                 name = row["slave"]
                 seats_left[name] = max(0, int(seats_left.get(name) or 0) - 1)
-            proof_hungry = [
+            root_hungry = [
                 {
                     "name": item["name"],
                     "seats": seats_left.get(item["name"], item["seats"]),
@@ -3633,14 +3695,14 @@ class SlaveManager:
                 for item in hungry
                 if seats_left.get(item["name"], item["seats"]) > 0
             ]
-            proof_claimed = feed_leftovers_one_pass(
+            root_claimed = feed_leftovers_one_pass(
                 self.batches,
-                proof_hungry,
+                root_hungry,
                 now=now,
-                proofs=True,
-                may_take_proof=views.may_take_proof,
+                takeable_bids_by_slave=takeable_by_slave,
+                proofs=False,
             )
-            claimed = root_claimed + proof_claimed
+            claimed = proof_claimed + root_claimed
             for row in claimed:
                 row["start_time"] = now
         finally:
@@ -4144,6 +4206,16 @@ class SlaveManager:
                 configured=int(CONFIG.get("max_batches_per_benchmark") or 0),
             )
             empty_seats = max(0, int(max_concurrent) - len(kept_assigned))
+            gap_jobs = int(
+                (
+                    self._sampling_gap_jobs_by_slave([slave_name], int(now)) or {}
+                ).get(slave_name, 0)
+            )
+            root_intake_cap = sampling_gap_root_intake_cap(
+                max_concurrent=max_concurrent,
+                assigned=len(kept_assigned),
+                gap_jobs=gap_jobs,
+            )
             feed_empty_seats = max(1, empty_seats or int(max_concurrent or 1))
             held_root_bids = [
                 str((b.get("batch") or {}).get("benchmark_id") or "")
@@ -4204,6 +4276,11 @@ class SlaveManager:
                         empty_seats=empty_seats,
                         max_concurrent=max_concurrent,
                         poller_is_gpu=poller_is_gpu,
+                    ):
+                        continue
+                    if (
+                        not is_proof
+                        and (poller_assigned_roots + taking_roots) >= root_intake_cap
                     ):
                         continue
                     if phase == "finish":
@@ -4773,6 +4850,16 @@ class SlaveManager:
                     concurrent_by_bench[bid] = concurrent_by_bench.get(bid, 0) + 1
 
                 empty_seats = max(0, int(max_concurrent) - len(kept_assigned))
+                gap_jobs = int(
+                    (
+                        self._sampling_gap_jobs_by_slave([slave_name], int(now)) or {}
+                    ).get(slave_name, 0)
+                )
+                root_intake_cap = sampling_gap_root_intake_cap(
+                    max_concurrent=max_concurrent,
+                    assigned=len(kept_assigned),
+                    gap_jobs=gap_jobs,
+                )
                 feed_empty_seats = max(1, empty_seats or int(max_concurrent or 1))
                 held_root_bids = [
                     str((b.get("batch") or {}).get("benchmark_id") or "")
@@ -4971,6 +5058,11 @@ class SlaveManager:
                             empty_seats=empty_seats,
                             max_concurrent=max_concurrent,
                             poller_is_gpu=poller_is_gpu,
+                        ):
+                            continue
+                        if (
+                            not is_proof
+                            and (poller_assigned_roots + taking_roots) >= root_intake_cap
                         ):
                             continue
                         if len(concurrent) >= max_concurrent:

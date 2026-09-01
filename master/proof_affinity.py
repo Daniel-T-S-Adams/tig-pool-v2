@@ -70,6 +70,58 @@ STRANDED_PROOF_STOP_MS = max(
     60_000,
     int(os.environ.get("SLAVE_STRANDED_PROOF_STOP_MS", str(15 * 60 * 1000))),
 )
+# Hold the owner's empty seat after last root until TIG returns sampled_nonces.
+# This is not SAMPLING_GAP_LOCK (that zeroed root_cap and stranded leftovers).
+SAMPLING_GAP_RESERVE_MS = max(
+    0, int(os.environ.get("SLAVE_SAMPLING_GAP_RESERVE_MS", str(3 * 60 * 1000)))
+)
+
+
+def job_counts_as_sampling_gap_reserve(
+    *,
+    has_unfinished_roots: bool = False,
+    merkle_proofs_ready: bool = False,
+    proof_batch_count: int = 0,
+    owner_has_ready_root: bool = False,
+    latest_ready_root_age_ms: Optional[int] = None,
+    reserve_ms: int = SAMPLING_GAP_RESERVE_MS,
+    stopped: bool = False,
+) -> bool:
+    """True when this owned job still owes a seat for TIG sampling."""
+    if stopped or merkle_proofs_ready or has_unfinished_roots:
+        return False
+    if int(proof_batch_count or 0) > 0:
+        return False
+    if not owner_has_ready_root:
+        return False
+    if int(reserve_ms or 0) <= 0:
+        return False
+    if latest_ready_root_age_ms is None:
+        return True
+    try:
+        return int(latest_ready_root_age_ms) <= int(reserve_ms)
+    except (TypeError, ValueError):
+        return True
+
+
+def sampling_gap_root_intake_cap(
+    *,
+    max_concurrent: int,
+    assigned: int,
+    gap_jobs: int,
+) -> int:
+    """Max in-flight rows allowed for new roots while seats wait for samples.
+
+    Other in-flight jobs keep running. Proofs may still fill up to max_concurrent.
+    """
+    try:
+        cap = max(0, int(max_concurrent or 0))
+        used = max(0, int(assigned or 0))
+        gap = max(0, int(gap_jobs or 0))
+    except (TypeError, ValueError):
+        return 0
+    reserved = min(gap, max(0, cap - used))
+    return max(0, cap - reserved)
 
 
 def preferred_root_slave(slave_scores: Dict[str, int]) -> Optional[str]:

@@ -11,6 +11,7 @@ from master.sql import get_db_conn
 from master.client_manager import CONFIG
 from master.proof_affinity import (
     PRE_SUBMIT_OWNER_ONLINE_MS,
+    SAMPLING_GAP_RESERVE_MS,
     SLAVE_ONLINE_MS,
     STRANDED_PROOF_STOP_ENABLED,
     STRANDED_PROOF_STOP_MS,
@@ -45,6 +46,7 @@ def pin_new_job_batches(benchmark_id: str, challenge_id: str, num_batches: int) 
         return 0
     now_ms = int(time.time() * 1000)
     cutoff = now_ms - int(SLAVE_ONLINE_MS)
+    gap_cutoff = now_ms - int(SAMPLING_GAP_RESERVE_MS)
     try:
         ensure_slave_seen_table(get_db_conn().execute)
         rows = get_db_conn().fetch_all(
@@ -67,9 +69,34 @@ def pin_new_job_batches(benchmark_id: str, challenge_id: str, num_batches: int) 
                   AND pb.ready IS NULL
                   AND pb.start_time IS NOT NULL
               )
+              AND (
+                %s <= 0
+                OR NOT EXISTS (
+                  SELECT 1
+                  FROM job j
+                  INNER JOIN root_batch r
+                    ON r.benchmark_id = j.benchmark_id
+                   AND r.slave = ss.slave_name
+                   AND r.ready = true
+                   AND r.end_time IS NOT NULL
+                   AND r.end_time >= %s
+                  WHERE j.stopped IS NULL
+                    AND j.end_time IS NULL
+                    AND j.merkle_proofs_ready IS NULL
+                    AND NOT EXISTS (
+                      SELECT 1 FROM root_batch u
+                      WHERE u.benchmark_id = j.benchmark_id
+                        AND u.ready IS NULL
+                    )
+                    AND NOT EXISTS (
+                      SELECT 1 FROM proofs_batch p
+                      WHERE p.benchmark_id = j.benchmark_id
+                    )
+                )
+              )
             ORDER BY ss.last_seen ASC
             """,
-            (cutoff,),
+            (cutoff, int(SAMPLING_GAP_RESERVE_MS), gap_cutoff),
         ) or []
     except Exception as exc:
         logger.warning("pin idle-slave query failed: %s", exc)
