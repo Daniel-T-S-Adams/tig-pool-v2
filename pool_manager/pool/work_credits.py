@@ -1,7 +1,8 @@
 """
 Effort-weighted work credits (shadow only until cutover).
 
-Live /set-coinbase still uses raw root nonces. This module scores
+Live /set-coinbase uses per-challenge nonce pots (see challenge_share).
+This module scores shadow effort credits as:
 completed roots as:
 
     credits = nonces × seconds_per_nonce(challenge, track) × conversion
@@ -645,12 +646,13 @@ def build_shadow_report(
     limit = max(1, int(top_n))
     payload = {
         "mode": "shadow",
-        "live_payout": "nonces",
+        "live_payout": "challenge_share",
         "note": (
-            "Live /set-coinbase is still raw root nonces. "
+            "Live /set-coinbase is per-challenge nonce pots "
+            "(equal TIG slice per challenge, then nonce share on that challenge). "
             "WT=table weight (EMA/prior). ACT=capped wall-clock. "
             "PRI=hardcoded prior only. If WT≈ACT, weights are calibrated. "
-            "CPU/GPU pots are separate what-ifs; combined is one pie."
+            "CPU/GPU pots here are separate what-ifs versus that live split."
         ),
         "member_share": member_share,
         "round_start_ms": round_start_ms,

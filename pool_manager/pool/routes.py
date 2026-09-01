@@ -17,7 +17,7 @@ from decimal import Decimal
 from fastapi import APIRouter, HTTPException, Header
 from pydantic import BaseModel
 from . import database as db
-from . import autopilot, ai_optimizer, hit_rate_report, ops_metrics, worker_earnings, work_credits
+from . import autopilot, ai_optimizer, challenge_share, hit_rate_report, ops_metrics, worker_earnings, work_credits
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -514,39 +514,34 @@ def _fetch_round_coinbase_map(api_url: str, player_id: str, round_num: int, is_f
         return None, None
 
 
-def _current_round_nonce_share(wallet: str) -> tuple[int, int]:
-    """This wallet's nonces and the pool total for the current round."""
+def _current_round_start_ms() -> int | None:
     start_raw = db.get_setting("current_round_start_ms", None) or db.get_setting("current_round_start", None)
     try:
-        start_ms = int(start_raw) if start_raw is not None else None
+        return int(start_raw) if start_raw is not None else None
     except (TypeError, ValueError):
-        start_ms = None
+        return None
+
+
+def _current_round_work_share(wallet: str) -> tuple[float, int, int]:
+    """Challenge-weighted work share (0-1), wallet nonces, pool nonces."""
+    start_ms = _current_round_start_ms()
     if start_ms is None:
-        return 0, 0
-    rows = db.fetch_all(
-        """
-        SELECT wallet_address, SUM(nonces_computed) AS nonces
-        FROM pool_contributions
-        WHERE snapshot_end_ms >= %s
-        GROUP BY wallet_address
-        """,
-        (start_ms,),
-    ) or []
-    pool_nonces = 0
-    wallet_nonces = 0
-    for row in rows:
-        n = int(row.get("nonces") or 0)
-        pool_nonces += n
-        if (row.get("wallet_address") or "").lower() == wallet:
-            wallet_nonces += n
-    return wallet_nonces, pool_nonces
+        return 0.0, 0, 0
+    table = challenge_share.build_round_challenge_table(int(start_ms))
+    shares = challenge_share.shares_from_challenge_nonces(table["owner_challenge"], scale=1.0)
+    shares_lc = {str(k).lower(): v for k, v in shares.items()}
+    nonces = table.get("wallet_nonces") or {}
+    nonces_lc = {str(k).lower(): int(v) for k, v in nonces.items()}
+    wallet_nonces = int(nonces_lc.get(wallet, 0) or 0)
+    pool_nonces = int(sum(nonces_lc.values()))
+    return float(shares_lc.get(wallet, 0.0) or 0.0), wallet_nonces, pool_nonces
 
 
 def _member_earnings(wallet: str, rounds: int) -> dict:
     """
-    Round-by-round earnings. The in-progress round is nonce share of
-    pool TIG after delegators: address_nonces / pool_nonces * pool_tig.
-    Finished rounds stay on TIG's recorded coinbase.
+    Round-by-round earnings. The in-progress round uses the same
+    per-challenge pots as /set-coinbase. Finished rounds stay on
+    TIG's recorded coinbase.
     """
     wallet = (wallet or "").strip().lower()
     if not wallet.startswith("0x") or len(wallet) < 10:
@@ -584,13 +579,9 @@ def _member_earnings(wallet: str, rounds: int) -> dict:
             wallet_tig = float(coinbase_map.get(wallet, 0.0) or 0)
             pct = round((wallet_tig / pool_tig) * 100, 2) if pool_tig else 0.0
         else:
-            wallet_nonces, pool_nonces = _current_round_nonce_share(wallet)
-            wallet_tig = (
-                round(pool_tig * (wallet_nonces / pool_nonces), 6)
-                if pool_tig > 0 and pool_nonces > 0
-                else 0.0
-            )
-            pct = round((wallet_nonces / pool_nonces) * 100, 2) if pool_nonces else 0.0
+            work_share, _wallet_nonces, pool_nonces = _current_round_work_share(wallet)
+            wallet_tig = round(pool_tig * work_share, 6) if pool_tig > 0 else 0.0
+            pct = round(work_share * 100, 2) if pool_nonces else 0.0
         total_wallet_tig += wallet_tig
         history.append(
             {
@@ -613,8 +604,7 @@ def _member_earnings(wallet: str, rounds: int) -> dict:
 @router.get("/worker-earnings")
 def get_worker_earnings():
     """
-    Public, display-only per-slave TIG estimates for the current round.
-    Does not change coinbase or payouts.
+    Per-slave TIG for the current round. Same per-challenge pots as /set-coinbase.
     """
     payload = worker_earnings.build_worker_earnings(
         pool_fee=POOL_FEE,
@@ -646,6 +636,8 @@ def get_worker_earnings():
         "pool_member_tig": payload.get("pool_member_tig"),
         "pool_fee_pct": payload.get("pool_fee_pct"),
         "total_nonces": payload.get("total_nonces"),
+        "challenge_count": payload.get("challenge_count"),
+        "tig_per_challenge": payload.get("tig_per_challenge"),
         "worker_count": len(public_workers),
         "note": payload.get("note"),
         "workers": public_workers,
@@ -655,9 +647,9 @@ def get_worker_earnings():
 @router.get("/member-earnings")
 def get_member_earnings(wallet: str, rounds: int = 8):
     """
-    Public lookup: any member can paste their wallet address to see exactly what
-    they earned from this pool's coinbase distributions, round by round, sourced
-    directly from TIG's /get-round-emissions — the same data used to pay out claims.
+    Public lookup: paste a wallet to see round-by-round TIG. The in-progress
+    round uses the same per-challenge split as /set-coinbase. Finished rounds
+    use TIG's recorded coinbase from /get-round-emissions.
     """
     return _member_earnings(wallet, rounds)
 
@@ -838,22 +830,42 @@ def get_leaderboard():
         FROM pool_contributions
         WHERE snapshot_end_ms >= %s
         GROUP BY wallet_address
-        ORDER BY nonces DESC
-        LIMIT 20
         """,
         (since_ms,),
-    )
-    total = sum(r["nonces"] or 0 for r in rows)
+    ) or []
+    nonce_by_wallet = {
+        str(r["wallet_address"]).strip(): int(r["nonces"] or 0)
+        for r in rows
+        if r.get("wallet_address")
+    }
+    batches_by_wallet = {
+        str(r["wallet_address"]).strip(): int(r["batches"] or 0)
+        for r in rows
+        if r.get("wallet_address")
+    }
+    shares = challenge_share.wallet_shares(int(since_ms), scale=1.0)
+    by_lc: dict[str, str] = {}
+    for wallet in list(shares) + list(nonce_by_wallet):
+        by_lc.setdefault(wallet.lower(), wallet)
+    ranked = sorted(
+        by_lc.values(),
+        key=lambda w: (
+            -float(shares.get(w, shares.get(w.lower(), 0.0))),
+            -int(nonce_by_wallet.get(w, nonce_by_wallet.get(w.lower(), 0))),
+        ),
+    )[:20]
     return [
         {
-            "wallet_address": r["wallet_address"],
-            "nonces_round": int(r["nonces"] or 0),
-            "batches_round": int(r["batches"] or 0),
-            "nonces_24h": int(r["nonces"] or 0),
-            "batches_24h": int(r["batches"] or 0),
-            "share_pct": round((r["nonces"] / total * 100), 2) if total > 0 else 0,
+            "wallet_address": wallet,
+            "nonces_round": int(nonce_by_wallet.get(wallet, nonce_by_wallet.get(wallet.lower(), 0))),
+            "batches_round": int(batches_by_wallet.get(wallet, batches_by_wallet.get(wallet.lower(), 0))),
+            "nonces_24h": int(nonce_by_wallet.get(wallet, nonce_by_wallet.get(wallet.lower(), 0))),
+            "batches_24h": int(nonce_by_wallet.get(wallet, nonce_by_wallet.get(wallet.lower(), 0))),
+            "share_pct": round(
+                float(shares.get(wallet, shares.get(wallet.lower(), 0.0))) * 100, 2
+            ),
         }
-        for r in rows
+        for wallet in ranked
     ]
 
 

@@ -135,8 +135,8 @@
         <div class="slave-earnings-grid" style="display:grid;grid-template-columns:54px minmax(0,1fr) 88px 88px 100px 78px;gap:8px;padding:0 0 6px;color:var(--muted);font-size:10px;font-weight:700;letter-spacing:.4px;text-transform:uppercase;">
           <span>Type</span>
           <span>Worker</span>
-          <span style="text-align:right;" title="Pool TIG so far × this machine's last-24h nonces / pool nonces this round">24 hours</span>
-          <span style="text-align:right;" title="Pool TIG so far × this machine's last-hour nonces / pool nonces this round">1 hour</span>
+          <span style="text-align:right;" title="This machine's last-24h nonces on each challenge × that challenge's equal TIG slice / pool nonces on it this round">24 hours</span>
+          <span style="text-align:right;" title="This machine's last-hour nonces on each challenge × that challenge's equal TIG slice / pool nonces on it this round">1 hour</span>
           <span style="text-align:right;">Trust</span>
           <span style="text-align:right;">Status</span>
         </div>
@@ -168,14 +168,14 @@
         <div class="dash-tile">
           <div class="val" id="d-tig-joined">—</div>
           <div class="lbl">TIG last 24h</div>
-          <div class="tile-sub">Your workers at the pool TIG-per-nonce rate</div>
+          <div class="tile-sub">Your workers at per-challenge TIG, same as pay</div>
         </div>
       </div>
 
       <!-- Info callout -->
       <div style="margin-bottom:24px; padding:14px 18px; border-left:3px solid #63b3ed; background:rgba(99,179,237,0.07); border-radius:0 8px 8px 0; font-size:13px; color:#93c5fd; line-height:1.7;">
         <span style="font-weight:700; color:#bfdbfe; display:block; margin-bottom:4px;">How rewards work</span>
-        Your Round Allocation % is set on-chain every ~50 blocks. At the end of each weekly round the operator claims the TIG earned, and the protocol sends your share directly to your wallet. Claimed TIG has a 28-day withdrawal lock before it can be moved. <strong>24 hours / 1 hour</strong> are this machine's nonces in that window times the pool's TIG so far divided by pool nonces this round.
+        Your Round Allocation % is set on-chain every ~50 blocks using the same per-challenge split as this page: each challenge the pool worked on gets an equal slice of pool TIG, then your machines take their nonce share of that slice. GPU and CPU are not mixed in one nonce pile. At the end of each weekly round the operator claims the TIG earned, and the protocol sends your share directly to your wallet. Claimed TIG has a 28-day withdrawal lock before it can be moved.
       </div>
 
       <!-- Recent activity + pool context side by side -->
@@ -611,8 +611,8 @@
         }
         row.appendChild(nameWrap);
 
-        appendTigCell(row, slave.est_tig_24h, "Last 24 hours at pool TIG / pool nonces this round");
-        appendTigCell(row, slave.est_tig_1h, "Last hour at pool TIG / pool nonces this round");
+        appendTigCell(row, slave.est_tig_24h, "Last 24 hours at per-challenge TIG, same as /set-coinbase");
+        appendTigCell(row, slave.est_tig_1h, "Last hour at per-challenge TIG, same as /set-coinbase");
 
         const trustEl = document.createElement("div");
         const trust = slaveTrustStatus(slave);

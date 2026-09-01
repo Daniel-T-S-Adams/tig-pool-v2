@@ -1,20 +1,16 @@
 """
-Display-only per-slave TIG estimates.
+Per-slave TIG estimates. Same per-challenge pots as /set-coinbase:
 
-Day / hour figures use the pool's current TIG-per-nonce:
-
-    rate = pool_member_tig / pool_nonces_this_round
-    24h = machine_nonces_24h * rate
-    1h  = machine_nonces_1h * rate
-
-That is the same check as: pool TIG so far, nonces since round start,
-nonces this machine computed in the window.
+    each challenge with pool work gets an equal slice of pool TIG
+    24h = sum_c (machine_nonces_24h_c / pool_nonces_round_c) × slice
+    1h  = sum_c (machine_nonces_1h_c  / pool_nonces_round_c) × slice
 """
 from __future__ import annotations
 
 import logging
 import time
 
+from . import challenge_share
 from . import database as db
 
 logger = logging.getLogger("pool.worker_earnings")
@@ -113,44 +109,45 @@ def round_start_ms() -> int:
     return int(time.time() * 1000) - 7 * 24 * 60 * 60 * 1000
 
 
-_NONCE_EXPR = "LEAST(j.batch_size, j.num_nonces - rb.batch_idx * j.batch_size)"
+def _empty_stats() -> dict:
+    return {
+        "batches": 0,
+        "nonces": 0,
+        "nonces_1h": 0,
+        "nonces_12h": 0,
+        "nonces_24h": 0,
+        "first_ms": None,
+        "by_challenge": {},
+    }
 
 
 def _slave_work_windows(since_ms: int, now_ms: int) -> dict[str, dict]:
-    h1 = int(now_ms) - HOUR_MS
-    h12 = int(now_ms) - TWELVE_MS
-    h24 = int(now_ms) - DAY_MS
-    rows = db.fetch_all(
-        f"""
-        SELECT
-            rb.slave AS slave_name,
-            COUNT(*) AS batches,
-            COALESCE(SUM({_NONCE_EXPR}), 0) AS nonces,
-            COALESCE(SUM({_NONCE_EXPR}) FILTER (WHERE rb.end_time >= %s), 0) AS nonces_1h,
-            COALESCE(SUM({_NONCE_EXPR}) FILTER (WHERE rb.end_time >= %s), 0) AS nonces_12h,
-            COALESCE(SUM({_NONCE_EXPR}) FILTER (WHERE rb.end_time >= %s), 0) AS nonces_24h,
-            MIN(rb.end_time) AS first_ms
-        FROM root_batch rb
-        JOIN job j ON rb.benchmark_id = j.benchmark_id
-        WHERE rb.ready = true
-          AND rb.end_time >= %s
-          AND rb.slave IS NOT NULL
-        GROUP BY rb.slave
-        """,
-        (h1, h12, h24, since_ms),
-    )
-    return {
-        str(r["slave_name"]): {
-            "batches": int(r["batches"] or 0),
-            "nonces": int(r["nonces"] or 0),
-            "nonces_1h": int(r["nonces_1h"] or 0),
-            "nonces_12h": int(r["nonces_12h"] or 0),
-            "nonces_24h": int(r["nonces_24h"] or 0),
-            "first_ms": _to_ms(r.get("first_ms")),
+    out: dict[str, dict] = {}
+    for row in challenge_share.fetch_slave_challenge_work(int(since_ms), int(now_ms)):
+        name = str(row["slave_name"])
+        challenge = str(row["challenge"])
+        stats = out.setdefault(name, _empty_stats())
+        nonces = int(row.get("nonces") or 0)
+        n1h = int(row.get("nonces_1h") or 0)
+        n12h = int(row.get("nonces_12h") or 0)
+        n24h = int(row.get("nonces_24h") or 0)
+        batches = int(row.get("batches") or 0)
+        stats["batches"] += batches
+        stats["nonces"] += nonces
+        stats["nonces_1h"] += n1h
+        stats["nonces_12h"] += n12h
+        stats["nonces_24h"] += n24h
+        first_ms = _to_ms(row.get("first_ms"))
+        if first_ms is not None:
+            prev = stats["first_ms"]
+            stats["first_ms"] = first_ms if prev is None else min(prev, first_ms)
+        stats["by_challenge"][challenge] = {
+            "nonces": nonces,
+            "nonces_1h": n1h,
+            "nonces_12h": n12h,
+            "nonces_24h": n24h,
         }
-        for r in (rows or [])
-        if r.get("slave_name")
-    }
+    return out
 
 
 def _pool_nonce_buckets(since_ms: int) -> list[tuple[int, int]]:
@@ -228,27 +225,21 @@ def build_worker_earnings(
 
     workers = []
     total_nonces = 0
-    wallet_nonces: dict[str, int] = {}
+    pool_challenge: dict[str, float] = {}
     for member in members:
         name = member.get("slave_name")
         if not name:
             continue
-        stats = work.get(name) or {
-            "batches": 0,
-            "nonces": 0,
-            "nonces_1h": 0,
-            "nonces_12h": 0,
-            "nonces_24h": 0,
-            "first_ms": None,
-        }
+        stats = work.get(name) or _empty_stats()
         nonces = int(stats["nonces"])
         nonces_1h = int(stats.get("nonces_1h") or 0)
         nonces_12h = int(stats.get("nonces_12h") or 0)
         nonces_24h = int(stats.get("nonces_24h") or 0)
-        wallet = (member.get("wallet_address") or "").strip().lower()
         total_nonces += nonces
-        if wallet:
-            wallet_nonces[wallet] = wallet_nonces.get(wallet, 0) + nonces
+        for challenge, pile in (stats.get("by_challenge") or {}).items():
+            pool_challenge[challenge] = pool_challenge.get(challenge, 0.0) + float(
+                pile.get("nonces") or 0
+            )
         workers.append(
             {
                 "slave_name": name,
@@ -265,28 +256,50 @@ def build_worker_earnings(
                 "nonces_1h": nonces_1h,
                 "nonces_12h": nonces_12h,
                 "nonces_24h": nonces_24h,
+                "_by_challenge": stats.get("by_challenge") or {},
             }
         )
 
-    # Payouts are per wallet. Each slave's estimate is that wallet's coinbase
-    # TIG split by the slave's share of the wallet's completed root nonces.
+    n_active = sum(1 for n in pool_challenge.values() if n > 0)
+    slice_tig = challenge_share.pot_per_challenge(member_tig, n_active)
+    wallet_tig_est: dict[str, float] = {}
+
+    for row in workers:
+        by_chal = row.pop("_by_challenge") or {}
+        row["est_tig"] = challenge_share.tig_from_challenge_pots(
+            {c: pile.get("nonces") or 0 for c, pile in by_chal.items()},
+            pool_challenge,
+            slice_tig,
+        )
+        row["est_tig_1h"] = challenge_share.tig_from_challenge_pots(
+            {c: pile.get("nonces_1h") or 0 for c, pile in by_chal.items()},
+            pool_challenge,
+            slice_tig,
+        )
+        row["est_tig_12h"] = challenge_share.tig_from_challenge_pots(
+            {c: pile.get("nonces_12h") or 0 for c, pile in by_chal.items()},
+            pool_challenge,
+            slice_tig,
+        )
+        row["est_tig_24h"] = challenge_share.tig_from_challenge_pots(
+            {c: pile.get("nonces_24h") or 0 for c, pile in by_chal.items()},
+            pool_challenge,
+            slice_tig,
+        )
+        row["est_tig_since_join"] = row["est_tig"]
+        row["share_pct"] = (
+            round((row["est_tig"] / member_tig) * 100, 4) if member_tig > 0 else 0.0
+        )
+        wallet = (row.get("wallet_address") or "").strip().lower()
+        if wallet:
+            wallet_tig_est[wallet] = wallet_tig_est.get(wallet, 0.0) + float(row["est_tig"])
+
     for row in workers:
         wallet = (row.get("wallet_address") or "").strip().lower()
-        w_nonces = int(wallet_nonces.get(wallet, 0) or 0)
-        wallet_tig = float(coinbase_map.get(wallet, 0) or 0)
-        if wallet_tig <= 0 and w_nonces > 0 and member_tig > 0:
-            wallet_tig = allocate_tig(w_nonces, total_nonces, member_tig)
-        row["share_pct"] = (
-            round((row["nonces"] / total_nonces) * 100, 4) if total_nonces > 0 else 0.0
-        )
+        w_tig = float(wallet_tig_est.get(wallet, 0) or 0)
         row["wallet_share_pct"] = (
-            round((row["nonces"] / w_nonces) * 100, 4) if w_nonces > 0 else 0.0
+            round((row["est_tig"] / w_tig) * 100, 4) if w_tig > 0 else 0.0
         )
-        row["est_tig"] = allocate_tig(row["nonces"], total_nonces, member_tig)
-        row["est_tig_1h"] = allocate_tig(row["nonces_1h"], total_nonces, member_tig)
-        row["est_tig_12h"] = allocate_tig(row["nonces_12h"], total_nonces, member_tig)
-        row["est_tig_24h"] = allocate_tig(row["nonces_24h"], total_nonces, member_tig)
-        row["est_tig_since_join"] = row["est_tig"]
 
     workers.sort(key=lambda r: (-float(r["est_tig"]), -int(r["nonces"]), r["slave_name"] or ""))
 
@@ -297,10 +310,14 @@ def build_worker_earnings(
         "pool_member_tig": member_tig,
         "pool_fee_pct": round(float(pool_fee or 0) * 100, 1),
         "total_nonces": total_nonces,
+        "challenge_count": n_active,
+        "tig_per_challenge": round(slice_tig, 6),
         "worker_count": len(workers),
         "note": (
-            "24h and 1h are this machine's nonces in that window "
-            "times (pool TIG so far / pool nonces this round)."
+            "Each challenge the pool worked on gets an equal slice of pool TIG. "
+            "24h and 1h are this machine's nonces on each challenge times "
+            "that challenge's slice / pool nonces on it this round. "
+            "Same split as /set-coinbase."
         ),
         "workers": workers,
     }

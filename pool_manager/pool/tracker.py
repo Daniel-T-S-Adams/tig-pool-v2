@@ -5,8 +5,8 @@ Runs every 60 seconds. Queries the master's root_batch / proofs_batch tables
 to find completed work since the last snapshot, maps slave names to registered
 pool members, and writes snapshot rows to pool_contributions.
 
-Live /set-coinbase still uses nonces_computed. work_credits is written for
-shadow compare and a future cutover.
+Live /set-coinbase uses per-challenge nonce pots from root_batch
+(see challenge_share). These snapshots stay as the nonce/credit ledger.
 """
 import time
 import logging

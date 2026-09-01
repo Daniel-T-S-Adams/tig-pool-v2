@@ -13,9 +13,10 @@ actual token flow to member wallets only happens when the operator claims
 at round end.
 
 This module keeps that split accurate by recalculating each member's share
-of the current round's contributions and calling /set-coinbase to keep the
-on-chain allocation current.  We update it every `coinbase_update_period`
-blocks so the proportions stay fresh throughout the round.
+of the current round and calling /set-coinbase. TIG scores one factor per
+challenge, so we do too: each challenge the pool worked on gets an equal
+slice of the member pot; a wallet's weight is its nonce share of each
+slice. We update every `coinbase_update_period` blocks.
 
 Members receive their share directly into their own wallet from TIG at
 round end — the pool never holds or transfers tokens on behalf of members.
@@ -24,6 +25,7 @@ import os
 import time
 import logging
 import requests
+from . import challenge_share
 from . import database as db
 
 logger = logging.getLogger(__name__)
@@ -107,20 +109,8 @@ def _current_round_start_ms() -> int | None:
         return None
 
 
-def _compute_allocation() -> dict[str, float]:
-    """
-    Compute each member's share of the round earnings based on ALL contributions
-    since the current round started (set when operator marks a round as claimed).
-
-    Returns a dict {wallet_address: fraction} where:
-      - fractions are proportional to total nonces computed this round
-      - the POOL_FEE fraction is NOT included (it stays with the operator wallet)
-      - all returned fractions sum to (1.0 - POOL_FEE)
-
-    Members who benchmarked early in the week and then stopped still receive
-    their fair share — contributions accumulate for the full round.
-    """
-    round_start_ms = _current_round_start_ms()
+def _nonce_pile_allocation(round_start_ms: int | None, member_share: float) -> dict[str, float]:
+    """Fallback: one pot, raw contribution nonces. Used only if challenge rows are empty."""
     if round_start_ms is not None:
         rows = db.fetch_all(
             """
@@ -132,7 +122,6 @@ def _compute_allocation() -> dict[str, float]:
             (round_start_ms,),
         )
     else:
-        # No round start recorded yet — sum all contributions ever
         rows = db.fetch_all(
             """
             SELECT wallet_address, SUM(nonces_computed) AS total_nonces
@@ -148,19 +137,43 @@ def _compute_allocation() -> dict[str, float]:
     if total == 0:
         return {}
 
-    member_share = 1.0 - POOL_FEE
     allocation = {
         r["wallet_address"]: round((int(r["total_nonces"]) / total) * member_share, 6)
         for r in rows
         if (r["total_nonces"] or 0) > 0
     }
-
-    # Sanity check: sum must not exceed member_share
     total_alloc = sum(allocation.values())
     if total_alloc > member_share:
         allocation = {k: round(v / total_alloc * member_share, 6) for k, v in allocation.items()}
-
     return allocation
+
+
+def _compute_allocation() -> dict[str, float]:
+    """
+    Member share of the in-progress round, matching the dashboard.
+
+    Each challenge with completed pool work gets an equal slice of
+    (1 - POOL_FEE). A wallet's weight is its nonce share of each slice.
+    Members who worked early and then stopped still keep that work.
+    """
+    member_share = 1.0 - POOL_FEE
+    round_start_ms = _current_round_start_ms()
+    if round_start_ms is not None:
+        try:
+            allocation = challenge_share.wallet_shares(
+                int(round_start_ms),
+                scale=member_share,
+            )
+            if allocation:
+                return allocation
+            logger.warning(
+                "Challenge-share allocation was empty; falling back to contribution nonces."
+            )
+        except Exception:
+            logger.exception(
+                "Challenge-share allocation failed; falling back to contribution nonces."
+            )
+    return _nonce_pile_allocation(round_start_ms, member_share)
 
 
 def maybe_update_coinbase():
