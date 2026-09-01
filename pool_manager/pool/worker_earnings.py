@@ -259,7 +259,10 @@ def build_worker_earnings(
                 "worker_type": member.get("worker_type"),
                 "active": bool(member.get("active")),
                 "registered_at": member.get("registered_at"),
-                "joined_ms": _to_ms(member.get("registered_at")) or stats.get("first_ms") or start_ms,
+                # First completed work this round, not wallet/fleet signup.
+                # Fleet rows share an old registered_at, so pica45 looking
+                # "joined in August" made Joined collapse to Round.
+                "joined_ms": stats.get("first_ms") or _to_ms(member.get("registered_at")) or start_ms,
                 "batches": int(stats["batches"]),
                 "nonces": nonces,
                 "nonces_1h": nonces_1h,
