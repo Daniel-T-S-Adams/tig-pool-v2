@@ -581,12 +581,12 @@ def leftover_takeable_by_poller(
 
     The last leftover of a job is always takeable so it can finish.
     Offline or telem-idle preferred owners do not lock the pile.
-    An empty GPU card, or any poller when the owner is already at its
-    assign cap, must take leftovers instead of sitting idle.
+    An empty GPU or CPU box, or any poller when the owner is already
+    at its assign cap, must take leftovers instead of sitting idle.
     """
     if leftover_finishes_job(unassigned_on_job, already_assigned=False):
         return True
-    if poller_is_gpu and poller_idle:
+    if poller_idle:
         return True
     if preferred_at_cap:
         return True

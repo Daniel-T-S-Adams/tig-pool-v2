@@ -418,8 +418,8 @@ def main() -> int:
             poller_idle=True,
             poller_is_gpu=False,
         )
-        is False,
-        "idle CPU still honors sticky lock unless last leftover / overflow",
+        is True,
+        "empty CPU box may take a sticky leftover pile",
     )
     idle_gpu_map = takeable_map(
         {"fat": 55, "crumb": 1},
