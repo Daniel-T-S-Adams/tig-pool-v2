@@ -17,7 +17,7 @@ from decimal import Decimal
 from fastapi import APIRouter, HTTPException, Header
 from pydantic import BaseModel
 from . import database as db
-from . import autopilot, ai_optimizer, hit_rate_report, ops_metrics, worker_earnings
+from . import autopilot, ai_optimizer, hit_rate_report, ops_metrics, worker_earnings, work_credits
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -1683,6 +1683,16 @@ def admin_ops_hit_rate(x_admin_secret: str = Header(None)):
     """Observe-only per-track quality vs TIG qualifier floor, bundles, and time."""
     _check_admin(x_admin_secret)
     return hit_rate_report.build_hit_rate_report()
+
+
+@router.get("/admin/payout-shadow")
+def admin_payout_shadow(x_admin_secret: str = Header(None)):
+    """Compare nonce vs effort-credit shares. Does not change /set-coinbase."""
+    _check_admin(x_admin_secret)
+    return work_credits.build_shadow_report(
+        pool_fee=POOL_FEE,
+        round_start_ms=worker_earnings.round_start_ms(),
+    )
 
 
 @router.post("/admin/ai-optimizer/run")

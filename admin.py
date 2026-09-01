@@ -23,6 +23,7 @@ Usage:
   python3 admin.py coinbase --all            # full audit ledger, all rounds
   python3 admin.py coinbase --failures       # only failed /set-coinbase calls, with error text
   python3 admin.py member-earnings <wallet> [rounds]  # on-chain earnings by round for a wallet
+  python3 admin.py payout-shadow             # nonce vs effort-credit split (shadow; live pay unchanged)
 """
 import json
 import os
@@ -641,6 +642,42 @@ def cmd_compute_types(args):
     resp = _master_update_config(cfg)
     print(f"\nupdate-config: {resp}")
 
+def cmd_payout_shadow(args):
+    report = _get("/admin/payout-shadow")
+    if "--json" in args:
+        print(json.dumps(report, indent=2, sort_keys=True))
+        return
+    print("Payout shadow (live /set-coinbase still uses nonces)")
+    print(f"  live payout : {report.get('live_payout')}")
+    print(f"  member share: {report.get('member_share')}")
+    print(f"  scored jobs : {report.get('scored_jobs')}")
+    print(f"  discounted  : {report.get('conversion_discounted_jobs')} jobs (stopped, no proof)")
+    print(f"  wallets     : {report.get('wallets')}")
+    print()
+    print(f"{'CHALLENGE':<22} {'TYPE':<4} {'NONCE %':>8} {'CREDIT %':>9} {'SEC/N':>7}")
+    print("-" * 56)
+    for row in report.get("challenges") or []:
+        print(
+            f"{str(row.get('challenge') or ''):<22} "
+            f"{str(row.get('profile') or ''):<4} "
+            f"{float(row.get('nonce_pct') or 0):>8.2f} "
+            f"{float(row.get('credit_pct') or 0):>9.2f} "
+            f"{float(row.get('sec_per_nonce') or 0):>7.2f}"
+        )
+    print()
+    print(f"{'WALLET':<44} {'NONCE':>8} {'CREDIT':>8} {'DELTA':>8}")
+    print("-" * 72)
+    for row in report.get("top_delta") or []:
+        print(
+            f"{str(row.get('wallet_address') or ''):<44} "
+            f"{float(row.get('nonce_share') or 0):>8.4f} "
+            f"{float(row.get('credit_share') or 0):>8.4f} "
+            f"{float(row.get('delta') or 0):>+8.4f}"
+        )
+    print()
+    print(report.get("note") or "")
+
+
 def cmd_new_round(_):
     """
     Run this AFTER you have claimed the round on TIG.
@@ -672,6 +709,7 @@ COMMANDS = {
     "compute-types": cmd_compute_types,
     "coinbase":  cmd_coinbase,
     "member-earnings": cmd_member_earnings,
+    "payout-shadow": cmd_payout_shadow,
     "new-round": cmd_new_round,
 }
 

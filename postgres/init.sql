@@ -205,8 +205,12 @@ CREATE TABLE IF NOT EXISTS pool_contributions (
     batches_completed BIGINT NOT NULL DEFAULT 0,
     -- Total nonces computed across those batches
     nonces_computed BIGINT NOT NULL DEFAULT 0,
+    -- Effort credits (shadow / future payout unit). 0 on rows predating this column.
+    work_credits DOUBLE PRECISION NOT NULL DEFAULT 0,
     -- Fractional share (0.0 to 1.0) of pool compute in this window
     share_fraction FLOAT NOT NULL DEFAULT 0.0,
+    -- Fractional share of work_credits in this window (shadow; live pay still uses share_fraction)
+    credit_share_fraction FLOAT NOT NULL DEFAULT 0.0,
     -- Block height at time of snapshot
     block_height BIGINT,
     snapshot_start_ms BIGINT NOT NULL,
