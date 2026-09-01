@@ -969,6 +969,18 @@ def gpu_assign_inflight_cap(
     return min(want, ceiling)
 
 
+def submit_ack(outcome: str, *, note: str | None = None) -> dict:
+    """HTTP 200 body for root / proof / error submits.
+
+    Slaves only check ``status_code == 200``. ``outcome`` lets monitors
+    separate a new accept from an idempotent duplicate or stale ACK.
+    """
+    body = {"status": "OK", "outcome": outcome}
+    if note:
+        body["note"] = note
+    return body
+
+
 def _algorithm_is_cpu(algorithm_id: str) -> bool:
     return str(algorithm_id or "")[:4] not in ("c004", "c005", "c006")
 
@@ -5260,7 +5272,7 @@ class SlaveManager:
                     )
                     _release_assigned_batch_id(batch_id, is_proof=False)
                     _release_assigned_batch_id(batch_id, is_proof=True)
-                    return {"status": "OK", "note": "stale_assignment"}
+                    return submit_ack("duplicate_accepted", note="stale_assignment")
                 b = {
                     "num_attempts": int(row.get("num_attempts") or 0),
                     "batch": {
@@ -5322,7 +5334,7 @@ class SlaveManager:
             else:
                 _retire_batch_id(batch_id, is_proof=is_proof)
 
-            return {"status": "OK"}
+            return submit_ack("accepted")
 
         @app.post('/submit-batch-root/{batch_id}')
         async def submit_batch_root(batch_id: str, request: Request):
@@ -5343,7 +5355,7 @@ class SlaveManager:
                         batch_id,
                         slave_name,
                     )
-                    return {"status": "OK"}
+                    return submit_ack("duplicate_accepted")
                 # Assignment raced away (ghost replace / steal) but work is still
                 # unfinished — accept the root from the slave that computed it.
                 orphan = True
@@ -5385,7 +5397,7 @@ class SlaveManager:
                             slave_name,
                         )
                         _retire_batch_id(batch_id, is_proof=False)
-                        return {"status": "OK", "note": "stale_closed_batch"}
+                        return submit_ack("duplicate_accepted", note="stale_closed_batch")
                     expected_nonces = int(row["num_nonces"])
                 if len(solution_quality) != expected_nonces:
                     raise ValueError(
@@ -5459,7 +5471,7 @@ class SlaveManager:
             ]
             get_db_conn().execute_many(*queries)
             _retire_batch_id(batch_id, is_proof=False)
-            return {"status": "OK"}
+            return submit_ack("accepted")
 
         @app.post('/submit-batch-proofs/{batch_id}')
         async def submit_batch_proofs(batch_id: str, request: Request):
@@ -5475,7 +5487,7 @@ class SlaveManager:
                             batch_id,
                             canonicalize_pool_slave_name(request.headers.get("User-Agent")),
                         )
-                        return {"status": "OK"}
+                        return submit_ack("duplicate_accepted")
                 raise
             try:
                 result = await request.json()
@@ -5513,7 +5525,7 @@ class SlaveManager:
                 )
             ])
             _retire_batch_id(batch_id, is_proof=True)
-            return {"status": "OK"}
+            return submit_ack("accepted")
             
         thread = Thread(target=lambda: uvicorn.run(app, host="0.0.0.0", port=5115, access_log=False))  # nosec B104 — container binds all interfaces; nginx controls external exposure
         thread.daemon = True

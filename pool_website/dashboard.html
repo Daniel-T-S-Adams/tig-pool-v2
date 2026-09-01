@@ -700,6 +700,15 @@
           border: "rgba(34,211,165,.20)",
         };
       }
+      if (state === "proven_recent" || slave.capacity_eligible) {
+        return {
+          label: "proven",
+          title: "Recent finishes count toward InnoPool capacity scaling",
+          bg: "rgba(34,211,165,.10)",
+          color: "var(--green)",
+          border: "rgba(34,211,165,.20)",
+        };
+      }
       return {
         label: "probation",
         title: "Can receive limited work, but does not expand pool capacity until proven",

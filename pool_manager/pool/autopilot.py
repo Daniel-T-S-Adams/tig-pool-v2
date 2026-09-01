@@ -625,6 +625,33 @@ def _counts_for_capacity(slave: dict) -> bool:
     return False
 
 
+OPERATOR_TRUST_STATES = frozenset(
+    {"trusted", "operator", "disabled", "quarantined", "blocked"}
+)
+
+
+def member_display_trust_state(db_trust: str, slave: dict | None = None) -> str:
+    """Public member API trust label.
+
+    Operator overrides stay as stored. The DB default ``probation`` is
+    replaced with ``proven_recent`` when the slave meets the same finish
+    bar health uses for capacity_eligible (10 CPU / 2 GPU).
+    """
+    trust = str(db_trust or "probation").lower()
+    if trust in OPERATOR_TRUST_STATES:
+        return trust
+    if not slave:
+        return "probation"
+    probe = dict(slave)
+    probe["active_now"] = True
+    if probe.get("registered_active") is None:
+        probe["registered_active"] = True
+    probe["trust_state"] = "probation"
+    if not probe.get("profile"):
+        probe["profile"] = _slave_profile(str(probe.get("slave_name") or ""))
+    return "proven_recent" if _counts_for_capacity(probe) else "probation"
+
+
 def _capacity_reason(slave: dict) -> str:
     name = slave.get("slave_name") or ""
     if not slave.get("active_now"):
@@ -5528,6 +5555,19 @@ def maybe_run():
 _REPORT_CACHE_MS = int(os.environ.get("AUTOPILOT_REPORT_CACHE_MS", "8000"))
 _report_lock = threading.Lock()
 _report_cache: dict[str, Any] = {"ts": 0, "report": None}
+
+
+def cached_slave_by_name() -> dict[str, dict]:
+    """Warm autopilot slave rows, or empty if the report is cold/degraded."""
+    cached = _report_cache.get("report")
+    if not cached or cached.get("degraded"):
+        return {}
+    out: dict[str, dict] = {}
+    for slave in cached.get("slaves") or []:
+        name = str(slave.get("slave_name") or "")
+        if name:
+            out[name] = slave
+    return out
 
 
 def _degraded_report(now_ms: int) -> dict:

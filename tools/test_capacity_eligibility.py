@@ -23,6 +23,7 @@ def _load_fn():
             "_counts_for_capacity",
             "_is_public_member_slave",
             "_slave_profile",
+            "member_display_trust_state",
         }:
             helpers.append(node)
             if node.name == "_counts_for_capacity":
@@ -35,9 +36,14 @@ def _load_fn():
         "TRUSTED_MAX_FAILED_RECENT": 0,
         "CAPACITY_LIVE_MIN_COMPLETIONS": 3,
         "CAPACITY_STUCK_MIN_INFLIGHT": 4,
+        "OPERATOR_TRUST_STATES": frozenset(
+            {"trusted", "operator", "disabled", "quarantined", "blocked"}
+        ),
     }
     exec(compile(ast.Module(body=helpers, type_ignores=[]), str(path), "exec"), ns, ns)
-    return ns["_counts_for_capacity"]
+    if "member_display_trust_state" not in ns:
+        raise RuntimeError("member_display_trust_state not found")
+    return ns["_counts_for_capacity"], ns["member_display_trust_state"]
 
 
 def _slave(**kwargs):
@@ -58,7 +64,7 @@ def _slave(**kwargs):
 
 
 def main() -> int:
-    fn = _load_fn()
+    fn, display = _load_fn()
     cases = [
         (
             fn(_slave(completed_recent=12, stale_roots=2)) is True,
@@ -100,6 +106,39 @@ def main() -> int:
             )
             is True,
             "trusted always counts when active",
+        ),
+        (
+            display("trusted", None) == "trusted",
+            "member API keeps operator trusted override",
+        ),
+        (
+            display("disabled", _slave(completed_recent=20)) == "disabled",
+            "member API keeps disabled override",
+        ),
+        (
+            display("probation", None) == "probation",
+            "member API default stays probation without metrics",
+        ),
+        (
+            display("probation", _slave(completed_recent=12)) == "proven_recent",
+            "member API shows proven_recent after CPU finish bar",
+        ),
+        (
+            display("probation", _slave(completed_recent=2, active_unfinished=0))
+            == "probation",
+            "member API stays probation below finish bar",
+        ),
+        (
+            display(
+                "probation",
+                _slave(
+                    slave_name="pool-gpu-abc-ap09",
+                    profile="gpu",
+                    completed_recent=2,
+                ),
+            )
+            == "proven_recent",
+            "member API GPU proven after 2 finishes",
         ),
     ]
     failed = 0

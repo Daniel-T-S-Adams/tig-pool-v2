@@ -368,6 +368,7 @@ def _health_unavailable():
         "latest_coinbase": None,
         "challenges": [],
         "degraded": True,
+        "warming": True,
     }
 
 
@@ -673,6 +674,15 @@ def get_pool_health():
     return _HEALTH_CACHE.get(_get_pool_health_uncached, placeholder=_health_unavailable())
 
 
+def prewarm_health_cache() -> None:
+    """Build /api/health off the request path so the first public GET is real."""
+    try:
+        _HEALTH_CACHE.get(_get_pool_health_uncached, force=True)
+        logger.info("health cache prewarmed")
+    except Exception:
+        logger.warning("health cache prewarm failed", exc_info=True)
+
+
 def _get_pool_health_uncached():
     report = autopilot.build_report()
     readiness = report.get("scale_readiness") or {}
@@ -874,12 +884,19 @@ def get_member_stats(wallet_address: str):
             """,
                 tuple(slave_list),
             )
+            cutoff_metrics = int(time.time() * 1000) - int(autopilot.METRIC_WINDOW_MS)
             activity_rows = db.fetch_all(
                 f"""
             WITH root_activity AS (
                 SELECT
                     slave,
                     COUNT(*) FILTER (WHERE ready IS NULL AND start_time IS NOT NULL) AS active_roots,
+                    COUNT(*) FILTER (WHERE ready = true AND end_time >= %s) AS completed_recent,
+                    COUNT(*) FILTER (
+                        WHERE ready IS NULL
+                          AND start_time IS NOT NULL
+                          AND start_time < %s
+                    ) AS stale_roots,
                     MAX(GREATEST(COALESCE(start_time, 0), COALESCE(end_time, 0))) AS last_root_ms
                 FROM root_batch
                 WHERE slave IN ({placeholders})
@@ -897,12 +914,14 @@ def get_member_stats(wallet_address: str):
             SELECT
                 COALESCE(r.slave, p.slave) AS slave_name,
                 COALESCE(r.active_roots, 0) AS active_roots,
+                COALESCE(r.completed_recent, 0) AS completed_recent,
+                COALESCE(r.stale_roots, 0) AS stale_roots,
                 COALESCE(p.active_proofs, 0) AS active_proofs,
                 GREATEST(COALESCE(r.last_root_ms, 0), COALESCE(p.last_proof_ms, 0)) AS last_activity_ms
             FROM root_activity r
             FULL OUTER JOIN proof_activity p ON p.slave = r.slave
             """,
-                tuple(slave_list) + tuple(slave_list),
+                (cutoff_metrics, cutoff_metrics) + tuple(slave_list) + tuple(slave_list),
             )
             slave_activity = {r["slave_name"]: r for r in activity_rows}
         except Exception as exc:
@@ -915,6 +934,26 @@ def get_member_stats(wallet_address: str):
         fetch_round_coinbase=_fetch_round_coinbase_map,
     )
     earnings_by_slave = worker_earnings.earnings_by_slave(earnings_payload)
+    cached_slaves = autopilot.cached_slave_by_name()
+
+    def _member_trust_state(row) -> str:
+        name = row["slave_name"]
+        cached = cached_slaves.get(name)
+        activity = slave_activity.get(name) or {}
+        fallback = {
+            "slave_name": name,
+            "registered_active": bool(row.get("active")),
+            "completed_recent": int(activity.get("completed_recent") or 0),
+            "active_unfinished": int(activity.get("active_roots") or 0),
+            "stale_roots": int(activity.get("stale_roots") or 0),
+            "stale_proofs": 0,
+            "failed_recent": 0,
+            "profile": _infer_worker_type(name, row.get("worker_type")),
+        }
+        return autopilot.member_display_trust_state(
+            row.get("trust_state") or "probation",
+            cached or fallback,
+        )
 
     return {
         "wallet_address": member["wallet_address"],
@@ -933,7 +972,7 @@ def get_member_stats(wallet_address: str):
                 "worker_type": _infer_worker_type(r["slave_name"], r.get("worker_type")),
                 "fleet_id": r.get("fleet_id"),
                 "machine_index": r.get("machine_index"),
-                "trust_state": r.get("trust_state") or "probation",
+                "trust_state": _member_trust_state(r),
                 "preflight_status": r.get("preflight_status"),
                 "active_roots": int((slave_activity.get(r["slave_name"]) or {}).get("active_roots") or 0),
                 "active_proofs": int((slave_activity.get(r["slave_name"]) or {}).get("active_proofs") or 0),

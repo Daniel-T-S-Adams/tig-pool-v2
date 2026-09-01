@@ -77,8 +77,15 @@ def background_loop():
         time.sleep(30)
 
 
+def _prewarm_health():
+    from pool.routes import prewarm_health_cache
+
+    prewarm_health_cache()
+
+
 if __name__ == "__main__":
     bg = threading.Thread(target=background_loop, daemon=True)
     bg.start()
+    threading.Thread(target=_prewarm_health, name="health-prewarm", daemon=True).start()
     logger.info("Pool Manager starting on port 8080")
     uvicorn.run(app, host="0.0.0.0", port=8080, log_level="warning")  # nosec B104 — container binds all interfaces; nginx controls external exposure
