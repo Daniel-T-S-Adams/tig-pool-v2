@@ -573,13 +573,22 @@ def leftover_takeable_by_poller(
     unassigned_on_job: int = 0,
     preferred_online: bool | None = None,
     preferred_releases: bool | None = None,
+    preferred_at_cap: bool = False,
+    poller_idle: bool = False,
+    poller_is_gpu: bool = False,
 ) -> bool:
     """Fat leftovers locked to another live working owner do not skip crumbs.
 
     The last leftover of a job is always takeable so it can finish.
     Offline or telem-idle preferred owners do not lock the pile.
+    An empty GPU card, or any poller when the owner is already at its
+    assign cap, must take leftovers instead of sitting idle.
     """
     if leftover_finishes_job(unassigned_on_job, already_assigned=False):
+        return True
+    if poller_is_gpu and poller_idle:
+        return True
+    if preferred_at_cap:
         return True
     key = str(bid or "")
     if not key:
@@ -695,8 +704,12 @@ def takeable_unassigned_by_bid(
     online_slaves: Optional[set] = None,
     active_by_slave: Optional[dict] = None,
     working_by_slave: Optional[dict] = None,
+    preferred_at_cap: Optional[set] = None,
+    poller_idle: bool = False,
+    poller_is_gpu: bool = False,
 ) -> Dict[str, int]:
     out: Dict[str, int] = {}
+    at_cap_owners = preferred_at_cap or set()
     for bid, n_unassigned in (unassigned_by_bid or {}).items():
         preferred = (root_affinity or {}).get(str(bid))
         preferred_online = None
@@ -718,6 +731,9 @@ def takeable_unassigned_by_bid(
             unassigned_on_job=int(n_unassigned or 0),
             preferred_online=preferred_online,
             preferred_releases=preferred_releases,
+            preferred_at_cap=bool(preferred and preferred in at_cap_owners),
+            poller_idle=poller_idle,
+            poller_is_gpu=poller_is_gpu,
         ):
             out[str(bid)] = int(n_unassigned or 0)
     return out
@@ -1035,6 +1051,32 @@ def retain_started_cpu_excess(excess: list, *, is_cpu: bool) -> tuple[list, list
         else:
             drop.append(row)
     return keep, drop
+
+
+def select_gpu_kept_assigned(assigned: list, cap: int) -> tuple[list, list]:
+    """Keep at most ``cap`` GPU mailbox rows. Running work stays.
+
+    get-batches is mailbox-only, so the leftover feeder must shed extras
+    that the clamp no longer wants. Prefer proofs and already-started
+    roots; release not-started prefetch first.
+    """
+    try:
+        keep_n = int(cap or 0)
+    except (TypeError, ValueError):
+        keep_n = 0
+    rows = [row for row in (assigned or []) if isinstance(row, dict)]
+    if keep_n <= 0:
+        return [], rows
+    if len(rows) <= keep_n:
+        return rows, []
+    proofs = [row for row in rows if _is_proof_batch_row(row)]
+    roots = [row for row in rows if not _is_proof_batch_row(row)]
+    started_proofs = [row for row in proofs if row.get("start_time") is not None]
+    pending_proofs = [row for row in proofs if row.get("start_time") is None]
+    started_roots = [row for row in roots if row.get("start_time") is not None]
+    pending_roots = [row for row in roots if row.get("start_time") is None]
+    ordered = started_proofs + started_roots + pending_proofs + pending_roots
+    return ordered[:keep_n], ordered[keep_n:]
 
 
 def _batch_retry_time(algorithm_id: str) -> int:
@@ -1672,13 +1714,17 @@ class SlaveManager:
         preferred_at_cap: Set[str],
     ) -> None:
         """Fan out leftover roots when same-profile peers are sitting idle."""
-        del adaptive_caps, preferred_at_cap
+        del adaptive_caps
         if not unassigned_by_bid:
             return
         now_mono = time.monotonic()
         cached = self._fanout_cache
         if cached is not None and now_mono < cached[1]:
             overflow_benchmark_ids.update(cached[0])
+            for bid in unassigned_by_bid:
+                preferred = root_affinity.get(bid)
+                if preferred and preferred in preferred_at_cap:
+                    overflow_benchmark_ids.add(bid)
             return
         idle_by_profile = {"cpu": 0, "gpu": 0}
         for name in online_slaves or set():
@@ -1701,6 +1747,9 @@ class SlaveManager:
                 active_by_slave.get(preferred), pref_working
             ):
                 idle_peers = max(0, idle_peers - 1)
+            if preferred in preferred_at_cap:
+                overflow_benchmark_ids.add(bid)
+                continue
             if not should_sticky_leftover_fanout(
                 unassigned_on_job=n_unassigned,
                 leftover_keep=STICKY_LEFTOVER_KEEP,
@@ -3327,6 +3376,7 @@ class SlaveManager:
             unassigned_by_bid,
             active_by_slave,
             working_by_slave,
+            preferred_at_cap,
         )
 
     def _takeable_bids_for_hungry(
@@ -3339,6 +3389,7 @@ class SlaveManager:
         online_slaves: Set[str],
         active_by_slave: Dict[str, int],
         working_by_slave: Dict[str, bool],
+        preferred_at_cap: Optional[Set[str]] = None,
     ) -> Dict[str, Set[str]]:
         out: Dict[str, Set[str]] = {}
         for item in hungry:
@@ -3351,6 +3402,9 @@ class SlaveManager:
                 online_slaves=online_slaves,
                 active_by_slave=active_by_slave,
                 working_by_slave=working_by_slave,
+                preferred_at_cap=preferred_at_cap,
+                poller_idle=int(active_by_slave.get(name) or 0) <= 0,
+                poller_is_gpu=_slave_work_profile(name) == "gpu",
             )
             out[name] = set(takeable)
         return out
@@ -3380,7 +3434,93 @@ class SlaveManager:
             ))
         return updates
 
+    def _gpu_release_excess_sql(self, excess: list, slave_name: str) -> list:
+        updates = []
+        for row in excess:
+            batch = (row or {}).get("batch") or {}
+            table = (
+                "root_batch"
+                if batch.get("sampled_nonces") is None
+                else "proofs_batch"
+            )
+            updates.append((
+                f"""
+                UPDATE {table}
+                SET slave = NULL,
+                    start_time = NULL,
+                    end_time = NULL,
+                    num_attempts = GREATEST(num_attempts - 1, 0)
+                WHERE benchmark_id = %s
+                  AND batch_idx = %s
+                  AND slave = %s
+                  AND ready IS NULL
+                """,
+                (batch.get("benchmark_id"), batch.get("batch_idx"), slave_name),
+            ))
+            row["slave"] = None
+            row["start_time"] = None
+            row["end_time"] = None
+            try:
+                row["num_attempts"] = max(0, int(row.get("num_attempts") or 1) - 1)
+            except (TypeError, ValueError):
+                row["num_attempts"] = 0
+        return updates
+
+    def _shed_gpu_over_cap(self) -> int:
+        """Drop GPU mailbox rows above the 1+1 clamp so empty cards can take them.
+
+        get-batches never releases excess. Without this, a card that still
+        holds 3–4 assigned jobs has zero hungry seats and locks leftovers.
+        """
+        now_ms = int(time.time() * 1000)
+        cutoff = now_ms - int(self._get_batches_feeder_hungry_ms)
+        with self._poll_seen_lock:
+            names = [
+                name
+                for name, seen in self._poll_seen.items()
+                if int(seen or 0) >= cutoff
+                and _slave_work_profile(name) == "gpu"
+            ]
+        if not names:
+            return 0
+        wait = min(self._get_batches_lock_wait_sec, 0.2)
+        acquired = self.lock.acquire(timeout=wait)
+        if not acquired:
+            return 0
+        released = 0
+        updates = []
+        try:
+            for slave_name in names:
+                cap = self._clamp_assign_cap(
+                    slave_name, self._route_cap_for_slave(slave_name)
+                )
+                assigned = [
+                    row
+                    for row in self.batches
+                    if row.get("slave") == slave_name and row.get("end_time") is None
+                ]
+                if len(assigned) <= cap:
+                    continue
+                _kept, excess = select_gpu_kept_assigned(assigned, cap)
+                if not excess:
+                    continue
+                updates.extend(self._gpu_release_excess_sql(excess, slave_name))
+                released += len(excess)
+                logger.info(
+                    "gpu clamp shed %s excess batches from %s (cap=%s held=%s)",
+                    len(excess),
+                    slave_name,
+                    cap,
+                    len(assigned) - len(excess),
+                )
+        finally:
+            self.lock.release()
+        if updates:
+            self._enqueue_assign_sql(updates)
+        return released
+
     def _feed_hungry_slaves(self) -> int:
+        self._shed_gpu_over_cap()
         now = time.time() * 1000
         views = self._get_assign_views()
         hungry = self._hungry_slave_items(int(now), views)
@@ -3394,6 +3534,7 @@ class SlaveManager:
             unassigned_by_bid,
             active_by_slave,
             working_by_slave,
+            preferred_at_cap,
         ) = self._leftover_takeable_maps(now)
         takeable_by_slave = self._takeable_bids_for_hungry(
             hungry,
@@ -3403,6 +3544,7 @@ class SlaveManager:
             online_slaves=online_slaves,
             active_by_slave=active_by_slave,
             working_by_slave=working_by_slave,
+            preferred_at_cap=preferred_at_cap,
         )
         wait = min(self._get_batches_lock_wait_sec, 0.2)
         acquired = self.lock.acquire(timeout=wait)

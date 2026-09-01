@@ -16,11 +16,23 @@ def _load():
         node
         for node in module.body
         if isinstance(node, ast.FunctionDef)
-        and node.name in {"gpu_assign_inflight_cap", "_slave_work_profile"}
+        and node.name
+        in {
+            "gpu_assign_inflight_cap",
+            "_slave_work_profile",
+            "_is_proof_batch_row",
+            "select_gpu_kept_assigned",
+        }
     ]
     names = {n.name for n in keep}
-    if names != {"gpu_assign_inflight_cap", "_slave_work_profile"}:
-        raise RuntimeError(f"missing helpers: { {'gpu_assign_inflight_cap', '_slave_work_profile'} - names}")
+    want = {
+        "gpu_assign_inflight_cap",
+        "_slave_work_profile",
+        "_is_proof_batch_row",
+        "select_gpu_kept_assigned",
+    }
+    if names != want:
+        raise RuntimeError(f"missing helpers: {want - names}")
     ns = {}
     exec(compile(ast.Module(body=keep, type_ignores=[]), str(path), "exec"), ns, ns)
     return ns
@@ -46,6 +58,24 @@ def main() -> int:
         (profile("pool-cpu-abc") == "cpu", "pool-cpu is CPU"),
         (profile("c3-slave-1") == "cpu", "c3 leftover name is CPU"),
     ]
+    keep_fn = ns["select_gpu_kept_assigned"]
+    pending = {"start_time": None, "batch": {"sampled_nonces": None}}
+    started = {"start_time": 1, "batch": {"sampled_nonces": None}}
+    proof = {"start_time": 1, "batch": {"sampled_nonces": [1]}}
+    kept, excess = keep_fn([pending, pending, started, proof], 2)
+    cases.extend(
+        [
+            (len(kept) == 2 and len(excess) == 2, "GPU shed keeps exactly cap rows"),
+            (
+                proof in kept and started in kept,
+                "GPU shed keeps started proof and started root first",
+            ),
+            (
+                all(row.get("start_time") is None for row in excess),
+                "GPU shed releases not-started prefetch first",
+            ),
+        ]
+    )
     for ok, label in cases:
         print(f"{'pass' if ok else 'FAIL'}: {label}")
         if not ok:

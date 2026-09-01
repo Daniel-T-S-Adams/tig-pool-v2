@@ -372,6 +372,68 @@ def main() -> int:
         is True,
         "overflow-unlocked leftover is takeable",
     )
+    check(
+        takeable(
+            "fat",
+            slave_name="pool-gpu-idle",
+            root_affinity={"fat": "pool-gpu-owner"},
+            overflow_benchmark_ids=set(),
+            unassigned_on_job=55,
+        )
+        is False,
+        "GPU leftover stays sticky for a busy stranger card",
+    )
+    check(
+        takeable(
+            "fat",
+            slave_name="pool-gpu-idle",
+            root_affinity={"fat": "pool-gpu-owner"},
+            overflow_benchmark_ids=set(),
+            unassigned_on_job=55,
+            poller_idle=True,
+            poller_is_gpu=True,
+        )
+        is True,
+        "empty GPU card may take a sticky leftover pile",
+    )
+    check(
+        takeable(
+            "fat",
+            slave_name="pool-gpu-idle",
+            root_affinity={"fat": "pool-gpu-owner"},
+            overflow_benchmark_ids=set(),
+            unassigned_on_job=55,
+            preferred_at_cap=True,
+        )
+        is True,
+        "leftover is takeable when the sticky owner is at cap",
+    )
+    check(
+        takeable(
+            "fat",
+            slave_name="pica",
+            root_affinity={"fat": "other"},
+            overflow_benchmark_ids=set(),
+            unassigned_on_job=80,
+            poller_idle=True,
+            poller_is_gpu=False,
+        )
+        is False,
+        "idle CPU still honors sticky lock unless last leftover / overflow",
+    )
+    idle_gpu_map = takeable_map(
+        {"fat": 55, "crumb": 1},
+        slave_name="pool-gpu-idle",
+        root_affinity={"fat": "pool-gpu-owner"},
+        overflow_benchmark_ids=set(),
+        preferred_at_cap={"pool-gpu-owner"},
+        poller_idle=True,
+        poller_is_gpu=True,
+    )
+    check(
+        "fat" in idle_gpu_map,
+        "takeable map unlocks GPU leftovers for an empty card when owner is at cap",
+    )
     locked_fat = takeable_map(
         {"fat": 80, "crumb": 1},
         slave_name="pica",
