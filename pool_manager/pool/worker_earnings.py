@@ -1,9 +1,10 @@
 """
 Per-slave TIG estimates. Same per-challenge pots as /set-coinbase:
 
-    each challenge with pool work gets an equal slice of pool TIG
-    24h = sum_c (machine_nonces_24h_c / pool_nonces_round_c) × slice
-    1h  = sum_c (machine_nonces_1h_c  / pool_nonces_round_c) × slice
+    GPU challenges share PAY_GPU_POT_FRAC of pool TIG (default 0.27)
+    CPU challenges share the rest; equal split within each family
+    24h = sum_c (machine_nonces_24h_c / pool_nonces_round_c) × pot_c
+    1h  = sum_c (machine_nonces_1h_c  / pool_nonces_round_c) × pot_c
 """
 from __future__ import annotations
 
@@ -261,7 +262,13 @@ def build_worker_earnings(
         )
 
     n_active = sum(1 for n in pool_challenge.values() if n > 0)
-    slice_tig = challenge_share.pot_per_challenge(member_tig, n_active)
+    pots = challenge_share.pots_by_challenge(member_tig, pool_challenge)
+    gpu_family_tig = sum(
+        v for c, v in pots.items() if challenge_share.is_gpu_challenge(c)
+    )
+    cpu_family_tig = sum(
+        v for c, v in pots.items() if not challenge_share.is_gpu_challenge(c)
+    )
     wallet_tig_est: dict[str, float] = {}
 
     for row in workers:
@@ -269,22 +276,22 @@ def build_worker_earnings(
         row["est_tig"] = challenge_share.tig_from_challenge_pots(
             {c: pile.get("nonces") or 0 for c, pile in by_chal.items()},
             pool_challenge,
-            slice_tig,
+            pots,
         )
         row["est_tig_1h"] = challenge_share.tig_from_challenge_pots(
             {c: pile.get("nonces_1h") or 0 for c, pile in by_chal.items()},
             pool_challenge,
-            slice_tig,
+            pots,
         )
         row["est_tig_12h"] = challenge_share.tig_from_challenge_pots(
             {c: pile.get("nonces_12h") or 0 for c, pile in by_chal.items()},
             pool_challenge,
-            slice_tig,
+            pots,
         )
         row["est_tig_24h"] = challenge_share.tig_from_challenge_pots(
             {c: pile.get("nonces_24h") or 0 for c, pile in by_chal.items()},
             pool_challenge,
-            slice_tig,
+            pots,
         )
         row["est_tig_since_join"] = row["est_tig"]
         row["share_pct"] = (
@@ -311,12 +318,17 @@ def build_worker_earnings(
         "pool_fee_pct": round(float(pool_fee or 0) * 100, 1),
         "total_nonces": total_nonces,
         "challenge_count": n_active,
-        "tig_per_challenge": round(slice_tig, 6),
+        "tig_per_challenge": {c: round(v, 6) for c, v in pots.items()},
+        "gpu_pot_frac": challenge_share.gpu_pot_frac(),
+        "gpu_family_tig": round(gpu_family_tig, 6),
+        "cpu_family_tig": round(cpu_family_tig, 6),
         "worker_count": len(workers),
         "note": (
-            "Each challenge the pool worked on gets an equal slice of pool TIG. "
+            f"GPU challenges share {challenge_share.gpu_pot_frac():.0%} of pool TIG "
+            f"and CPU challenges share {1.0 - challenge_share.gpu_pot_frac():.0%}, "
+            "then each family splits equally across the challenges it worked. "
             "24h and 1h are this machine's nonces on each challenge times "
-            "that challenge's slice / pool nonces on it this round. "
+            "that challenge's pot / pool nonces on it this round. "
             "Same split as /set-coinbase."
         ),
         "workers": workers,

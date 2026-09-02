@@ -649,7 +649,7 @@ def build_shadow_report(
         "live_payout": "challenge_share",
         "note": (
             "Live /set-coinbase is per-challenge nonce pots "
-            "(equal TIG slice per challenge, then nonce share on that challenge). "
+            "(GPU family 27% / CPU family 73%, then nonce share on that challenge). "
             "WT=table weight (EMA/prior). ACT=capped wall-clock. "
             "PRI=hardcoded prior only. If WT≈ACT, weights are calibrated. "
             "CPU/GPU pots here are separate what-ifs versus that live split."

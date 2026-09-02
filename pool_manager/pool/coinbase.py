@@ -13,10 +13,11 @@ actual token flow to member wallets only happens when the operator claims
 at round end.
 
 This module keeps that split accurate by recalculating each member's share
-of the current round and calling /set-coinbase. TIG scores one factor per
-challenge, so we do too: each challenge the pool worked on gets an equal
-slice of the member pot; a wallet's weight is its nonce share of each
-slice. We update every `coinbase_update_period` blocks.
+of the current round and calling /set-coinbase. GPU challenges share
+PAY_GPU_POT_FRAC of the member pot (default 0.27) and CPU challenges share
+the rest; within each family, active challenges split equally. A wallet's
+weight is its nonce share of each challenge pot. We update every
+`coinbase_update_period` blocks.
 
 Members receive their share directly into their own wallet from TIG at
 round end — the pool never holds or transfers tokens on behalf of members.
@@ -152,8 +153,9 @@ def _compute_allocation() -> dict[str, float]:
     """
     Member share of the in-progress round, matching the dashboard.
 
-    Each challenge with completed pool work gets an equal slice of
-    (1 - POOL_FEE). A wallet's weight is its nonce share of each slice.
+    GPU challenges share PAY_GPU_POT_FRAC of (1 - POOL_FEE); CPU
+    challenges share the rest. Within a family, active challenges
+    split equally. A wallet's weight is its nonce share of each pot.
     Members who worked early and then stopped still keep that work.
     """
     member_share = 1.0 - POOL_FEE

@@ -10,7 +10,7 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "pool_manager"))
 
 from pool.challenge_share import (  # noqa: E402
-    pot_per_challenge,
+    pots_by_challenge,
     shares_from_challenge_nonces,
     tig_from_challenge_pots,
 )
@@ -25,18 +25,23 @@ def main() -> int:
         if not ok:
             failed += 1
 
-    # Same nonces on two challenges -> 50/50 even if one pile is huge.
+    # Same nonces on two families: GPU pot 27%, CPU pot 73% of the member share.
     shares = shares_from_challenge_nonces(
         {
             ("cpu-wallet", "knapsack"): 14_000_000,
             ("gpu-wallet", "hypergraph"): 273_000,
         },
         scale=0.95,
+        gpu_frac=0.27,
     )
     check(abs(sum(shares.values()) - 0.95) < 1e-6, "shares sum to member pot")
     check(
-        abs(shares["cpu-wallet"] - shares["gpu-wallet"]) < 1e-9,
-        f"equal pots: knapsack farm and GPU farm split 50/50, got {shares}",
+        abs(shares["gpu-wallet"] - 0.95 * 0.27) < 1e-9,
+        f"GPU family 27% of 0.95, got {shares}",
+    )
+    check(
+        abs(shares["cpu-wallet"] - 0.95 * 0.73) < 1e-9,
+        f"CPU family 73% of 0.95, got {shares}",
     )
 
     mixed = shares_from_challenge_nonces(
@@ -48,10 +53,35 @@ def main() -> int:
             ("gpu-wallet", "neuralnet_optimizer"): 50_000,
         },
         scale=1.0,
+        gpu_frac=0.27,
     )
-    # 5 challenges: CPU owns 2, GPU owns 3 -> GPU 60%.
-    check(abs(mixed["gpu-wallet"] - 0.6) < 1e-9, f"GPU 3/5 of pots -> 0.6, got {mixed}")
-    check(abs(mixed["cpu-wallet"] - 0.4) < 1e-9, f"CPU 2/5 of pots -> 0.4, got {mixed}")
+    check(abs(mixed["gpu-wallet"] - 0.27) < 1e-9, f"3 GPU challenges still 0.27, got {mixed}")
+    check(abs(mixed["cpu-wallet"] - 0.73) < 1e-9, f"2 CPU challenges still 0.73, got {mixed}")
+
+    cpu_only = shares_from_challenge_nonces(
+        {("cpu-wallet", "knapsack"): 100, ("other", "energy_arbitrage"): 100},
+        scale=1.0,
+        gpu_frac=0.27,
+    )
+    check(abs(sum(cpu_only.values()) - 1.0) < 1e-9, "CPU-only work renormalizes to 100%")
+    check(abs(cpu_only["cpu-wallet"] - 0.5) < 1e-9, f"CPU-only equal pots, got {cpu_only}")
+
+    restored = shares_from_challenge_nonces(
+        {
+            ("cpu-wallet", "knapsack"): 1,
+            ("cpu-wallet", "energy_arbitrage"): 1,
+            ("cpu-wallet", "satisfiability"): 1,
+            ("cpu-wallet", "job_scheduling"): 1,
+            ("cpu-wallet", "vehicle_routing"): 1,
+            ("gpu-wallet", "hypergraph"): 1,
+            ("gpu-wallet", "vector_search"): 1,
+            ("gpu-wallet", "neuralnet_optimizer"): 1,
+        },
+        scale=1.0,
+        gpu_frac=0.375,
+    )
+    check(abs(restored["gpu-wallet"] - 0.375) < 1e-9, f"0.375 GPU frac restores 3/8, got {restored}")
+    check(abs(restored["cpu-wallet"] - 0.625) < 1e-9, f"0.375 GPU frac restores 5/8, got {restored}")
 
     check(shares_from_challenge_nonces({}, scale=1.0) == {}, "empty work -> empty shares")
     check(
@@ -59,7 +89,7 @@ def main() -> int:
         "zero nonces -> empty shares",
     )
 
-    # Pica GPU 24h at equal pots. Mixed-nonce rate made this ~0.027.
+    # Pica GPU 24h at 27/73 family pots. Mixed-nonce rate made this ~0.027.
     pool = {
         "knapsack": 14_000_000,
         "energy_arbitrage": 8_900_000,
@@ -70,15 +100,22 @@ def main() -> int:
         "vector_search": 54_000,
         "neuralnet_optimizer": 50_000,
     }
-    slice_tig = pot_per_challenge(166.4, 8)
+    pots = pots_by_challenge(166.4, pool, gpu_frac=0.27)
+    check(abs(sum(pots[c] for c in ("hypergraph", "vector_search", "neuralnet_optimizer")) - 166.4 * 0.27) < 1e-9, "GPU pots sum to 27%")
     pica45 = tig_from_challenge_pots(
         {"hypergraph": 2900, "neuralnet_optimizer": 520, "vector_search": 442},
         pool,
-        slice_tig,
+        pots,
     )
     mixed_rate = 166.4 * (2900 + 520 + 442) / sum(pool.values())
     check(pica45 > 0.4, f"pica45 GPU 24h is {pica45}, not the mixed-rate {mixed_rate:.4f}")
     check(pica45 > mixed_rate * 10, "per-challenge TIG is >10x the mixed nonce pile")
+    equal = tig_from_challenge_pots(
+        {"hypergraph": 2900, "neuralnet_optimizer": 520, "vector_search": 442},
+        pool,
+        pots_by_challenge(166.4, pool, gpu_frac=0.375),
+    )
+    check(pica45 < equal, f"27% GPU pot pays less than equal 8-pots: {pica45} vs {equal}")
 
     one_chal = tig_from_challenge_pots({"hypergraph": 2900}, {"hypergraph": 2900}, 20.0)
     check(one_chal == 20.0, "sole worker on a challenge takes that slice")

@@ -1,22 +1,34 @@
 """
 Per-challenge TIG share (live pay and display).
 
-TIG influence uses one challenge factor per challenge, then averages them.
-A knapsack nonce is not worth a hypergraph nonce. The accurate pool split is:
+TIG influence still uses one challenge factor per challenge. Member pay does
+not: GPU cards were taking ~37.5% of the pot (3/8 equal slices) while TigPool
+prices that work closer to ~27%. Live split:
 
-    each challenge with pool work gets an equal slice of the member pot
-    wallet/machine TIG = sum_c (their nonces_c / pool nonces_c) × slice
+    GPU challenges share PAY_GPU_POT_FRAC of the member pot (default 0.27)
+    CPU challenges share the rest (default 0.73)
+    within each family, active challenges still split equally
+    wallet/machine TIG = sum_c (their nonces_c / pool nonces_c) × pot_c
 
-/set-coinbase and the dashboard both use this. Finished rounds still show
-TIG's recorded coinbase; this module is for the in-progress round.
+If only CPU or only GPU has work, that family takes 100%. /set-coinbase and
+the dashboard both use this. Finished rounds still show TIG's recorded
+coinbase; this module is for the in-progress round.
 """
 from __future__ import annotations
 
 import logging
+import os
 import time
 from typing import Mapping
 
 logger = logging.getLogger("pool.challenge_share")
+
+GPU_CHALLENGES = frozenset(
+    {"vector_search", "hypergraph", "neuralnet_optimizer"}
+)
+DEFAULT_GPU_POT_FRAC = 0.27
+_GPU_FRAC_MIN = 0.05
+_GPU_FRAC_MAX = 0.95
 
 _NONCE_EXPR = "LEAST(j.batch_size, j.num_nonces - rb.batch_idx * j.batch_size)"
 
@@ -24,16 +36,74 @@ _TABLE_TTL_S = 30.0
 _table_cache: dict = {"ts": 0.0, "since_ms": None, "data": None}
 
 
+def is_gpu_challenge(challenge: str) -> bool:
+    return str(challenge or "") in GPU_CHALLENGES
+
+
+def gpu_pot_frac(*, override: float | None = None) -> float:
+    raw = override if override is not None else os.environ.get(
+        "PAY_GPU_POT_FRAC", DEFAULT_GPU_POT_FRAC
+    )
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        value = float(DEFAULT_GPU_POT_FRAC)
+    return min(_GPU_FRAC_MAX, max(_GPU_FRAC_MIN, value))
+
+
+def challenge_pot_weights(
+    active: list[str],
+    *,
+    gpu_frac: float | None = None,
+) -> dict[str, float]:
+    """Family weights that sum to 1.0 across challenges with pool work."""
+    names = [str(c) for c in (active or []) if c]
+    gpu = [c for c in names if is_gpu_challenge(c)]
+    cpu = [c for c in names if not is_gpu_challenge(c)]
+    target = gpu_pot_frac(override=gpu_frac)
+    g = target if gpu else 0.0
+    c = (1.0 - target) if cpu else 0.0
+    total = g + c
+    if total <= 0:
+        return {}
+    g /= total
+    c /= total
+    out: dict[str, float] = {}
+    if gpu:
+        each = g / len(gpu)
+        for chal in gpu:
+            out[chal] = each
+    if cpu:
+        each = c / len(cpu)
+        for chal in cpu:
+            out[chal] = each
+    return out
+
+
+def pots_by_challenge(
+    pool_tig: float,
+    pool_nonces: Mapping[str, float],
+    *,
+    gpu_frac: float | None = None,
+) -> dict[str, float]:
+    active = [c for c, n in (pool_nonces or {}).items() if float(n or 0) > 0]
+    weights = challenge_pot_weights(active, gpu_frac=gpu_frac)
+    share = max(0.0, float(pool_tig or 0))
+    return {c: share * w for c, w in weights.items()}
+
+
 def shares_from_challenge_nonces(
     owner_challenge_nonces: Mapping[tuple[str, str], float],
     *,
     scale: float = 1.0,
+    gpu_frac: float | None = None,
 ) -> dict[str, float]:
     """
     owner_challenge_nonces: (owner_id, challenge) -> nonces.
 
-    Each challenge with a positive pool total gets an equal pot.
-    Owner share = mean over those challenges of (owner / pool) × scale.
+    GPU challenges share gpu_frac of the pot; CPU challenges share the rest.
+    Within a family, active challenges still split equally. Owner share is
+    nonce-share of each challenge pot, times scale.
     """
     share = max(0.0, float(scale or 0))
     pool: dict[str, float] = {}
@@ -51,8 +121,8 @@ def shares_from_challenge_nonces(
         owners.add(owner)
 
     active = [c for c, total in pool.items() if total > 0]
-    n_active = len(active)
-    if n_active <= 0 or share <= 0 or not owners:
+    weights = challenge_pot_weights(active, gpu_frac=gpu_frac)
+    if not weights or share <= 0 or not owners:
         return {}
 
     out: dict[str, float] = {}
@@ -61,8 +131,8 @@ def shares_from_challenge_nonces(
         for challenge in active:
             total = pool[challenge]
             mine = cleaned.get((owner, challenge), 0.0)
-            acc += mine / total
-        out[owner] = round((acc / n_active) * share, 6)
+            acc += (mine / total) * float(weights.get(challenge) or 0)
+        out[owner] = round(acc * share, 6)
 
     summed = sum(out.values())
     if summed > share and summed > 0:
@@ -71,6 +141,7 @@ def shares_from_challenge_nonces(
 
 
 def pot_per_challenge(pool_tig: float, n_active: int) -> float:
+    """Equal-slice helper. Live pay uses pots_by_challenge instead."""
     if int(n_active or 0) <= 0 or float(pool_tig or 0) <= 0:
         return 0.0
     return float(pool_tig) / int(n_active)
@@ -79,18 +150,32 @@ def pot_per_challenge(pool_tig: float, n_active: int) -> float:
 def tig_from_challenge_pots(
     owner_nonces: Mapping[str, float],
     pool_nonces: Mapping[str, float],
-    slice_tig: float,
+    pots: Mapping[str, float] | float,
 ) -> float:
-    """TIG for one owner from their per-challenge nonces at the current slice."""
-    if float(slice_tig or 0) <= 0:
+    """TIG for one owner from their per-challenge nonces.
+
+    ``pots`` is challenge -> TIG. A bare float is treated as an equal slice
+    on every active challenge (legacy helper / tests).
+    """
+    if isinstance(pots, Mapping):
+        pot_map = pots
+    else:
+        slice_tig = float(pots or 0)
+        pot_map = {
+            c: slice_tig
+            for c, n in (pool_nonces or {}).items()
+            if float(n or 0) > 0
+        }
+    if not pot_map:
         return 0.0
     total = 0.0
     for challenge, raw in (owner_nonces or {}).items():
         n = float(raw or 0)
         pool = float((pool_nonces or {}).get(challenge) or 0)
-        if n <= 0 or pool <= 0:
+        pot = float(pot_map.get(challenge) or 0)
+        if n <= 0 or pool <= 0 or pot <= 0:
             continue
-        total += (n / pool) * float(slice_tig)
+        total += (n / pool) * pot
     return round(total, 6)
 
 
