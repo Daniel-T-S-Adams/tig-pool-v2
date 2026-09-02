@@ -65,7 +65,7 @@ MAX_GPU_SLOTS_PER_TYPE = int(os.environ.get("AUTOPILOT_MAX_GPU_SLOTS_PER_TYPE", 
 GPU_UNITS_PER_JOB = max(1, int(os.environ.get("AUTOPILOT_GPU_UNITS_PER_JOB", "4")))
 # Extra GPU slots/jobs kept unowned so a finishing GPU has work waiting.
 # Sticky blocks fan-out, so this buffer hides TIG precommit latency.
-GPU_JOB_SPARE = max(0, int(os.environ.get("AUTOPILOT_GPU_JOB_SPARE", "2")))
+GPU_JOB_SPARE = max(0, int(os.environ.get("AUTOPILOT_GPU_JOB_SPARE", "4")))
 MAX_CPU_CHALLENGE_BENCHMARKS = int(os.environ.get("AUTOPILOT_MAX_CPU_CHALLENGE_BENCHMARKS", "16"))
 MAX_GPU_CHALLENGE_BENCHMARKS = int(os.environ.get("AUTOPILOT_MAX_GPU_CHALLENGE_BENCHMARKS", "12"))
 # Optional per-challenge ceilings. Unset keys fall back to the CPU/GPU family max.

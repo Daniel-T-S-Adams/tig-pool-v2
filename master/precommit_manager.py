@@ -40,8 +40,16 @@ logger = logging.getLogger(os.path.splitext(os.path.basename(__file__))[0])
 
 CPU_CHALLENGE_IDS = ("c001", "c002", "c003", "c007", "c008")
 GPU_CHALLENGE_IDS = ("c004", "c005", "c006")
-# One replacement job above live GPU headcount. Not a create target.
-GPU_FLEET_SPARE = 1
+# Replacement jobs above live GPU headcount. Must cover gpu_spare_jobs
+# or keep-ahead wants 4 and the fleet ceiling still blocks at +1.
+def _gpu_fleet_spare() -> int:
+    try:
+        return max(0, int(os.environ.get("PRECOMMIT_GOVERNOR_GPU_FLEET_SPARE", "4")))
+    except (TypeError, ValueError):
+        return 4
+
+
+GPU_FLEET_SPARE = _gpu_fleet_spare()
 
 
 def _env_bool(name, default="true"):
@@ -137,7 +145,7 @@ def _governor_settings():
         "gpu_spare_jobs": int(
             gov.get(
                 "gpu_spare_jobs",
-                os.environ.get("PRECOMMIT_GOVERNOR_GPU_SPARE_JOBS", "2"),
+                os.environ.get("PRECOMMIT_GOVERNOR_GPU_SPARE_JOBS", "4"),
             )
         ),
         "min_root_ready_rate": float(
@@ -376,7 +384,7 @@ def _cpu_create_target(cpu_slots: int) -> int:
 
 def _keep_ahead_spare() -> int:
     try:
-        return max(0, int(os.environ.get("PRECOMMIT_KEEP_AHEAD_SPARE", "2")))
+        return max(0, int(os.environ.get("PRECOMMIT_KEEP_AHEAD_SPARE", "4")))
     except (TypeError, ValueError):
         return 2
 
@@ -626,7 +634,7 @@ def resolve_tick_burst(*values) -> int:
 
 
 def gpu_inflight_root_ceiling(*, online_gpu: int = 0, spare: int = 1) -> int:
-    """Live GPU cards plus a single replacement job."""
+    """Live GPU cards plus replacement jobs (caller passes fleet spare)."""
     return max(0, int(online_gpu or 0)) + max(0, int(spare or 0))
 
 
@@ -678,9 +686,9 @@ def compute_gpu_keep_ahead(
     gpu_root_jobs: int = 0,
     gpu_fleet_spare: int = 1,
 ) -> bool:
-    """True when the GPU 2-job spare pile is short. GPUs may all be busy.
+    """True when the GPU spare pile is short. GPUs may all be busy.
 
-    Spare target is a couple of replacements, capped by live GPU count.
+    Spare target is a few replacements, capped by live GPU count.
     Claimable leftovers *are* that pile. Sticky crumbs on live GPU jobs
     are not — idle cards cannot pull them, so they must not hide a
     replacement while claimable_gpu is 0.
@@ -1909,6 +1917,7 @@ class PrecommitManager:
                     keep_ahead_spare=_keep_ahead_spare(),
                     leftover_jobs=gpu_leftover_jobs,
                     gpu_root_jobs=gpu_jobs_needing_roots,
+                    gpu_fleet_spare=_gpu_fleet_spare(),
                 ),
                 "idle_gpu_needs_work": compute_idle_gpu_needs_work(
                     gpu_unassigned_claimable=gpu_unassigned_claimable,
@@ -1921,6 +1930,7 @@ class PrecommitManager:
                     keep_ahead_spare=_keep_ahead_spare(),
                     leftover_jobs=gpu_leftover_jobs,
                     gpu_root_jobs=gpu_jobs_needing_roots,
+                    gpu_fleet_spare=_gpu_fleet_spare(),
                 ),
             }
         except Exception as exc:
@@ -2677,7 +2687,7 @@ class PrecommitManager:
                 selection["track_settings"][t_id] = {}
             _pinned = _track_algo_map.get(t_id)
             if _pinned is not None and _pinned != a_id:
-                selection["track_settings"][t_id] = {}
+            selection["track_settings"][t_id] = {}
         
         for t_id in set(challenge_config["active_tracks"]):
             for k in set(selection["track_settings"][t_id]) - {"num_bundles", "hyperparameters", "fuel_budget"}:
