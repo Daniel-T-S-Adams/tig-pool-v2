@@ -127,7 +127,22 @@ install_docker_if_needed() {
     $SUDO apt-get install -y docker.io docker-compose-v2 \
       || $SUDO apt-get install -y docker.io docker-compose-plugin
   fi
+  $SUDO apt-get install -y iptables nftables || true
   $SUDO systemctl enable --now docker || true
+  if ! docker info >/dev/null 2>&1; then
+    echo "Docker failed to start; switching iptables to legacy (nft NAT unsupported)..."
+    if [[ -x /usr/sbin/iptables-legacy ]]; then
+      $SUDO update-alternatives --set iptables /usr/sbin/iptables-legacy || true
+      $SUDO update-alternatives --set ip6tables /usr/sbin/ip6tables-legacy || true
+    fi
+    $SUDO systemctl reset-failed docker || true
+    $SUDO systemctl restart docker || true
+  fi
+  if ! docker info >/dev/null 2>&1; then
+    echo "Docker is still not running. Last log:" >&2
+    $SUDO journalctl -u docker.service -n 40 --no-pager >&2 || true
+    exit 1
+  fi
   # Ensure the interactive login user can run docker without sudo.
   if [[ "$INSTALL_USER" != "root" ]]; then
     $SUDO usermod -aG docker "$INSTALL_USER" || true
@@ -373,12 +388,11 @@ fetch_and_write_env() {
   else
     workers="${NUM_WORKERS:-}"
     if [[ -z "$workers" ]]; then
-      # ~80% of cores (10–20% headroom) so telemetry can earn concurrent>1
-      # when master cpu_headroom_ratio≈1.25. Override with NUM_WORKERS=...
+      # Logical CPUs minus one (16c/32t => 31). Override with NUM_WORKERS=...
       workers="$(python3 - <<'PY'
 import os
-cores = max(1, os.cpu_count() or 1)
-print(max(1, (cores * 4) // 5))
+threads = max(1, os.cpu_count() or 1)
+print(max(1, threads - 1))
 PY
 )"
     fi

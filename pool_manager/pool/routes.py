@@ -1247,9 +1247,9 @@ def _build_slave_setup_command(slave_name: str, num_workers: int = 8, worker_typ
         if worker_type == "gpu"
         else """DETECTED_NUM_WORKERS="${NUM_WORKERS:-$(python3 - <<'PY'
 import os
-cores = max(1, os.cpu_count() or 1)
-# ~80% of cores (10–20% headroom) for telemetry earn-cap
-print(max(1, (cores * 4) // 5))
+threads = max(1, os.cpu_count() or 1)
+# Logical CPUs minus one (16c/32t => 31)
+print(max(1, threads - 1))
 PY
 )}"
 """
