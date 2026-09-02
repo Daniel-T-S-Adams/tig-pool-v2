@@ -129,7 +129,25 @@ def main() -> int:
         cases.append(
             (
                 earnable(tier=TIER_M, telemetry=None, settings=settings) == 1,
-                "M → 1",
+                "M no telem → 1",
+            )
+        )
+        pica = {"cores": 32, "num_workers": 32, "load_1m": 12, "free_ram_gb": 16}
+        cases.append(
+            (
+                earnable(tier=TIER_M, telemetry=pica, settings=settings) == 2,
+                "M 32w load 12 → pack seat 2",
+            )
+        )
+        cases.append(
+            (
+                earnable(
+                    tier=TIER_M,
+                    telemetry={**pica, "load_1m": 29},
+                    settings=settings,
+                )
+                == 1,
+                "M 32w load 29 → no pack seat",
             )
         )
         cases.append(
@@ -230,8 +248,8 @@ def main() -> int:
                     telemetry=good,
                     settings=settings,
                 )
-                == 1,
-                "Pica/M never exceeds 1 even with telemetry",
+                == 2,
+                "Pica/M pack cap is 2 with worker telem",
             )
         )
         cases.append(
@@ -269,8 +287,8 @@ def main() -> int:
                     telemetry=good,
                     settings=settings,
                 )
-                == 1,
-                "M clamps to tier earnable 1 even if fleet max raised",
+                == 2,
+                "M clamps to pack cap 2 even if fleet max raised",
             )
         )
         cases.append(
@@ -296,8 +314,8 @@ def main() -> int:
         cases.append((live_tier(workers=153) == TIER_XL, "153 workers → XL"))
         cases.append(
             (
-                empty_seats(workers=25, cores=32, active=0, settings=settings) == 1,
-                "Pica empty seats = 1",
+                empty_seats(workers=25, cores=32, active=0, settings=settings) == 2,
+                "Pica empty seats = 2",
             )
         )
         cases.append(

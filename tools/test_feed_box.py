@@ -56,6 +56,9 @@ def main() -> int:
         "pick_fill_bid",
         "assigned_crumb_should_release",
         "split_assigned_crumbs",
+        "booked_cpu_nonces",
+        "cpu_worker_hole",
+        "cpu_pack_candidate_ok",
         extra_ns={
             "Optional": __import__("typing").Optional,
             "Dict": __import__("typing").Dict,
@@ -753,6 +756,65 @@ def main() -> int:
         [r["batch"]["benchmark_id"] for r in dropped] == ["crumb"]
         and [r["batch"]["benchmark_id"] for r in kept] == ["fat"],
         "split drops the assigned crumb and keeps the fat root",
+    )
+
+    booked = ns["booked_cpu_nonces"]
+    hole = ns["cpu_worker_hole"]
+    fits = ns["cpu_pack_candidate_ok"]
+    check(
+        booked([{"batch": {"num_nonces": 16}}, {"num_nonces": 16}]) == 32,
+        "booked sums assigned root nonces",
+    )
+    check(hole(32, 16) == 16, "32w with a 16-nonce root has a 16 hole")
+    check(
+        fits(remaining_nonces=16, workers=32, booked=16) is True,
+        "16+16 fits a 32-thread Pica",
+    )
+    check(
+        fits(remaining_nonces=32, workers=32, booked=16) is False,
+        "16+32 does not fit a 32-thread Pica",
+    )
+    check(
+        fits(remaining_nonces=32, workers=32, booked=0) is True,
+        "idle Pica still takes a full 32",
+    )
+    check(
+        fits(is_gpu=True, remaining_nonces=32, workers=1, booked=0) is True,
+        "GPU skips the CPU hole gate",
+    )
+    check(
+        same_job(
+            fill_bid="a",
+            bid="b",
+            pack_cross_job=True,
+        )
+        is True,
+        "pack hole may take a different job",
+    )
+    check(
+        release(
+            remaining_nonces=16,
+            unassigned_on_job=2,
+            workers=32,
+            empty_seats=2,
+            has_fat_claimable=True,
+        )
+        is False,
+        "pack-seat Pica keeps the 16-nonce crumb",
+    )
+    kept2, dropped2 = split_crumbs(
+        [
+            {"batch": {"benchmark_id": "crumb", "num_nonces": 16, "sampled_nonces": None}},
+        ],
+        workers=32,
+        max_concurrent=2,
+        unassigned_by_bid={"crumb": 2, "fat": 80},
+        leftover_nonces_by_bid={"crumb": 16, "fat": 64},
+        has_fat_claimable=True,
+    )
+    check(
+        [r["batch"]["benchmark_id"] for r in kept2] == ["crumb"] and not dropped2,
+        "split keeps the crumb when a pack seat is open",
     )
 
     return 2 if failed else 0

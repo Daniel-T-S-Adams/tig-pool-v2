@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""CPU assign cap is 1 on S/M Picas. L/XL keep earnable seats."""
+"""CPU assign cap is 2 on S/M Picas with worker telem. L/XL keep earnable seats."""
 
 from __future__ import annotations
 
@@ -22,8 +22,8 @@ def main() -> int:
     cap = ns["cpu_assign_inflight_cap"]
     failed = 0
     cases = [
-        (cap(32, cores=32, workers=32, route_cap=32) == 1, "32-core Pica warehouses 32 -> 1"),
-        (cap(8, cores=32, workers=32, route_cap=32) == 1, "32-core Pica warehouses 8 -> 1"),
+        (cap(32, cores=32, workers=32, route_cap=32) == 2, "32-core Pica warehouses 32 -> 2"),
+        (cap(8, cores=32, workers=32, route_cap=32) == 2, "32-core Pica warehouses 8 -> 2"),
         (cap(32, cores=None, workers=None, route_cap=32) == 1, "unknown CPU size fail-safes to 1"),
         (
             cap(32, cores=None, workers=None, route_cap=32, trusted_without_telem=True) == 32,
@@ -36,7 +36,11 @@ def main() -> int:
             cap(4, cores=32, workers=32, route_cap=32, load_shed_active=True) == 0,
             "load-shed active yields 0",
         ),
-        (cap(32, cores=48, workers=48, route_cap=32) == 1, "48-core M stays at 1"),
+        (cap(32, cores=48, workers=48, route_cap=32) == 2, "48-core M pack cap is 2"),
+        (
+            cap(32, cores=32, workers=32, route_cap=32, load_1m=29) == 1,
+            "hot 32-core Pica stays at 1",
+        ),
         (cap(32, cores=80, workers=80, route_cap=32) == 2, "80-core L scales to 80/32 = 2"),
         (cap(32, cores=96, workers=96, route_cap=32) == 3, "96-core XL scales to 96/32 = 3"),
     ]

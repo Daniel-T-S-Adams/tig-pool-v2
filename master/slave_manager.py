@@ -57,6 +57,7 @@ from master.job_manager import (
     STUCK_SLAVE_SHED_ENABLED,
     STUCK_SLAVE_SHED_WINDOW_MS,
     register_new_root_batch_sink,
+    shed_sibling_stalled_roots,
     should_shed_slave_roots,
 )
 
@@ -305,12 +306,24 @@ def feed_leftovers_one_pass(
                     continue
                 if not may_take_proof(item["name"], bid, batch_idx):
                     continue
+            if int(item.get("workers") or 0) > 0 and not is_proof:
+                rem = batch_remaining_nonces(batch)
+                hole = cpu_worker_hole(
+                    int(item.get("workers") or 0),
+                    int(item.get("booked") or 0),
+                )
+                if rem > hole:
+                    continue
             picked = item
             cursor = (cursor + offset + 1) % n
             break
         if picked is None:
             continue
         picked["seats"] -= 1
+        if int(picked.get("workers") or 0) > 0 and not is_proof:
+            picked["booked"] = int(picked.get("booked") or 0) + batch_remaining_nonces(
+                batch
+            )
         row["slave"] = picked["name"]
         row["start_time"] = now
         row["num_attempts"] = int(row.get("num_attempts") or 0) + 1
@@ -529,6 +542,46 @@ def poller_worker_count(telemetry: Optional[dict] = None, *, is_gpu: bool = Fals
     return 1 if is_gpu else 25
 
 
+def booked_cpu_nonces(rows) -> int:
+    """Sum remaining nonces on assigned batches (roots and proofs)."""
+    total = 0
+    for row in rows or []:
+        if not isinstance(row, dict):
+            continue
+        batch = row.get("batch") if "batch" in row else row
+        if not isinstance(batch, dict):
+            continue
+        total += batch_remaining_nonces(batch)
+    return total
+
+
+def cpu_worker_hole(workers: int = 0, booked: int = 0) -> int:
+    return max(0, int(workers or 0) - int(booked or 0))
+
+
+def cpu_pack_candidate_ok(
+    *,
+    is_proof: bool = False,
+    is_gpu: bool = False,
+    remaining_nonces: int = 0,
+    workers: int = 0,
+    booked: int = 0,
+) -> bool:
+    """True when this root still fits the box's unused worker threads.
+
+    GPU and proofs skip the gate. workers<=0 means no telem — do not block.
+    """
+    if is_gpu or is_proof:
+        return True
+    try:
+        n_workers = int(workers or 0)
+    except (TypeError, ValueError):
+        n_workers = 0
+    if n_workers <= 0:
+        return True
+    return int(remaining_nonces or 0) <= cpu_worker_hole(n_workers, booked)
+
+
 def leftover_feeds_box(
     *,
     remaining_nonces: int = 0,
@@ -591,8 +644,9 @@ def cpu_pack_seats_open(
 ) -> bool:
     """True when a multi-seat CPU box still has room to pack leftovers.
 
-    1-seat S/M stay False so a Pica finishes its last crumb first. GPU stays
-    False so leftover-hold / prefetch seats are unchanged.
+    S/M with a pack seat (max_concurrent=2) are True so a 16-nonce Pica
+    can take another leftover. GPU stays False so leftover-hold / prefetch
+    seats are unchanged.
     """
     if poller_is_gpu:
         return False
@@ -613,8 +667,9 @@ def should_skip_foreign_root_for_last_leftover(
 ) -> bool:
     """Finish the last leftover before taking knapsack / other mid-job roots.
 
-    1-seat S/M stay parked on that crumb. L/XL with spare seats may pack
-    more SAT leftovers. Proofs and another job's last leftover may still join.
+    1-seat boxes stay parked on that crumb. Pack-seat S/M and L/XL with
+    spare seats may take another leftover. Proofs and another job's last
+    leftover may still join.
     """
     if is_proof or candidate_is_last_leftover:
         return False
@@ -779,6 +834,8 @@ def assigned_crumb_should_release(
     """
     if is_proof or not has_fat_claimable:
         return False
+    if int(empty_seats or 1) > 1:
+        return False
     if leftover_finishes_job(unassigned_on_job, already_assigned=True):
         return False
     return leftover_is_crumb(
@@ -926,12 +983,14 @@ def same_job_fill_allows(
     sticky_own: bool = False,
     is_proof: bool = False,
     unassigned_on_job: int = 0,
+    pack_cross_job: bool = False,
 ) -> bool:
     """Once this poll starts a fat job, stay on it.
 
     Last leftovers may still join so a finishing job is not left sitting.
+    Packing a worker hole (16+16) may take a different job.
     """
-    if is_proof or sticky_own or not fill_bid:
+    if is_proof or sticky_own or not fill_bid or pack_cross_job:
         return True
     if leftover_finishes_job(unassigned_on_job, already_assigned=False):
         return True
@@ -2391,7 +2450,7 @@ class SlaveManager:
         )
 
     def _clamp_cpu_assign_cap(self, slave_name: str, proposed: int) -> int:
-        """CPU: S/M stay at 1 in-flight root; L/XL keep earnable seats."""
+        """CPU: S/M at most the pack-seat cap; L/XL keep earnable seats."""
         try:
             want = int(proposed or 0)
         except (TypeError, ValueError):
@@ -2677,8 +2736,6 @@ class SlaveManager:
             )
             if reason:
                 to_shed.append((slave, reason, int(row.get("inflight") or 0)))
-        if not to_shed:
-            return
         queries = []
         for slave, reason, inflight in to_shed:
             if reason == "overloaded_slow":
@@ -2723,6 +2780,35 @@ class SlaveManager:
                 ))
         if queries:
             get_db_conn().execute_many(*queries)
+        self._apply_sibling_stall_shed(now_i)
+
+    def _apply_sibling_stall_shed(self, now_ms: int) -> None:
+        released = shed_sibling_stalled_roots(now_ms)
+        if not released:
+            return
+        keys = {
+            (str(row.get("benchmark_id")), int(row.get("batch_idx")))
+            for row in released
+            if row.get("benchmark_id") is not None and row.get("batch_idx") is not None
+        }
+        acquired = self.lock.acquire(timeout=self._get_batches_lock_wait_sec)
+        if not acquired:
+            return
+        try:
+            for row in self.batches:
+                batch = row.get("batch") or {}
+                if batch.get("sampled_nonces") is not None:
+                    continue
+                bid = batch.get("benchmark_id")
+                bidx = batch.get("batch_idx")
+                if bid is None or bidx is None:
+                    continue
+                if (str(bid), int(bidx)) not in keys:
+                    continue
+                row["slave"] = None
+                row["start_time"] = None
+        finally:
+            self.lock.release()
 
     def _adaptive_max_concurrent(
         self,
@@ -2738,8 +2824,9 @@ class SlaveManager:
         the recent window, they earn more in-flight work. Trusted/operator
         slaves keep the route cap so local AWS/C3 tuning remains explicit.
 
-        Public CPU members: S/M stay at 1 job. L/XL scale with live
-        NUM_WORKERS (one job per 32 workers; see master.cpu_tier_caps).
+        Public CPU members: S/M may earn a pack seat (2) when worker
+        telem exists. L/XL scale with live NUM_WORKERS (one job per 32
+        workers; see master.cpu_tier_caps).
 
         Sticky-overflow preferred-owner checks should pass log=False so every
         get-batches poll does not multiply adaptive-cap DEBUG spam.
@@ -3493,7 +3580,17 @@ class SlaveManager:
                 seats = max(0, int(root_cap) - int(item["assigned"]))
                 if seats <= 0:
                     continue
-                item.pop("assigned_rows", None)
+                assigned_rows = item.pop("assigned_rows", None) or []
+                is_gpu = _slave_work_profile(item["name"]) == "gpu"
+                if is_gpu:
+                    item["workers"] = 0
+                    item["booked"] = 0
+                else:
+                    item["workers"] = poller_worker_count(
+                        self._slave_telemetry.get(item["name"]) or {},
+                        is_gpu=False,
+                    )
+                    item["booked"] = booked_cpu_nonces(assigned_rows)
                 item["seats"] = seats
                 kept.append(item)
             hungry = kept
@@ -3990,6 +4087,11 @@ class SlaveManager:
             updates = []
             algo_re = slave.get("algorithm_id_regex") or ""
             scanned = 0
+            idle_workers = poller_worker_count(
+                telem, is_gpu=_slave_work_profile(slave_name) == "gpu"
+            )
+            idle_is_gpu = _slave_work_profile(slave_name) == "gpu"
+            idle_booked = 0
             for b in self.batches:
                 if deadline_mono is not None and time.monotonic() >= deadline_mono:
                     break
@@ -4004,6 +4106,15 @@ class SlaveManager:
                 settings = batch.get("settings") or {}
                 algo = settings.get("algorithm_id") or ""
                 if not algo or not re.match(algo_re, algo):
+                    continue
+                rem = batch_remaining_nonces(batch)
+                if not cpu_pack_candidate_ok(
+                    is_proof=False,
+                    is_gpu=idle_is_gpu,
+                    remaining_nonces=rem,
+                    workers=idle_workers,
+                    booked=idle_booked,
+                ):
                     continue
                 b["slave"] = slave_name
                 b["start_time"] = now
@@ -4028,6 +4139,7 @@ class SlaveManager:
                     ),
                 ))
                 concurrent.append(batch)
+                idle_booked += rem
             if concurrent:
                 logger.info(
                     "idle leftover fill slave=%s claimed=%s scanned=%s",
@@ -4543,11 +4655,26 @@ class SlaveManager:
                             or bid in finish_root_bids
                             or root_affinity.get(bid) == slave_name
                         )
+                        pack_booked = booked_cpu_nonces(concurrent)
+                        pack_hole = cpu_worker_hole(poller_workers, pack_booked)
+                        if not cpu_pack_candidate_ok(
+                            is_proof=False,
+                            is_gpu=poller_is_gpu,
+                            remaining_nonces=batch_remaining_nonces(batch),
+                            workers=poller_workers,
+                            booked=pack_booked,
+                        ):
+                            continue
                         if not same_job_fill_allows(
                             fill_bid=fill_bid,
                             bid=bid,
                             sticky_own=sticky_own,
                             unassigned_on_job=unassigned_by_bid.get(str(bid), 0),
+                            pack_cross_job=(
+                                not poller_is_gpu
+                                and pack_booked > 0
+                                and pack_hole > 0
+                            ),
                         ):
                             continue
                         if (not finishes) and should_skip_crumb_for_empty_seat(
@@ -5359,11 +5486,26 @@ class SlaveManager:
                                 or bid in finish_root_bids
                                 or root_affinity.get(bid) == slave_name
                             )
+                            pack_booked = booked_cpu_nonces(concurrent)
+                            pack_hole = cpu_worker_hole(poller_workers, pack_booked)
+                            if not cpu_pack_candidate_ok(
+                                is_proof=False,
+                                is_gpu=poller_is_gpu,
+                                remaining_nonces=batch_remaining_nonces(batch),
+                                workers=poller_workers,
+                                booked=pack_booked,
+                            ):
+                                continue
                             if not same_job_fill_allows(
                                 fill_bid=fill_bid,
                                 bid=bid,
                                 sticky_own=sticky_own,
                                 unassigned_on_job=unassigned_by_bid.get(str(bid), 0),
+                                pack_cross_job=(
+                                    not poller_is_gpu
+                                    and pack_booked > 0
+                                    and pack_hole > 0
+                                ),
                             ):
                                 continue
                             if (not finishes) and should_skip_crumb_for_empty_seat(
