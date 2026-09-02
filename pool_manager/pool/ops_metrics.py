@@ -925,40 +925,47 @@ def _build_ops_metrics_uncached() -> dict:
         (online_cutoff, now_ms),
     ) or {}
 
-    sticky_jobs = db.fetch_all(
-        f"""
-        WITH {STICKY_ONLINE_OWNERS_CTE}
-        SELECT
-            left(j.benchmark_id, 12) AS benchmark,
-            j.benchmark_id,
-            j.challenge,
-            j.settings->>'track_id' AS track,
-            COUNT(*) AS sticky_reserved_roots,
-            (
-                SELECT rb2.slave
+    try:
+        sticky_jobs = db.fetch_all(
+            f"""
+            WITH {STICKY_ONLINE_OWNERS_CTE},
+            preferred_owners AS (
+                SELECT DISTINCT ON (rb2.benchmark_id)
+                    rb2.benchmark_id,
+                    rb2.slave AS preferred_slave
                 FROM root_batch rb2
                 JOIN slave_seen ss ON ss.slave_name = rb2.slave
-                WHERE rb2.benchmark_id = j.benchmark_id
-                  AND rb2.slave IS NOT NULL
+                JOIN sticky_online_owners soo ON soo.benchmark_id = rb2.benchmark_id
+                WHERE rb2.slave IS NOT NULL
                   AND (rb2.ready = true OR rb2.ready IS NULL)
                   AND ss.last_seen >= %s
-                ORDER BY rb2.end_time DESC NULLS LAST, rb2.start_time DESC NULLS LAST
-                LIMIT 1
-            ) AS preferred_slave,
-            ROUND((EXTRACT(EPOCH FROM NOW()) * 1000 - COALESCE(j.start_time, %s)) / 60000.0, 1) AS age_min
-        FROM root_batch rb
-        JOIN job j ON j.benchmark_id = rb.benchmark_id
-        JOIN sticky_online_owners soo ON soo.benchmark_id = rb.benchmark_id
-        WHERE rb.ready IS NULL
-          AND rb.slave IS NULL
-          AND COALESCE(j.stopped, false) = false
-          AND j.end_time IS NULL
-        GROUP BY j.benchmark_id, j.challenge, j.settings, j.start_time
-        ORDER BY sticky_reserved_roots DESC, age_min DESC
-        LIMIT 12
-        """,
-        (online_cutoff, online_cutoff, now_ms),
-    )
+                ORDER BY rb2.benchmark_id, rb2.end_time DESC NULLS LAST, rb2.start_time DESC NULLS LAST
+            )
+            SELECT
+                left(j.benchmark_id, 12) AS benchmark,
+                j.benchmark_id,
+                j.challenge,
+                j.settings->>'track_id' AS track,
+                COUNT(*) AS sticky_reserved_roots,
+                MAX(po.preferred_slave) AS preferred_slave,
+                ROUND((EXTRACT(EPOCH FROM NOW()) * 1000 - COALESCE(j.start_time, %s)) / 60000.0, 1) AS age_min
+            FROM root_batch rb
+            JOIN job j ON j.benchmark_id = rb.benchmark_id
+            JOIN sticky_online_owners soo ON soo.benchmark_id = rb.benchmark_id
+            LEFT JOIN preferred_owners po ON po.benchmark_id = j.benchmark_id
+            WHERE rb.ready IS NULL
+              AND rb.slave IS NULL
+              AND COALESCE(j.stopped, false) = false
+              AND j.end_time IS NULL
+            GROUP BY j.benchmark_id, j.challenge, j.settings, j.start_time
+            ORDER BY sticky_reserved_roots DESC, age_min DESC
+            LIMIT 12
+            """,
+            (online_cutoff, online_cutoff, now_ms),
+        )
+    except Exception as exc:
+        logger.warning("sticky_jobs query failed: %s", exc)
+        sticky_jobs = []
 
     fattest = db.fetch_all(
         """
