@@ -19,6 +19,8 @@ def _load_fns():
     module = ast.parse(source)
     wanted = {
         "_gpu_job_target",
+        "_gpu_slot_type_cap",
+        "_gpu_slot_hard_cap_total",
         "_target_resource_slots",
         "_target_per_challenge_caps",
         "_challenge_ids_by_profile",
@@ -38,6 +40,11 @@ def _load_fns():
         "GPU_SLOT_TYPES": ("vector_search", "hypergraph", "neuralnet_optimizer"),
         "MAX_CPU_SLOTS": 96,
         "MAX_GPU_SLOTS_PER_TYPE": 16,
+        "CHALLENGE_NAME_TO_ID": {
+            "vector_search": "c004",
+            "hypergraph": "c005",
+            "neuralnet_optimizer": "c006",
+        },
         "GPU_UNITS_PER_JOB": 4,
         "GPU_JOB_SPARE": 0,
         "UPSTREAM_SAFE_MAX_BENCHMARKS": 192,
@@ -252,6 +259,48 @@ def main() -> int:
     print(f"{'pass' if ok else 'FAIL'}: GPU spare adds headroom above busy -> total={spare_total}")
     failed += 0 if ok else 1
     ns["GPU_JOB_SPARE"] = 0
+
+    # Per-challenge env max must stop leftover spread from refilling HG/NN to 16.
+    ns["_max_challenge_benchmarks"] = lambda challenge_id: {
+        "c004": 8,
+        "c005": 1,
+        "c006": 3,
+    }.get(str(challenge_id), 12)
+    pinned = target_slots(
+        _capacity(
+            active_gpu=25,
+            active_gpu_units=25,
+            sizing_gpu_units=25,
+            current_slots={
+                "vehicle_routing": 40,
+                "vector_search": 16,
+                "hypergraph": 16,
+                "neuralnet_optimizer": 16,
+            },
+            slot_busy={
+                "vehicle_routing": 35,
+                "vector_search": 2,
+                "hypergraph": 1,
+                "neuralnet_optimizer": 1,
+            },
+            gpu_slot_floor={
+                "vector_search": 6,
+                "hypergraph": 1,
+                "neuralnet_optimizer": 3,
+            },
+        )
+    )
+    ok = (
+        int(pinned["hypergraph"]) == 1
+        and int(pinned["neuralnet_optimizer"]) == 3
+        and int(pinned["vector_search"]) <= 8
+    )
+    print(
+        f"{'pass' if ok else 'FAIL'}: challenge max pins GPU slots "
+        f"-> { {k: pinned[k] for k in keys} }"
+    )
+    failed += 0 if ok else 1
+    ns["_max_challenge_benchmarks"] = lambda challenge_id: 32
 
     return 2 if failed else 0
 

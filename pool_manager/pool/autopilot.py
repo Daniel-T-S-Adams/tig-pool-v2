@@ -144,6 +144,21 @@ def _max_challenge_benchmarks(challenge_id: str) -> int:
     return max(1, int(MAX_CPU_CHALLENGE_BENCHMARKS))
 
 
+def _gpu_slot_type_cap(slot_type: str) -> int:
+    """Hard slot ceiling for one GPU type.
+
+    Leftover GPU job budget used to spread up to MAX_GPU_SLOTS_PER_TYPE on
+    every type, so C005=1 still became hypergraph=16. Honor the per-challenge
+    env max as well.
+    """
+    cid = CHALLENGE_NAME_TO_ID.get(str(slot_type or ""), "")
+    return min(MAX_GPU_SLOTS_PER_TYPE, _max_challenge_benchmarks(cid))
+
+
+def _gpu_slot_hard_cap_total() -> int:
+    return sum(_gpu_slot_type_cap(slot_type) for slot_type in GPU_SLOT_TYPES)
+
+
 MAX_CPU_SLAVE_CAP = int(os.environ.get("AUTOPILOT_MAX_CPU_SLAVE_CAP", "256"))
 MAX_GPU_SLAVE_CAP = int(os.environ.get("AUTOPILOT_MAX_GPU_SLAVE_CAP", "24"))
 MIN_CPU_SLAVE_CAP = int(os.environ.get("AUTOPILOT_MIN_CPU_SLAVE_CAP", "4"))
@@ -2708,7 +2723,7 @@ def _gpu_job_target(capacity: dict) -> int:
         min(cpu_slots, max(int(capacity.get("active_cpu") or 0), busy_cpu)),
     )
     room = UPSTREAM_SAFE_MAX_BENCHMARKS - cpu_need - BENCHMARK_BUFFER
-    hard_cap = MAX_GPU_SLOTS_PER_TYPE * len(GPU_SLOT_TYPES)
+    hard_cap = _gpu_slot_hard_cap_total()
     target = min(target, hard_cap)
     if room > 0:
         target = min(target, max(floor_total, busy_total, 1, room))
@@ -2801,10 +2816,13 @@ def _target_resource_slots(capacity: dict) -> dict:
     busy_total = sum(busy_gpu_slots.values())
     floor_total = sum(int(gpu_slot_floor.get(slot_type, 0) or 0) for slot_type in GPU_SLOT_TYPES)
     gpu_target_total = max(gpu_target_total, busy_total, floor_total, 1)
-    gpu_target_total = min(gpu_target_total, MAX_GPU_SLOTS_PER_TYPE * len(GPU_SLOT_TYPES))
+    gpu_target_total = min(gpu_target_total, _gpu_slot_hard_cap_total())
 
     proposed_gpu_slots = {
-        slot_type: int(gpu_slot_floor.get(slot_type, 0) or 0)
+        slot_type: min(
+            _gpu_slot_type_cap(slot_type),
+            int(gpu_slot_floor.get(slot_type, 0) or 0),
+        )
         for slot_type in GPU_SLOT_TYPES
     }
     remaining = max(0, gpu_target_total - sum(proposed_gpu_slots.values()))
@@ -2821,7 +2839,7 @@ def _target_resource_slots(capacity: dict) -> dict:
     for slot_type in type_order:
         if remaining <= 0:
             break
-        room = MAX_GPU_SLOTS_PER_TYPE - proposed_gpu_slots[slot_type]
+        room = _gpu_slot_type_cap(slot_type) - proposed_gpu_slots[slot_type]
         if room <= 0:
             continue
         need = max(0, busy_gpu_slots.get(slot_type, 0) - proposed_gpu_slots[slot_type])
@@ -2830,13 +2848,14 @@ def _target_resource_slots(capacity: dict) -> dict:
             proposed_gpu_slots[slot_type] += add
             remaining -= add
 
-    # Spread leftover capacity across types (still may be below prior highs).
+    # Spread leftover capacity across types that still have challenge-max room.
+    # Do not refill hypergraph to 16 when C005=1.
     while remaining > 0:
         progressed = False
         for slot_type in type_order:
             if remaining <= 0:
                 break
-            room = MAX_GPU_SLOTS_PER_TYPE - proposed_gpu_slots[slot_type]
+            room = _gpu_slot_type_cap(slot_type) - proposed_gpu_slots[slot_type]
             if room <= 0:
                 continue
             proposed_gpu_slots[slot_type] += 1
