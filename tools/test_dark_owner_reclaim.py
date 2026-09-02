@@ -32,6 +32,8 @@ def _load_fn():
     # Default arg DARK_OWNER_RECLAIM_MS is a Name in the function signature —
     # provide it in ns before exec.
     ns["DARK_OWNER_RECLAIM_MS"] = 180_000
+    ns["FAT_ROOT_MIN_NONCES"] = 16
+    ns["FAT_ROOT_RECLAIM_MS"] = 180_000
     exec(compile(ast.Module(body=keep, type_ignores=[]), str(path), "exec"), ns, ns)
     return ns["batch_owner_stealable"], ns["reclaim_idle_assigned_roots"]
 
@@ -132,7 +134,7 @@ def main() -> int:
         if not ok:
             failed += 1
 
-    def _row(bid, idx, slave, start, proof=False):
+    def _row(bid, idx, slave, start, proof=False, nonces=8):
         return {
             "slave": slave,
             "start_time": start,
@@ -140,6 +142,7 @@ def main() -> int:
             "batch": {
                 "benchmark_id": bid,
                 "batch_idx": idx,
+                "num_nonces": nonces,
                 "sampled_nonces": [1] if proof else None,
             },
         }
@@ -198,6 +201,30 @@ def main() -> int:
     )
     ok = len(released) == 0 and proof[0]["slave"] == "idle-cpu"
     print(f"{'pass' if ok else 'FAIL'}: proofs are never reclaimed from idle owner")
+    if not ok:
+        failed += 1
+
+    fat_fresh = [_row("job-e", 0, "idle-cpu", now - 30_000, nonces=32)]
+    released = reclaim(
+        fat_fresh,
+        now_ms=now,
+        working_by_slave={"idle-cpu": False},
+        unassigned_by_bid={"job-e": 4},
+    )
+    ok = len(released) == 0 and fat_fresh[0]["slave"] == "idle-cpu"
+    print(f"{'pass' if ok else 'FAIL'}: telem-idle fat 32 stays under 3m grace")
+    if not ok:
+        failed += 1
+
+    fat_aged = [_row("job-f", 0, "idle-cpu", now - 180_000, nonces=32)]
+    released = reclaim(
+        fat_aged,
+        now_ms=now,
+        working_by_slave={"idle-cpu": False},
+        unassigned_by_bid={"job-f": 4},
+    )
+    ok = len(released) == 1 and fat_aged[0]["slave"] is None
+    print(f"{'pass' if ok else 'FAIL'}: telem-idle fat 32 releases after 3m")
     if not ok:
         failed += 1
 

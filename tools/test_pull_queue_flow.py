@@ -62,6 +62,8 @@ def main() -> int:
             "Optional": __import__("typing").Optional,
             "Set": __import__("typing").Set,
             "DARK_OWNER_RECLAIM_MS": 180_000,
+            "FAT_ROOT_MIN_NONCES": 16,
+            "FAT_ROOT_RECLAIM_MS": 180_000,
         },
     )
     per_bench = slave_ns["seat_per_bench_cap"]
@@ -96,9 +98,15 @@ def main() -> int:
         "Pica seat cap stays 1",
     )
     check(
-        reclaim(is_proof=False, owner_active=4, owner_working=False, unassigned_on_job=2)
+        reclaim(
+            is_proof=False,
+            owner_active=4,
+            owner_working=False,
+            unassigned_on_job=2,
+            remaining_nonces=8,
+        )
         is True,
-        "owner idle + assigned leftover is reclaimable",
+        "owner idle + assigned leftover crumb is reclaimable",
     )
     check(
         reclaim(is_proof=False, owner_active=0, owner_working=False, unassigned_on_job=0)
@@ -144,9 +152,44 @@ def main() -> int:
             owner_active=3,
             owner_working=False,
             unassigned_on_job=2,
+            remaining_nonces=8,
         )
         is True,
-        "next Pica/EPYC poll can claim an owner-idle assigned root",
+        "next Pica/EPYC poll can claim an owner-idle assigned crumb",
+    )
+    check(
+        stealable(
+            now_ms=now,
+            slave="idle-owner",
+            start_time=now - 5_000,
+            algorithm_id="c001_x",
+            online_slaves={"pica", "idle-owner"},
+            is_proof=False,
+            retry_ms=7_200_000,
+            owner_active=1,
+            owner_working=False,
+            unassigned_on_job=4,
+            remaining_nonces=32,
+        )
+        is False,
+        "telem-idle fat 32 is not stolen in the first seconds",
+    )
+    check(
+        stealable(
+            now_ms=now,
+            slave="idle-owner",
+            start_time=now - 180_000,
+            algorithm_id="c001_x",
+            online_slaves={"pica", "idle-owner"},
+            is_proof=False,
+            retry_ms=7_200_000,
+            owner_active=1,
+            owner_working=False,
+            unassigned_on_job=4,
+            remaining_nonces=32,
+        )
+        is True,
+        "telem-idle fat 32 is stealable after 3m",
     )
     check(
         stealable(

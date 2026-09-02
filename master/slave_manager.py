@@ -433,14 +433,20 @@ def assigned_root_reclaimable(
     assigned_age_ms: int = 0,
     owner_other_roots: int = 0,
     last_leftover_steal_ms: int = 10 * 60 * 1000,
+    remaining_nonces: int = 0,
+    fat_min_nonces: int = 16,
+    fat_reclaim_ms: int = 180_000,
 ) -> bool:
     """True when an assigned root should be leftover for the next empty seat.
 
-    Proofs stay with the artifact owner. Roots on an idle or not-working
-    owner become claimable so 49 pending rows do not sit next to idle boxes.
-    A last leftover stays put mid-start. After grace it is stolen when the
-    owner is telem-idle, not working, or still warehousing other roots, so a
-    dropped last leftover cannot pin the job until the hour retry.
+    Proofs stay with the artifact owner. Crumbs on an idle or not-working
+    owner become claimable immediately so empty seats can pull. A live fat
+    root (16+ nonces, or unknown size) needs a few minutes of assigned age
+    before telem-idle steal — packer boxes report idle while still running
+    a 32-nonce batch. A last leftover stays put mid-start. After grace it
+    is stolen when the owner is telem-idle, not working, or still
+    warehousing other roots, so a dropped last leftover cannot pin the job
+    until the hour retry.
     """
     if is_proof:
         return False
@@ -455,11 +461,29 @@ def assigned_root_reclaimable(
         if owner_working is False:
             return True
         return False
+    idle = False
     if owner_active is not None and int(owner_active or 0) <= 0:
-        return True
+        idle = True
     if owner_working is False:
-        return True
-    return False
+        idle = True
+    if not idle:
+        return False
+    try:
+        rem = int(remaining_nonces or 0)
+    except (TypeError, ValueError):
+        rem = 0
+    try:
+        fat_floor = max(1, int(fat_min_nonces or 16))
+    except (TypeError, ValueError):
+        fat_floor = 16
+    try:
+        grace = max(0, int(fat_reclaim_ms or 0))
+    except (TypeError, ValueError):
+        grace = 180_000
+    fat = rem <= 0 or rem >= fat_floor
+    if fat and int(assigned_age_ms or 0) < grace:
+        return False
+    return True
 
 
 def reclaim_idle_assigned_roots(
@@ -503,6 +527,10 @@ def reclaim_idle_assigned_roots(
         except (TypeError, ValueError):
             age = 0
         owner_n = int(active.get(owner) or 0)
+        try:
+            rem = int(batch.get("num_nonces") or 0)
+        except (TypeError, ValueError):
+            rem = 0
         if not assigned_root_reclaimable(
             is_proof=False,
             owner_active=owner_n,
@@ -510,6 +538,7 @@ def reclaim_idle_assigned_roots(
             unassigned_on_job=int(unassigned.get(bid) or 0),
             assigned_age_ms=age,
             owner_other_roots=max(0, owner_n - 1),
+            remaining_nonces=rem,
         ):
             continue
         released.append({
@@ -1305,6 +1334,8 @@ def _batch_retry_time(algorithm_id: str) -> int:
 DARK_OWNER_RECLAIM_MS = max(
     0, int(os.environ.get("SLAVE_DARK_OWNER_RECLAIM_MS", str(3 * 60 * 1000)))
 )
+FAT_ROOT_MIN_NONCES = max(1, int(os.environ.get("SLAVE_FAT_ROOT_MIN_NONCES", "16")))
+FAT_ROOT_RECLAIM_MS = max(0, int(os.environ.get("SLAVE_FAT_ROOT_RECLAIM_MS", "180000")))
 
 
 def batch_owner_stealable(
@@ -1320,12 +1351,15 @@ def batch_owner_stealable(
     owner_active: int | None = None,
     owner_working: bool | None = None,
     unassigned_on_job: int = 0,
+    remaining_nonces: int = 0,
 ) -> bool:
     """True when an assigned batch may be given to another polling slave.
 
     Proofs are never dark-stolen (local artifacts). Roots may be reclaimed
     from a dark owner after dark_reclaim_ms even if challenge retry is hours.
-    Idle or not-working owners release roots immediately so empty seats pull.
+    Crumbs on idle owners release immediately. Fat roots need
+    FAT_ROOT_RECLAIM_MS of assigned age so telem-idle lag does not restart
+    a live 16/32-nonce batch.
     """
     if slave is None or start_time is None:
         return True
@@ -1340,6 +1374,9 @@ def batch_owner_stealable(
         unassigned_on_job=unassigned_on_job,
         assigned_age_ms=age,
         owner_other_roots=other,
+        remaining_nonces=remaining_nonces,
+        fat_min_nonces=FAT_ROOT_MIN_NONCES,
+        fat_reclaim_ms=FAT_ROOT_RECLAIM_MS,
     ):
         return True
     effective_retry = (
@@ -4703,6 +4740,7 @@ class SlaveManager:
                         if owner
                         else None,
                         unassigned_on_job=unassigned_by_bid.get(str(bid), 0),
+                        remaining_nonces=batch_remaining_nonces(batch),
                     ):
                         continue
                     b["slave"] = slave_name
@@ -5476,6 +5514,7 @@ class SlaveManager:
                             if owner
                             else None,
                             unassigned_on_job=unassigned_by_bid.get(str(bid), 0),
+                            remaining_nonces=batch_remaining_nonces(batch),
                         ):
                             continue
                         if respect_cap and concurrent_by_bench.get(bid, 0) >= per_bench_cap:
