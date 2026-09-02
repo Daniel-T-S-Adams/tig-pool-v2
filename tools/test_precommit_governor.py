@@ -499,6 +499,36 @@ def main() -> int:
             False,
             "claimable covering empty seats is not a hole",
         ),
+        (
+            dict(
+                idle_cpu_override=True,
+                cpu_slots=96,
+                cpu_unassigned_claimable=11,
+                cpu_leftover_jobs=1,
+                unowned_cpu_root_jobs=0,
+                cpu_jobs_needing_roots=4,
+                cpu_create_target=96,
+                cpu_profile_blocked=False,
+                online_idle_cpu_slaves=1,
+            ),
+            False,
+            "1 leftover job feeds 1 idle CPU even when unowned=0",
+        ),
+        (
+            dict(
+                idle_cpu_override=True,
+                cpu_slots=96,
+                cpu_unassigned_claimable=11,
+                cpu_leftover_jobs=1,
+                unowned_cpu_root_jobs=0,
+                cpu_jobs_needing_roots=4,
+                cpu_create_target=96,
+                cpu_profile_blocked=False,
+                online_idle_cpu_slaves=23,
+            ),
+            True,
+            "1 leftover job is one-wide; 23 idle CPUs still need work",
+        ),
     ]
     for kwargs, expect, label in idle_cases:
         got = idle_needs(**kwargs)
@@ -626,6 +656,20 @@ def main() -> int:
     print(
         f"{'pass' if ok else 'FAIL'}: sticky leftover crumbs on live GPU jobs "
         f"do not hide keep-ahead when claimable_gpu=0"
+    )
+    if not ok:
+        failed += 1
+    ok = gpu_keep_ahead_fn(
+        unowned_gpu_root_jobs=0,
+        gpu_spare_jobs=2,
+        gpu_unassigned_claimable=0,
+        leftover_jobs=8,
+        online_idle_gpu_slaves=2,
+        gpu_unassigned_roots=8,
+    ) is False
+    print(
+        f"{'pass' if ok else 'FAIL'}: idle GPU cards pull sticky leftovers "
+        f"before keep-ahead mint"
     )
     if not ok:
         failed += 1

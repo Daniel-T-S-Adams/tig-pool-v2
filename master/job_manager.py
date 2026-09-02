@@ -35,6 +35,76 @@ def _job_profile(challenge_id: str) -> str:
     return "gpu" if cid in GPU_CHALLENGE_IDS else "cpu"
 
 
+_NEW_ROOT_BATCH_SINK = None
+
+
+def register_new_root_batch_sink(fn) -> None:
+    """SlaveManager registers so new jobs appear in memory before run()."""
+    global _NEW_ROOT_BATCH_SINK
+    _NEW_ROOT_BATCH_SINK = fn
+
+
+def new_root_memory_rows(
+    *,
+    benchmark_id: str,
+    batch_size: int,
+    num_nonces: int,
+    num_batches: int,
+    settings,
+    hyperparameters=None,
+    fuel_budget=None,
+    download_url=None,
+    rand_hash=None,
+    challenge=None,
+    algorithm=None,
+    job_start_time=None,
+) -> list:
+    """In-memory root rows matching the UNION ALL load in slave_manager.run()."""
+    rows = []
+    size = max(1, int(batch_size or 1))
+    total = max(0, int(num_nonces or 0))
+    count = max(0, int(num_batches or 0))
+    bid = str(benchmark_id or "")
+    for idx in range(count):
+        start = idx * size
+        n = min(size, max(0, total - start))
+        rows.append({
+            "slave": None,
+            "start_time": None,
+            "end_time": None,
+            "num_attempts": 0,
+            "batch": {
+                "id": f"{bid}_{idx}",
+                "benchmark_id": bid,
+                "start_nonce": start,
+                "num_nonces": n,
+                "settings": settings,
+                "hyperparameters": hyperparameters,
+                "sampled_nonces": None,
+                "fuel_budget": fuel_budget,
+                "download_url": download_url,
+                "rand_hash": rand_hash,
+                "batch_size": size,
+                "batch_idx": idx,
+                "challenge": challenge,
+                "algorithm": algorithm,
+                "job_start_time": job_start_time,
+            },
+        })
+    return rows
+
+
+def notify_new_root_batches(rows) -> int:
+    fn = _NEW_ROOT_BATCH_SINK
+    if not fn or not rows:
+        return 0
+    try:
+        return int(fn(rows) or 0)
+    except Exception as exc:
+        logger.warning("new root memory ingest failed: %s", exc)
+        return 0
+
+
 def pin_new_job_batches(benchmark_id: str, challenge_id: str, num_batches: int) -> int:
     """Reserve new root rows for idle boxes of the matching profile.
 
@@ -685,6 +755,25 @@ class JobManager:
                     ]
             
             get_db_conn().execute_many(*atomic_inserts)
+            if not skip:
+                try:
+                    settings_obj = asdict(x.settings) if hasattr(x.settings, "__dataclass_fields__") else x.settings
+                    notify_new_root_batches(new_root_memory_rows(
+                        benchmark_id=benchmark_id,
+                        batch_size=batch_size,
+                        num_nonces=x.details.num_nonces,
+                        num_batches=num_batches,
+                        settings=settings_obj,
+                        hyperparameters=x.details.hyperparameters,
+                        fuel_budget=x.details.fuel_budget,
+                        download_url=bin.details.download_url,
+                        rand_hash=x.details.rand_hash,
+                        challenge=c_name,
+                        algorithm=a_name,
+                        job_start_time=int(time.time() * 1000),
+                    ))
+                except Exception as exc:
+                    logger.warning("new root memory rows failed %s: %s", benchmark_id, exc)
             # Pins made claimable=0: named boxes held rows other idle boxes
             # could not pull. Slaves poll ~1s; unassigned leftovers are the queue.
             if not skip and os.environ.get("PIN_NEW_JOB_BATCHES", "false").lower() in (

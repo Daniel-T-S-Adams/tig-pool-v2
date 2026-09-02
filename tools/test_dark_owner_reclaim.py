@@ -13,22 +13,31 @@ def _load_fn():
     source = path.read_text(encoding="utf-8")
     module = ast.parse(source)
     keep = []
-    want = {"batch_owner_stealable", "assigned_root_reclaimable", "leftover_finishes_job"}
+    want = {
+        "batch_owner_stealable",
+        "assigned_root_reclaimable",
+        "leftover_finishes_job",
+        "reclaim_idle_assigned_roots",
+    }
     for node in module.body:
         if isinstance(node, ast.FunctionDef) and node.name in want:
             keep.append(node)
     if {n.name for n in keep} != want:
         raise RuntimeError(f"missing slave_manager helpers: {want - {n.name for n in keep}}")
-    ns: dict = {"Optional": __import__("typing").Optional, "Set": __import__("typing").Set}
+    ns: dict = {
+        "Optional": __import__("typing").Optional,
+        "Set": __import__("typing").Set,
+        "Dict": __import__("typing").Dict,
+    }
     # Default arg DARK_OWNER_RECLAIM_MS is a Name in the function signature —
     # provide it in ns before exec.
     ns["DARK_OWNER_RECLAIM_MS"] = 180_000
     exec(compile(ast.Module(body=keep, type_ignores=[]), str(path), "exec"), ns, ns)
-    return ns["batch_owner_stealable"]
+    return ns["batch_owner_stealable"], ns["reclaim_idle_assigned_roots"]
 
 
 def main() -> int:
-    fn = _load_fn()
+    fn, reclaim = _load_fn()
     now = 10_000_000
     online = {"alive"}
     cases = [
@@ -122,6 +131,76 @@ def main() -> int:
         print(f"{'pass' if ok else 'FAIL'}: {label}")
         if not ok:
             failed += 1
+
+    def _row(bid, idx, slave, start, proof=False):
+        return {
+            "slave": slave,
+            "start_time": start,
+            "end_time": None,
+            "batch": {
+                "benchmark_id": bid,
+                "batch_idx": idx,
+                "sampled_nonces": [1] if proof else None,
+            },
+        }
+
+    idle_owner = [
+        _row("job-a", 0, "idle-cpu", now - 30_000),
+        _row("job-a", 1, "idle-cpu", now - 30_000),
+        _row("job-a", 2, None, None),
+    ]
+    released = reclaim(
+        idle_owner,
+        now_ms=now,
+        working_by_slave={"idle-cpu": False},
+        unassigned_by_bid={"job-a": 1},
+    )
+    ok = (
+        len(released) == 2
+        and idle_owner[0]["slave"] is None
+        and idle_owner[1]["slave"] is None
+        and idle_owner[2]["slave"] is None
+    )
+    print(f"{'pass' if ok else 'FAIL'}: telem-idle owner releases assigned roots")
+    if not ok:
+        failed += 1
+
+    busy = [_row("job-b", 0, "busy-cpu", now - 30_000)]
+    released = reclaim(
+        busy,
+        now_ms=now,
+        working_by_slave={"busy-cpu": True},
+        unassigned_by_bid={"job-b": 11},
+    )
+    ok = len(released) == 0 and busy[0]["slave"] == "busy-cpu"
+    print(f"{'pass' if ok else 'FAIL'}: working owner keeps assigned roots")
+    if not ok:
+        failed += 1
+
+    last = [_row("job-c", 0, "idle-cpu", now - 30_000)]
+    released = reclaim(
+        last,
+        now_ms=now,
+        working_by_slave={"idle-cpu": False},
+        unassigned_by_bid={"job-c": 0},
+    )
+    ok = len(released) == 0 and last[0]["slave"] == "idle-cpu"
+    print(f"{'pass' if ok else 'FAIL'}: last leftover stays under 10m steal grace")
+    if not ok:
+        failed += 1
+
+    proof = [_row("job-d", 0, "idle-cpu", now - 30_000, proof=True)]
+    released = reclaim(
+        proof,
+        now_ms=now,
+        working_by_slave={"idle-cpu": False},
+        unassigned_by_bid={},
+    )
+    ok = len(released) == 0 and proof[0]["slave"] == "idle-cpu"
+    print(f"{'pass' if ok else 'FAIL'}: proofs are never reclaimed from idle owner")
+    if not ok:
+        failed += 1
+
     return 2 if failed else 0
 
 

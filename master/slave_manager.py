@@ -56,6 +56,7 @@ from master.job_manager import (
     OVERLOAD_SLAVE_SHED_MIN_AGE_MS,
     STUCK_SLAVE_SHED_ENABLED,
     STUCK_SLAVE_SHED_WINDOW_MS,
+    register_new_root_batch_sink,
     should_shed_slave_roots,
 )
 
@@ -446,6 +447,69 @@ def assigned_root_reclaimable(
     if owner_working is False:
         return True
     return False
+
+
+def reclaim_idle_assigned_roots(
+    rows,
+    *,
+    now_ms: int,
+    working_by_slave=None,
+    unassigned_by_bid=None,
+):
+    """Unassign roots whose owner is telem-idle so the leftover pass can take them.
+
+    Mutates ``rows`` in place (clears slave/start_time). Proofs stay. The last
+    leftover keeps the 10-minute steal grace from assigned_root_reclaimable.
+    Returns dicts with the previous owner for SQL.
+    """
+    working = working_by_slave or {}
+    unassigned = dict(unassigned_by_bid or {})
+    active: Dict[str, int] = {}
+    for row in rows or []:
+        if row.get("end_time") is not None:
+            continue
+        owner = row.get("slave")
+        if not owner:
+            continue
+        batch = row.get("batch") or {}
+        if batch.get("sampled_nonces") is not None:
+            continue
+        key = str(owner)
+        active[key] = active.get(key, 0) + 1
+    released = []
+    for row in rows or []:
+        if row.get("end_time") is not None or not row.get("slave"):
+            continue
+        batch = row.get("batch") or {}
+        if batch.get("sampled_nonces") is not None:
+            continue
+        bid = str(batch.get("benchmark_id") or "")
+        owner = str(row.get("slave"))
+        try:
+            age = int(now_ms) - int(row.get("start_time") or 0)
+        except (TypeError, ValueError):
+            age = 0
+        owner_n = int(active.get(owner) or 0)
+        if not assigned_root_reclaimable(
+            is_proof=False,
+            owner_active=owner_n,
+            owner_working=working.get(owner),
+            unassigned_on_job=int(unassigned.get(bid) or 0),
+            assigned_age_ms=age,
+            owner_other_roots=max(0, owner_n - 1),
+        ):
+            continue
+        released.append({
+            "slave": owner,
+            "benchmark_id": batch.get("benchmark_id"),
+            "batch_idx": batch.get("batch_idx"),
+        })
+        row["slave"] = None
+        row["start_time"] = None
+        active[owner] = max(0, owner_n - 1)
+        if bid:
+            unassigned[bid] = int(unassigned.get(bid) or 0) + 1
+    return released
 
 
 def batch_remaining_nonces(batch: Optional[dict] = None) -> int:
@@ -1430,6 +1494,45 @@ class SlaveManager:
             500,
             int(os.environ.get("SLAVE_ARTIFACT_CACHE_MS", "15000")),
         )
+        register_new_root_batch_sink(self.ingest_new_root_rows)
+
+    def ingest_new_root_rows(self, rows) -> int:
+        """Add newly created unassigned roots so the feeder sees them before run()."""
+        incoming = list(rows or [])
+        if not incoming:
+            return 0
+        acquired = self.lock.acquire(timeout=self._get_batches_lock_wait_sec)
+        if not acquired:
+            return 0
+        added = 0
+        try:
+            have = set()
+            for row in self.batches:
+                batch = row.get("batch") or {}
+                bid = batch.get("benchmark_id")
+                bidx = batch.get("batch_idx")
+                if bid is None or bidx is None:
+                    continue
+                if batch.get("sampled_nonces") is not None:
+                    continue
+                have.add((str(bid), int(bidx)))
+            for row in incoming:
+                batch = (row or {}).get("batch") or {}
+                bid = batch.get("benchmark_id")
+                bidx = batch.get("batch_idx")
+                if bid is None or bidx is None:
+                    continue
+                key = (str(bid), int(bidx))
+                if key in have:
+                    continue
+                self.batches.append(row)
+                have.add(key)
+                added += 1
+        finally:
+            self.lock.release()
+        if added:
+            logger.info("ingested %s new root row(s) into feeder memory", added)
+        return added
 
     def _ensure_slave_seen_table(self):
         if self._slave_seen_ready:
@@ -3670,14 +3773,32 @@ class SlaveManager:
             self._enqueue_assign_sql(updates)
         return released
 
+    def _reclaim_assigned_sql(self, released: List[dict]) -> list:
+        updates = []
+        for item in released or []:
+            updates.append((
+                """
+                UPDATE root_batch
+                SET slave = NULL,
+                    start_time = NULL,
+                    end_time = NULL
+                WHERE benchmark_id = %s
+                  AND batch_idx = %s
+                  AND slave = %s
+                  AND ready IS NULL
+                """,
+                (
+                    item.get("benchmark_id"),
+                    item.get("batch_idx"),
+                    item.get("slave"),
+                ),
+            ))
+        return updates
+
     def _feed_hungry_slaves(self, only_slave: str | None = None) -> int:
-        if only_slave is None:
-            self._shed_gpu_over_cap()
+        self._shed_gpu_over_cap()
         now = time.time() * 1000
         views = self._get_assign_views()
-        hungry = self._hungry_slave_items(int(now), views, only_slave=only_slave)
-        if not hungry:
-            return 0
         (
             views,
             root_affinity,
@@ -3688,6 +3809,38 @@ class SlaveManager:
             working_by_slave,
             preferred_at_cap,
         ) = self._leftover_takeable_maps(now)
+        wait = min(self._get_batches_lock_wait_sec, 0.2)
+        released: List[dict] = []
+        acquired = self.lock.acquire(timeout=wait)
+        if acquired:
+            try:
+                released = reclaim_idle_assigned_roots(
+                    self.batches,
+                    now_ms=int(now),
+                    working_by_slave=working_by_slave,
+                    unassigned_by_bid=unassigned_by_bid,
+                )
+            finally:
+                self.lock.release()
+        elif only_slave is None:
+            logger.warning("leftover feeder reclaim lock timeout")
+        hungry = self._hungry_slave_items(int(now), views, only_slave=only_slave)
+        if not hungry:
+            if released:
+                self._enqueue_assign_sql(self._reclaim_assigned_sql(released))
+                logger.info("leftover feeder reclaimed=%s (no hungry seats)", len(released))
+            return 0
+        if released:
+            (
+                views,
+                root_affinity,
+                online_slaves,
+                overflow_benchmark_ids,
+                unassigned_by_bid,
+                active_by_slave,
+                working_by_slave,
+                preferred_at_cap,
+            ) = self._leftover_takeable_maps(now)
         takeable_by_slave = self._takeable_bids_for_hungry(
             hungry,
             unassigned_by_bid=unassigned_by_bid,
@@ -3698,10 +3851,11 @@ class SlaveManager:
             working_by_slave=working_by_slave,
             preferred_at_cap=preferred_at_cap,
         )
-        wait = min(self._get_batches_lock_wait_sec, 0.2)
         acquired = self.lock.acquire(timeout=wait)
         if not acquired:
             logger.warning("leftover feeder lock timeout")
+            if released:
+                self._enqueue_assign_sql(self._reclaim_assigned_sql(released))
             return 0
         claimed: List[dict] = []
         try:
@@ -3737,14 +3891,21 @@ class SlaveManager:
                 row["start_time"] = now
         finally:
             self.lock.release()
+        updates = []
+        if released:
+            updates.extend(self._reclaim_assigned_sql(released))
         if claimed:
-            self._enqueue_assign_sql(self._feed_claim_sql(claimed))
+            updates.extend(self._feed_claim_sql(claimed))
+        if updates:
+            self._enqueue_assign_sql(updates)
+        if claimed or released:
             by_slave: Dict[str, int] = {}
             for row in claimed:
                 by_slave[row["slave"]] = by_slave.get(row["slave"], 0) + 1
             logger.info(
-                "leftover feeder claimed=%s slaves=%s",
+                "leftover feeder claimed=%s reclaimed=%s slaves=%s",
                 len(claimed),
+                len(released),
                 len(by_slave),
             )
         return len(claimed)

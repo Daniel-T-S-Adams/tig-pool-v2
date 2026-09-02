@@ -454,8 +454,12 @@ def compute_idle_cpu_needs_work(
     if cpu_profile_blocked:
         return False
     idle = max(0, int(online_idle_cpu_slaves or 0))
+    leftover = max(0, int(cpu_leftover_jobs or 0))
+    unowned = max(0, int(unowned_cpu_root_jobs or 0))
     if cpu_leftover_jobs is not None:
-        food = max(0, int(unowned_cpu_root_jobs or 0))
+        # Leftover *jobs* feed idle boxes (one-wide). Unowned jobs are extra.
+        # Do not treat leftover ROOT rows as seats (900 batches / 7 jobs != 900).
+        food = max(unowned, leftover)
     else:
         food = max(0, int(cpu_unassigned_claimable or 0))
     return idle > 0 and food < idle
@@ -685,15 +689,15 @@ def compute_gpu_keep_ahead(
     leftover_jobs: int | None = None,
     gpu_root_jobs: int = 0,
     gpu_fleet_spare: int = 1,
+    gpu_unassigned_roots: int = 0,
 ) -> bool:
     """True when the GPU spare pile is short. GPUs may all be busy.
 
     Spare target is a few replacements, capped by live GPU count.
     Claimable leftovers *are* that pile. Sticky crumbs on live GPU jobs
-    are not — idle cards cannot pull them, so they must not hide a
-    replacement while claimable_gpu is 0.
+    are not — busy cards cannot pull them. Idle cards can, so sticky
+    leftovers next to idle GPUs must not hide a replacement mint.
     """
-    del online_idle_gpu_slaves
     del leftover_jobs
     if gpu_profile_blocked:
         return False
@@ -704,7 +708,13 @@ def compute_gpu_keep_ahead(
     ):
         return False
     spare_n = max(0, int(keep_ahead_spare or 0))
-    if max(0, int(gpu_unassigned_claimable or 0)) > 0:
+    claimable = max(0, int(gpu_unassigned_claimable or 0))
+    idle = max(0, int(online_idle_gpu_slaves or 0))
+    unassigned = max(0, int(gpu_unassigned_roots or 0))
+    pullable = claimable
+    if idle > 0:
+        pullable = max(pullable, unassigned)
+    if pullable > 0:
         return False
     proving = max(0, int(gpu_jobs_in_proof_phase or 0))
     online = max(0, int(online_gpu_slaves or 0))
@@ -739,6 +749,7 @@ def compute_idle_gpu_needs_work(
     leftover_jobs: int | None = None,
     gpu_root_jobs: int = 0,
     gpu_fleet_spare: int = 1,
+    gpu_unassigned_roots: int = 0,
 ) -> bool:
     """True when GPUs need more claimable work, including a keep-ahead spare.
 
@@ -764,6 +775,7 @@ def compute_idle_gpu_needs_work(
         leftover_jobs=leftover_jobs,
         gpu_root_jobs=gpu_root_jobs,
         gpu_fleet_spare=gpu_fleet_spare,
+        gpu_unassigned_roots=gpu_unassigned_roots,
     )
 
 
@@ -1912,6 +1924,7 @@ class PrecommitManager:
                     leftover_jobs=gpu_leftover_jobs,
                     gpu_root_jobs=gpu_jobs_needing_roots,
                     gpu_fleet_spare=_gpu_fleet_spare(),
+                    gpu_unassigned_roots=gpu_unassigned_roots,
                 ),
                 "idle_gpu_needs_work": compute_idle_gpu_needs_work(
                     gpu_unassigned_claimable=gpu_unassigned_claimable,
@@ -1925,6 +1938,7 @@ class PrecommitManager:
                     leftover_jobs=gpu_leftover_jobs,
                     gpu_root_jobs=gpu_jobs_needing_roots,
                     gpu_fleet_spare=_gpu_fleet_spare(),
+                    gpu_unassigned_roots=gpu_unassigned_roots,
                 ),
             }
         except Exception as exc:
