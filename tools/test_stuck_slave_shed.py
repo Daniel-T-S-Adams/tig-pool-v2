@@ -11,13 +11,15 @@ def _load_fn():
     path = pathlib.Path(__file__).resolve().parents[1] / "master" / "job_manager.py"
     source = path.read_text(encoding="utf-8")
     module = ast.parse(source)
-    target = None
+    keep = []
     for node in module.body:
-        if isinstance(node, ast.FunctionDef) and node.name == "should_shed_slave_roots":
-            target = node
-            break
-    if target is None:
-        raise RuntimeError("should_shed_slave_roots not found")
+        if isinstance(node, ast.FunctionDef) and node.name in (
+            "should_shed_slave_roots",
+            "sibling_root_stalled",
+        ):
+            keep.append(node)
+    if {n.name for n in keep} != {"should_shed_slave_roots", "sibling_root_stalled"}:
+        raise RuntimeError("missing shed helpers")
     ns = {
         "Optional": __import__("typing").Optional,
         "STUCK_SLAVE_SHED_MIN_INFLIGHT": 2,
@@ -29,13 +31,16 @@ def _load_fn():
         "DARK_ROOT_SHED_MS": 180_000,
         "ZOMBIE_IDLE_AGE_MS": 5 * 60 * 1000,
         "ZOMBIE_SINGLE_AGE_MS": 45 * 60 * 1000,
+        "SIBLING_STALL_MIN_READY": 2,
+        "SIBLING_STALL_MULT": 2.5,
+        "SIBLING_STALL_MIN_AGE_MS": 15 * 60 * 1000,
     }
-    exec(compile(ast.Module(body=[target], type_ignores=[]), str(path), "exec"), ns, ns)
-    return ns["should_shed_slave_roots"]
+    exec(compile(ast.Module(body=keep, type_ignores=[]), str(path), "exec"), ns, ns)
+    return ns["should_shed_slave_roots"], ns["sibling_root_stalled"]
 
 
 def main() -> int:
-    fn = _load_fn()
+    fn, sibling = _load_fn()
     twelve_min = 12 * 60 * 1000
     five_min = 5 * 60 * 1000
     forty_five_min = 45 * 60 * 1000
@@ -173,6 +178,43 @@ def main() -> int:
             )
             is None,
             "telem idle but recent complete kept",
+        ),
+        (
+            sibling(
+                assigned_age_ms=1_778_541,
+                sibling_ready_n=4,
+                sibling_median_ms=578_000,
+            )
+            is True,
+            "hive33 30m vs 10m siblings is stalled",
+        ),
+        (
+            sibling(
+                assigned_age_ms=700_000,
+                sibling_ready_n=4,
+                sibling_median_ms=578_000,
+            )
+            is False,
+            "same job still under 2.5x sibling median is kept",
+        ),
+        (
+            sibling(
+                assigned_age_ms=1_778_541,
+                sibling_ready_n=1,
+                sibling_median_ms=578_000,
+            )
+            is False,
+            "one finished sibling is not enough",
+        ),
+        (
+            sibling(
+                is_proof=True,
+                assigned_age_ms=1_778_541,
+                sibling_ready_n=4,
+                sibling_median_ms=578_000,
+            )
+            is False,
+            "proofs are never sibling-stolen",
         ),
     ]
     failed = 0

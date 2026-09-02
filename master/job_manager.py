@@ -442,6 +442,15 @@ ZOMBIE_IDLE_AGE_MS = max(
 ZOMBIE_SINGLE_AGE_MS = max(
     60_000, int(os.environ.get("SLAVE_ZOMBIE_SINGLE_AGE_MS", str(45 * 60 * 1000)))
 )
+# One assigned root still COMPUTING after siblings finished. hive33 sat 30m
+# on a 10m job because inflight=1 + telem working skips every other shed.
+SIBLING_STALL_MIN_READY = max(
+    1, int(os.environ.get("SLAVE_SIBLING_STALL_MIN_READY", "2"))
+)
+SIBLING_STALL_MULT = float(os.environ.get("SLAVE_SIBLING_STALL_MULT", "2.5"))
+SIBLING_STALL_MIN_AGE_MS = max(
+    60_000, int(os.environ.get("SLAVE_SIBLING_STALL_MIN_AGE_MS", str(15 * 60 * 1000)))
+)
 
 
 def should_shed_slave_roots(
@@ -504,6 +513,131 @@ def should_shed_slave_roots(
     ):
         return "overloaded_slow"
     return None
+
+
+def sibling_root_stalled(
+    *,
+    is_proof: bool = False,
+    assigned_age_ms: int = 0,
+    sibling_ready_n: int = 0,
+    sibling_median_ms: int = 0,
+    min_ready: int = SIBLING_STALL_MIN_READY,
+    slow_mult: float = SIBLING_STALL_MULT,
+    min_age_ms: int = SIBLING_STALL_MIN_AGE_MS,
+) -> bool:
+    """True when one assigned root is far slower than finished siblings.
+
+    A 32-nonce job with four ROOT READY batches at ~10m and one COMPUTING
+    at 30m is this case. Telem still says working, so zombie_idle will not
+    fire, and the 45m single-batch backstop is too late for the merkle.
+    """
+    if is_proof:
+        return False
+    if int(sibling_ready_n or 0) < int(min_ready or 2):
+        return False
+    med = max(0, int(sibling_median_ms or 0))
+    if med <= 0:
+        return False
+    try:
+        mult = float(slow_mult)
+    except (TypeError, ValueError):
+        mult = 2.5
+    cutoff = max(int(min_age_ms or 0), int(med * max(1.0, mult)))
+    return int(assigned_age_ms or 0) >= cutoff
+
+
+def shed_sibling_stalled_roots(now_ms: int) -> list:
+    """Unassign roots that are 2.5x slower than finished siblings on the job."""
+    now_i = int(now_ms)
+    try:
+        rows = get_db_conn().fetch_all(
+            """
+            WITH sibling AS (
+                SELECT
+                    benchmark_id,
+                    COUNT(*) AS ready_n,
+                    PERCENTILE_CONT(0.5) WITHIN GROUP (
+                        ORDER BY (end_time - start_time)
+                    ) AS median_ms
+                FROM root_batch
+                WHERE ready = true
+                  AND start_time IS NOT NULL
+                  AND end_time IS NOT NULL
+                  AND end_time > start_time
+                GROUP BY benchmark_id
+                HAVING COUNT(*) >= %s
+            )
+            SELECT
+                r.benchmark_id,
+                r.batch_idx,
+                r.slave,
+                (%s - r.start_time) AS age_ms,
+                s.median_ms,
+                s.ready_n
+            FROM root_batch r
+            JOIN sibling s ON s.benchmark_id = r.benchmark_id
+            JOIN job j ON j.benchmark_id = r.benchmark_id
+            WHERE r.ready IS NULL
+              AND r.slave IS NOT NULL
+              AND r.start_time IS NOT NULL
+              AND COALESCE(j.stopped, false) = false
+              AND j.merkle_root_ready IS NULL
+              AND (%s - r.start_time) >= GREATEST(
+                    %s::bigint,
+                    (s.median_ms * %s)::bigint
+                  )
+            """,
+            (
+                int(SIBLING_STALL_MIN_READY),
+                now_i,
+                now_i,
+                int(SIBLING_STALL_MIN_AGE_MS),
+                float(SIBLING_STALL_MULT),
+            ),
+        ) or []
+    except Exception as exc:
+        logger.warning("sibling stall query failed: %s", exc)
+        return []
+    stalled = []
+    for row in rows:
+        if not sibling_root_stalled(
+            assigned_age_ms=int(row.get("age_ms") or 0),
+            sibling_ready_n=int(row.get("ready_n") or 0),
+            sibling_median_ms=int(float(row.get("median_ms") or 0)),
+        ):
+            continue
+        stalled.append(row)
+    if not stalled:
+        return []
+    queries = []
+    for row in stalled:
+        logger.warning(
+            "shedding sibling-stalled root %s_%s from %s "
+            "(age_ms=%s sibling_median_ms=%s ready_n=%s)",
+            row.get("benchmark_id"),
+            row.get("batch_idx"),
+            row.get("slave"),
+            row.get("age_ms"),
+            row.get("median_ms"),
+            row.get("ready_n"),
+        )
+        queries.append((
+            """
+            UPDATE root_batch
+            SET slave = NULL,
+                start_time = NULL,
+                end_time = NULL
+            WHERE benchmark_id = %s
+              AND batch_idx = %s
+              AND slave = %s
+              AND ready IS NULL
+            """,
+            (row.get("benchmark_id"), row.get("batch_idx"), row.get("slave")),
+        ))
+    if queries:
+        get_db_conn().execute_many(*queries)
+    return stalled
+
 
 class JobManager:
     def on_new_block(
@@ -1029,8 +1163,6 @@ class JobManager:
             )
             if reason:
                 to_shed.append((slave, reason, int(row.get("inflight") or 0)))
-        if not to_shed:
-            return
         queries = []
         for slave, reason, inflight in to_shed:
             if reason == "overloaded_slow":
@@ -1070,6 +1202,7 @@ class JobManager:
                 ))
         if queries:
             get_db_conn().execute_many(*queries)
+        shed_sibling_stalled_roots(now_ms)
 
     def _stop_stranded_proof_jobs(self, now_ms: int):
         """Stop jobs whose remaining proofs are stuck on offline artifact owners."""
