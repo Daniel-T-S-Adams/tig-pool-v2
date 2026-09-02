@@ -115,13 +115,33 @@ def _get_pool() -> pool.ThreadedConnectionPool:
         return _pool
 
 
+def _reset_conn(conn) -> bool:
+    """Clear an aborted txn so a pooled connection is safe to reuse.
+
+    A statement_timeout leaves the session in INERROR. If that connection is
+    given out again without ROLLBACK, every later query is
+    InFailedSqlTransaction (stats, health, autopilot, ops).
+    """
+    try:
+        if getattr(conn, "closed", 1):
+            return False
+        conn.rollback()
+        return True
+    except Exception:
+        try:
+            conn.close()
+        except Exception:
+            pass
+        return False
+
+
 def _checkout():
     current = _get_pool()
     deadline = time.monotonic() + _pool_wait_sec
     last_err: BaseException | None = None
     while True:
         try:
-            return current.getconn()
+            conn = current.getconn()
         except pool.PoolError as exc:
             last_err = exc
             if _pool_wait_sec <= 0 or time.monotonic() >= deadline:
@@ -132,6 +152,18 @@ def _checkout():
                 )
                 raise
             time.sleep(0.05)
+            continue
+        if _reset_conn(conn):
+            return conn
+        try:
+            current.putconn(conn, close=True)
+        except Exception:
+            try:
+                conn.close()
+            except Exception:
+                pass
+        if time.monotonic() >= deadline:
+            raise last_err or RuntimeError("Postgres connection reset failed")
     raise last_err  # pragma: no cover
 
 
