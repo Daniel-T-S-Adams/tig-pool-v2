@@ -70,10 +70,11 @@ STRANDED_PROOF_STOP_MS = max(
     60_000,
     int(os.environ.get("SLAVE_STRANDED_PROOF_STOP_MS", str(15 * 60 * 1000))),
 )
-# Hold the owner's empty seat after last root until TIG returns sampled_nonces.
-# This is not SAMPLING_GAP_LOCK (that zeroed root_cap and stranded leftovers).
+# OFF by default. A 3-minute reserve parked every finished 32-thread box
+# empty while TIG sampled, which dropped fleet throughput. Set >0 only as
+# an emergency brake. This is not SAMPLING_GAP_LOCK.
 SAMPLING_GAP_RESERVE_MS = max(
-    0, int(os.environ.get("SLAVE_SAMPLING_GAP_RESERVE_MS", str(3 * 60 * 1000)))
+    0, int(os.environ.get("SLAVE_SAMPLING_GAP_RESERVE_MS", "0"))
 )
 
 
@@ -154,22 +155,9 @@ def should_sticky_leftover_fanout(
     preferred_inflight_total: int = 0,
     preferred_cap: int = 0,
 ) -> bool:
-    """Unlock exclusive sticky when leftovers sit idle while peers are empty.
-
-    Do not compare leftovers to the owner's remaining cap. A 32-slot owner
-    with 3 in flight still "has room" for 29, so a 8–20 root job stayed
-    exclusive and the rest of the fleet got "no batches available".
-    Keep a small leftover exclusive; fan the rest out only when same-profile
-    peers are idle. Proofs stay on whoever actually ran each root.
-    """
-    del preferred_inflight_total, preferred_cap
-    unassigned = max(0, int(unassigned_on_job or 0))
-    keep = max(0, int(leftover_keep or 0))
-    if 0 < unassigned <= 1:
-        return True
-    if unassigned <= keep:
-        return False
-    return int(idle_peers or 0) > 0
+    """Unlock exclusive sticky so leftover roots stay a shared CPU queue."""
+    del leftover_keep, preferred_inflight_total, preferred_cap, idle_peers
+    return max(0, int(unassigned_on_job or 0)) > 0
 
 
 def should_sticky_idle_overflow(
@@ -180,17 +168,23 @@ def should_sticky_idle_overflow(
     job_age_ms: int,
     idle_ms: int,
     preferred_online: bool,
+    cpu_shared_queue: bool = False,
 ) -> bool:
-    """True when aged sticky leftovers should overflow to other live CPUs.
+    """True when sticky leftovers should overflow to other live CPUs.
 
-    Preferred is online and under normal sticky protection, but is not working
-    this job while unassigned roots remain past idle_ms.
+    GPU stays exclusive while the preferred card is still working the job.
+    CPU leftovers are a shared queue: sibling roots must fan out even when
+    the owner is computing another batch of the same job.
     """
-    if idle_ms <= 0:
-        return False
     if not preferred_slave or not preferred_online:
         return False
-    if not has_unassigned or preferred_inflight_on_job:
+    if not has_unassigned:
+        return False
+    if cpu_shared_queue:
+        return True
+    if idle_ms <= 0:
+        return False
+    if preferred_inflight_on_job:
         return False
     return int(job_age_ms) >= int(idle_ms)
 
@@ -227,16 +221,17 @@ def should_skip_root_for_slave(
     preferred_at_cap: bool = False,
     poller_idle: bool = False,
     preferred_working: bool | None = None,
+    poller_is_gpu: bool = False,
 ) -> bool:
     """True when this polling slave must not take a root for a sticky job.
 
-    If the preferred owner is online and working, only that owner may take
-    more roots. Dark or telem-idle preferred owners do not warehouse the
-    pile. preferred_at_cap means the master released exclusive sticky lock.
-    An idle poller must never be told 'no batches' while leftovers sit.
-    Proofs stay with whoever actually ran each root.
+    CPU leftovers are a shared queue: a free CPU seat must take the next
+    root. GPU still respects sticky so a busy card does not steal. Dark or
+    telem-idle owners do not warehouse. Proofs stay with the root owner.
     """
     if not sticky_enabled:
+        return False
+    if not poller_is_gpu:
         return False
     if poller_idle:
         return False

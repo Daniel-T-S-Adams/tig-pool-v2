@@ -401,17 +401,17 @@ def _governor_view(
                   AND j.settings->>'challenge_id' IN %s
             ) AS gpu_unassigned_roots,
             (
+                -- CPU leftovers are a shared queue. An online sticky owner
+                -- computing batch 1 must not hide sibling unassigned roots.
                 SELECT COUNT(*)
                 FROM root_batch rb
                 JOIN job j ON j.benchmark_id = rb.benchmark_id
-                LEFT JOIN sticky_online_owners soo ON soo.benchmark_id = rb.benchmark_id
                 WHERE rb.ready IS NULL
                   AND rb.slave IS NULL
                   AND COALESCE(j.stopped, false) = false
                   AND j.end_time IS NULL
                   AND j.merkle_root_ready IS NULL
                   AND j.settings->>'challenge_id' IN %s
-                  AND soo.benchmark_id IS NULL
             ) AS cpu_unassigned_claimable,
             (
                 SELECT COUNT(*)
@@ -555,12 +555,17 @@ def _governor_view(
     block_reasons.extend(cpu_reasons)
     block_reasons.extend(gpu_reasons)
 
+    leftover_starve = (
+        int(row.get("cpu_unassigned_roots") or 0) > 0
+        and online_idle_cpu_instant > 0
+    )
     return {
         "enabled": True,
         "would_block_global": would_block_global,
         "at_max_concurrent": at_max_concurrent,
         "global_reason": global_reason,
         "idle_cpu_needs_work": idle_cpu_needs_work,
+        "cpu_leftover_starve": leftover_starve,
         "block_reasons": block_reasons,
         "profile_blocks": {
             "cpu": bool(cpu_reasons),

@@ -41,6 +41,19 @@ def main() -> int:
         (
             should_sticky_idle_overflow(
                 preferred_slave="a",
+                preferred_inflight_on_job=True,
+                has_unassigned=True,
+                job_age_ms=1_000,
+                idle_ms=3 * 60 * 1000,
+                preferred_online=True,
+                cpu_shared_queue=True,
+            )
+            is True,
+            "CPU shared queue overflows sibling leftovers while owner computes batch 1",
+        ),
+        (
+            should_sticky_idle_overflow(
+                preferred_slave="a",
                 preferred_inflight_on_job=False,
                 has_unassigned=True,
                 job_age_ms=60_000,

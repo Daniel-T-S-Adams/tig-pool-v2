@@ -1687,9 +1687,9 @@ class PrecommitManager:
                           AND j.settings->>'challenge_id' IN %s
                     ) AS gpu_unassigned_roots,
                     (
-                        -- Claimable = unassigned and not reserved for an online
-                        -- sticky owner. Sticky-warehoused roots must not freeze
-                        -- CPU creates for idle newcomers.
+                        -- CPU leftovers are a shared queue. Sticky owner still
+                        -- working the job must not hide sibling unassigned roots
+                        -- from idle CPUs or from idle-override food counts.
                         SELECT COUNT(*)
                         FROM root_batch rb
                         JOIN job j ON j.benchmark_id = rb.benchmark_id
@@ -1699,15 +1699,6 @@ class PrecommitManager:
                           AND j.end_time IS NULL
                           AND j.merkle_root_ready IS NULL
                           AND j.settings->>'challenge_id' IN %s
-                          AND NOT EXISTS (
-                            SELECT 1
-                            FROM root_batch rb2
-                            JOIN slave_seen ss ON ss.slave_name = rb2.slave
-                            WHERE rb2.benchmark_id = rb.benchmark_id
-                              AND rb2.slave IS NOT NULL
-                              AND (rb2.ready = true OR rb2.ready IS NULL)
-                              AND ss.last_seen >= %s
-                          )
                     ) AS cpu_unassigned_claimable,
                     (
                         SELECT COUNT(*)
@@ -1789,7 +1780,6 @@ class PrecommitManager:
                     CPU_CHALLENGE_IDS,
                     GPU_CHALLENGE_IDS,
                     CPU_CHALLENGE_IDS,
-                    now_ms - int(SLAVE_ONLINE_MS),
                     GPU_CHALLENGE_IDS,
                     now_ms - int(SLAVE_ONLINE_MS),
                     now_ms - int(SLAVE_ONLINE_MS),
@@ -1819,6 +1809,9 @@ class PrecommitManager:
             gpu_unassigned_claimable = int(row.get("gpu_unassigned_claimable") or 0)
             online_idle_cpu_slaves = int(row.get("online_idle_cpu_slaves") or 0)
             online_idle_gpu_slaves = int(row.get("online_idle_gpu_slaves") or 0)
+            cpu_leftover_starve = (
+                cpu_unassigned_roots > 0 and online_idle_cpu_slaves > 0
+            )
             online_idle_cpu_seats = 0
             try:
                 seat_rows = get_db_conn().fetch_all(
@@ -1901,6 +1894,7 @@ class PrecommitManager:
                 "profile_caps": profile_caps,
                 "profile_blocks": profile_blocks,
                 "idle_cpu_needs_work": False,
+                "cpu_leftover_starve": cpu_leftover_starve,
                 "idle_gpu_starved": compute_idle_gpu_starved(
                     gpu_unassigned_claimable=gpu_unassigned_claimable,
                     online_idle_gpu_slaves=online_idle_gpu_slaves,
@@ -2687,7 +2681,7 @@ class PrecommitManager:
                 selection["track_settings"][t_id] = {}
             _pinned = _track_algo_map.get(t_id)
             if _pinned is not None and _pinned != a_id:
-            selection["track_settings"][t_id] = {}
+                selection["track_settings"][t_id] = {}
         
         for t_id in set(challenge_config["active_tracks"]):
             for k in set(selection["track_settings"][t_id]) - {"num_bundles", "hyperparameters", "fuel_budget"}:

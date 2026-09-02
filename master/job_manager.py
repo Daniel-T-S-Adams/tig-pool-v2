@@ -299,15 +299,6 @@ def fetch_cpu_adaptive_batch_telemetry(now_ms: Optional[int] = None) -> Dict:
                       AND j.end_time IS NULL
                       AND j.merkle_root_ready IS NULL
                       AND j.settings->>'challenge_id' IN %s
-                      AND NOT EXISTS (
-                        SELECT 1
-                        FROM root_batch rb2
-                        JOIN slave_seen ss ON ss.slave_name = rb2.slave
-                        WHERE rb2.benchmark_id = rb.benchmark_id
-                          AND rb2.slave IS NOT NULL
-                          AND (rb2.ready = true OR rb2.ready IS NULL)
-                          AND ss.last_seen >= %s
-                      )
                 ) AS cpu_unassigned_claimable,
                 (
                     SELECT COUNT(*)
@@ -323,7 +314,7 @@ def fetch_cpu_adaptive_batch_telemetry(now_ms: Optional[int] = None) -> Dict:
                       )
                 ) AS online_idle_cpu_slaves
             """,
-            (CPU_CHALLENGE_IDS, online_cutoff, online_cutoff),
+            (CPU_CHALLENGE_IDS, online_cutoff),
         ) or {}
         return {
             "cpu_unassigned_claimable": int(row.get("cpu_unassigned_claimable") or 0),

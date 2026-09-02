@@ -46,6 +46,8 @@ def main() -> int:
         "owner_idle_unlocks_sticky",
         "should_skip_crumb_for_empty_seat",
         "takeable_unassigned_by_bid",
+        "leftover_job_profile",
+        "leftover_profiles_by_bid",
         "claimable_has_fat_leftover",
         "feed_leftover_rank",
         "same_job_fill_allows",
@@ -68,6 +70,8 @@ def main() -> int:
     same_job = ns["same_job_fill_allows"]
     takeable = ns["leftover_takeable_by_poller"]
     takeable_map = ns["takeable_unassigned_by_bid"]
+    job_profile = ns["leftover_job_profile"]
+    profiles_by_bid = ns["leftover_profiles_by_bid"]
     pick = ns["pick_fill_bid"]
     leftover_nonces = ns["leftover_nonces_by_job"]
     unassigned = ns["unassigned_roots_by_job"]
@@ -326,7 +330,22 @@ def main() -> int:
             unassigned_on_job=80,
         )
         is False,
-        "fat leftover locked to another owner is not takeable",
+        "at-cap CPU with no empty seat does not list a foreign leftover",
+    )
+    check(
+        takeable(
+            "fat",
+            slave_name="pica",
+            root_affinity={"fat": "other"},
+            overflow_benchmark_ids=set(),
+            unassigned_on_job=80,
+            poller_idle=False,
+            poller_is_gpu=False,
+            poller_empty_seats=1,
+            poller_max_concurrent=1,
+        )
+        is True,
+        "CPU with a free seat takes the next leftover immediately",
     )
     check(
         takeable(
@@ -495,6 +514,84 @@ def main() -> int:
         )
         is False,
         "sticky-locked fat does not count as fat claimable for this poller",
+    )
+    check(
+        job_profile(
+            {
+                "challenge": "energy_arbitrage",
+                "settings": {"algorithm_id": "c001_first_energy"},
+            }
+        )
+        == "cpu",
+        "energy leftover is a CPU job",
+    )
+    check(
+        job_profile(
+            {
+                "challenge": "vector_search",
+                "settings": {"algorithm_id": "c004_something"},
+            }
+        )
+        == "gpu",
+        "vector_search leftover is a GPU job",
+    )
+    profile_rows = [
+        {
+            "batch": {
+                "benchmark_id": "energy",
+                "challenge": "energy_arbitrage",
+                "settings": {"algorithm_id": "c001_first_energy"},
+            }
+        },
+        {
+            "batch": {
+                "benchmark_id": "gpujob",
+                "challenge": "vector_search",
+                "settings": {"algorithm_id": "c004_vs"},
+            }
+        },
+    ]
+    check(
+        profiles_by_bid(profile_rows) == {"energy": "cpu", "gpujob": "gpu"},
+        "leftover profile map splits CPU and GPU jobs",
+    )
+    cpu_idle_map = takeable_map(
+        {"energy": 11, "gpujob": 206},
+        slave_name="pica",
+        root_affinity={"energy": "owner", "gpujob": "gpu-owner"},
+        overflow_benchmark_ids=set(),
+        poller_idle=True,
+        poller_is_gpu=False,
+        bid_profile={"energy": "cpu", "gpujob": "gpu"},
+        poller_profile="cpu",
+    )
+    check(
+        cpu_idle_map == {"energy": 11},
+        "idle CPU takeable map ignores GPU leftovers so energy is not skipped as a crumb",
+    )
+    check(
+        has_fat(
+            unassigned_by_bid=cpu_idle_map,
+            leftover_nonces_by_bid={"energy": 64, "gpujob": 800},
+            workers=128,
+            empty_seats=1,
+        )
+        is False,
+        "after GPU leftovers are filtered, a 64-nonce energy pile is not fake-fat",
+    )
+    check(
+        skip(
+            remaining_nonces=64,
+            unassigned_on_job=11,
+            workers=128,
+            empty_seats=1,
+            poller_assigned=0,
+            taking_this_poll=0,
+            has_fat_claimable=False,
+            sticky_own=False,
+        )
+        is False,
+        "idle XL takes energy leftovers when they are the only CPU food",
     )
 
     check(

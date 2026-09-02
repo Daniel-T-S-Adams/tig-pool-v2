@@ -418,8 +418,12 @@
         && !gov.at_max_concurrent
         && !gov.would_block_global;
       const pill = el("status-pill");
+      const cpuIdle = ((s.by_profile || {}).cpu || {}).idle || 0;
+      const cpuUnassigned = (gov.counts || {}).cpu_unassigned_roots || 0;
       if (data.master_config_error) {
         setPill(pill, "config error", "bad");
+      } else if (gov.cpu_leftover_starve || (cpuUnassigned > 0 && cpuIdle > 0)) {
+        setPill(pill, "CPU leftovers idle", "bad");
       } else if (gpuOnlyCap && gov.idle_cpu_needs_work) {
         setPill(pill, "CPU underfed", "warn");
       } else if (reasons.length) {

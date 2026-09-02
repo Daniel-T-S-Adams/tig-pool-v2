@@ -130,7 +130,8 @@ GET_BATCHES_STALL_MS = max(
 GET_BATCHES_LIVE_POLL_STALE_MS = max(
     0, int(os.environ.get("GET_BATCHES_LIVE_POLL_STALE_MS", "30000"))
 )
-# Background leftover feeder. HTTP never ranks or claims.
+# Background leftover feeder. Empty-mailbox HTTP claims leftovers for
+# that slave only so idle CPUs never wait a feeder cycle.
 GET_BATCHES_FEEDER_MS = max(
     50, int(os.environ.get("GET_BATCHES_FEEDER_MS", "250"))
 )
@@ -609,17 +610,17 @@ def leftover_takeable_by_poller(
     poller_empty_seats: int = 0,
     poller_max_concurrent: int = 1,
 ) -> bool:
-    """Fat leftovers locked to another live working owner do not skip crumbs.
+    """CPU leftovers are takeable whenever this poller has a free seat.
 
-    The last leftover of a job is always takeable so it can finish.
-    Offline or telem-idle preferred owners do not lock the pile.
-    An empty GPU or CPU box, a multi-seat CPU with spare seats, or any
-    poller when the owner is already at its assign cap, must take leftovers
-    instead of sitting idle.
+    GPU still stays sticky unless the card is idle, the owner is dark, or
+    the owner is at cap. Last leftover on GPU stays takeable so a job can
+    finish.
     """
     if leftover_finishes_job(unassigned_on_job, already_assigned=False):
         return True
     if poller_idle:
+        return True
+    if not poller_is_gpu and int(poller_empty_seats or 0) > 0:
         return True
     if cpu_pack_seats_open(
         poller_is_gpu=poller_is_gpu,
@@ -639,6 +640,28 @@ def leftover_takeable_by_poller(
         return True
     overflow = overflow_benchmark_ids or set()
     return key in overflow or bid in overflow
+
+
+def leftover_job_profile(batch: Optional[dict] = None) -> str:
+    """cpu or gpu from leftover batch metadata. Missing algo defaults cpu."""
+    batch = batch or {}
+    chal = str(batch.get("challenge") or "")
+    if chal in {"vector_search", "hypergraph", "neuralnet_optimizer"}:
+        return "gpu"
+    algo = str((batch.get("settings") or {}).get("algorithm_id") or "")
+    if str(algo)[:4] in ("c004", "c005", "c006"):
+        return "gpu"
+    return "cpu"
+
+
+def leftover_profiles_by_bid(rows) -> Dict[str, str]:
+    out: Dict[str, str] = {}
+    for row in rows or []:
+        batch = (row or {}).get("batch") or {}
+        bid = str(batch.get("benchmark_id") or "")
+        if bid:
+            out[bid] = leftover_job_profile(batch)
+    return out
 
 
 def should_skip_crumb_for_empty_seat(
@@ -748,10 +771,18 @@ def takeable_unassigned_by_bid(
     poller_is_gpu: bool = False,
     poller_empty_seats: int = 0,
     poller_max_concurrent: int = 1,
+    bid_profile: Optional[dict] = None,
+    poller_profile: str = "",
 ) -> Dict[str, int]:
     out: Dict[str, int] = {}
     at_cap_owners = preferred_at_cap or set()
+    want_profile = str(poller_profile or "").strip()
+    profiles = bid_profile or {}
     for bid, n_unassigned in (unassigned_by_bid or {}).items():
+        if want_profile:
+            profile = profiles.get(str(bid))
+            if profile and profile != want_profile:
+                continue
         preferred = (root_affinity or {}).get(str(bid))
         preferred_online = None
         preferred_releases = None
@@ -3305,14 +3336,19 @@ class SlaveManager:
             except Exception:
                 logger.exception("leftover feeder failed")
 
-    def _hungry_slave_items(self, now_ms: int, views) -> List[dict]:
-        cutoff = int(now_ms) - int(self._get_batches_feeder_hungry_ms)
-        with self._poll_seen_lock:
-            names = [
-                name
-                for name, seen in self._poll_seen.items()
-                if int(seen or 0) >= cutoff
-            ]
+    def _hungry_slave_items(
+        self, now_ms: int, views, only_slave: str | None = None
+    ) -> List[dict]:
+        if only_slave:
+            names = [only_slave]
+        else:
+            cutoff = int(now_ms) - int(self._get_batches_feeder_hungry_ms)
+            with self._poll_seen_lock:
+                names = [
+                    name
+                    for name, seen in self._poll_seen.items()
+                    if int(seen or 0) >= cutoff
+                ]
         hungry = []
         for slave_name in names:
             route = self._slave_route(slave_name)
@@ -3354,19 +3390,7 @@ class SlaveManager:
                 seats = max(0, int(root_cap) - int(item["assigned"]))
                 if seats <= 0:
                     continue
-                assigned_rows = item.pop("assigned_rows")
-                if slave_holds_last_leftover(
-                    assigned_rows,
-                    leftover_finish_bids(
-                        unassigned_roots_by_job(self.batches),
-                        unfinished_roots_by_job(self.batches),
-                    ),
-                ) and not cpu_pack_seats_open(
-                    poller_is_gpu=_slave_work_profile(item["name"]) == "gpu",
-                    empty_seats=seats,
-                    max_concurrent=item["max_concurrent"],
-                ):
-                    continue
+                item.pop("assigned_rows", None)
                 item["seats"] = seats
                 kept.append(item)
             hungry = kept
@@ -3480,6 +3504,7 @@ class SlaveManager:
                         job_age_ms=unassigned_job_age[bid],
                         idle_ms=eff_idle_ms,
                         preferred_online=True,
+                        cpu_shared_queue=_slave_work_profile(preferred) != "gpu",
                     ):
                         continue
                     overflow_benchmark_ids.add(bid)
@@ -3512,8 +3537,10 @@ class SlaveManager:
         preferred_at_cap: Optional[Set[str]] = None,
     ) -> Dict[str, Set[str]]:
         out: Dict[str, Set[str]] = {}
+        profiles = leftover_profiles_by_bid(self.batches)
         for item in hungry:
             name = item["name"]
+            poller_is_gpu = _slave_work_profile(name) == "gpu"
             takeable = takeable_unassigned_by_bid(
                 unassigned_by_bid,
                 slave_name=name,
@@ -3524,9 +3551,11 @@ class SlaveManager:
                 working_by_slave=working_by_slave,
                 preferred_at_cap=preferred_at_cap,
                 poller_idle=int(active_by_slave.get(name) or 0) <= 0,
-                poller_is_gpu=_slave_work_profile(name) == "gpu",
+                poller_is_gpu=poller_is_gpu,
                 poller_empty_seats=int(item.get("seats") or 0),
                 poller_max_concurrent=int(item.get("max_concurrent") or 1),
+                bid_profile=profiles,
+                poller_profile="gpu" if poller_is_gpu else "cpu",
             )
             out[name] = set(takeable)
         return out
@@ -3641,11 +3670,12 @@ class SlaveManager:
             self._enqueue_assign_sql(updates)
         return released
 
-    def _feed_hungry_slaves(self) -> int:
-        self._shed_gpu_over_cap()
+    def _feed_hungry_slaves(self, only_slave: str | None = None) -> int:
+        if only_slave is None:
+            self._shed_gpu_over_cap()
         now = time.time() * 1000
         views = self._get_assign_views()
-        hungry = self._hungry_slave_items(int(now), views)
+        hungry = self._hungry_slave_items(int(now), views, only_slave=only_slave)
         if not hungry:
             return 0
         (
@@ -3982,6 +4012,7 @@ class SlaveManager:
                     job_age_ms=unassigned_job_age[bid],
                     idle_ms=eff_idle_ms,
                     preferred_online=True,
+                    cpu_shared_queue=_slave_work_profile(preferred) != "gpu",
                 ):
                     continue
                 overflow_benchmark_ids.add(bid)
@@ -4027,6 +4058,8 @@ class SlaveManager:
             poller_is_gpu=poller_is_gpu,
             poller_empty_seats=max(0, int(max_concurrent) - poller_assigned),
             poller_max_concurrent=int(max_concurrent),
+            bid_profile=leftover_profiles_by_bid(self.batches),
+            poller_profile="gpu" if poller_is_gpu else "cpu",
         )
         poller_workers = poller_worker_count(
             self._slave_telemetry.get(slave_name) or {},
@@ -4329,6 +4362,7 @@ class SlaveManager:
                             preferred_working=working_by_slave.get(preferred)
                             if preferred
                             else None,
+                            poller_is_gpu=poller_is_gpu,
                         )
                             and bid not in overflow_benchmark_ids
                         ):
@@ -4472,8 +4506,9 @@ class SlaveManager:
             self._note_mailbox_poll(slave_name, int(now))
             self._touch_slave_seen(slave_name, int(now))
 
-            # Mailbox only: return already-assigned work. Leftover claiming is
-            # the leftover-feeder thread. HTTP must not rank or take self.lock.
+            # Mailbox first. An empty mailbox claims leftovers for this slave
+            # now so idle CPUs do not wait on the feeder while ROOT NOT
+            # ASSIGNED rows sit next to them. HTTP still does not rank.
             started_mono = time.monotonic()
             poll_token = None
             with self._get_batches_inflight_lock:
@@ -4483,6 +4518,14 @@ class SlaveManager:
                 self._get_batches_starts[poll_token] = started_mono
             try:
                 mailbox = self._peek_assigned_batches(slave_name)
+                if not mailbox:
+                    try:
+                        self._feed_hungry_slaves(only_slave=slave_name)
+                    except Exception:
+                        logger.exception(
+                            "empty-mailbox leftover feed failed for %s", slave_name
+                        )
+                    mailbox = self._peek_assigned_batches(slave_name)
                 return JSONResponse(content=jsonable_encoder(mailbox))
             except Exception as exc:
                 logger.warning("get-batches mailbox failed for %s: %s", slave_name, exc)
@@ -4785,6 +4828,8 @@ class SlaveManager:
                     poller_is_gpu=poller_is_gpu,
                     poller_empty_seats=max(0, int(max_concurrent) - len(assigned)),
                     poller_max_concurrent=int(max_concurrent),
+                    bid_profile=leftover_profiles_by_bid(self.batches),
+                    poller_profile="gpu" if poller_is_gpu else "cpu",
                 )
                 has_fat_claimable = claimable_has_fat_leftover(
                     unassigned_by_bid=takeable_unassigned,
@@ -5028,6 +5073,7 @@ class SlaveManager:
                             preferred_working=working_by_slave.get(preferred)
                             if preferred
                             else None,
+                            poller_is_gpu=poller_is_gpu,
                         ):
                             if bid not in overflow_benchmark_ids:
                                 continue
@@ -5092,6 +5138,7 @@ class SlaveManager:
                             preferred_working=working_by_slave.get(preferred)
                             if preferred
                             else None,
+                            poller_is_gpu=poller_is_gpu,
                         ):
                             if bid not in overflow_benchmark_ids:
                                 continue
