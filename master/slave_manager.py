@@ -56,6 +56,7 @@ from master.job_manager import (
     OVERLOAD_SLAVE_SHED_MIN_AGE_MS,
     STUCK_SLAVE_SHED_ENABLED,
     STUCK_SLAVE_SHED_WINDOW_MS,
+    assemble_ready_proofs,
     register_new_root_batch_sink,
     shed_sibling_stalled_roots,
     should_shed_slave_roots,
@@ -6107,6 +6108,12 @@ class SlaveManager:
                             proof_slave,
                         )
                         _heartbeat(proof_slave)
+                        Thread(
+                            target=assemble_ready_proofs,
+                            args=(benchmark_id,),
+                            name=f"assemble-proof-{benchmark_id[:8]}",
+                            daemon=True,
+                        ).start()
                         return submit_ack("duplicate_accepted")
                 raise
             try:
@@ -6146,6 +6153,12 @@ class SlaveManager:
             ])
             _retire_batch_id(batch_id, is_proof=True)
             _heartbeat(slave_name)
+            Thread(
+                target=assemble_ready_proofs,
+                args=(benchmark_id,),
+                name=f"assemble-proof-{benchmark_id[:8]}",
+                daemon=True,
+            ).start()
             return submit_ack("accepted")
             
         thread = Thread(target=lambda: uvicorn.run(app, host="0.0.0.0", port=5115, access_log=False))  # nosec B104 — container binds all interfaces; nginx controls external exposure

@@ -467,6 +467,147 @@ SIBLING_STALL_SKIP_CHALLENGES = frozenset(
 )
 
 
+def should_kick_proof_assembly(
+    *,
+    merkle_root_ready: bool = False,
+    merkle_proofs_ready: bool = False,
+    stopped: bool = False,
+    all_batches_ready: bool = False,
+) -> bool:
+    """True when the last proof batch can be stitched now."""
+    if stopped or merkle_proofs_ready or not merkle_root_ready:
+        return False
+    return bool(all_batches_ready)
+
+
+def assemble_ready_proofs(benchmark_id: Optional[str] = None) -> int:
+    """Stitch batch proofs into job merkle_proofs as soon as all batches are ready.
+
+    Called from the last /submit-batch-proofs and as a job_manager.run() fallback
+    so SUBMITTING PROOF does not wait on a slow main-loop pass.
+    """
+    only = str(benchmark_id or "") or None
+    rows = get_db_conn().fetch_all(
+        """
+        WITH ready AS (
+            SELECT A.benchmark_id
+            FROM proofs_batch A
+            INNER JOIN job B
+                ON B.merkle_root_ready
+                AND B.merkle_proofs_ready IS NULL
+                AND B.stopped IS NULL
+                AND B.end_time IS NULL
+                AND A.benchmark_id = B.benchmark_id
+            WHERE (%s IS NULL OR A.benchmark_id = %s)
+            GROUP BY A.benchmark_id
+            HAVING BOOL_AND(A.ready IS TRUE)
+        )
+        SELECT
+            A.benchmark_id,
+            JSONB_AGG(D.merkle_proofs ORDER BY D.batch_idx) AS batch_merkle_proofs,
+            B.batch_size,
+            B.num_batches
+        FROM ready A
+        INNER JOIN job B
+            ON A.benchmark_id = B.benchmark_id
+        INNER JOIN proofs_batch C
+            ON A.benchmark_id = C.benchmark_id
+        INNER JOIN batch_data D
+            ON C.benchmark_id = D.benchmark_id
+            AND C.batch_idx = D.batch_idx
+        GROUP BY
+            A.benchmark_id,
+            B.batch_size,
+            B.num_batches
+        """,
+        (only, only),
+    ) or []
+    assembled = 0
+    for row in rows:
+        if _assemble_one_proof_job(row):
+            assembled += 1
+    return assembled
+
+
+def _assemble_one_proof_job(row: dict) -> bool:
+    benchmark_id = row["benchmark_id"]
+    raw_batch_proofs = row["batch_merkle_proofs"]
+    if raw_batch_proofs is None or any(y is None for y in raw_batch_proofs):
+        logger.warning(
+            f"job {benchmark_id}: skipping proof assembly "
+            f"(null batch merkle_proofs)"
+        )
+        return False
+    batch_merkle_proofs = [
+        MerkleProof.from_dict(x)
+        for y in raw_batch_proofs
+        for x in y
+    ]
+
+    batch_merkle_roots = get_db_conn().fetch_one(
+        """
+        SELECT JSONB_AGG(merkle_root ORDER BY batch_idx) as batch_merkle_roots
+        FROM batch_data
+        WHERE benchmark_id = %s
+        """,
+        (benchmark_id,)
+    )
+
+    batch_merkle_roots = (batch_merkle_roots or {}).get("batch_merkle_roots")
+    if batch_merkle_roots is None or any(r is None for r in batch_merkle_roots):
+        logger.warning(
+            f"job {benchmark_id}: skipping proof assembly "
+            f"(null batch merkle_roots)"
+        )
+        return False
+
+    logger.info(f"job {benchmark_id}: (proof ready)")
+
+    depth_offset = (row["batch_size"] - 1).bit_length()
+    tree = MerkleTree(
+        [MerkleHash.from_str(root) for root in batch_merkle_roots],
+        1 << (row["num_batches"] - 1).bit_length()
+    )
+
+    merkle_proofs = []
+    for proof in batch_merkle_proofs:
+        batch_idx = proof.leaf.nonce // row["batch_size"]
+        upper_stems = [
+            (d + depth_offset, h)
+            for d, h in tree.calc_merkle_branch(batch_idx).stems
+        ]
+        merkle_proofs.append(
+            MerkleProof(
+                leaf=proof.leaf,
+                branch=MerkleBranch(proof.branch.stems + upper_stems)
+            )
+        )
+
+    get_db_conn().execute_many(*[
+        (
+            """
+            UPDATE job_data
+            SET merkle_proofs = %s
+            WHERE benchmark_id = %s
+            """,
+            (
+                json.dumps([x.to_dict() for x in merkle_proofs]),
+                benchmark_id
+            )
+        ),
+        (
+            """
+            UPDATE job
+            SET merkle_proofs_ready = true
+            WHERE benchmark_id = %s
+              AND merkle_proofs_ready IS NULL
+            """,
+            (benchmark_id,)
+        )
+    ])
+    return True
+
+
 def should_shed_slave_roots(
     *,
     inflight: int,
@@ -1352,121 +1493,9 @@ class JobManager:
                 )
             ])
             
-        # Find jobs where all proofs_batchs are ready
-        # Same ready=false trap as roots: abandon/stop/zombie cleanup marks
-        # unfinished proofs ready=false with null merkle_proofs. Also skip
-        # stopped/ended jobs (proof CTE previously lacked that filter).
-        rows = get_db_conn().fetch_all(
-            """
-            WITH ready AS (
-                SELECT A.benchmark_id
-                FROM proofs_batch A
-                INNER JOIN job B
-                    ON B.merkle_root_ready
-                    AND B.merkle_proofs_ready IS NULL
-                    AND B.stopped IS NULL
-                    AND B.end_time IS NULL
-                    AND A.benchmark_id = B.benchmark_id
-                GROUP BY A.benchmark_id
-                HAVING BOOL_AND(A.ready IS TRUE)
-            )
-            SELECT 
-                A.benchmark_id, 
-                JSONB_AGG(D.merkle_proofs ORDER BY D.batch_idx) AS batch_merkle_proofs,
-                B.batch_size, 
-                B.num_batches
-            FROM ready A
-            INNER JOIN job B 
-                ON A.benchmark_id = B.benchmark_id
-            INNER JOIN proofs_batch C
-                ON A.benchmark_id = C.benchmark_id
-            INNER JOIN batch_data D
-                ON C.benchmark_id = D.benchmark_id 
-                AND C.batch_idx = D.batch_idx
-            GROUP BY 
-                A.benchmark_id, 
-                B.batch_size, 
-                B.num_batches
-            """
-        )
-
-        for row in rows:
-            benchmark_id = row["benchmark_id"]
-            raw_batch_proofs = row["batch_merkle_proofs"]
-            if raw_batch_proofs is None or any(y is None for y in raw_batch_proofs):
-                logger.warning(
-                    f"job {benchmark_id}: skipping proof assembly "
-                    f"(null batch merkle_proofs)"
-                )
-                continue
-            batch_merkle_proofs = [
-                MerkleProof.from_dict(x) 
-                for y in raw_batch_proofs 
-                for x in y
-            ]
-
-            batch_merkle_roots = get_db_conn().fetch_one(
-                """
-                SELECT JSONB_AGG(merkle_root ORDER BY batch_idx) as batch_merkle_roots
-                FROM batch_data
-                WHERE benchmark_id = %s
-                """,
-                (benchmark_id,)
-            )
-
-            batch_merkle_roots = batch_merkle_roots["batch_merkle_roots"]
-            if batch_merkle_roots is None or any(r is None for r in batch_merkle_roots):
-                logger.warning(
-                    f"job {benchmark_id}: skipping proof assembly "
-                    f"(null batch merkle_roots)"
-                )
-                continue
-            
-            logger.info(f"job {benchmark_id}: (proof ready)")
-            
-            depth_offset = (row["batch_size"] - 1).bit_length()
-            tree = MerkleTree(
-                [MerkleHash.from_str(root) for root in batch_merkle_roots],
-                1 << (row["num_batches"] - 1).bit_length()
-            )
-            
-            merkle_proofs = []       
-            for proof in batch_merkle_proofs:
-                batch_idx = proof.leaf.nonce // row["batch_size"]
-                upper_stems = [
-                    (d + depth_offset, h)
-                    for d, h in tree.calc_merkle_branch(batch_idx).stems
-                ]
-                
-                merkle_proofs.append(
-                    MerkleProof(
-                        leaf=proof.leaf,
-                        branch=MerkleBranch(proof.branch.stems + upper_stems)
-                    )
-                )
-                    
-            # Update database with calculated merkle proofs
-            get_db_conn().execute_many(*[
-                (
-                    """
-                    UPDATE job_data
-                    SET merkle_proofs = %s
-                    WHERE benchmark_id = %s
-                    """, 
-                    (
-                        json.dumps([x.to_dict() for x in merkle_proofs]), 
-                        benchmark_id
-                    )
-                ),
-                (
-                    """
-                    UPDATE job
-                    SET merkle_proofs_ready = true
-                    WHERE benchmark_id = %s
-                    """,
-                    (benchmark_id,)
-                )
-            ])
+        # Last-batch submit kicks this immediately. run() is the fallback
+        # when merkle_root was not ready yet or the kick missed.
+        assemble_ready_proofs()
 
         self._shed_stuck_root_owners(now)
         self._stop_stranded_proof_jobs(now)
