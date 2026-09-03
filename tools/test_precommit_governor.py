@@ -882,8 +882,8 @@ def main() -> int:
                 idle_gpu_needs_work=True,
                 idle_gpu_slaves=8,
             )
-            is False,
-            "one VS with all roots ready still occupies the cutoff slot",
+            is True,
+            "empty GPUs replace a VS that is only ROOT READY / submitting",
         ),
         (
             under_cap(
@@ -895,8 +895,8 @@ def main() -> int:
                 idle_gpu_starved=True,
                 idle_gpu_needs_work=True,
             )
-            is False,
-            "one VS submitting proof still occupies the cutoff slot",
+            is True,
+            "empty GPUs replace a VS that is only submitting proof",
         ),
         (
             under_cap(
@@ -1119,6 +1119,32 @@ def main() -> int:
             )
             is False,
             "c004 stays at hard cap even with empty GPU cards",
+        ),
+        (
+            under_cap(
+                "c004",
+                pending_counts={"c004": 8},
+                root_phase_counts={"c004": 0},
+                submitted={},
+                per_challenge_max={"c004": 8},
+                idle_gpu_starved=True,
+                idle_gpu_needs_work=True,
+                idle_gpu_slaves=5,
+            )
+            is True,
+            "empty GPUs may replace submit/proof jobs that still occupy pending",
+        ),
+        (
+            under_cap(
+                "c004",
+                pending_counts={"c004": 8},
+                root_phase_counts={"c004": 0},
+                submitted={},
+                per_challenge_max={"c004": 8},
+                idle_gpu_starved=False,
+            )
+            is False,
+            "proving/busy cards still count submit-phase jobs against the cap",
         ),
         (
             under_cap(

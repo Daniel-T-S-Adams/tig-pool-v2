@@ -919,13 +919,15 @@ def challenge_under_create_cap(
             return False
     cpu_idle = bool(idle_cpu_needs_work) and cid in cpu_ids
     extra = 0
-    # GPU cutoff counts every open job, including ROOT READY waiting
-    # to submit. Counting only merkle_root_ready IS NULL let a second
-    # VS mint while cards looked idle in that submit gap.
+    # Busy cards: count every open job so a second VS cannot mint in the
+    # submit gap. Empty cards: submit/proof jobs are not food — only
+    # root-phase jobs occupy the cap, so replacements can start.
     if cid in gpu_ids:
-        used = int((pending_counts or {}).get(cid, 0) or 0) + int(
-            (submitted or {}).get(cid, 0) or 0
-        )
+        submitted_here = int((submitted or {}).get(cid, 0) or 0)
+        if idle_gpu_starved:
+            used = int((root_phase_counts or {}).get(cid, 0) or 0) + submitted_here
+        else:
+            used = int((pending_counts or {}).get(cid, 0) or 0) + submitted_here
         return used < int(cap)
     counts = root_phase_counts if cpu_idle else pending_counts
     used = int((counts or {}).get(cid, 0) or 0) + int((submitted or {}).get(cid, 0) or 0)
@@ -1807,6 +1809,13 @@ class PrecommitManager:
                               AND rb.ready IS NULL
                               AND rb.start_time IS NOT NULL
                           )
+                          AND NOT EXISTS (
+                            SELECT 1
+                            FROM proofs_batch pb
+                            WHERE pb.slave = ss.slave_name
+                              AND pb.ready IS NULL
+                              AND pb.start_time IS NOT NULL
+                          )
                     ) AS online_idle_gpu_slaves
                 """,
                 (
@@ -2339,8 +2348,8 @@ class PrecommitManager:
         )
 
         # Filter eligible algorithms (not over their per-challenge limit).
-        # Empty GPU cards: proof-phase jobs do not count against GPU caps, and
-        # the cap lifts so those cards are not starved onto CPU. Keep-ahead
+        # Empty GPU cards: only root-phase jobs count against GPU caps so a
+        # submit/proof pile cannot starve replacements onto CPU. Keep-ahead
         # only adds the spare count — it must not copy the idle-card lift.
         # Idle CPUs: same root-phase rule, plus a +1..2 lift so a drained
         # autopilot per-challenge cap cannot freeze the fleet.
