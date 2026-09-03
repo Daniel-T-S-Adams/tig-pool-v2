@@ -811,6 +811,15 @@ def main() -> int:
         )
         if not ok:
             failed += 1
+        os.environ["PRECOMMIT_GPU_RESERVED_SEATS"] = "2"
+        got = cpu_ns["_cpu_create_target"](146)
+        ok = got == 83
+        print(
+            f"{'pass' if ok else 'FAIL'}: reserved=2 beats stale VS floor 8 "
+            f"got={got} expect=83"
+        )
+        if not ok:
+            failed += 1
         os.environ["PRECOMMIT_GPU_RESERVED_SEATS"] = "0"
         cpu_ns["CONFIG"]["gpu_slot_floor"] = {
             "hypergraph": 1,

@@ -40,13 +40,13 @@ logger = logging.getLogger(os.path.splitext(os.path.basename(__file__))[0])
 
 CPU_CHALLENGE_IDS = ("c001", "c002", "c003", "c007", "c008")
 GPU_CHALLENGE_IDS = ("c004", "c005", "c006")
-# Replacement jobs above live GPU headcount. Must cover gpu_spare_jobs
-# or keep-ahead wants 4 and the fleet ceiling still blocks at +1.
+# Replacement jobs above live GPU headcount. Cutoff retainer: 1 spare
+# is enough when the fleet is two cards, not a 25-card warehouse.
 def _gpu_fleet_spare() -> int:
     try:
-        return max(0, int(os.environ.get("PRECOMMIT_GOVERNOR_GPU_FLEET_SPARE", "4")))
+        return max(0, int(os.environ.get("PRECOMMIT_GOVERNOR_GPU_FLEET_SPARE", "1")))
     except (TypeError, ValueError):
-        return 4
+        return 1
 
 
 GPU_FLEET_SPARE = _gpu_fleet_spare()
@@ -145,7 +145,7 @@ def _governor_settings():
         "gpu_spare_jobs": int(
             gov.get(
                 "gpu_spare_jobs",
-                os.environ.get("PRECOMMIT_GOVERNOR_GPU_SPARE_JOBS", "4"),
+                os.environ.get("PRECOMMIT_GOVERNOR_GPU_SPARE_JOBS", "1"),
             )
         ),
         "min_root_ready_rate": float(
@@ -371,13 +371,13 @@ def _gpu_slot_total() -> int:
 def _gpu_reserved_seats() -> int:
     """Seats inside max_concurrent that CPU mint must not eat.
 
-    One GPU job is one card on this fleet. Default 20 so ~25 cards can
-    stay fed while the parked cap stays at the TIG unresolved ceiling.
+    One GPU job is one card on this fleet. Default 2: cutoff retainer
+    for a CPU-heavy pool that only has a couple of cards.
     """
     try:
-        return max(0, int(os.environ.get("PRECOMMIT_GPU_RESERVED_SEATS", "20")))
+        return max(0, int(os.environ.get("PRECOMMIT_GPU_RESERVED_SEATS", "2")))
     except (TypeError, ValueError):
-        return 20
+        return 2
 
 
 def _cpu_create_target(cpu_slots: int) -> int:
@@ -385,11 +385,13 @@ def _cpu_create_target(cpu_slots: int) -> int:
 
     resource_slots.cpu can be far above max_concurrent_benchmarks (e.g. 96 vs 13).
     Using the raw slot count made idle-CPU mode permanent and starved GPU creates.
-    Hold PRECOMMIT_GPU_RESERVED_SEATS (or the operator GPU floor) out of
-    the CPU share so a leftover warehouse cannot fill all 85 seats.
+    Hold PRECOMMIT_GPU_RESERVED_SEATS out of the CPU share. A positive
+    reserved value wins over a stale gpu_slot_floor (overnight VS floor
+    stayed at 8 after cards left).
     """
     max_concurrent = int(CONFIG.get("max_concurrent_benchmarks") or 0)
-    gpu_hold = max(_gpu_slot_floor_total(), _gpu_reserved_seats())
+    reserved = _gpu_reserved_seats()
+    gpu_hold = reserved if reserved > 0 else _gpu_slot_floor_total()
     if max_concurrent > 0:
         cpu_fair_share = max(1, max_concurrent - max(1, gpu_hold))
         return max(1, min(cpu_slots, cpu_fair_share))
