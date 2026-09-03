@@ -444,12 +444,26 @@ ZOMBIE_SINGLE_AGE_MS = max(
 )
 # One assigned root still COMPUTING after siblings finished. hive33 sat 30m
 # on a 10m job because inflight=1 + telem working skips every other shed.
+# Off by default: SAT nonce times vary wildly, so 2.5x sibling median
+# STOPs a live hard nonce and wastes the minutes already spent.
+SIBLING_STALL_ENABLED = os.environ.get("SLAVE_SIBLING_STALL_ENABLED", "false").lower() in (
+    "1",
+    "true",
+    "yes",
+    "on",
+)
 SIBLING_STALL_MIN_READY = max(
     1, int(os.environ.get("SLAVE_SIBLING_STALL_MIN_READY", "2"))
 )
 SIBLING_STALL_MULT = float(os.environ.get("SLAVE_SIBLING_STALL_MULT", "2.5"))
 SIBLING_STALL_MIN_AGE_MS = max(
     60_000, int(os.environ.get("SLAVE_SIBLING_STALL_MIN_AGE_MS", str(15 * 60 * 1000)))
+)
+# SAT (c001) is never sibling-stolen even if stall is turned back on.
+SIBLING_STALL_SKIP_CHALLENGES = frozenset(
+    s.strip()[:4]
+    for s in os.environ.get("SLAVE_SIBLING_STALL_SKIP", "c001").split(",")
+    if s.strip()
 )
 
 
@@ -524,6 +538,8 @@ def sibling_root_stalled(
     min_ready: int = SIBLING_STALL_MIN_READY,
     slow_mult: float = SIBLING_STALL_MULT,
     min_age_ms: int = SIBLING_STALL_MIN_AGE_MS,
+    challenge_id: str = "",
+    skip_challenges: frozenset = SIBLING_STALL_SKIP_CHALLENGES,
 ) -> bool:
     """True when one assigned root is far slower than finished siblings.
 
@@ -532,6 +548,9 @@ def sibling_root_stalled(
     fire, and the 45m single-batch backstop is too late for the merkle.
     """
     if is_proof:
+        return False
+    cid = str(challenge_id or "")[:4]
+    if cid and cid in (skip_challenges or ()):
         return False
     if int(sibling_ready_n or 0) < int(min_ready or 2):
         return False
@@ -548,6 +567,8 @@ def sibling_root_stalled(
 
 def shed_sibling_stalled_roots(now_ms: int) -> list:
     """Unassign roots that are 2.5x slower than finished siblings on the job."""
+    if not SIBLING_STALL_ENABLED:
+        return []
     now_i = int(now_ms)
     try:
         rows = get_db_conn().fetch_all(
@@ -571,6 +592,7 @@ def shed_sibling_stalled_roots(now_ms: int) -> list:
                 r.benchmark_id,
                 r.batch_idx,
                 r.slave,
+                j.settings->>'challenge_id' AS challenge_id,
                 (%s - r.start_time) AS age_ms,
                 s.median_ms,
                 s.ready_n
@@ -582,6 +604,7 @@ def shed_sibling_stalled_roots(now_ms: int) -> list:
               AND r.start_time IS NOT NULL
               AND COALESCE(j.stopped, false) = false
               AND j.merkle_root_ready IS NULL
+              AND COALESCE(j.settings->>'challenge_id', '') NOT IN ('c001')
               AND (%s - r.start_time) >= GREATEST(
                     %s::bigint,
                     (s.median_ms * %s)::bigint
@@ -604,6 +627,7 @@ def shed_sibling_stalled_roots(now_ms: int) -> list:
             assigned_age_ms=int(row.get("age_ms") or 0),
             sibling_ready_n=int(row.get("ready_n") or 0),
             sibling_median_ms=int(float(row.get("median_ms") or 0)),
+            challenge_id=str(row.get("challenge_id") or ""),
         ):
             continue
         stalled.append(row)

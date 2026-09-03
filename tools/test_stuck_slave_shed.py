@@ -34,6 +34,7 @@ def _load_fn():
         "SIBLING_STALL_MIN_READY": 2,
         "SIBLING_STALL_MULT": 2.5,
         "SIBLING_STALL_MIN_AGE_MS": 15 * 60 * 1000,
+        "SIBLING_STALL_SKIP_CHALLENGES": frozenset({"c001"}),
     }
     exec(compile(ast.Module(body=keep, type_ignores=[]), str(path), "exec"), ns, ns)
     return ns["should_shed_slave_roots"], ns["sibling_root_stalled"]
@@ -215,6 +216,16 @@ def main() -> int:
             )
             is False,
             "proofs are never sibling-stolen",
+        ),
+        (
+            sibling(
+                assigned_age_ms=1_778_541,
+                sibling_ready_n=4,
+                sibling_median_ms=578_000,
+                challenge_id="c001",
+            )
+            is False,
+            "SAT hard nonce is never sibling-stolen",
         ),
     ]
     failed = 0
