@@ -3664,16 +3664,17 @@ class SlaveManager:
             )
             kept = []
             for item in hungry:
+                is_gpu = _slave_work_profile(item["name"]) == "gpu"
                 root_cap = sampling_gap_root_intake_cap(
                     max_concurrent=item["max_concurrent"],
                     assigned=item["assigned"],
                     gap_jobs=int(gap_by_slave.get(item["name"]) or 0),
+                    keep_last_seat=is_gpu,
                 )
                 seats = max(0, int(root_cap) - int(item["assigned"]))
                 if seats <= 0:
                     continue
                 assigned_rows = item.pop("assigned_rows", None) or []
-                is_gpu = _slave_work_profile(item["name"]) == "gpu"
                 if is_gpu:
                     item["workers"] = 0
                     item["booked"] = 0
@@ -4623,6 +4624,7 @@ class SlaveManager:
                 max_concurrent=max_concurrent,
                 assigned=len(kept_assigned),
                 gap_jobs=gap_jobs,
+                keep_last_seat=_slave_work_profile(slave_name) == "gpu",
             )
             feed_empty_seats = max(1, empty_seats or int(max_concurrent or 1))
             held_root_bids = [
@@ -5289,6 +5291,7 @@ class SlaveManager:
                     max_concurrent=max_concurrent,
                     assigned=len(kept_assigned),
                     gap_jobs=gap_jobs,
+                    keep_last_seat=_slave_work_profile(slave_name) == "gpu",
                 )
                 feed_empty_seats = max(1, empty_seats or int(max_concurrent or 1))
                 held_root_bids = [

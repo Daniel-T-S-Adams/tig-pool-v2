@@ -219,6 +219,14 @@ def main() -> int:
                 intake(max_concurrent=2, assigned=1, gap_jobs=1) == 1,
                 "GPU prefetch seat stays reserved for the proof",
             ),
+            (
+                intake(max_concurrent=1, assigned=0, gap_jobs=1) == 0,
+                "1-wide GPU without keep_last_seat parks the only seat",
+            ),
+            (
+                intake(max_concurrent=1, assigned=0, gap_jobs=1, keep_last_seat=True) == 1,
+                "idle 1-wide GPU keeps one leftover seat during sampling gap",
+            ),
         ]
     )
     failed = 0

@@ -684,11 +684,17 @@ def compute_idle_gpu_starved(
     online_idle_gpu_slaves: int = 0,
     gpu_profile_blocked: bool = False,
 ) -> bool:
-    """True only when live GPU cards are empty and have nothing to claim."""
+    """True when live GPU cards are empty.
+
+    SQL claimable leftovers are not food. A 12-row GPU pile next to idle
+    cards is how the dashboard showed 0% GPU fill during a CPU warehouse:
+    claimable >= idle hid the hole, so root_ready_rate stayed a global
+    create block and the leftovers never moved.
+    """
+    del gpu_unassigned_claimable
     if gpu_profile_blocked:
         return False
-    idle = max(0, int(online_idle_gpu_slaves or 0))
-    return idle > 0 and int(gpu_unassigned_claimable or 0) < idle
+    return max(0, int(online_idle_gpu_slaves or 0)) > 0
 
 
 def compute_gpu_keep_ahead(

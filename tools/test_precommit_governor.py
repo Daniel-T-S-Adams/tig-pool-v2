@@ -540,7 +540,7 @@ def main() -> int:
 
     gpu_idle_cases = [
         (dict(gpu_unassigned_claimable=0, online_idle_gpu_slaves=2), True, "idle GPUs and no claimable work"),
-        (dict(gpu_unassigned_claimable=4, online_idle_gpu_slaves=2), False, "enough GPU roots to absorb idle"),
+        (dict(gpu_unassigned_claimable=4, online_idle_gpu_slaves=2), True, "idle GPUs are a hole even if SQL shows leftovers"),
         (
             dict(gpu_unassigned_claimable=0, online_idle_gpu_slaves=0, gpu_spare_jobs=0),
             False,
@@ -599,6 +599,12 @@ def main() -> int:
         gpu_unassigned_claimable=0, online_idle_gpu_slaves=2
     ) is True
     print(f"{'pass' if ok else 'FAIL'}: empty GPU cards are starved")
+    if not ok:
+        failed += 1
+    ok = idle_gpu_starved_fn(
+        gpu_unassigned_claimable=12, online_idle_gpu_slaves=3
+    ) is True
+    print(f"{'pass' if ok else 'FAIL'}: idle GPUs stay starved when leftovers sit unassigned")
     if not ok:
         failed += 1
     ok = gpu_ceiling(online_gpu=15, spare=1) == 16

@@ -111,10 +111,14 @@ def sampling_gap_root_intake_cap(
     max_concurrent: int,
     assigned: int,
     gap_jobs: int,
+    keep_last_seat: bool = False,
 ) -> int:
     """Max in-flight rows allowed for new roots while seats wait for samples.
 
     Other in-flight jobs keep running. Proofs may still fill up to max_concurrent.
+    An idle GPU (assigned=0) must keep one leftover seat: 1-wide cards
+    otherwise reserve their only slot for TIG sampling and sit dark next
+    to claimable GPU leftovers.
     """
     try:
         cap = max(0, int(max_concurrent or 0))
@@ -123,7 +127,10 @@ def sampling_gap_root_intake_cap(
     except (TypeError, ValueError):
         return 0
     reserved = min(gap, max(0, cap - used))
-    return max(0, cap - reserved)
+    intake = max(0, cap - reserved)
+    if keep_last_seat and cap > 0 and used <= 0:
+        return max(1, intake)
+    return intake
 
 
 def preferred_root_slave(slave_scores: Dict[str, int]) -> Optional[str]:
