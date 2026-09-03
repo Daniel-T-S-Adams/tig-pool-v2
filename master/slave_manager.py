@@ -132,8 +132,8 @@ GET_BATCHES_STALL_MS = max(
 GET_BATCHES_LIVE_POLL_STALE_MS = max(
     0, int(os.environ.get("GET_BATCHES_LIVE_POLL_STALE_MS", "30000"))
 )
-# Background leftover feeder. Empty-mailbox HTTP claims leftovers for
-# that slave only so idle CPUs never wait a feeder cycle.
+# Background leftover feeder. get-batches only peeks the mailbox;
+# this thread claims leftovers so idle pollers do not stampede the lock.
 GET_BATCHES_FEEDER_MS = max(
     50, int(os.environ.get("GET_BATCHES_FEEDER_MS", "250"))
 )
@@ -4878,9 +4878,8 @@ class SlaveManager:
             self._note_mailbox_poll(slave_name, int(now))
             self._touch_slave_seen(slave_name, int(now))
 
-            # Mailbox first. An empty mailbox claims leftovers for this slave
-            # now so idle CPUs do not wait on the feeder while ROOT NOT
-            # ASSIGNED rows sit next to them. HTTP still does not rank.
+            # Mailbox peek only. Leftover assign is the feeder thread so a
+            # wave of empty CPUs cannot all take the leftover lock.
             started_mono = time.monotonic()
             poll_token = None
             with self._get_batches_inflight_lock:
@@ -4890,14 +4889,6 @@ class SlaveManager:
                 self._get_batches_starts[poll_token] = started_mono
             try:
                 mailbox = self._peek_assigned_batches(slave_name)
-                if not mailbox:
-                    try:
-                        self._feed_hungry_slaves(only_slave=slave_name)
-                    except Exception:
-                        logger.exception(
-                            "empty-mailbox leftover feed failed for %s", slave_name
-                        )
-                    mailbox = self._peek_assigned_batches(slave_name)
                 return JSONResponse(content=jsonable_encoder(mailbox))
             except Exception as exc:
                 logger.warning("get-batches mailbox failed for %s: %s", slave_name, exc)

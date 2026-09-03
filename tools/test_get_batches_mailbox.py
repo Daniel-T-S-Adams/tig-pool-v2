@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Mailbox get-batches: one-pass leftover feed + heartbeat helpers."""
+"""Mailbox get-batches: peek-only HTTP + one-pass leftover feeder."""
 
 from __future__ import annotations
 
@@ -157,6 +157,23 @@ def main() -> int:
     seen_q.append(("pool-cpu-a", 1000))
     cases.append(
         (assign_q == [] and len(seen_q) == 1, "heartbeat uses a separate seen queue")
+    )
+
+    source = pathlib.Path(__file__).resolve().parents[1] / "master" / "slave_manager.py"
+    text = source.read_text(encoding="utf-8")
+    handler_start = text.find("@app.route('/get-batches'")
+    handler_chunk = text[handler_start : handler_start + 2500] if handler_start >= 0 else ""
+    cases.append(
+        (
+            handler_start >= 0 and "_feed_hungry_slaves" not in handler_chunk,
+            "get-batches mailbox peeks only and does not claim leftovers",
+        )
+    )
+    cases.append(
+        (
+            "def _leftover_feeder_loop" in text and "self._feed_hungry_slaves()" in text,
+            "leftover feeder thread still claims leftovers",
+        )
     )
 
     for ok, label in cases:
