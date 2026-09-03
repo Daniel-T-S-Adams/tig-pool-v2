@@ -439,32 +439,44 @@ def assigned_root_reclaimable(
 ) -> bool:
     """True when an assigned root should be leftover for the next empty seat.
 
-    Proofs stay with the artifact owner. Crumbs on an idle or not-working
-    owner become claimable immediately so empty seats can pull. A live fat
-    root (16+ nonces, or unknown size) needs a few minutes of assigned age
-    before telem-idle steal — packer boxes report idle while still running
-    a 32-nonce batch. A last leftover stays put mid-start. After grace it
-    is stolen when the owner is telem-idle, not working, or still
-    warehousing other roots, so a dropped last leftover cannot pin the job
-    until the hour retry.
+    Proofs stay with the artifact owner. Telem-idle is not a steal signal
+    while this owner still has assigned roots. Pica and packer boxes report
+    idle (Last Idle 1s) at ~0.95 load while tig-runtime is mid-nonce.
+    Stealing those roots makes the slave STOP the batch and waste the hour.
+
+    A last leftover may be stolen after grace only when the owner is empty
+    or telem-idle with only this leftover. Do not steal from a working box
+    that is packing other live roots. Dark reclaim still frees abandoned
+    work when the owner is offline.
     """
     if is_proof:
         return False
+    booked = None
+    if owner_active is not None:
+        try:
+            booked = int(owner_active)
+        except (TypeError, ValueError):
+            booked = None
     if leftover_finishes_job(unassigned_on_job, already_assigned=True):
         steal_after = max(0, int(last_leftover_steal_ms or 0))
         if steal_after <= 0 or int(assigned_age_ms or 0) < steal_after:
             return False
-        if int(owner_other_roots or 0) > 0:
-            return True
-        if owner_active is not None and int(owner_active or 0) <= 0:
+        # Working packers/Picas keep live leftovers. The old "warehousing"
+        # steal stopped 32-nonce SAT mid-run after 10 minutes.
+        if owner_working is True:
+            return False
+        if booked is not None and booked > 1:
+            return False
+        if booked is not None and booked <= 0:
             return True
         if owner_working is False:
             return True
         return False
+    # Telem-idle steal only when our books show no assigned work.
     idle = False
-    if owner_active is not None and int(owner_active or 0) <= 0:
+    if booked is not None and booked <= 0:
         idle = True
-    if owner_working is False:
+    elif booked is None and owner_working is False:
         idle = True
     if not idle:
         return False
@@ -1357,9 +1369,8 @@ def batch_owner_stealable(
 
     Proofs are never dark-stolen (local artifacts). Roots may be reclaimed
     from a dark owner after dark_reclaim_ms even if challenge retry is hours.
-    Crumbs on idle owners release immediately. Fat roots need
-    FAT_ROOT_RECLAIM_MS of assigned age so telem-idle lag does not restart
-    a live 16/32-nonce batch.
+    Online owners keep assigned roots even when telem says idle. Fat-root
+    grace still applies when books show no assigned work.
     """
     if slave is None or start_time is None:
         return True

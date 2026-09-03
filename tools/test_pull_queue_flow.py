@@ -105,8 +105,8 @@ def main() -> int:
             unassigned_on_job=2,
             remaining_nonces=8,
         )
-        is True,
-        "owner idle + assigned leftover crumb is reclaimable",
+        is False,
+        "telem-idle crumb stays while the owner still has assigned roots",
     )
     check(
         reclaim(is_proof=False, owner_active=0, owner_working=False, unassigned_on_job=0)
@@ -154,8 +154,8 @@ def main() -> int:
             unassigned_on_job=2,
             remaining_nonces=8,
         )
-        is True,
-        "next Pica/EPYC poll can claim an owner-idle assigned crumb",
+        is False,
+        "online owner keeps an assigned crumb even when telem says idle",
     )
     check(
         stealable(
@@ -188,8 +188,8 @@ def main() -> int:
             unassigned_on_job=4,
             remaining_nonces=32,
         )
-        is True,
-        "telem-idle fat 32 is stealable after 3m",
+        is False,
+        "telem-idle fat 32 stays assigned while the owner still has it",
     )
     check(
         stealable(
@@ -316,8 +316,8 @@ def main() -> int:
             assigned_age_ms=11 * 60 * 1000,
             owner_other_roots=4,
         )
-        is True,
-        "stale last leftover is stealable when the owner is warehousing",
+        is False,
+        "working owner keeps a last leftover even while packing other roots",
     )
     check(
         stealable(
@@ -332,8 +332,8 @@ def main() -> int:
             owner_working=True,
             unassigned_on_job=0,
         )
-        is True,
-        "next Pica can steal a 11-min last leftover from a busy XL",
+        is False,
+        "busy XL/Pica keeps an 11-min last leftover it is still running",
     )
     check(
         stealable(
@@ -350,6 +350,23 @@ def main() -> int:
         )
         is False,
         "last leftover is not stolen while it is the owner's only root",
+    )
+    check(
+        stealable(
+            now_ms=now,
+            slave="pool-cpu-9ffb87dc69ee-home-pica09",
+            start_time=now - (13 * 60 * 1000),
+            algorithm_id="c001_a098",
+            online_slaves={"pica", "pool-cpu-9ffb87dc69ee-home-pica09"},
+            is_proof=False,
+            retry_ms=7_200_000,
+            owner_active=1,
+            owner_working=False,
+            unassigned_on_job=4,
+            remaining_nonces=32,
+        )
+        is False,
+        "online Pica SAT 32 is not reassigned after 13m of false telem-idle",
     )
 
     pre_ns = _load_fns(
