@@ -368,16 +368,30 @@ def _gpu_slot_total() -> int:
     return max(total, _gpu_slot_floor_total())
 
 
+def _gpu_reserved_seats() -> int:
+    """Seats inside max_concurrent that CPU mint must not eat.
+
+    One GPU job is one card on this fleet. Default 20 so ~25 cards can
+    stay fed while the parked cap stays at the TIG unresolved ceiling.
+    """
+    try:
+        return max(0, int(os.environ.get("PRECOMMIT_GPU_RESERVED_SEATS", "20")))
+    except (TypeError, ValueError):
+        return 20
+
+
 def _cpu_create_target(cpu_slots: int) -> int:
     """Bound idle-CPU pressure by the live concurrent budget, not raw slot count.
 
     resource_slots.cpu can be far above max_concurrent_benchmarks (e.g. 96 vs 13).
     Using the raw slot count made idle-CPU mode permanent and starved GPU creates.
+    Hold PRECOMMIT_GPU_RESERVED_SEATS (or the operator GPU floor) out of
+    the CPU share so a leftover warehouse cannot fill all 85 seats.
     """
     max_concurrent = int(CONFIG.get("max_concurrent_benchmarks") or 0)
-    gpu_floor = _gpu_slot_floor_total()
+    gpu_hold = max(_gpu_slot_floor_total(), _gpu_reserved_seats())
     if max_concurrent > 0:
-        cpu_fair_share = max(1, max_concurrent - max(1, gpu_floor))
+        cpu_fair_share = max(1, max_concurrent - max(1, gpu_hold))
         return max(1, min(cpu_slots, cpu_fair_share))
     return max(1, cpu_slots)
 
@@ -826,24 +840,27 @@ def concurrent_create_allowed(
     unresolved_ceiling: int = 0,
     seat_hole: bool = False,
     spare_short: bool = False,
+    gpu_seat_hole: bool = False,
 ) -> bool:
     """True when another precommit may start.
 
-    Autopilot owns max_concurrent. Master honors that number. Empty seats
-    must raise the cap via autopilot, not walk around it here. Hard stop
-    at the TIG unresolved ceiling. Proof-phase overlap is only a local
-    pipeline hint and must not beat that ceiling.
+    Autopilot owns max_concurrent. CPU XL holes must not walk around a
+    parked cap (78-on-20). Empty GPU cards may use room under the TIG
+    unresolved ceiling so a CPU warehouse cannot zero the cards.
+    Hard stop at that ceiling.
     """
     del seat_hole, spare_short
     ceiling = int(unresolved_ceiling or 0)
     if ceiling > 0 and int(unresolved or 0) >= ceiling:
         return False
+    root = max(0, int(root_phase_jobs or 0))
+    inflight = max(0, int(submitted or 0))
+    if gpu_seat_hole and ceiling > 0:
+        return root + inflight < ceiling
     cap = int(max_concurrent or 0)
     if cap <= 0:
         return True
-    root = max(0, int(root_phase_jobs or 0))
     proof = max(0, int(proof_phase_jobs or 0))
-    inflight = max(0, int(submitted or 0))
     overlap = min(proof, max(0, int(overlap_cap or 0)))
     if root + proof + inflight >= cap + overlap:
         return False
@@ -876,9 +893,9 @@ def challenge_under_create_cap(
     Proof-phase jobs do not feed idle root workers. When a profile is idle
     with no claimable roots, count only root-phase jobs against that
     profile's per-challenge cap so a new root job can start.
-    GPU idle lift grows with empty cards. CPU idle lift grows with idle
-    boxes — a +2 lift left dozens of CPUs empty against autopilot caps of 7.
-    Unassigned remaining still caps the leftover pile.
+    GPU idle lift grows with empty cards. Hypergraph (c005) is a hard
+    cap — idle lift must not open a second slow HG job. CPU idle lift
+    grows with idle boxes. Unassigned remaining still caps the leftover pile.
     """
     cid = str(challenge_id or "")[:4]
     cap = per_challenge_max.get(cid)
@@ -902,6 +919,9 @@ def challenge_under_create_cap(
     counts = root_phase_counts if (cpu_idle or gpu_idle) else pending_counts
     used = int((counts or {}).get(cid, 0) or 0) + int((submitted or {}).get(cid, 0) or 0)
     extra = 0
+    # c005 stays at the operator cap even when cards are empty.
+    if cid == "c005":
+        return used < int(cap)
     if gpu_idle:
         extra = max(int(gpu_spare_jobs or 0), int(idle_gpu_slaves or 0), 1)
     elif gpu_keep_ahead and cid in gpu_ids:
@@ -2180,6 +2200,7 @@ class PrecommitManager:
             unresolved_ceiling=unresolved_ceiling,
             seat_hole=seat_hole,
             spare_short=spare_short,
+            gpu_seat_hole=idle_gpu_needs_work or idle_gpu_starved,
         ):
             logger.info(
                 "pending benchmarks at cap (pending=%s root=%s proof=%s "

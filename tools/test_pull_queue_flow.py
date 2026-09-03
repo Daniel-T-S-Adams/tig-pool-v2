@@ -392,6 +392,28 @@ def main() -> int:
         is True,
         "25/27 under the autopilot cap still creates for a GPU hole",
     )
+    check(
+        create_ok(
+            root_phase_jobs=83,
+            max_concurrent=85,
+            unresolved=83,
+            unresolved_ceiling=85,
+            gpu_seat_hole=True,
+        )
+        is True,
+        "GPU seat hole may create under TIG ceiling when CPU filled 85",
+    )
+    check(
+        create_ok(
+            root_phase_jobs=20,
+            max_concurrent=20,
+            unresolved=85,
+            unresolved_ceiling=85,
+            gpu_seat_hole=True,
+        )
+        is False,
+        "GPU seat hole still stops at the TIG unresolved ceiling",
+    )
     pica_cap = eff_cap(
         max_concurrent=20, idle_needs_work=True, hole_deficit=4, max_hole_lift=16
     )

@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import ast
+import os
 import pathlib
 import sys
 
@@ -773,6 +774,10 @@ def main() -> int:
         (dict(root_phase_jobs=35, proof_phase_jobs=0, max_concurrent=21, unresolved=35, unresolved_ceiling=85, spare_short=True), False, "spare short does not walk around max_concurrent"),
         (dict(root_phase_jobs=35, proof_phase_jobs=0, max_concurrent=21, unresolved=85, unresolved_ceiling=85, spare_short=True), False, "TIG 85 blocks spare top-up"),
         (dict(root_phase_jobs=24, proof_phase_jobs=0, max_concurrent=27, unresolved=24, unresolved_ceiling=85), True, "under the autopilot cap still creates"),
+        (dict(root_phase_jobs=42, proof_phase_jobs=0, max_concurrent=20, unresolved=42, unresolved_ceiling=85, gpu_seat_hole=True), True, "GPU hole may fill toward TIG ceiling"),
+        (dict(root_phase_jobs=20, proof_phase_jobs=0, max_concurrent=20, unresolved=85, unresolved_ceiling=85, gpu_seat_hole=True), False, "GPU hole still stops at TIG 85"),
+        (dict(root_phase_jobs=83, proof_phase_jobs=0, max_concurrent=85, unresolved=83, unresolved_ceiling=85, gpu_seat_hole=True), True, "CPU-filled 83/85 still creates for empty GPUs"),
+        (dict(root_phase_jobs=42, proof_phase_jobs=0, max_concurrent=20, unresolved=42, unresolved_ceiling=85, seat_hole=True, gpu_seat_hole=False), False, "CPU hole still cannot walk 42/20"),
     ]
     for kwargs, expect, label in create_cases:
         got = create_ok(**kwargs)
@@ -780,6 +785,51 @@ def main() -> int:
         print(f"{'pass' if ok else 'FAIL'}: {label} got={got}")
         if not ok:
             failed += 1
+
+    cpu_ns = _load_fns(
+        "_gpu_slot_floor_total",
+        "_gpu_reserved_seats",
+        "_cpu_create_target",
+    )
+    cpu_ns["os"] = os
+    cpu_ns["CONFIG"] = {
+        "max_concurrent_benchmarks": 85,
+        "gpu_slot_floor": {
+            "hypergraph": 1,
+            "vector_search": 8,
+            "neuralnet_optimizer": 3,
+        },
+    }
+    prev_reserved = os.environ.get("PRECOMMIT_GPU_RESERVED_SEATS")
+    try:
+        os.environ["PRECOMMIT_GPU_RESERVED_SEATS"] = "20"
+        got = cpu_ns["_cpu_create_target"](146)
+        ok = got == 65
+        print(
+            f"{'pass' if ok else 'FAIL'}: CPU create target holds 20 GPU seats "
+            f"got={got} expect=65"
+        )
+        if not ok:
+            failed += 1
+        os.environ["PRECOMMIT_GPU_RESERVED_SEATS"] = "0"
+        cpu_ns["CONFIG"]["gpu_slot_floor"] = {
+            "hypergraph": 1,
+            "vector_search": 20,
+            "neuralnet_optimizer": 3,
+        }
+        got = cpu_ns["_cpu_create_target"](146)
+        ok = got == 61
+        print(
+            f"{'pass' if ok else 'FAIL'}: CPU create target uses GPU floor "
+            f"when reserved is 0 got={got} expect=61"
+        )
+        if not ok:
+            failed += 1
+    finally:
+        if prev_reserved is None:
+            os.environ.pop("PRECOMMIT_GPU_RESERVED_SEATS", None)
+        else:
+            os.environ["PRECOMMIT_GPU_RESERVED_SEATS"] = prev_reserved
 
     cap_cases = [
         (
@@ -970,6 +1020,63 @@ def main() -> int:
             )
             is True,
             "GPU creates still allowed under the fleet ceiling",
+        ),
+        (
+            under_cap(
+                "c005",
+                pending_counts={"c005": 1},
+                root_phase_counts={"c005": 1},
+                submitted={},
+                per_challenge_max={"c005": 1},
+                idle_gpu_starved=True,
+                idle_gpu_needs_work=True,
+                gpu_spare_jobs=4,
+                idle_gpu_slaves=25,
+            )
+            is False,
+            "c005 stays at hard cap 1 even with empty GPU cards",
+        ),
+        (
+            under_cap(
+                "c005",
+                pending_counts={"c005": 0},
+                root_phase_counts={"c005": 0},
+                submitted={},
+                per_challenge_max={"c005": 1},
+                idle_gpu_starved=True,
+                idle_gpu_needs_work=True,
+                idle_gpu_slaves=25,
+            )
+            is True,
+            "c005 may still mint its single job",
+        ),
+        (
+            under_cap(
+                "c005",
+                pending_counts={"c005": 1},
+                root_phase_counts={"c005": 1},
+                submitted={},
+                per_challenge_max={"c005": 1},
+                idle_gpu_starved=False,
+                gpu_keep_ahead=True,
+                gpu_spare_jobs=4,
+            )
+            is False,
+            "c005 keep-ahead does not open a second HG job",
+        ),
+        (
+            under_cap(
+                "c004",
+                pending_counts={"c004": 8},
+                root_phase_counts={"c004": 8},
+                submitted={},
+                per_challenge_max={"c004": 8},
+                idle_gpu_needs_work=True,
+                gpu_spare_jobs=2,
+                idle_gpu_slaves=12,
+            )
+            is True,
+            "c004 idle lift still grows with empty cards",
         ),
     ]
     for ok, label in cap_cases:
