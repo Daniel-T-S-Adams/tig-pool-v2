@@ -52,6 +52,8 @@ def main() -> int:
         "newest_poll_seen_ms",
         "feed_leftovers_one_pass",
         "get_batches_stall_should_exit",
+        "batch_remaining_nonces",
+        "cpu_worker_hole",
     )
     note = ns["note_poll_seen"]
     newest = ns["newest_poll_seen_ms"]
@@ -103,6 +105,49 @@ def main() -> int:
         (
             [c["benchmark_id"] for c in sticky_claimed] == ["open"],
             "sticky takeable set skips locked leftovers",
+        )
+    )
+
+    sat_plus_ks = [_leftover_row("ks32", 0)]
+    sat_plus_ks[0]["batch"]["num_nonces"] = 32
+    packed = feed(
+        sat_plus_ks,
+        [
+            {
+                "name": "pool-cpu-pica46",
+                "seats": 1,
+                "algo_re": r"^c00",
+                "workers": 32,
+                "booked": 32,
+            }
+        ],
+        now=2.0,
+    )
+    cases.append(
+        (
+            packed == [] and sat_plus_ks[0].get("slave") is None,
+            "32-core box with SAT 32 does not take knapsack 32",
+        )
+    )
+    fit_16 = [_leftover_row("ks16", 0)]
+    fit_16[0]["batch"]["num_nonces"] = 16
+    packed16 = feed(
+        fit_16,
+        [
+            {
+                "name": "pool-cpu-pica46",
+                "seats": 1,
+                "algo_re": r"^c00",
+                "workers": 32,
+                "booked": 16,
+            }
+        ],
+        now=3.0,
+    )
+    cases.append(
+        (
+            [c["benchmark_id"] for c in packed16] == ["ks16"],
+            "32-core box with a 16-nonce hole still packs 16",
         )
     )
 

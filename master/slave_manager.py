@@ -261,13 +261,15 @@ def feed_leftovers_one_pass(
 ) -> List[dict]:
     """Claim unassigned batches into empty seats with one leftover pass.
 
-    hungry items: {name, seats, algo_re}. Mutates claimed rows in place.
+    hungry items: {name, seats, algo_re, workers, booked}. Mutates claimed rows.
     """
     waiting = [
         {
             "name": str(item.get("name") or ""),
             "seats": max(0, int(item.get("seats") or 0)),
             "algo_re": item.get("algo_re") or "",
+            "workers": int(item.get("workers") or 0),
+            "booked": int(item.get("booked") or 0),
         }
         for item in (hungry or [])
         if str(item.get("name") or "") and int(item.get("seats") or 0) > 0
@@ -308,10 +310,10 @@ def feed_leftovers_one_pass(
                     continue
             if int(item.get("workers") or 0) > 0 and not is_proof:
                 rem = batch_remaining_nonces(batch)
-                hole = cpu_worker_hole(
-                    int(item.get("workers") or 0),
-                    int(item.get("booked") or 0),
-                )
+                booked = int(item.get("booked") or 0)
+                hole = cpu_worker_hole(int(item.get("workers") or 0), booked)
+                if rem <= 0:
+                    rem = hole + 1 if booked > 0 else 0
                 if rem > hole:
                     continue
             picked = item
@@ -620,7 +622,12 @@ def cpu_pack_candidate_ok(
         n_workers = 0
     if n_workers <= 0:
         return True
-    return int(remaining_nonces or 0) <= cpu_worker_hole(n_workers, booked)
+    rem = int(remaining_nonces or 0)
+    hole = cpu_worker_hole(n_workers, booked)
+    if rem <= 0:
+        # Missing nonce count: only allow on an empty box.
+        return int(booked or 0) <= 0
+    return rem <= hole
 
 
 def leftover_feeds_box(
@@ -3639,6 +3646,9 @@ class SlaveManager:
                         is_gpu=False,
                     )
                     item["booked"] = booked_cpu_nonces(assigned_rows)
+                    if assigned_rows and int(item["booked"] or 0) <= 0:
+                        # Already running work we cannot size: treat the box as full.
+                        item["booked"] = int(item["workers"] or 0)
                 item["seats"] = seats
                 kept.append(item)
             hungry = kept
@@ -4020,6 +4030,8 @@ class SlaveManager:
                     "name": item["name"],
                     "seats": seats_left.get(item["name"], item["seats"]),
                     "algo_re": item["algo_re"],
+                    "workers": int(item.get("workers") or 0),
+                    "booked": int(item.get("booked") or 0),
                 }
                 for item in hungry
                 if seats_left.get(item["name"], item["seats"]) > 0

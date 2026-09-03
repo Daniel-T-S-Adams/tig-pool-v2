@@ -779,6 +779,14 @@ def main() -> int:
         "idle Pica still takes a full 32",
     )
     check(
+        fits(remaining_nonces=32, workers=32, booked=32) is False,
+        "SAT 32 plus knapsack 32 does not fit 32 cores",
+    )
+    check(
+        fits(remaining_nonces=0, workers=32, booked=32) is False,
+        "unknown-size leftover does not pack onto a full box",
+    )
+    check(
         fits(is_gpu=True, remaining_nonces=32, workers=1, booked=0) is True,
         "GPU skips the CPU hole gate",
     )
