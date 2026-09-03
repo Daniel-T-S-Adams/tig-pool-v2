@@ -13,10 +13,9 @@ actual token flow to member wallets only happens when the operator claims
 at round end.
 
 This module keeps that split accurate by recalculating each member's share
-of the current round and calling /set-coinbase. GPU challenges share
-PAY_GPU_POT_FRAC of the member pot (default 0.27) and CPU challenges share
-the rest; within each family, active challenges split equally. A wallet's
-weight is its nonce share of each challenge pot. We update every
+of the current round and calling /set-coinbase. Default PAY_MODE=effort
+splits the member pot by work credits (nonces × seconds/nonce). PAY_MODE=family
+restores GPU PAY_GPU_POT_FRAC / CPU pots. We update every
 `coinbase_update_period` blocks.
 
 Members receive their share directly into their own wallet from TIG at
@@ -26,7 +25,7 @@ import os
 import time
 import logging
 import requests
-from . import challenge_share
+from . import challenge_share, work_credits
 from . import database as db
 
 logger = logging.getLogger(__name__)
@@ -153,27 +152,35 @@ def _compute_allocation() -> dict[str, float]:
     """
     Member share of the in-progress round, matching the dashboard.
 
-    GPU challenges share PAY_GPU_POT_FRAC of (1 - POOL_FEE); CPU
-    challenges share the rest. Within a family, active challenges
-    split equally. A wallet's weight is its nonce share of each pot.
+    PAY_MODE=effort (default): wallet share is effort credits / pool
+    credits. PAY_MODE=family: GPU PAY_GPU_POT_FRAC, CPU the rest.
     Members who worked early and then stopped still keep that work.
     """
     member_share = 1.0 - POOL_FEE
     round_start_ms = _current_round_start_ms()
     if round_start_ms is not None:
+        mode = work_credits.pay_mode()
         try:
-            allocation = challenge_share.wallet_shares(
-                int(round_start_ms),
-                scale=member_share,
-            )
+            if mode == "effort":
+                allocation = work_credits.wallet_shares(
+                    int(round_start_ms),
+                    scale=member_share,
+                )
+            else:
+                allocation = challenge_share.wallet_shares(
+                    int(round_start_ms),
+                    scale=member_share,
+                )
             if allocation:
                 return allocation
             logger.warning(
-                "Challenge-share allocation was empty; falling back to contribution nonces."
+                "%s allocation was empty; falling back to contribution nonces.",
+                mode,
             )
         except Exception:
             logger.exception(
-                "Challenge-share allocation failed; falling back to contribution nonces."
+                "%s allocation failed; falling back to contribution nonces.",
+                work_credits.pay_mode(),
             )
     return _nonce_pile_allocation(round_start_ms, member_share)
 

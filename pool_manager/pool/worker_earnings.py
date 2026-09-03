@@ -1,17 +1,18 @@
 """
-Per-slave TIG estimates. Same per-challenge pots as /set-coinbase:
+Per-slave TIG estimates. Same split as /set-coinbase:
 
-    GPU challenges share PAY_GPU_POT_FRAC of pool TIG (default 0.27)
-    CPU challenges share the rest; equal split within each family
-    24h = sum_c (machine_nonces_24h_c / pool_nonces_round_c) × pot_c
-    1h  = sum_c (machine_nonces_1h_c  / pool_nonces_round_c) × pot_c
+    PAY_MODE=effort (default): challenge pots follow effort credits
+    (nonces × seconds/nonce). GPU shrinks when GPU work shrinks.
+    PAY_MODE=family: GPU PAY_GPU_POT_FRAC, CPU the rest.
+    24h / 1h = machine nonces on each challenge × that challenge pot
+    / pool nonces on it this round.
 """
 from __future__ import annotations
 
 import logging
 import time
 
-from . import challenge_share
+from . import challenge_share, work_credits
 from . import database as db
 
 logger = logging.getLogger("pool.worker_earnings")
@@ -262,7 +263,16 @@ def build_worker_earnings(
         )
 
     n_active = sum(1 for n in pool_challenge.values() if n > 0)
-    pots = challenge_share.pots_by_challenge(member_tig, pool_challenge)
+    if work_credits.pay_mode() == "family":
+        pots = challenge_share.pots_by_challenge(member_tig, pool_challenge)
+    else:
+        try:
+            weights = work_credits.fetch_weight_table()
+        except Exception:
+            weights = {}
+        pots = work_credits.challenge_effort_pots(
+            member_tig, pool_challenge, weights=weights
+        )
     gpu_family_tig = sum(
         v for c, v in pots.items() if challenge_share.is_gpu_challenge(c)
     )
@@ -319,17 +329,28 @@ def build_worker_earnings(
         "total_nonces": total_nonces,
         "challenge_count": n_active,
         "tig_per_challenge": {c: round(v, 6) for c, v in pots.items()},
-        "gpu_pot_frac": challenge_share.gpu_pot_frac(),
+        "gpu_pot_frac": (
+            challenge_share.gpu_pot_frac()
+            if work_credits.pay_mode() == "family"
+            else (round(gpu_family_tig / member_tig, 4) if member_tig > 0 else 0.0)
+        ),
         "gpu_family_tig": round(gpu_family_tig, 6),
         "cpu_family_tig": round(cpu_family_tig, 6),
+        "pay_mode": work_credits.pay_mode(),
         "worker_count": len(workers),
         "note": (
-            f"GPU challenges share {challenge_share.gpu_pot_frac():.0%} of pool TIG "
-            f"and CPU challenges share {1.0 - challenge_share.gpu_pot_frac():.0%}, "
-            "then each family splits equally across the challenges it worked. "
+            "Pay follows effort credits (nonces × seconds/nonce) so GPU "
+            "and CPU earn in proportion to work done. "
             "24h and 1h are this machine's nonces on each challenge times "
-            "that challenge's pot / pool nonces on it this round. "
+            "that challenge's effort pot / pool nonces on it this round. "
             "Same split as /set-coinbase."
+            if work_credits.pay_mode() == "effort"
+            else (
+                f"GPU challenges share {challenge_share.gpu_pot_frac():.0%} of pool TIG "
+                f"and CPU challenges share {1.0 - challenge_share.gpu_pot_frac():.0%}, "
+                "then each family splits equally across the challenges it worked. "
+                "Same split as /set-coinbase."
+            )
         ),
         "workers": workers,
     }

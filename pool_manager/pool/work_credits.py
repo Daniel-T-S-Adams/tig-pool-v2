@@ -1,9 +1,8 @@
 """
-Effort-weighted work credits (shadow only until cutover).
+Effort-weighted work credits.
 
-Live /set-coinbase uses per-challenge nonce pots (see challenge_share).
-This module scores shadow effort credits as:
-completed roots as:
+Live /set-coinbase (PAY_MODE=effort, the default) splits the member pot by
+completed-root effort, not a fixed GPU/CPU family pot:
 
     credits = nonces × seconds_per_nonce(challenge, track) × conversion
 
@@ -13,9 +12,12 @@ times that weight (hung box cannot mint hours).
 
 conversion is 1.0 for normal work and CONVERSION_FLOOR when the job
 stopped without a proof submit (junk / never-converted).
+
+PAY_MODE=family restores the old 27/73 challenge pots.
 """
 from __future__ import annotations
 
+import os
 import time
 from typing import Any, Iterable, Mapping, Optional
 
@@ -47,6 +49,55 @@ MIN_EMA_SAMPLES = 8
 
 def is_gpu_challenge(challenge: str) -> bool:
     return str(challenge or "") in GPU_CHALLENGES
+
+
+def pay_mode() -> str:
+    """Live coinbase mode. effort = work credits; family = GPU/CPU pots."""
+    raw = (os.environ.get("PAY_MODE") or "effort").strip().lower()
+    if raw in {"family", "pots", "gpu_frac"}:
+        return "family"
+    return "effort"
+
+
+def challenge_effort_pots(
+    pool_tig: float,
+    pool_nonces: Mapping[str, float],
+    *,
+    weights: Mapping[tuple[str, str], Mapping] | None = None,
+) -> dict[str, float]:
+    """Split pool TIG by challenge effort (nonces × sec/nonce), not 27/73."""
+    table = weights if weights is not None else {}
+    credits: dict[str, float] = {}
+    for challenge, raw in (pool_nonces or {}).items():
+        n = float(raw or 0)
+        if n <= 0 or not challenge:
+            continue
+        sec = seconds_for(table, str(challenge))
+        cr = credits_for_nonces(n, sec)
+        if cr > 0:
+            credits[str(challenge)] = cr
+    return fractions_from_amounts(credits, max(0.0, float(pool_tig or 0)))
+
+
+def wallet_shares(
+    since_ms: int | None,
+    *,
+    scale: float = 1.0,
+    force: bool = False,
+) -> dict[str, float]:
+    """Member-pot fractions from effort credits for the current round."""
+    report = build_shadow_report(
+        pool_fee=max(0.0, 1.0 - float(scale or 0)),
+        round_start_ms=since_ms,
+        force=force,
+    )
+    out: dict[str, float] = {}
+    for row in report.get("wallets_combined") or []:
+        wallet = str(row.get("wallet_address") or "").strip()
+        share = float(row.get("weight_share") or 0)
+        if wallet and share > 0:
+            out[wallet] = share
+    return out
 
 
 def prior_seconds_per_nonce(challenge: str, track_id: str = "") -> float:
@@ -644,15 +695,16 @@ def build_shadow_report(
     cpu_nonce_frac = fractions_from_amounts(cpu_nonce, member_share)
     gpu_nonce_frac = fractions_from_amounts(gpu_nonce, member_share)
     limit = max(1, int(top_n))
+    live = pay_mode()
     payload = {
-        "mode": "shadow",
-        "live_payout": "challenge_share",
+        "mode": live,
+        "live_payout": "effort" if live == "effort" else "challenge_share",
         "note": (
-            "Live /set-coinbase is per-challenge nonce pots "
-            "(GPU family 27% / CPU family 73%, then nonce share on that challenge). "
+            "Live /set-coinbase splits the member pot by effort credits "
+            "(nonces × fleet seconds/nonce) when PAY_MODE=effort. "
+            "PAY_MODE=family restores GPU 27% / CPU 73% challenge pots. "
             "WT=table weight (EMA/prior). ACT=capped wall-clock. "
-            "PRI=hardcoded prior only. If WT≈ACT, weights are calibrated. "
-            "CPU/GPU pots here are separate what-ifs versus that live split."
+            "PRI=hardcoded prior only. If WT≈ACT, weights are calibrated."
         ),
         "member_share": member_share,
         "round_start_ms": round_start_ms,

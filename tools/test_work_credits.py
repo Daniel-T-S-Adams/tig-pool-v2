@@ -13,10 +13,12 @@ from pool.work_credits import (  # noqa: E402
     CAP_MULT,
     CONVERSION_FLOOR,
     blend_seconds_per_nonce,
+    challenge_effort_pots,
     conversion_factor,
     credits_for_nonces,
     fractions_from_amounts,
     load_weight_table,
+    pay_mode,
     prior_seconds_per_nonce,
     score_root_group,
 )
@@ -122,6 +124,30 @@ def main() -> int:
     check(hung["actual_sec"] == 10.0, "100s / 10 nonces = 10s actual")
     check(hung["credits_actual"] == 60.0, "hung SAT actual capped at 3x prior 2s")
     check(hung["credits_weight"] == 20.0, "SAT weight credits stay 10*2")
+
+    cutoff_pool = {
+        "knapsack": 14_000_000,
+        "energy_arbitrage": 8_900_000,
+        "satisfiability": 400_000,
+        "job_scheduling": 300_000,
+        "vehicle_routing": 200_000,
+        "hypergraph": 273_000,
+        "vector_search": 54_000,
+        "neuralnet_optimizer": 50_000,
+    }
+    pots = challenge_effort_pots(100.0, cutoff_pool)
+    gpu_tig = sum(
+        pots.get(c, 0.0)
+        for c in ("hypergraph", "vector_search", "neuralnet_optimizer")
+    )
+    check(abs(sum(pots.values()) - 100.0) < 1e-6, "effort pots sum to pool TIG")
+    check(gpu_tig < 27.0, f"cutoff-scale GPU effort is {gpu_tig:.2f}% not a 27% pot")
+    check(gpu_tig > 0.5, f"GPU still earns something, got {gpu_tig:.2f}")
+    check(
+        pots["vehicle_routing"] > pots["knapsack"] * (200_000 / 14_000_000),
+        "VRPTW pot beats raw-nonce share because each nonce costs more",
+    )
+    check(pay_mode() in {"effort", "family"}, "pay_mode is effort or family")
 
     return 2 if failed else 0
 
