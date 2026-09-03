@@ -20,6 +20,7 @@ def _load():
         in {
             "gpu_assign_inflight_cap",
             "_slave_work_profile",
+            "_is_c3_dispatcher_slave",
             "_is_proof_batch_row",
             "select_gpu_kept_assigned",
         }
@@ -28,6 +29,7 @@ def _load():
     want = {
         "gpu_assign_inflight_cap",
         "_slave_work_profile",
+        "_is_c3_dispatcher_slave",
         "_is_proof_batch_row",
         "select_gpu_kept_assigned",
     }
@@ -42,6 +44,7 @@ def main() -> int:
     ns = _load()
     cap = ns["gpu_assign_inflight_cap"]
     profile = ns["_slave_work_profile"]
+    is_c3 = ns["_is_c3_dispatcher_slave"]
     failed = 0
 
     cases = [
@@ -54,6 +57,14 @@ def main() -> int:
         (cap(4, workers=2, route_cap=8) == 2, "2 advertised workers still 2"),
         (cap(0, workers=1, route_cap=8) == 0, "load-shed 0 stays 0"),
         (cap(8, workers=None, route_cap=8) == 2, "missing workers still 2"),
+        (cap(2, workers=6, route_cap=2, dispatcher=True) == 6, "C3 uses 6 workers not home clamp"),
+        (cap(8, workers=6, route_cap=8, dispatcher=True) == 6, "C3 width is worker count"),
+        (cap(8, workers=None, route_cap=8, dispatcher=True) == 2, "C3 without telem stays 2"),
+        (cap(0, workers=6, route_cap=8, dispatcher=True) == 0, "C3 load-shed 0 stays 0"),
+        (cap(8, workers=99, route_cap=8, dispatcher=True) == 16, "C3 workers hard-max 16"),
+        (is_c3("pool-gpu-a330c544ec5b-c3-001"), "live C3 name is dispatcher"),
+        (not is_c3("pool-gpu-9ffb87dc69ee-home-pica"), "home Pica is not C3"),
+        (not is_c3("pool-gpu-a330c544ec5b-home-kevin-strix"), "home Strix is not C3"),
         (profile("pool-gpu-abc") == "gpu", "pool-gpu is GPU"),
         (profile("pool-cpu-abc") == "cpu", "pool-cpu is CPU"),
         (profile("c3-slave-1") == "cpu", "c3 leftover name is CPU"),

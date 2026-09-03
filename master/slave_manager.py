@@ -1208,18 +1208,28 @@ def _slave_work_profile(slave_name: str) -> str:
     return ""
 
 
+def _is_c3_dispatcher_slave(slave_name: str) -> bool:
+    """C3 is N cloud GPUs behind one name, not one local card."""
+    name = str(slave_name or "")
+    return "-c3-" in name or name.startswith("c3-slave-")
+
+
 def gpu_assign_inflight_cap(
     proposed: int,
     *,
     workers=None,
     route_cap: int = 0,
     cfg=None,
+    dispatcher: bool = False,
 ) -> int:
-    """Hard ceiling: one running GPU batch plus at most one prefetch.
+    """Hard ceiling for a local GPU: one running batch plus one prefetch.
 
-    ``workers`` / ``NUM_WORKERS`` are local nonce threads, not assign
-    width. A card still executes one batch at a time. Advertising 4
-    workers used to warehouse 4 whole jobs on that serialized card.
+    On a home card, ``workers`` / ``NUM_WORKERS`` are local nonce threads,
+    not assign width. Advertising 4 workers used to warehouse 4 jobs on
+    that serialized card.
+
+    C3 is different: each worker is a separate cloud GPU job. Pass
+    ``dispatcher=True`` so advertised workers are the assign width.
 
     Adaptive throughput/runtime caps used to warehouse 8-13 jobs.
     Callers must only apply this to ``pool-gpu-*``.
@@ -1230,6 +1240,16 @@ def gpu_assign_inflight_cap(
         want = 0
     if want <= 0:
         return 0
+    if dispatcher:
+        try:
+            hard = int(workers or 0)
+        except (TypeError, ValueError):
+            hard = 0
+        if hard < 1:
+            hard = 2
+        elif hard > 16:
+            hard = 16
+        return hard
     cfg = cfg or {}
     try:
         # Default 2 = one running + one prefetch so the card does not
@@ -2538,7 +2558,7 @@ class SlaveManager:
         return self._clamp_assign_cap(slave_name, want)
 
     def _clamp_gpu_assign_cap(self, slave_name: str, proposed: int) -> int:
-        """GPU-only: one running batch plus at most one prefetch."""
+        """Local GPU: run + prefetch. C3: one inflight batch per worker."""
         try:
             want = int(proposed or 0)
         except (TypeError, ValueError):
@@ -2555,6 +2575,7 @@ class SlaveManager:
             workers=workers,
             route_cap=want,
             cfg=CONFIG.get("adaptive_slave_caps") or {},
+            dispatcher=_is_c3_dispatcher_slave(slave_name),
         )
 
     def _clamp_cpu_assign_cap(self, slave_name: str, proposed: int) -> int:
@@ -3072,8 +3093,7 @@ class SlaveManager:
         else:
             cap = min_cap
 
-        # Real GPUs run one batch at a time. NUM_WORKERS is local nonce
-        # threads, not assign width. Do not raise cap to advertised workers.
+        # Local GPUs run one batch at a time. C3 workers are cloud jobs.
         if _slave_work_profile(slave_name) == "gpu":
             cap = self._clamp_gpu_assign_cap(slave_name, cap)
         if profile == "cpu" and max_cap > 1:
