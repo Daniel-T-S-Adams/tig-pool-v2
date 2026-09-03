@@ -2521,6 +2521,22 @@ class SlaveManager:
             (state, benchmark_id)
         )
 
+    def _preferred_assign_cap(self, slave_name: str, views=None) -> int:
+        """Seats sticky must treat as full. GPU clamp is 2, not route 4–12."""
+        route = self._route_cap_for_slave(slave_name)
+        if route <= 0:
+            return 0
+        adaptive = None
+        if views is not None:
+            caps = getattr(views, "adaptive_caps", None) or {}
+            if slave_name in caps:
+                try:
+                    adaptive = int(caps[slave_name])
+                except (TypeError, ValueError):
+                    adaptive = None
+        want = route if adaptive is None else max(0, min(route, adaptive))
+        return self._clamp_assign_cap(slave_name, want)
+
     def _clamp_gpu_assign_cap(self, slave_name: str, proposed: int) -> int:
         """GPU-only: one running batch plus at most one prefetch."""
         try:
@@ -3722,14 +3738,10 @@ class SlaveManager:
                 for preferred in preferreds_with_unassigned:
                     if not preferred or preferred not in online_slaves:
                         continue
-                    pref_route = self._route_cap_for_slave(preferred)
-                    if preferred in views.adaptive_caps:
-                        pref_cap = max(0, min(pref_route, int(views.adaptive_caps[preferred])))
-                    else:
-                        pref_cap = pref_route
-                    if pref_route <= 0:
+                    pref_cap = self._preferred_assign_cap(preferred, views)
+                    if pref_cap <= 0:
                         continue
-                    if int(active_by_slave.get(preferred) or 0) >= min(pref_route, pref_cap):
+                    if int(active_by_slave.get(preferred) or 0) >= pref_cap:
                         preferred_at_cap.add(preferred)
                         continue
                     if PROOF_PRIORITY_ENABLED and (
@@ -4304,14 +4316,10 @@ class SlaveManager:
             for preferred in preferreds_with_unassigned:
                 if not preferred or preferred not in online_slaves:
                     continue
-                pref_route = self._route_cap_for_slave(preferred)
-                if preferred in views.adaptive_caps:
-                    pref_cap = max(0, min(pref_route, int(views.adaptive_caps[preferred])))
-                else:
-                    pref_cap = pref_route
-                if pref_route <= 0:
+                pref_cap = self._preferred_assign_cap(preferred, views)
+                if pref_cap <= 0:
                     continue
-                if int(active_by_slave.get(preferred) or 0) >= min(pref_route, pref_cap):
+                if int(active_by_slave.get(preferred) or 0) >= pref_cap:
                     preferred_at_cap.add(preferred)
                     continue
                 # Unlock sticky when preferred can take proofs OR is awaiting proofs.
@@ -4976,10 +4984,10 @@ class SlaveManager:
                 for preferred in preferreds_with_unassigned:
                     if not preferred or preferred not in online_slaves:
                         continue
-                    pref_route = self._route_cap_for_slave(preferred)
-                    if pref_route <= 0:
+                    pref_cap = self._preferred_assign_cap(preferred, views)
+                    if pref_cap <= 0:
                         continue
-                    if int(active_by_slave.get(preferred) or 0) >= pref_route:
+                    if int(active_by_slave.get(preferred) or 0) >= pref_cap:
                         preferred_at_cap.add(preferred)
                         continue
                     if PROOF_PRIORITY_ENABLED and preferred in slaves_with_proof_work:
