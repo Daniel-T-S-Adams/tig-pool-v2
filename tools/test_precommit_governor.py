@@ -927,8 +927,8 @@ def main() -> int:
                 gpu_spare_jobs=2,
                 idle_gpu_slaves=3,
             )
-            is True,
-            "idle GPUs lift GPU cap so spare creates are not forced onto CPU",
+            is False,
+            "GPU hard cap does not idle-lift past the operator cap",
         ),
         (
             under_cap(
@@ -971,8 +971,8 @@ def main() -> int:
                 gpu_spare_jobs=2,
                 idle_gpu_slaves=0,
             )
-            is True,
-            "keep-ahead may exceed cap by the spare count only",
+            is False,
+            "GPU keep-ahead does not open a job past the operator cap",
         ),
         (
             under_cap(
@@ -1084,8 +1084,23 @@ def main() -> int:
                 gpu_spare_jobs=2,
                 idle_gpu_slaves=12,
             )
-            is True,
-            "c004 idle lift still grows with empty cards",
+            is False,
+            "c004 stays at hard cap even with empty GPU cards",
+        ),
+        (
+            under_cap(
+                "c006",
+                pending_counts={"c006": 1},
+                root_phase_counts={"c006": 1},
+                submitted={},
+                per_challenge_max={"c006": 1},
+                idle_gpu_starved=True,
+                idle_gpu_needs_work=True,
+                gpu_spare_jobs=4,
+                idle_gpu_slaves=25,
+            )
+            is False,
+            "c006 stays at hard cap 1 even with empty GPU cards",
         ),
     ]
     for ok, label in cap_cases:

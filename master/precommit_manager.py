@@ -895,9 +895,11 @@ def challenge_under_create_cap(
     Proof-phase jobs do not feed idle root workers. When a profile is idle
     with no claimable roots, count only root-phase jobs against that
     profile's per-challenge cap so a new root job can start.
-    GPU idle lift grows with empty cards. Hypergraph (c005) is a hard
-    cap — idle lift must not open a second slow HG job. CPU idle lift
-    grows with idle boxes. Unassigned remaining still caps the leftover pile.
+    GPU challenges stay at the operator cap. Idle lift used to warehouse
+    vector_search and neuralnet past a 1-job cutoff when cards looked
+    empty. Empty cards may still replace a finished job because used
+    drops. CPU idle lift still grows with idle boxes. Unassigned
+    remaining still caps the leftover pile.
     """
     cid = str(challenge_id or "")[:4]
     cap = per_challenge_max.get(cid)
@@ -921,14 +923,10 @@ def challenge_under_create_cap(
     counts = root_phase_counts if (cpu_idle or gpu_idle) else pending_counts
     used = int((counts or {}).get(cid, 0) or 0) + int((submitted or {}).get(cid, 0) or 0)
     extra = 0
-    # c005 stays at the operator cap even when cards are empty.
-    if cid == "c005":
+    # VS / HG / NN do not idle-lift or keep-ahead past the operator cap.
+    if cid in gpu_ids:
         return used < int(cap)
-    if gpu_idle:
-        extra = max(int(gpu_spare_jobs or 0), int(idle_gpu_slaves or 0), 1)
-    elif gpu_keep_ahead and cid in gpu_ids:
-        extra = max(int(gpu_spare_jobs or 0), 1)
-    elif cpu_idle:
+    if cpu_idle:
         extra = max(1, min(int(idle_cpu_slaves or 0), max(1, int(max_idle_lift or 16))))
     return used < int(cap) + extra
 
