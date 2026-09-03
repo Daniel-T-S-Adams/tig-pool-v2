@@ -1,8 +1,8 @@
 """Per-tier CPU concurrent-batch ceilings for public pool members.
 
-S/M (32-thread Pica-class) may earn a second seat so a 16-nonce root can
-pack another leftover that still fits NUM_WORKERS. Blind concurrent=2 is
-still rejected: hole-fit lives in slave_manager. No worker telem → 1.
+S/M fill to telem cores (32, 16+16, 24+8). Seat count is cores/8 so
+combinations that fit are not blocked by a hard 2-batch cap. Hole-fit
+in slave_manager refuses anything over remaining cores. No telem → 1.
 L/XL still scale one job per 32 workers.
 
 Load-shed still wins.
@@ -27,7 +27,8 @@ DEFAULT_CPU_TIER_CAPS = {"S": 1, "M": 1, "L": 3, "XL": 6}
 DEFAULT_TIER_CORE_CEILINGS = (32, 64, 96)
 DEFAULT_XL_ABSOLUTE_MAX = 8
 DEFAULT_WORKERS_PER_CPU_JOB = 32
-DEFAULT_SM_PACK_SEATS = 2
+DEFAULT_SM_PACK_SEATS = 8
+DEFAULT_SM_CORE_CRUMB = 8
 # cores / num_workers. Kept for tests / legacy headroom helper.
 DEFAULT_HEADROOM_RATIO = 1.25
 DEFAULT_LOAD_OK_MULT = 0.85
@@ -55,7 +56,7 @@ def _sm_pack_seats(cfg: Mapping[str, Any]) -> int:
         value = int(raw)
     except (TypeError, ValueError):
         value = DEFAULT_SM_PACK_SEATS
-    return min(2, max(1, value))
+    return min(8, max(1, value))
 
 
 def cpu_tier_cap_settings(config: Optional[Mapping[str, Any]] = None) -> dict:
@@ -231,7 +232,7 @@ def cpu_assign_inflight_cap(
     load_shed_active: bool = False,
     trusted_without_telem: bool = False,
 ) -> int:
-    """Hard ceiling: S/M get at most the pack-seat cap (2); L/XL keep earnable.
+    """Hard ceiling: S/M get at most core-fit seats; L/XL keep earnable.
 
     Adaptive cache misses and the pool-cpu route cap of 32 used to warehouse
     6-10 jobs on a 32-thread Pica. Trusted coordinators with no size telem
@@ -723,10 +724,11 @@ def cpu_earnable_concurrent_ceiling(
 ) -> int:
     """Per-slave CPU concurrent ceiling (0 while load-shed).
 
-    S/M with worker telem may earn a pack seat (default 2) so a 16-nonce
-    root can take another leftover that still fits. No worker telem → 1.
-    Load already at cores*0.85 → 1 (no hole). L/XL scale one job per 32
-    workers. A 192-thread EPYC with 153 workers gets 4 jobs.
+    S/M with core telem may hold as many batches as fit those cores
+    (32, 16+16, 24+8). Seat ceiling is cores/8 so a 2-batch cap cannot
+    block a legal mix. No telem → 1. Load already at cores*0.85 → 1.
+    L/XL scale one job per 32 workers. A 192-thread EPYC with 153 workers
+    gets 4 jobs.
     """
     # Load-shed must win even when tier ceiling is already 1 (fleet/Pica),
     # otherwise cooldown is a no-op and overloaded boxes keep receiving work.
@@ -734,10 +736,11 @@ def cpu_earnable_concurrent_ceiling(
         return 0
     if int(tier) <= TIER_M:
         telem = telemetry or {}
-        workers = _parse_int(telem.get("num_workers")) or _parse_int(telem.get("cores"))
-        if workers is None:
-            return 1
         cores = _parse_int(telem.get("cores"))
+        workers = _parse_int(telem.get("num_workers"))
+        lanes = cores or workers
+        if lanes is None:
+            return 1
         load_1m = telem.get("load_1m")
         if cores is not None and load_1m is not None:
             try:
@@ -751,7 +754,9 @@ def cpu_earnable_concurrent_ceiling(
             pack = int(settings.get("sm_pack_seats") or DEFAULT_SM_PACK_SEATS)
         except (TypeError, ValueError):
             pack = DEFAULT_SM_PACK_SEATS
-        return min(2, max(1, pack))
+        crumb = max(1, int(settings.get("sm_core_crumb") or DEFAULT_SM_CORE_CRUMB))
+        core_seats = max(1, int(lanes) // crumb)
+        return max(1, min(core_seats, max(1, pack), 8))
     ceiling = tier_concurrent_ceiling(tier, settings)
     if ceiling <= 1:
         return 1

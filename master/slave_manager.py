@@ -585,6 +585,23 @@ def poller_worker_count(telemetry: Optional[dict] = None, *, is_gpu: bool = Fals
     return 1 if is_gpu else 25
 
 
+def cpu_lane_count(telemetry: Optional[dict] = None) -> int:
+    """Runnable CPU lanes for pack-fit. Prefer telem cores, then workers.
+
+    32 cores may hold 32, 16+16, 24+8, 8+8+16 — any mix that sums to
+    cores. Missing telem is 0 so hole-fit does not invent a 25-lane box.
+    """
+    telem = telemetry or {}
+    for key in ("cores", "num_workers"):
+        try:
+            n = int(telem.get(key) or 0)
+        except (TypeError, ValueError):
+            n = 0
+        if n >= 1:
+            return n
+    return 0
+
+
 def booked_cpu_nonces(rows) -> int:
     """Sum remaining nonces on assigned batches (roots and proofs)."""
     total = 0
@@ -610,9 +627,10 @@ def cpu_pack_candidate_ok(
     workers: int = 0,
     booked: int = 0,
 ) -> bool:
-    """True when this root still fits the box's unused worker threads.
+    """True when this root still fits unused CPU lanes (telem cores).
 
-    GPU and proofs skip the gate. workers<=0 means no telem — do not block.
+    32 + 0, 16+16, 24+8 are fine. 32+8 is not. GPU and proofs skip.
+    workers<=0 means no telem — do not block a first batch.
     """
     if is_gpu or is_proof:
         return True
@@ -3641,9 +3659,8 @@ class SlaveManager:
                     item["workers"] = 0
                     item["booked"] = 0
                 else:
-                    item["workers"] = poller_worker_count(
-                        self._slave_telemetry.get(item["name"]) or {},
-                        is_gpu=False,
+                    item["workers"] = cpu_lane_count(
+                        self._slave_telemetry.get(item["name"]) or {}
                     )
                     item["booked"] = booked_cpu_nonces(assigned_rows)
                     if assigned_rows and int(item["booked"] or 0) <= 0:
@@ -4147,10 +4164,13 @@ class SlaveManager:
             updates = []
             algo_re = slave.get("algorithm_id_regex") or ""
             scanned = 0
-            idle_workers = poller_worker_count(
-                telem, is_gpu=_slave_work_profile(slave_name) == "gpu"
-            )
             idle_is_gpu = _slave_work_profile(slave_name) == "gpu"
+            idle_lanes = cpu_lane_count(telem)
+            idle_workers = (
+                idle_lanes
+                if (not idle_is_gpu and idle_lanes > 0)
+                else poller_worker_count(telem, is_gpu=idle_is_gpu)
+            )
             idle_booked = 0
             for b in self.batches:
                 if deadline_mono is not None and time.monotonic() >= deadline_mono:
@@ -4394,9 +4414,12 @@ class SlaveManager:
             bid_profile=leftover_profiles_by_bid(self.batches),
             poller_profile="gpu" if poller_is_gpu else "cpu",
         )
-        poller_workers = poller_worker_count(
-            self._slave_telemetry.get(slave_name) or {},
-            is_gpu=poller_is_gpu,
+        telem = self._slave_telemetry.get(slave_name) or {}
+        lanes = cpu_lane_count(telem)
+        poller_workers = (
+            lanes
+            if (not poller_is_gpu and lanes > 0)
+            else poller_worker_count(telem, is_gpu=poller_is_gpu)
         )
         has_fat_claimable = claimable_has_fat_leftover(
             unassigned_by_bid=takeable_unassigned,
@@ -5060,9 +5083,12 @@ class SlaveManager:
             if not unassigned_by_bid:
                 unassigned_by_bid = unassigned_roots_by_job(self.batches)
             poller_is_gpu = _slave_work_profile(slave_name) == "gpu"
-            poller_workers = poller_worker_count(
-                self._slave_telemetry.get(slave_name) or {},
-                is_gpu=poller_is_gpu,
+            slow_telem = self._slave_telemetry.get(slave_name) or {}
+            slow_lanes = cpu_lane_count(slow_telem)
+            poller_workers = (
+                slow_lanes
+                if (not poller_is_gpu and slow_lanes > 0)
+                else poller_worker_count(slow_telem, is_gpu=poller_is_gpu)
             )
 
             now_i = int(now)

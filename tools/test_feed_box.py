@@ -36,6 +36,7 @@ def main() -> int:
         "master/slave_manager.py",
         "batch_remaining_nonces",
         "poller_worker_count",
+        "cpu_lane_count",
         "leftover_feeds_box",
         "leftover_is_crumb",
         "leftover_finishes_job",
@@ -781,6 +782,27 @@ def main() -> int:
     check(
         fits(remaining_nonces=32, workers=32, booked=32) is False,
         "SAT 32 plus knapsack 32 does not fit 32 cores",
+    )
+    check(
+        ns["cpu_lane_count"]({"cores": 32, "num_workers": 25}) == 32,
+        "pack budget prefers telem cores over workers",
+    )
+    check(ns["cpu_lane_count"]({}) == 0, "no telem → 0 lanes")
+    check(
+        fits(remaining_nonces=24, workers=32, booked=0) is True,
+        "idle 32-core takes a 24-nonce leftover",
+    )
+    check(
+        fits(remaining_nonces=8, workers=32, booked=24) is True,
+        "24+8 fills 32 cores",
+    )
+    check(
+        fits(remaining_nonces=16, workers=32, booked=16) is True,
+        "16+16 fills 32 cores",
+    )
+    check(
+        fits(remaining_nonces=8, workers=32, booked=32) is False,
+        "32+8 exceeds 32 cores",
     )
     check(
         fits(remaining_nonces=0, workers=32, booked=32) is False,

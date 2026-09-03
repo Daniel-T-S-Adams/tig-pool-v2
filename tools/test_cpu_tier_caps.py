@@ -135,8 +135,8 @@ def main() -> int:
         pica = {"cores": 32, "num_workers": 32, "load_1m": 12, "free_ram_gb": 16}
         cases.append(
             (
-                earnable(tier=TIER_M, telemetry=pica, settings=settings) == 2,
-                "M 32w load 12 → pack seat 2",
+                earnable(tier=TIER_M, telemetry=pica, settings=settings) == 4,
+                "M 32 cores load 12 → 4 core-fit seats",
             )
         )
         cases.append(
@@ -248,8 +248,8 @@ def main() -> int:
                     telemetry=good,
                     settings=settings,
                 )
-                == 2,
-                "Pica/M pack cap is 2 with worker telem",
+                == 8,
+                "M 96-core telem core-fit seats cap at 8",
             )
         )
         cases.append(
@@ -287,8 +287,8 @@ def main() -> int:
                     telemetry=good,
                     settings=settings,
                 )
-                == 2,
-                "M clamps to pack cap 2 even if fleet max raised",
+                == 8,
+                "M 96-core telem still core-fit capped at 8",
             )
         )
         cases.append(
@@ -314,8 +314,8 @@ def main() -> int:
         cases.append((live_tier(workers=153) == TIER_XL, "153 workers → XL"))
         cases.append(
             (
-                empty_seats(workers=25, cores=32, active=0, settings=settings) == 2,
-                "Pica empty seats = 2",
+                empty_seats(workers=25, cores=32, active=0, settings=settings) == 4,
+                "Pica empty seats = 4 core-fit",
             )
         )
         cases.append(
