@@ -311,10 +311,11 @@ def feed_leftovers_one_pass(
             if int(item.get("workers") or 0) > 0 and not is_proof:
                 rem = batch_remaining_nonces(batch)
                 booked = int(item.get("booked") or 0)
-                hole = cpu_worker_hole(int(item.get("workers") or 0), booked)
+                n_workers = int(item.get("workers") or 0)
+                hole = cpu_worker_hole(n_workers, booked)
                 if rem <= 0:
                     rem = hole + 1 if booked > 0 else 0
-                if rem > hole:
+                if rem > 0 and cpu_batch_lanes(rem, n_workers) > hole:
                     continue
             picked = item
             cursor = (cursor + offset + 1) % n
@@ -323,8 +324,9 @@ def feed_leftovers_one_pass(
             continue
         picked["seats"] -= 1
         if int(picked.get("workers") or 0) > 0 and not is_proof:
-            picked["booked"] = int(picked.get("booked") or 0) + batch_remaining_nonces(
-                batch
+            picked["booked"] = int(picked.get("booked") or 0) + cpu_batch_lanes(
+                batch_remaining_nonces(batch),
+                int(picked.get("workers") or 0),
             )
         row["slave"] = picked["name"]
         row["start_time"] = now
@@ -619,6 +621,21 @@ def cpu_worker_hole(workers: int = 0, booked: int = 0) -> int:
     return max(0, int(workers or 0) - int(booked or 0))
 
 
+def cpu_batch_lanes(remaining_nonces: int = 0, workers: int = 0) -> int:
+    """Concurrent CPU lanes a leftover occupies right now.
+
+    Knapsack@256 is eight waves of 32 on a 32-core box, not 256 processes.
+    Pack-fit must use this or empty Picas refuse every 256-nonce root.
+    """
+    rem = max(0, int(remaining_nonces or 0))
+    n = max(0, int(workers or 0))
+    if rem <= 0:
+        return 0
+    if n <= 0:
+        return rem
+    return min(rem, n)
+
+
 def cpu_pack_candidate_ok(
     *,
     is_proof: bool = False,
@@ -629,8 +646,9 @@ def cpu_pack_candidate_ok(
 ) -> bool:
     """True when this root still fits unused CPU lanes (telem cores).
 
-    32 + 0, 16+16, 24+8 are fine. 32+8 is not. GPU and proofs skip.
-    workers<=0 means no telem — do not block a first batch.
+    Concurrent demand is min(nonces, cores): 256 on an empty 32-core is
+    32 lanes. 32+0, 16+16, 24+8 are fine. 32+8 and 256+16 are not.
+    GPU and proofs skip. workers<=0 means no telem — do not block a first batch.
     """
     if is_gpu or is_proof:
         return True
@@ -645,7 +663,7 @@ def cpu_pack_candidate_ok(
     if rem <= 0:
         # Missing nonce count: only allow on an empty box.
         return int(booked or 0) <= 0
-    return rem <= hole
+    return cpu_batch_lanes(rem, n_workers) <= hole
 
 
 def leftover_feeds_box(

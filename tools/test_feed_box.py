@@ -59,6 +59,7 @@ def main() -> int:
         "split_assigned_crumbs",
         "booked_cpu_nonces",
         "cpu_worker_hole",
+        "cpu_batch_lanes",
         "cpu_pack_candidate_ok",
         extra_ns={
             "Optional": __import__("typing").Optional,
@@ -778,6 +779,18 @@ def main() -> int:
     check(
         fits(remaining_nonces=32, workers=32, booked=0) is True,
         "idle Pica still takes a full 32",
+    )
+    check(
+        ns["cpu_batch_lanes"](256, 32) == 32,
+        "knapsack 256 occupies 32 concurrent lanes on a 32-core box",
+    )
+    check(
+        fits(remaining_nonces=256, workers=32, booked=0) is True,
+        "idle 32-core takes knapsack 256",
+    )
+    check(
+        fits(remaining_nonces=256, workers=32, booked=16) is False,
+        "knapsack 256 does not pack onto a 16-nonce hole",
     )
     check(
         fits(remaining_nonces=32, workers=32, booked=32) is False,

@@ -54,6 +54,7 @@ def main() -> int:
         "get_batches_stall_should_exit",
         "batch_remaining_nonces",
         "cpu_worker_hole",
+        "cpu_batch_lanes",
     )
     note = ns["note_poll_seen"]
     newest = ns["newest_poll_seen_ms"]
@@ -127,6 +128,27 @@ def main() -> int:
         (
             packed == [] and sat_plus_ks[0].get("slave") is None,
             "32-core box with SAT 32 does not take knapsack 32",
+        )
+    )
+    ks256 = [_leftover_row("ks256", 0)]
+    ks256[0]["batch"]["num_nonces"] = 256
+    packed256 = feed(
+        ks256,
+        [
+            {
+                "name": "pool-cpu-pica01",
+                "seats": 1,
+                "algo_re": r"^c00",
+                "workers": 32,
+                "booked": 0,
+            }
+        ],
+        now=2.5,
+    )
+    cases.append(
+        (
+            [c["benchmark_id"] for c in packed256] == ["ks256"],
+            "empty 32-core takes knapsack 256",
         )
     )
     fit_16 = [_leftover_row("ks16", 0)]
