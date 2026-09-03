@@ -5705,6 +5705,15 @@ class SlaveManager:
             
             return slave_name, b
 
+        def _heartbeat(slave_name: str) -> None:
+            """A root/proof submit is a live slave. Do not wait for get-batches."""
+            if not slave_name:
+                return
+            try:
+                self._touch_slave_seen(slave_name, int(time.time() * 1000))
+            except Exception:
+                logger.debug("slave_seen touch on submit failed for %s", slave_name)
+
         def _retire_batch_id(batch_id: str, *, is_proof: bool = False):
             """Mark in-memory copies of this phase finished and drop them.
 
@@ -5912,6 +5921,7 @@ class SlaveManager:
                         batch_id,
                         slave_name,
                     )
+                    _heartbeat(slave_name)
                     return submit_ack("duplicate_accepted")
                 # Assignment raced away (ghost replace / steal) but work is still
                 # unfinished — accept the root from the slave that computed it.
@@ -5954,6 +5964,7 @@ class SlaveManager:
                             slave_name,
                         )
                         _retire_batch_id(batch_id, is_proof=False)
+                        _heartbeat(slave_name)
                         return submit_ack("duplicate_accepted", note="stale_closed_batch")
                     expected_nonces = int(row["num_nonces"])
                 if len(solution_quality) != expected_nonces:
@@ -6028,6 +6039,7 @@ class SlaveManager:
             ]
             get_db_conn().execute_many(*queries)
             _retire_batch_id(batch_id, is_proof=False)
+            _heartbeat(slave_name)
             return submit_ack("accepted")
 
         @app.post('/submit-batch-proofs/{batch_id}')
@@ -6039,11 +6051,15 @@ class SlaveManager:
                     benchmark_id, batch_idx_s = batch_id.split("_", 1)
                     if _proofs_already_ready(benchmark_id, int(batch_idx_s)):
                         _retire_batch_id(batch_id, is_proof=True)
+                        proof_slave = canonicalize_pool_slave_name(
+                            request.headers.get("User-Agent")
+                        )
                         logger.debug(
                             "idempotent proofs accept for already-ready %s from %s",
                             batch_id,
-                            canonicalize_pool_slave_name(request.headers.get("User-Agent")),
+                            proof_slave,
                         )
+                        _heartbeat(proof_slave)
                         return submit_ack("duplicate_accepted")
                 raise
             try:
@@ -6082,6 +6098,7 @@ class SlaveManager:
                 )
             ])
             _retire_batch_id(batch_id, is_proof=True)
+            _heartbeat(slave_name)
             return submit_ack("accepted")
             
         thread = Thread(target=lambda: uvicorn.run(app, host="0.0.0.0", port=5115, access_log=False))  # nosec B104 — container binds all interfaces; nginx controls external exposure

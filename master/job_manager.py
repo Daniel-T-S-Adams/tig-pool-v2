@@ -1050,60 +1050,13 @@ class JobManager:
         )
         
                 
-    def _invalidate_roots_for_offline_owners(self, benchmark_id: str, offline: List[str]) -> int:
-        """Clear ready roots owned by dark slaves so live slaves can redo them."""
-        if not offline:
-            return 0
-        rows = get_db_conn().fetch_all(
-            """
-            SELECT batch_idx, slave
-            FROM root_batch
-            WHERE benchmark_id = %s
-              AND ready = true
-              AND slave IN %s
-            """,
-            (benchmark_id, tuple(offline)),
-        ) or []
-        if not rows:
-            return 0
-        queries = []
-        for row in rows:
-            queries.extend([
-                (
-                    """
-                    UPDATE root_batch
-                    SET ready = NULL,
-                        slave = NULL,
-                        start_time = NULL,
-                        end_time = NULL,
-                        num_attempts = 0
-                    WHERE benchmark_id = %s
-                      AND batch_idx = %s
-                      AND ready = true
-                    """,
-                    (benchmark_id, row["batch_idx"]),
-                ),
-                (
-                    """
-                    UPDATE batch_data
-                    SET merkle_root = NULL,
-                        solution_quality = NULL,
-                        average_quality = NULL
-                    WHERE benchmark_id = %s
-                      AND batch_idx = %s
-                    """,
-                    (benchmark_id, row["batch_idx"]),
-                ),
-            ])
-        get_db_conn().execute_many(*queries)
-        logger.warning(
-            f"job {benchmark_id}: invalidated {len(rows)} root batch(es) owned by "
-            f"offline slave(s) {sorted(set(r['slave'] for r in rows))} before merkle submit"
-        )
-        return len(rows)
+    def _warn_if_ready_root_owners_dark(self, benchmark_id: str, now_ms: int) -> None:
+        """Merkle is assembled from batch_data. Do not wipe ready roots.
 
-    def _root_owners_online(self, benchmark_id: str, now_ms: int) -> bool:
-        """False if any ready-root owner has not heartbeated recently."""
+        A finished box can still look dark if it has not polled or submitted
+        recently. Those roots are already in Postgres; proofs stay with the
+        artifact owner.
+        """
         ensure_slave_seen_table(get_db_conn().execute)
         owners = get_db_conn().fetch_all(
             """
@@ -1117,17 +1070,18 @@ class JobManager:
         ) or []
         owner_names = [r["slave"] for r in owners if r.get("slave")]
         if not owner_names:
-            return True
+            return
         online = fetch_online_slaves(
             get_db_conn().fetch_all,
             now_ms,
             PRE_SUBMIT_OWNER_ONLINE_MS,
         )
         dark = offline_owners(owner_names, online)
-        if not dark:
-            return True
-        self._invalidate_roots_for_offline_owners(benchmark_id, dark)
-        return False
+        if dark:
+            logger.warning(
+                f"job {benchmark_id}: submitting merkle with dark root "
+                f"owner(s) {sorted(dark)}; proofs stay with those owners"
+            )
 
     def _shed_stuck_root_owners(self, now_ms: int):
         """Unassign unfinished roots from dark / stuck / zombie / overloaded owners.
@@ -1350,10 +1304,7 @@ class JobManager:
                     f"(null batch merkle_root/solution_quality)"
                 )
                 continue
-            # Do not submit merkle while any root owner is dark — invalidate those
-            # roots so a live slave can redo them and proofs stay completable.
-            if not self._root_owners_online(benchmark_id, now):
-                continue
+            self._warn_if_ready_root_owners_dark(benchmark_id, now)
             solution_quality = [x for y in row['solution_quality'] for x in y]
             if not solution_quality:
                 logger.warning(

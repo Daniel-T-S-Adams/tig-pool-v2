@@ -5,8 +5,9 @@ one job's roots across many pool CPUs makes proofs fail when a member box goes
 dark. These helpers:
 
 1. Prefer keeping a job's roots on one live slave (sticky affinity).
-2. Track slave liveness via get-batches heartbeats (slave_seen).
-3. Support pre-submit redo of roots owned by offline slaves.
+2. Track slave liveness via get-batches / submit heartbeats (slave_seen).
+3. Reclaim unfinished roots from dark owners. Never wipe ready roots —
+   merkle is assembled from batch_data already in Postgres.
 4. Support stopping jobs whose proofs are stranded on offline artifact owners.
 """
 
