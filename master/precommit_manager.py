@@ -892,14 +892,10 @@ def challenge_under_create_cap(
 ) -> bool:
     """True when this challenge may receive another precommit.
 
-    Proof-phase jobs do not feed idle root workers. When a profile is idle
-    with no claimable roots, count only root-phase jobs against that
-    profile's per-challenge cap so a new root job can start.
-    GPU challenges stay at the operator cap. Idle lift used to warehouse
-    vector_search and neuralnet past a 1-job cutoff when cards looked
-    empty. Empty cards may still replace a finished job because used
-    drops. CPU idle lift still grows with idle boxes. Unassigned
-    remaining still caps the leftover pile.
+    CPU idle still counts only root-phase jobs so a proving CPU job
+    does not freeze new CPU roots. GPU cutoff counts every open job:
+    ROOT READY waiting to submit, and proof-phase, still occupy the
+    slot. Empty cards may replace a finished job because used drops.
     """
     cid = str(challenge_id or "")[:4]
     cap = per_challenge_max.get(cid)
@@ -915,17 +911,18 @@ def challenge_under_create_cap(
             spare=gpu_fleet_spare,
         ):
             return False
-    starved = bool(idle_gpu_starved) or (
-        bool(idle_gpu_needs_work) and not bool(gpu_keep_ahead)
-    )
     cpu_idle = bool(idle_cpu_needs_work) and cid in cpu_ids
-    gpu_idle = starved and cid in gpu_ids
-    counts = root_phase_counts if (cpu_idle or gpu_idle) else pending_counts
-    used = int((counts or {}).get(cid, 0) or 0) + int((submitted or {}).get(cid, 0) or 0)
     extra = 0
-    # VS / HG / NN do not idle-lift or keep-ahead past the operator cap.
+    # GPU cutoff counts every open job, including ROOT READY waiting
+    # to submit. Counting only merkle_root_ready IS NULL let a second
+    # VS mint while cards looked idle in that submit gap.
     if cid in gpu_ids:
+        used = int((pending_counts or {}).get(cid, 0) or 0) + int(
+            (submitted or {}).get(cid, 0) or 0
+        )
         return used < int(cap)
+    counts = root_phase_counts if cpu_idle else pending_counts
+    used = int((counts or {}).get(cid, 0) or 0) + int((submitted or {}).get(cid, 0) or 0)
     if cpu_idle:
         extra = max(1, min(int(idle_cpu_slaves or 0), max(1, int(max_idle_lift or 16))))
     return used < int(cap) + extra
@@ -1159,6 +1156,23 @@ class PrecommitManager:
             self.per_challenge_precommits_submitted[challenge_id] = (
                 self.per_challenge_precommits_submitted.get(challenge_id, 0) + 1
             )
+
+    def _decay_submitted_precommits(self, open_counts: dict) -> None:
+        """Drop in-memory holds once the job row is visible as an open job."""
+        seen = getattr(self, "_open_counts_seen", None)
+        if not isinstance(seen, dict):
+            seen = {}
+            self._open_counts_seen = seen
+        holds = self.per_challenge_precommits_submitted
+        for cid in set(list(holds) + list(open_counts or {}) + list(seen)):
+            now = int((open_counts or {}).get(cid, 0) or 0)
+            prev = int(seen.get(cid, 0) or 0)
+            landed = max(0, now - prev)
+            if landed and cid in holds:
+                holds[cid] = max(0, int(holds.get(cid, 0) or 0) - landed)
+                if holds[cid] == 0:
+                    holds.pop(cid, None)
+            seen[cid] = now
 
     def note_tig_cap_hit(self, hold_s: float = 90.0):
         """TIG said we are over 100. Stop minting until the hold ends."""
@@ -1418,7 +1432,9 @@ class PrecommitManager:
         except Exception:
             pass
         self.num_precommits_submitted = 0
-        self.per_challenge_precommits_submitted = {}
+        # Do not wipe per_challenge_precommits_submitted. A new block
+        # used to drop the in-memory hold and mint a second VS before
+        # the accepted job row existed.
         self.challenge_configs = block.config["challenges"]
         self._algorithms = kwargs.get("algorithms")
         self._binarys = kwargs.get("binarys")
@@ -2292,14 +2308,15 @@ class PrecommitManager:
                 COUNT(*) AS cnt,
                 COUNT(*) FILTER (WHERE merkle_root_ready IS NULL) AS root_cnt
             FROM job
-            WHERE merkle_proofs_ready IS NULL
-                AND stopped IS NULL
+            WHERE end_time IS NULL
+              AND COALESCE(stopped, false) = false
             GROUP BY settings->>'challenge_id'
             """
         )
         for row in rows:
             per_challenge_counts[row["challenge_id"]] = row["cnt"]
             root_phase_counts[row["challenge_id"]] = row["root_cnt"]
+        self._decay_submitted_precommits(per_challenge_counts)
 
         per_challenge_max = CONFIG.get("per_challenge_max_benchmarks", {})
         idle_gpu_needs_work = bool(idle_gpu_needs_work)

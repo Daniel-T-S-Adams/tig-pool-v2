@@ -862,8 +862,35 @@ def main() -> int:
                 per_challenge_max={"c004": 2},
                 idle_gpu_needs_work=True,
             )
-            is True,
-            "idle GPUs ignore proof-phase jobs for GPU create cap",
+            is False,
+            "idle GPUs still count ROOT READY / proof-phase GPU jobs",
+        ),
+        (
+            under_cap(
+                "c004",
+                pending_counts={"c004": 1},
+                root_phase_counts={"c004": 0},
+                submitted={},
+                per_challenge_max={"c004": 1},
+                idle_gpu_starved=True,
+                idle_gpu_needs_work=True,
+                idle_gpu_slaves=8,
+            )
+            is False,
+            "one VS with all roots ready still occupies the cutoff slot",
+        ),
+        (
+            under_cap(
+                "c004",
+                pending_counts={"c004": 1},
+                root_phase_counts={"c004": 0},
+                submitted={},
+                per_challenge_max={"c004": 1},
+                idle_gpu_starved=True,
+                idle_gpu_needs_work=True,
+            )
+            is False,
+            "one VS submitting proof still occupies the cutoff slot",
         ),
         (
             under_cap(
