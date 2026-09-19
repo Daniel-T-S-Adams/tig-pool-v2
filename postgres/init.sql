@@ -144,19 +144,29 @@ CREATE TABLE IF NOT EXISTS batch_audit (
     attempts INTEGER NOT NULL DEFAULT 0,
     result JSONB,
     error TEXT,
-    UNIQUE (benchmark_id, batch_idx)
+    -- 'sample' = picked at root ack; 'fetch' = operator asked for specific
+    -- archived nonces later (TIG report). One sample per batch, any fetches.
+    kind TEXT NOT NULL DEFAULT 'sample',
+    requested_by TEXT
 );
 
 CREATE TABLE IF NOT EXISTS batch_audit_leaf (
     audit_id BIGINT NOT NULL REFERENCES batch_audit(id) ON DELETE CASCADE,
     nonce BIGINT NOT NULL,
     leaf JSONB NOT NULL,
+    -- merkle branch sent with the leaf (slave >= 0.1.23) and whether it
+    -- reproduces the merkle_root committed at root submit
+    branch TEXT,
+    merkle_ok BOOLEAN,
     PRIMARY KEY (audit_id, nonce)
 );
 
+CREATE UNIQUE INDEX IF NOT EXISTS uq_batch_audit_sample ON batch_audit(benchmark_id, batch_idx) WHERE kind = 'sample';
 CREATE INDEX IF NOT EXISTS idx_batch_audit_status ON batch_audit(status);
 CREATE INDEX IF NOT EXISTS idx_batch_audit_slave ON batch_audit(slave);
 CREATE INDEX IF NOT EXISTS idx_batch_audit_requested_at ON batch_audit(requested_at);
+CREATE INDEX IF NOT EXISTS idx_batch_audit_kind_status ON batch_audit(kind, status);
+CREATE INDEX IF NOT EXISTS idx_batch_audit_benchmark ON batch_audit(benchmark_id);
 
 -- Default config (pool operator sets their real api_key/player_id via the benchmarker UI)
 INSERT INTO config

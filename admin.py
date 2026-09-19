@@ -21,6 +21,10 @@ Usage:
   python3 admin.py audit --benchmark <bid> [--nonce N] [--dump DIR]
                                              # answer a TIG report: who computed each batch,
                                              # posted vs verifier quality, write kept leaves
+  python3 admin.py audit --benchmark <bid> --nonce N --fetch [--wait [SECS]] [--note "..."]
+  python3 admin.py audit --benchmark <bid> --nonces 12,57,301 --fetch --wait
+                                             # pull the archived leaf(s) from the slave that
+                                             # computed them (merkle-checked) and re-verify
   python3 admin.py ai-optimizer [--json]     # run read-only DeepSeek analyst
   python3 admin.py ai-decisions [N]          # show recent AI recommendations
   python3 admin.py compute-types [--apply]   # validate/add TIG 0.0.7 compute_type
@@ -523,11 +527,108 @@ def _opt(args, flag):
             return args[i + 1]
     return None
 
+_AUDIT_TERMINAL = ("passed", "failed", "missing", "skipped", "error")
+
+
+def _audit_verdict_lines(row):
+    """Human lines for one batch_audit row (as returned by /admin/ops/audit/<id>)."""
+    lines = []
+    status = row.get("status")
+    kind = row.get("kind") or "sample"
+    lines.append(
+        f"  {kind} #{row.get('id')} batch {row.get('batch_idx')} slave={row.get('slave')} status={status}"
+        + (f" ({row.get('error')})" if row.get("error") else "")
+    )
+    result = row.get("result") or {}
+    leaves = {int(l["nonce"]): l for l in (row.get("leaves") or [])}
+    nonces = [int(n) for n in (row.get("requested_nonces") or [])]
+    expected = row.get("expected_qualities") or []
+    for i, n in enumerate(nonces):
+        v = result.get(str(n)) or {}
+        exp = v.get("expected", expected[i] if i < len(expected) else None)
+        leaf = leaves.get(n) or {}
+        mk = leaf.get("merkle_ok")
+        merkle = "merkle=ok" if mk is True else ("merkle=MISMATCH" if mk is False else "merkle=n/a")
+        if not leaf:
+            lines.append(f"      nonce {n}: posted={exp} leaf not delivered")
+            continue
+        if v.get("actual") is None and not v.get("error"):
+            lines.append(f"      nonce {n}: posted={exp} {merkle} verifier pending")
+            continue
+        flag = "MATCH" if v.get("ok") else "MISMATCH"
+        lines.append(f"      nonce {n}: posted={exp} verifier={v.get('actual')} {flag} {merkle} {v.get('error') or ''}".rstrip())
+    return lines
+
+
+def cmd_audit_fetch(args, bid, nonces):
+    """audit --benchmark <bid> --nonce N | --nonces a,b,c --fetch [--wait [SECS]] [--note ...]"""
+    import time as _time
+
+    body = {"benchmark_id": bid, "nonces": nonces, "requested_by": _opt(args, "--note") or "admin.py"}
+    rep = _post("/admin/ops/audit/fetch", body)
+    if "--json" in args and "--wait" not in args:
+        print(json.dumps(rep, indent=2, sort_keys=True, default=str))
+        return
+    created = rep.get("created") or []
+    errors = rep.get("errors") or []
+    print(f"Benchmark {bid}: fetch requested for nonces {nonces}")
+    for c in created:
+        seen = _fmt_ms(c.get("slave_last_seen"))
+        print(
+            f"  fetch #{c['audit_id']} batch {c['batch_idx']} nonces={c['nonces']} posted={c.get('posted_qualities')}"
+            f"  slave={c['slave']} active={'yes' if c.get('slave_active') else 'no'} trust={c.get('slave_trust') or '?'} last_seen={seen}"
+        )
+    for e in errors:
+        print(f"  cannot fetch {e.get('nonces') or e.get('nonce')}: {e.get('error')}")
+    if not created:
+        return
+    if "--wait" not in args:
+        ids = " ".join(str(c["audit_id"]) for c in created)
+        print(f"\n  Slave answers on its next poll (seconds if online). Check with: python3 admin.py audit {ids.split()[0]}")
+        return
+    wait_s = _opt(args, "--wait")
+    try:
+        wait_s = float(wait_s) if wait_s and not wait_s.startswith("--") else 600.0
+    except ValueError:
+        wait_s = 600.0
+    deadline = _time.time() + wait_s
+    pending = {int(c["audit_id"]) for c in created}
+    rows = {}
+    print(f"\n  waiting up to {int(wait_s)}s for leaves + verifier ...", flush=True)
+    while pending and _time.time() < deadline:
+        for aid in list(pending):
+            row = _get(f"/admin/ops/audit/{aid}")
+            rows[aid] = row
+            if row.get("status") in _AUDIT_TERMINAL:
+                pending.discard(aid)
+        if pending:
+            _time.sleep(5)
+    print()
+    for aid in sorted(rows):
+        for line in _audit_verdict_lines(rows[aid]):
+            print(line)
+    if pending:
+        print(f"\n  still open: {sorted(pending)} — slave offline or verifier busy; re-check with python3 admin.py audit <id>")
+    if "--json" in args:
+        print(json.dumps(list(rows.values()), indent=2, sort_keys=True, default=str))
+
+
 def cmd_audit_benchmark(args):
-    """audit --benchmark <id> [--nonce N] [--dump DIR] [--json]"""
+    """audit --benchmark <id> [--nonce N] [--nonces a,b] [--fetch] [--dump DIR] [--json]"""
     bid = _opt(args, "--benchmark")
     nonce = _opt(args, "--nonce")
     dump = _opt(args, "--dump")
+    if "--fetch" in args:
+        wanted = []
+        if nonce is not None:
+            wanted.append(int(nonce))
+        if (many := _opt(args, "--nonces")):
+            wanted.extend(int(x) for x in many.replace(" ", "").split(",") if x)
+        if not wanted:
+            print("audit --fetch needs --nonce N or --nonces a,b,c")
+            sys.exit(2)
+        cmd_audit_fetch(args, bid, sorted(set(wanted)))
+        return
     q = []
     if nonce is not None:
         q.append(f"nonce={int(nonce)}")
@@ -555,44 +656,60 @@ def cmd_audit_benchmark(args):
         print(f"\n  nonce {focus['nonce']} -> batch {focus['batch_idx']} computed by {focus.get('slave') or '?'}")
         print(f"    posted quality : {focus.get('posted_quality') if focus.get('posted_quality') is not None else 'unknown (batch_data pruned)'}")
         if focus.get("audited"):
-            ok = "MATCH" if v.get("ok") else "MISMATCH"
-            print(f"    audited        : yes (#{focus.get('audit_id')}, {focus.get('audit_status')}) verifier={v.get('actual')} {ok} {v.get('error') or ''}")
+            ok = "MATCH" if v.get("ok") else ("pending" if v.get("actual") is None and not v.get("error") else "MISMATCH")
+            mk = focus.get("merkle_ok")
+            merkle = "merkle=ok" if mk is True else ("merkle=MISMATCH" if mk is False else "")
+            print(
+                f"    audited        : yes ({focus.get('audit_kind') or 'sample'} #{focus.get('audit_id')}, {focus.get('audit_status')}) "
+                f"verifier={v.get('actual')} {ok} {merkle} {v.get('error') or ''}".rstrip()
+            )
             print(f"    leaf kept      : {'yes — --dump DIR writes it for re-verification' if focus.get('leaf_kept') else 'no (pruned)'}")
         else:
-            print(f"    audited        : no — not in the sample for this batch (audit #{focus.get('audit_id') or '—'} {focus.get('audit_status') or ''})")
+            print(f"    audited        : no — not in the sample for this batch")
+            if focus.get("root_available"):
+                print(f"    fetch          : python3 admin.py audit --benchmark {bid} --nonce {focus['nonce']} --fetch --wait")
+            else:
+                print(f"    fetch          : not possible — batch root no longer in DB (outside retention)")
     print()
-    print(f"{'BATCH':>5} {'SLAVE':<34} {'AUDIT':<9} {'SAMPLED NONCES -> posted/verifier':<50} {'LEAVES':>6}")
-    print("-" * 108)
+    print(f"{'BATCH':>5} {'SLAVE':<34} {'KIND':<7} {'AUDIT':<9} {'NONCES -> posted/verifier':<44} {'LEAVES':>6}")
+    print("-" * 110)
     for b in batches:
-        a = b.get("audit") or {}
-        res = a.get("result") or {}
-        parts = []
-        for n in (a.get("requested_nonces") or []):
-            v = res.get(str(n)) or {}
-            exp = v.get("expected")
-            if exp is None:
-                idx = (a.get("requested_nonces") or []).index(n)
-                eq = a.get("expected_qualities") or []
-                exp = eq[idx] if idx < len(eq) else "?"
-            act = v.get("actual")
-            mark = "" if act is None else ("=" if v.get("ok") else "!=")
-            parts.append(f"{n}:{exp}{mark}{'' if act is None else act}")
-        print(
-            f"{int(b.get('batch_idx')):>5} {str(b.get('slave') or '—'):<34} {str(a.get('status') or '—'):<9} "
-            f"{' '.join(parts)[:50]:<50} {int(a.get('leaves_kept') or 0):>6}"
-        )
-        if a.get("error"):
-            print(f"      error: {a['error']}")
+        rows = b.get("audits") or ([b["audit"]] if b.get("audit") else [])
+        if not rows:
+            print(f"{int(b.get('batch_idx')):>5} {str(b.get('slave') or '—'):<34} {'—':<7} {'—':<9} {'':<44} {0:>6}")
+            continue
+        for a in rows:
+            res = a.get("result") or {}
+            parts = []
+            for n in (a.get("requested_nonces") or []):
+                v = res.get(str(n)) or {}
+                exp = v.get("expected")
+                if exp is None:
+                    idx = (a.get("requested_nonces") or []).index(n)
+                    eq = a.get("expected_qualities") or []
+                    exp = eq[idx] if idx < len(eq) else "?"
+                act = v.get("actual")
+                mark = "" if act is None else ("=" if v.get("ok") else "!=")
+                parts.append(f"{n}:{exp}{mark}{'' if act is None else act}")
+            mk = a.get("merkle_ok")
+            merkle = "" if mk is None else (" merkle=ok" if mk else " merkle=BAD")
+            print(
+                f"{int(b.get('batch_idx')):>5} {str(b.get('slave') or '—'):<34} {str(a.get('kind') or 'sample'):<7} "
+                f"{str(a.get('status') or '—'):<9} {(' '.join(parts) + merkle)[:44]:<44} {int(a.get('leaves_kept') or 0):>6}"
+            )
+            if a.get("error"):
+                print(f"      error: {a['error']}")
     if dump:
         import os
         os.makedirs(dump, exist_ok=True)
         n = 0
         for b in batches:
-            for l in ((b.get("audit") or {}).get("leaves") or []):
-                path = os.path.join(dump, f"{int(l['nonce'])}.json")
-                with open(path, "w") as f:
-                    json.dump(l["leaf"], f, separators=(",", ":"))
-                n += 1
+            for a in (b.get("audits") or ([b["audit"]] if b.get("audit") else [])):
+                for l in (a.get("leaves") or []):
+                    path = os.path.join(dump, f"{int(l['nonce'])}.json")
+                    with open(path, "w") as f:
+                        json.dump(l["leaf"], f, separators=(",", ":"))
+                    n += 1
         print(f"\n  wrote {n} leaf file(s) to {dump}/ — re-verify with:")
         if job:
             print(
@@ -606,7 +723,15 @@ def cmd_audit(args):
         return
     if args and args[0].isdigit():
         row = _get(f"/admin/ops/audit/{args[0]}")
-        print(json.dumps(row, indent=2, sort_keys=True, default=str))
+        if "--json" in args:
+            print(json.dumps(row, indent=2, sort_keys=True, default=str))
+            return
+        print(f"Audit #{args[0]} — benchmark {row.get('benchmark_id')} {row.get('challenge')}/{row.get('algorithm')}")
+        for line in _audit_verdict_lines(row):
+            print(line)
+        print(f"  requested={_fmt_ms(row.get('requested_at'))} leaves={_fmt_ms(row.get('leaves_received_at'))} verified={_fmt_ms(row.get('verified_at'))}"
+              + (f" by={row.get('requested_by')}" if row.get("requested_by") else ""))
+        print("  (--json for the full row incl. leaf payloads)")
         return
     report = _get("/admin/ops/audit")
     if "--json" in args:

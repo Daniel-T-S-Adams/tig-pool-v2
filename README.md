@@ -257,20 +257,32 @@ A root submit commits to the *solutions* (merkle root) but not to the *quality n
 
 1. Slave POSTs `/submit-batch-root` as normal.
 2. Master picks the audit nonces **after** seeing the quality list — the highest-quality nonce plus `leaves_per_batch` random ones — and returns them in the ack as `audit_nonces`. The slave cannot know the sample before committing.
-3. Slave (≥ 0.1.22) POSTs the original `{nonce}.json` leaves to `/submit-batch-audit/{batch_id}` and keeps its own copy for 30 days.
+3. Slave (≥ 0.1.22) POSTs the original `{nonce}.json` leaves to `/submit-batch-audit/{batch_id}`.
 4. The `auditor` container runs **`tig-verifier` only** on each leaf inside the matching challenge container and compares the result to the posted quality.
 
 Outcomes per batch: `passed`, `failed`, `skipped` (not sampled / GPU challenge), `missing` (slave never delivered), `error` (verifier infrastructure problem, retried). A `failed` audit deactivates the member, sets `trust_state = quarantined` and releases its unfinished work. Failed audits and their leaves are kept **forever** as evidence; passed ones are pruned after `AUDIT_RETENTION_DAYS`.
 
+### Every leaf, on demand (fetch)
+
+The sample covers a few nonces per batch. If TIG reports a nonce we did **not** sample, the pool can still produce it: slaves ≥ 0.1.23 archive **every** leaf of every batch (`AUDIT_DIR/<batch>/leaves.json.gz`, 14 days) and the master pulls specific nonces on demand:
+
+1. `admin.py audit --benchmark <bid> --nonce <n> --fetch` creates a `batch_audit` row with `kind = fetch` for the slave that computed that batch.
+2. The master advertises it in the `X-Innopool-Audit-Fetch` header of that slave's next `get-batches` reply (seconds if online; older slaves ignore the header).
+3. The slave answers `/submit-batch-audit/{batch_id}` with the leaf **and its merkle branch**. The master recomputes the root from the branch and compares it with the `merkle_root` the slave committed at root-submit time (`merkle_ok`). A leaf altered after the fact cannot pass this check; a slave that no longer holds the archive reports `unavailable` and the row is marked `missing` at once.
+4. The auditor re-scores the leaf with `tig-verifier` exactly like a sample. A `merkle_ok = false` leaf is a `failed` audit regardless of quality. Fetches are always verified (no trust sampling) and wait `AUDIT_FETCH_TTL_H` (24 h) for an offline slave before being marked `missing`.
+
 ```bash
 python3 admin.py audit              # per-slave pass/fail/missing, backlog
 python3 admin.py audit --failures   # expected vs verifier quality per nonce
-python3 admin.py audit <id>         # one audit with its kept leaves
+python3 admin.py audit <id>         # one audit's verdict (--json for leaves)
 python3 admin.py audit --benchmark <bid> --nonce <n> --dump ./evidence
                                     # answer a TIG report for one benchmark/nonce
+python3 admin.py audit --benchmark <bid> --nonce <n> --fetch --wait
+                                    # not sampled? pull the archived leaf, merkle-check, re-verify
+python3 admin.py audit --benchmark <bid> --nonces 12,57,301 --fetch --wait 900 --note "tig report #123"
 ```
 
-**If TIG reports one of the pool's benchmarks**, run `audit --benchmark <bid> --nonce <n>`. It shows which slave computed that batch, the quality the slave posted for that exact nonce (`batch_data`), whether the nonce was in our sample, what `tig-verifier` returned, and whether we still hold the original `{nonce}.json`. `--dump DIR` writes the kept leaves out so you can re-run `tig-verifier` in front of anyone. A nonce that was not sampled still tells you who computed it and their audit record; the slave keeps its own copies of sampled leaves for 30 days (`AUDIT_DIR`).
+**If TIG reports one of the pool's benchmarks**, run `audit --benchmark <bid> --nonce <n>`. It shows which slave computed that batch, the quality the slave posted for that exact nonce (`batch_data`), whether the nonce was in our sample, what `tig-verifier` returned, and whether we still hold the original `{nonce}.json`. If it was not sampled, the output prints the `--fetch` command to run; `--wait` blocks until the leaf arrives and is verified (default 600 s). `--dump DIR` writes kept leaves out so you can re-run `tig-verifier` in front of anyone. Fetches need the job and its roots to still be in the DB (14-day job retention) and the slave to still hold its archive (`AUDIT_TTL`, 14 days).
 
 Tuning lives in `.env` (`AUDIT_*`, see `.env.example`) and, for the master side, under `"audit"` in the master config (`enabled`, `leaves_per_batch`, `include_max_quality`, `max_leaf_bytes`, `request_ttl_ms`). Leave `AUDIT_MISSING_QUARANTINE_THRESHOLD=0` until every member runs a slave ≥ 0.1.22 — older slaves never answer audit requests. GPU challenges are stored but not verified (the VPS has no GPU).
 
@@ -295,6 +307,7 @@ python3 admin.py audit [--json]                       # Quality spot-check: per-
 python3 admin.py audit --failures                     # Failed audits with expected vs verifier quality
 python3 admin.py audit <id>                           # One audit incl. kept leaves (dispute evidence)
 python3 admin.py audit --benchmark <bid> [--nonce N] [--dump DIR]  # Answer a TIG report for one benchmark
+python3 admin.py audit --benchmark <bid> --nonce N --fetch --wait  # Pull + merkle-check + re-verify an unsampled nonce
 
 python3 admin.py members                              # List all registered members (with trust/preflight state)
 python3 admin.py fleets                               # List registered fleets
@@ -388,6 +401,8 @@ All endpoints are prefixed with `/api/`.
 | POST | `/admin/pool-settings` | Update pool configuration |
 | GET | `/admin/ops/audit` | Quality-audit report: per-slave totals, backlog, recent failures |
 | GET | `/admin/ops/audit/{id}` | One audit row with its kept leaves |
+| GET | `/admin/ops/audit/benchmark/{bid}` | Per-batch audit picture for one benchmark (`?nonce=N&leaves=true`) |
+| POST | `/admin/ops/audit/fetch` | Request archived leaves from the computing slave (`{benchmark_id, nonces[], requested_by}`) |
 
 ---
 

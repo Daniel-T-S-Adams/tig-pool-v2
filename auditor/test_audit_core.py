@@ -29,6 +29,11 @@ def test_settings_from_env_defaults_and_overrides():
     assert s.trusted_sample_rate == 1.0
     assert s.fail_quarantine_threshold == 1
     assert s.retention_days == 1
+    assert s.fetch_ttl_ms == 24 * 3600 * 1000
+    s = AuditorSettings.from_env({"AUDIT_FETCH_TTL_H": "0.5"})
+    assert s.fetch_ttl_ms == 30 * 60 * 1000
+    s = AuditorSettings.from_env({"AUDIT_FETCH_TTL_H": "0"})   # clamps to 10 min
+    assert s.fetch_ttl_ms == 600_000
 
 
 def test_should_verify_probation_always_trusted_sampled():
@@ -88,6 +93,18 @@ def test_judge_failed_on_any_mismatch():
 def test_judge_failed_on_invalid_solution():
     out = judge([100], [5], {5: _v(5, 100, None, ok=False, error="invalid solution: bad")}, delivered=[5])
     assert out.status == "failed"
+
+
+def test_judge_failed_on_merkle_mismatch_even_if_quality_would_match():
+    # main.verify_one emits this verdict for merkle_ok=False leaves without
+    # running the verifier: not the committed leaf => strike, full stop.
+    out = judge(
+        [100, 200], [5, 9],
+        {5: _v(5, 100, 100), 9: _v(9, 200, None, ok=False, error="merkle: leaf does not match the root committed at submit")},
+        delivered=[5, 9],
+    )
+    assert out.status == "failed"
+    assert out.result_json()["9"]["ok"] is False
 
 
 def test_judge_error_on_infra_only():

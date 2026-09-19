@@ -21,6 +21,15 @@ Protocol (slave push, two phases)
    ``tig-verifier`` only — never ``tig-runtime`` — on each leaf and compares
    the result to the quality the slave posted. Mismatch => strike.
 
+Fetch (kind='fetch')
+--------------------
+Slaves >= 0.1.23 archive every leaf of every batch for AUDIT_TTL. When TIG
+reports a nonce we did not sample, the operator creates a ``fetch`` row; the
+master advertises it in the ``X-Innopool-Audit-Fetch`` header of that slave's
+next get-batches reply; the slave pushes the leaf plus its merkle branch; the
+master checks the branch against the ``merkle_root`` the slave committed at
+root-submit time (``merkle_ok``) before the auditor re-scores it.
+
 Everything here is pure helpers + SQL so ``slave_manager`` stays small and
 the logic is unit-testable without a DB.
 """
@@ -37,6 +46,11 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence
 logger = logging.getLogger(os.path.splitext(os.path.basename(__file__))[0])
 
 LEAF_REQUIRED_KEYS = ("nonce", "runtime_signature", "fuel_consumed", "solution", "cpu_arch")
+# Optional per-leaf merkle branch (hex, 66 chars per stem) from slaves >= 0.1.23.
+LEAF_BRANCH_KEY = "branch"
+AUDIT_FETCH_HEADER = "X-Innopool-Audit-Fetch"
+# Fetch rows advertised per get-batches reply; header stays small.
+AUDIT_FETCH_MAX_PER_POLL = 5
 
 # Master-side defaults. Operator can override any key under CONFIG["audit"]
 # via /update-config without a restart.
@@ -153,9 +167,59 @@ def validate_audit_leaves(
         size = len(json.dumps(clean, separators=(",", ":")))
         if size > int(max_leaf_bytes):
             raise ValueError(f"leaf {nonce} is {size} bytes > {max_leaf_bytes}")
+        branch = leaf.get(LEAF_BRANCH_KEY)
+        if branch is not None:
+            if not isinstance(branch, str) or len(branch) % 66 != 0 or len(branch) > 66 * 64:
+                raise ValueError(f"leaf {nonce} has a malformed merkle branch")
+            try:
+                bytes.fromhex(branch)
+            except ValueError as exc:
+                raise ValueError(f"leaf {nonce} merkle branch is not hex") from exc
+            clean[LEAF_BRANCH_KEY] = branch
         seen.add(nonce)
         accepted.append(clean)
     return accepted
+
+
+def verify_leaf_branch(leaf: dict, *, merkle_root: str, start_nonce: int) -> Optional[bool]:
+    """Check a delivered leaf against the root the slave committed at submit.
+
+    Returns True/False, or None when the leaf carries no branch (slave < 0.1.23)
+    or no root is known. Import is local so the pure helpers stay importable
+    in tests without the tig ``common`` package.
+    """
+    branch = leaf.get(LEAF_BRANCH_KEY)
+    if not branch or not merkle_root:
+        return None
+    try:
+        from common.merkle_tree import MerkleBranch, MerkleHash
+        from common.structs import OutputData
+
+        data = {k: leaf[k] for k in LEAF_REQUIRED_KEYS}
+        leaf_hash = OutputData.from_dict(data).to_merkle_hash()
+        root = MerkleBranch.from_str(branch).calc_merkle_root(leaf_hash, int(leaf["nonce"]) - int(start_nonce))
+        return root == MerkleHash.from_str(merkle_root)
+    except Exception as exc:
+        logger.warning("merkle branch check failed for nonce %s: %s", leaf.get("nonce"), exc)
+        return False
+
+
+def group_nonces_by_batch(nonces: Iterable[int], *, batch_size: int) -> Dict[int, List[int]]:
+    """Absolute nonces -> {batch_idx: [nonces]} for a job's batch size."""
+    out: Dict[int, List[int]] = {}
+    for n in sorted({int(x) for x in nonces}):
+        out.setdefault(n // int(batch_size), []).append(n)
+    return out
+
+
+def fetch_header_value(items: Sequence[dict]) -> str:
+    """Compact JSON for the get-batches header. Empty string when nothing to ask."""
+    if not items:
+        return ""
+    return json.dumps(
+        [{"audit_id": int(i["id"]), "batch_id": f"{i['benchmark_id']}_{int(i['batch_idx'])}", "nonces": [int(n) for n in i["requested_nonces"]]} for i in items],
+        separators=(",", ":"),
+    )
 
 
 # ── schema ───────────────────────────────────────────────────────────────────
@@ -184,7 +248,10 @@ SCHEMA_STATEMENTS = (
         -- per-nonce verifier output: {nonce: {"expected":..,"actual":..,"ok":bool,"error":..}}
         result JSONB,
         error TEXT,
-        UNIQUE (benchmark_id, batch_idx)
+        -- 'sample' (picked at root ack) or 'fetch' (operator asked for specific nonces later)
+        kind TEXT NOT NULL DEFAULT 'sample',
+        -- free text for fetches: who asked / which TIG report
+        requested_by TEXT
     )
     """,
     """
@@ -192,12 +259,25 @@ SCHEMA_STATEMENTS = (
         audit_id BIGINT NOT NULL REFERENCES batch_audit(id) ON DELETE CASCADE,
         nonce BIGINT NOT NULL,
         leaf JSONB NOT NULL,
+        -- merkle branch delivered with the leaf and whether it reproduces the committed root
+        branch TEXT,
+        merkle_ok BOOLEAN,
         PRIMARY KEY (audit_id, nonce)
     )
     """,
+    # Upgrades for DBs created before kind/fetch existed.
+    "ALTER TABLE batch_audit ADD COLUMN IF NOT EXISTS kind TEXT NOT NULL DEFAULT 'sample'",
+    "ALTER TABLE batch_audit ADD COLUMN IF NOT EXISTS requested_by TEXT",
+    "ALTER TABLE batch_audit DROP CONSTRAINT IF EXISTS batch_audit_benchmark_id_batch_idx_key",
+    "ALTER TABLE batch_audit_leaf ADD COLUMN IF NOT EXISTS branch TEXT",
+    "ALTER TABLE batch_audit_leaf ADD COLUMN IF NOT EXISTS merkle_ok BOOLEAN",
+    # One sample per batch; any number of fetches.
+    "CREATE UNIQUE INDEX IF NOT EXISTS uq_batch_audit_sample ON batch_audit(benchmark_id, batch_idx) WHERE kind = 'sample'",
     "CREATE INDEX IF NOT EXISTS idx_batch_audit_status ON batch_audit(status)",
     "CREATE INDEX IF NOT EXISTS idx_batch_audit_slave ON batch_audit(slave)",
     "CREATE INDEX IF NOT EXISTS idx_batch_audit_requested_at ON batch_audit(requested_at)",
+    "CREATE INDEX IF NOT EXISTS idx_batch_audit_kind_status ON batch_audit(kind, status)",
+    "CREATE INDEX IF NOT EXISTS idx_batch_audit_benchmark ON batch_audit(benchmark_id)",
 )
 
 _schema_ready = False
@@ -241,7 +321,7 @@ def record_audit_request(
             requested_nonces, expected_qualities, status, requested_at
         )
         VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, 'requested', %s)
-        ON CONFLICT (benchmark_id, batch_idx) DO NOTHING
+        ON CONFLICT (benchmark_id, batch_idx) WHERE kind = 'sample' DO NOTHING
         """,
         (
             benchmark_id,
@@ -258,30 +338,70 @@ def record_audit_request(
     )
 
 
-def fetch_audit_request(db, *, benchmark_id: str, batch_idx: int) -> Optional[dict]:
+def fetch_audit_request(db, *, benchmark_id: str, batch_idx: int, audit_id: Optional[int] = None) -> Optional[dict]:
+    """The row a ``/submit-batch-audit`` push is answering.
+
+    Slaves >= 0.1.23 name the ``audit_id``; older ones do not, and for them
+    the only row that can exist is the batch's sample.
+    """
+    if audit_id is not None:
+        return db.fetch_one(
+            """
+            SELECT id, slave, status, kind, requested_nonces, requested_at
+            FROM batch_audit
+            WHERE id = %s AND benchmark_id = %s AND batch_idx = %s
+            """,
+            (int(audit_id), benchmark_id, int(batch_idx)),
+        )
     return db.fetch_one(
         """
-        SELECT id, slave, status, requested_nonces, requested_at
+        SELECT id, slave, status, kind, requested_nonces, requested_at
         FROM batch_audit
-        WHERE benchmark_id = %s AND batch_idx = %s
+        WHERE benchmark_id = %s AND batch_idx = %s AND kind = 'sample'
         """,
         (benchmark_id, int(batch_idx)),
     )
 
 
-def store_audit_leaves(db, *, audit_id: int, leaves: List[dict], now_ms: Optional[int] = None) -> None:
+def fetch_batch_root(db, *, benchmark_id: str, batch_idx: int) -> Optional[dict]:
+    """merkle_root the slave committed for this batch plus the job's batch_size."""
+    return db.fetch_one(
+        """
+        SELECT bd.merkle_root, j.batch_size
+        FROM batch_data bd
+        JOIN job j ON j.benchmark_id = bd.benchmark_id
+        WHERE bd.benchmark_id = %s AND bd.batch_idx = %s
+        """,
+        (benchmark_id, int(batch_idx)),
+    )
+
+
+def store_audit_leaves(
+    db,
+    *,
+    audit_id: int,
+    leaves: List[dict],
+    merkle_ok: Optional[Dict[int, Optional[bool]]] = None,
+    now_ms: Optional[int] = None,
+) -> None:
     now_ms = int(now_ms if now_ms is not None else time.time() * 1000)
-    queries = [
-        (
-            """
-            INSERT INTO batch_audit_leaf (audit_id, nonce, leaf)
-            VALUES (%s, %s, %s)
-            ON CONFLICT (audit_id, nonce) DO UPDATE SET leaf = EXCLUDED.leaf
-            """,
-            (int(audit_id), int(leaf["nonce"]), json.dumps(leaf, separators=(",", ":"))),
+    merkle_ok = merkle_ok or {}
+    queries = []
+    for leaf in leaves:
+        nonce = int(leaf["nonce"])
+        branch = leaf.get(LEAF_BRANCH_KEY)
+        stored = {k: leaf[k] for k in LEAF_REQUIRED_KEYS}
+        queries.append(
+            (
+                """
+                INSERT INTO batch_audit_leaf (audit_id, nonce, leaf, branch, merkle_ok)
+                VALUES (%s, %s, %s, %s, %s)
+                ON CONFLICT (audit_id, nonce) DO UPDATE
+                SET leaf = EXCLUDED.leaf, branch = EXCLUDED.branch, merkle_ok = EXCLUDED.merkle_ok
+                """,
+                (int(audit_id), nonce, json.dumps(stored, separators=(",", ":")), branch, merkle_ok.get(nonce)),
+            )
         )
-        for leaf in leaves
-    ]
     queries.append(
         (
             """
@@ -295,3 +415,31 @@ def store_audit_leaves(db, *, audit_id: int, leaves: List[dict], now_ms: Optiona
         )
     )
     db.execute_many(*queries)
+
+
+def mark_audit_unavailable(db, *, audit_id: int, reason: str, now_ms: Optional[int] = None) -> None:
+    """Slave answered a fetch with 'I do not have it'. Record immediately as
+    missing instead of waiting for the request TTL."""
+    now_ms = int(now_ms if now_ms is not None else time.time() * 1000)
+    db.execute(
+        """
+        UPDATE batch_audit
+        SET status = 'missing', verified_at = %s, error = %s
+        WHERE id = %s AND status = 'requested'
+        """,
+        (now_ms, str(reason)[:500], int(audit_id)),
+    )
+
+
+def pending_fetch_requests(db, *, limit: int = 500) -> List[dict]:
+    """All fetch rows still waiting for leaves; master caches these per slave."""
+    return db.fetch_all(
+        """
+        SELECT id, benchmark_id, batch_idx, slave, requested_nonces
+        FROM batch_audit
+        WHERE kind = 'fetch' AND status = 'requested'
+        ORDER BY requested_at
+        LIMIT %s
+        """,
+        (int(limit),),
+    ) or []

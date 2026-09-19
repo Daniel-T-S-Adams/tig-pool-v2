@@ -37,6 +37,8 @@ class AuditorSettings:
     strike_window_ms: int = 7 * 24 * 3600 * 1000
     # Slave has this long after the root ack to deliver leaves.
     request_ttl_ms: int = 30 * 60 * 1000
+    # Operator fetches of archived leaves wait this long (slave may be offline).
+    fetch_ttl_ms: int = 24 * 3600 * 1000
     # Keep leaves of passed / skipped audits this long. Failed = forever.
     retention_days: int = 14
     # Verifier retries on infra error (container down etc.) before 'error'.
@@ -77,6 +79,7 @@ class AuditorSettings:
             missing_quarantine_threshold=max(0, _f("AUDIT_MISSING_QUARANTINE_THRESHOLD", 0, int)),
             strike_window_ms=max(60_000, _f("AUDIT_STRIKE_WINDOW_MS", 7 * 24 * 3600 * 1000, int)),
             request_ttl_ms=max(60_000, _f("AUDIT_REQUEST_TTL_MS", 30 * 60 * 1000, int)),
+            fetch_ttl_ms=max(600_000, int(_f("AUDIT_FETCH_TTL_H", 24.0, float) * 3600 * 1000)),
             retention_days=max(1, _f("AUDIT_RETENTION_DAYS", 14, int)),
             max_attempts=max(1, _f("AUDIT_MAX_ATTEMPTS", 3, int)),
             verifier_timeout_s=max(10, _f("AUDIT_VERIFIER_TIMEOUT_S", 120, int)),

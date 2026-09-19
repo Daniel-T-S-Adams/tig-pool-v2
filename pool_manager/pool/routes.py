@@ -1808,6 +1808,29 @@ def admin_ops_audit_benchmark(
     return audit_report.fetch_benchmark_audits(benchmark_id, nonce=nonce, with_leaves=leaves)
 
 
+@router.post("/admin/ops/audit/fetch")
+def admin_ops_audit_fetch(body: dict, x_admin_secret: str = Header(None)):
+    """Ask the slave(s) that computed specific nonces for their archived leaves.
+
+    Body: {"benchmark_id": "...", "nonces": [..], "requested_by": "tig report ..."}.
+    Creates batch_audit rows (kind='fetch'); the master relays them on the
+    slave's next poll and the auditor re-scores what comes back.
+    """
+    _check_admin(x_admin_secret)
+    benchmark_id = str((body or {}).get("benchmark_id") or "").strip()
+    nonces = (body or {}).get("nonces") or []
+    if not benchmark_id or not isinstance(nonces, list):
+        raise HTTPException(status_code=400, detail="benchmark_id and nonces[] required")
+    try:
+        return audit_report.create_fetch_requests(
+            benchmark_id, [int(n) for n in nonces], requested_by=(body or {}).get("requested_by")
+        )
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    except (ValueError, RuntimeError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
 @router.get("/admin/ops/audit/{audit_id}")
 def admin_ops_audit_detail(audit_id: int, x_admin_secret: str = Header(None)):
     """One audit row with its kept leaves — the evidence for a dispute."""

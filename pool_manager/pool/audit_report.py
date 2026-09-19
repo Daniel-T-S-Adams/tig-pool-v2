@@ -113,15 +113,22 @@ def fetch_benchmark_audits(benchmark_id: str, nonce: int | None = None, with_lea
         (benchmark_id,),
     )
     batch_size = int(job["batch_size"]) if job and job.get("batch_size") else None
+    kind_col = "a.kind" if db.has_columns("batch_audit", "kind") else "'sample' AS kind"
+    merkle_col = (
+        "(SELECT bool_and(l.merkle_ok) FROM batch_audit_leaf l WHERE l.audit_id = a.id AND l.merkle_ok IS NOT NULL) AS merkle_ok"
+        if db.has_columns("batch_audit_leaf", "merkle_ok")
+        else "NULL::boolean AS merkle_ok"
+    )
     audits = db.fetch_all(
-        """
+        f"""
         SELECT a.id, a.batch_idx, a.slave, a.challenge, a.algorithm, a.settings, a.rand_hash,
                a.status, a.requested_nonces, a.expected_qualities, a.result, a.error,
-               a.requested_at, a.leaves_received_at, a.verified_at,
-               (SELECT COUNT(*) FROM batch_audit_leaf l WHERE l.audit_id = a.id) AS leaves_kept
+               a.requested_at, a.leaves_received_at, a.verified_at, {kind_col},
+               (SELECT COUNT(*) FROM batch_audit_leaf l WHERE l.audit_id = a.id) AS leaves_kept,
+               {merkle_col}
         FROM batch_audit a
         WHERE a.benchmark_id = %s
-        ORDER BY a.batch_idx
+        ORDER BY a.batch_idx, a.requested_at
         """,
         (benchmark_id,),
     )
@@ -152,17 +159,23 @@ def fetch_benchmark_audits(benchmark_id: str, nonce: int | None = None, with_lea
         (benchmark_id,),
     ):
         batches[int(r["batch_idx"])] = dict(r)
+    leaf_cols = "nonce, leaf" + (", branch, merkle_ok" if db.has_columns("batch_audit_leaf", "merkle_ok") else "")
     for a in audits:
         b = batches.setdefault(int(a["batch_idx"]), {"batch_idx": int(a["batch_idx"]), "slave": a["slave"]})
-        b["audit"] = dict(a)
+        row = dict(a)
         if with_leaves:
-            b["audit"]["leaves"] = [
+            row["leaves"] = [
                 dict(l)
                 for l in db.fetch_all(
-                    "SELECT nonce, leaf FROM batch_audit_leaf WHERE audit_id = %s ORDER BY nonce",
+                    f"SELECT {leaf_cols} FROM batch_audit_leaf WHERE audit_id = %s ORDER BY nonce",
                     (int(a["id"]),),
                 )
             ]
+        # One sample per batch plus any number of fetches. ``audit`` stays the
+        # sample for older callers; ``audits`` has everything.
+        b.setdefault("audits", []).append(row)
+        if row.get("kind", "sample") == "sample" or "audit" not in b:
+            b["audit"] = row
 
     focus = None
     if nonce is not None and batch_size:
@@ -174,8 +187,13 @@ def fetch_benchmark_audits(benchmark_id: str, nonce: int | None = None, with_lea
             off = nonce - bidx * batch_size
             if 0 <= off < len(b["solution_quality"]):
                 posted = b["solution_quality"][off]
-        audit = (b or {}).get("audit") or {}
-        sampled = nonce in [int(n) for n in (audit.get("requested_nonces") or [])]
+        # Prefer the newest audit that actually covers this nonce.
+        covering = [
+            a for a in ((b or {}).get("audits") or [])
+            if nonce in [int(n) for n in (a.get("requested_nonces") or [])]
+        ]
+        audit = covering[-1] if covering else {}
+        sampled = bool(covering)
         verdict = ((audit.get("result") or {}).get(str(nonce))) if sampled else None
         focus = {
             "nonce": nonce,
@@ -184,9 +202,12 @@ def fetch_benchmark_audits(benchmark_id: str, nonce: int | None = None, with_lea
             "posted_quality": posted,
             "audited": sampled,
             "audit_id": audit.get("id"),
+            "audit_kind": audit.get("kind"),
             "audit_status": audit.get("status"),
+            "merkle_ok": audit.get("merkle_ok"),
             "verifier": verdict,
             "leaf_kept": bool(sampled and audit.get("leaves_kept")),
+            "root_available": bool((b or {}).get("merkle_root")),
         }
         batches = {bidx: b} if b else {}
 
@@ -202,10 +223,123 @@ def fetch_audit_detail(audit_id: int) -> dict | None:
     row = db.fetch_one("SELECT * FROM batch_audit WHERE id = %s", (int(audit_id),))
     if row is None:
         return None
+    leaf_cols = "nonce, leaf" + (", branch, merkle_ok" if db.has_columns("batch_audit_leaf", "merkle_ok") else "")
     leaves = db.fetch_all(
-        "SELECT nonce, leaf FROM batch_audit_leaf WHERE audit_id = %s ORDER BY nonce",
+        f"SELECT {leaf_cols} FROM batch_audit_leaf WHERE audit_id = %s ORDER BY nonce",
         (int(audit_id),),
     )
     out = dict(row)
     out["leaves"] = [dict(l) for l in leaves]
     return out
+
+
+def create_fetch_requests(benchmark_id: str, nonces: list[int], requested_by: str | None = None) -> dict:
+    """Ask the slaves that computed these nonces for their archived leaves.
+
+    One ``batch_audit`` row (kind='fetch') per batch touched. The master
+    advertises it on the slave's next get-batches poll; the slave answers
+    with leaf + merkle branch; the auditor re-scores. Needs the job and the
+    batch's root (batch_data) to still be in the DB, i.e. inside retention.
+    """
+    benchmark_id = str(benchmark_id).strip()
+    wanted = sorted({int(n) for n in nonces})
+    if not wanted:
+        raise ValueError("no nonces")
+    if not db.has_columns("batch_audit", "kind"):
+        raise RuntimeError("batch_audit has no 'kind' column yet — restart the master to migrate")
+    job = db.fetch_one(
+        """
+        SELECT benchmark_id, challenge, algorithm, settings, rand_hash, num_nonces, batch_size
+        FROM job WHERE benchmark_id = %s
+        """,
+        (benchmark_id,),
+    )
+    if job is None:
+        raise LookupError(f"job {benchmark_id} not found (outside retention?)")
+    batch_size = int(job["batch_size"])
+    num_nonces = int(job["num_nonces"] or 0)
+    created, errors = [], []
+    now_ms = _now_ms()
+    by_batch: dict[int, list[int]] = {}
+    for n in wanted:
+        if num_nonces and not (0 <= n < num_nonces):
+            errors.append({"nonce": n, "error": f"outside job range 0..{num_nonces - 1}"})
+            continue
+        by_batch.setdefault(n // batch_size, []).append(n)
+    for bidx, ns in sorted(by_batch.items()):
+        b = db.fetch_one(
+            """
+            SELECT rb.slave, bd.merkle_root, bd.solution_quality
+            FROM root_batch rb
+            LEFT JOIN batch_data bd ON bd.benchmark_id = rb.benchmark_id AND bd.batch_idx = rb.batch_idx
+            WHERE rb.benchmark_id = %s AND rb.batch_idx = %s
+            """,
+            (benchmark_id, bidx),
+        )
+        if b is None or not b.get("slave"):
+            errors.append({"batch_idx": bidx, "nonces": ns, "error": "no root_batch row (never assigned or pruned)"})
+            continue
+        qualities = b.get("solution_quality")
+        if not isinstance(qualities, list) or not b.get("merkle_root"):
+            errors.append({"batch_idx": bidx, "nonces": ns, "slave": b["slave"], "error": "root never submitted for this batch"})
+            continue
+        expected = []
+        for n in ns:
+            off = n - bidx * batch_size
+            expected.append(int(qualities[off]) if 0 <= off < len(qualities) else None)
+        if any(q is None for q in expected):
+            errors.append({"batch_idx": bidx, "nonces": ns, "slave": b["slave"], "error": "posted quality list shorter than batch (corrupt batch_data)"})
+            continue
+        row = db.fetch_one(
+            """
+            INSERT INTO batch_audit (
+                benchmark_id, batch_idx, slave, challenge, algorithm, settings, rand_hash,
+                requested_nonces, expected_qualities, status, requested_at, kind, requested_by
+            )
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s::jsonb, %s::jsonb, 'requested', %s, 'fetch', %s)
+            RETURNING id
+            """,
+            (
+                benchmark_id,
+                bidx,
+                b["slave"],
+                job["challenge"],
+                job.get("algorithm"),
+                _json(job["settings"]),
+                job["rand_hash"],
+                _json(ns),
+                _json(expected),
+                now_ms,
+                (requested_by or "admin")[:200],
+            ),
+        )
+        member = db.fetch_one(
+            "SELECT active, trust_state FROM pool_members WHERE slave_name = %s",
+            (b["slave"],),
+        ) or {}
+        seen = (
+            db.fetch_one("SELECT last_seen FROM slave_seen WHERE slave_name = %s", (b["slave"],))
+            if db.table_exists("slave_seen")
+            else None
+        ) or {}
+        created.append(
+            {
+                "audit_id": int(row["id"]),
+                "batch_idx": bidx,
+                "slave": b["slave"],
+                "nonces": ns,
+                "posted_qualities": expected,
+                "slave_active": bool(member.get("active")),
+                "slave_trust": member.get("trust_state"),
+                "slave_last_seen": seen.get("last_seen"),
+            }
+        )
+    return {"benchmark_id": benchmark_id, "created": created, "errors": errors}
+
+
+def _json(value) -> str:
+    import json
+
+    if isinstance(value, str):
+        return value
+    return json.dumps(value, separators=(",", ":"))

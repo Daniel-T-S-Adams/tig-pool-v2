@@ -133,11 +133,23 @@ def wait_for_schema(db: DB) -> None:
                 "SELECT 1 FROM information_schema.tables WHERE table_schema='public' AND table_name='batch_audit'"
             )
             if row:
-                return
+                break
             logger.info("waiting for batch_audit table (master creates it on start)")
         except Exception as exc:
             logger.warning("db not ready: %s", exc)
         time.sleep(5)
+    # Columns added for fetch audits; the master migrates them at start. Add
+    # them here too so an auditor upgraded before the master keeps working.
+    for stmt in (
+        "ALTER TABLE batch_audit ADD COLUMN IF NOT EXISTS kind TEXT NOT NULL DEFAULT 'sample'",
+        "ALTER TABLE batch_audit ADD COLUMN IF NOT EXISTS requested_by TEXT",
+        "ALTER TABLE batch_audit_leaf ADD COLUMN IF NOT EXISTS branch TEXT",
+        "ALTER TABLE batch_audit_leaf ADD COLUMN IF NOT EXISTS merkle_ok BOOLEAN",
+    ):
+        try:
+            db.execute(stmt)
+        except Exception as exc:
+            logger.warning("schema upgrade failed (%s): %s", stmt[:60], exc)
 
 
 def ensure_trust_columns(db: DB) -> None:
@@ -151,16 +163,21 @@ def ensure_trust_columns(db: DB) -> None:
 # ── phase 1: expire undelivered requests ─────────────────────────────────────
 
 def expire_requests(db: DB, s: AuditorSettings) -> int:
+    # Samples must arrive within minutes of the root ack. Fetches wait longer:
+    # the slave may be offline, and it answers on its next poll.
     n = db.execute(
         """
         UPDATE batch_audit
         SET status = 'missing',
             verified_at = %s,
-            error = 'leaves not delivered within request ttl'
+            error = CASE WHEN kind = 'fetch'
+                         THEN 'archived leaves not delivered within fetch ttl'
+                         ELSE 'leaves not delivered within request ttl' END
         WHERE status = 'requested'
-          AND requested_at < %s
+          AND ((kind = 'fetch' AND requested_at < %s)
+               OR (kind <> 'fetch' AND requested_at < %s))
         """,
-        (now_ms(), now_ms() - int(s.request_ttl_ms)),
+        (now_ms(), now_ms() - int(s.fetch_ttl_ms), now_ms() - int(s.request_ttl_ms)),
     )
     if n:
         logger.info("marked %s audit request(s) missing", n)
@@ -228,7 +245,7 @@ def verify_one(db: DB, row: dict, s: AuditorSettings) -> AuditOutcome:
     expected = [int(q) for q in row["expected_qualities"]]
     exp_by_nonce = dict(zip(nonces, expected))
     leaves = db.fetch_all(
-        "SELECT nonce, leaf FROM batch_audit_leaf WHERE audit_id = %s ORDER BY nonce",
+        "SELECT nonce, leaf, merkle_ok FROM batch_audit_leaf WHERE audit_id = %s ORDER BY nonce",
         (int(row["id"]),),
     )
     delivered = [int(l["nonce"]) for l in leaves]
@@ -239,6 +256,15 @@ def verify_one(db: DB, row: dict, s: AuditorSettings) -> AuditOutcome:
     verdicts: Dict[int, LeafVerdict] = {}
     for l in leaves:
         nonce = int(l["nonce"])
+        # The master checked the leaf's merkle branch against the root the
+        # slave committed at submit. False means this is not that leaf —
+        # a fail regardless of what the verifier would say about it.
+        if l.get("merkle_ok") is False:
+            verdicts[nonce] = LeafVerdict(
+                nonce, exp_by_nonce.get(nonce), None, False,
+                error="merkle: leaf does not match the root committed at submit",
+            )
+            continue
         verdicts[nonce] = verify_leaf(row, nonce, l["leaf"], exp_by_nonce.get(nonce), s)
     return judge(expected, nonces, verdicts, delivered=delivered)
 
@@ -247,11 +273,11 @@ def process_pending(db: DB, s: AuditorSettings) -> int:
     rows = db.fetch_all(
         """
         SELECT id, benchmark_id, batch_idx, slave, challenge, settings, rand_hash,
-               requested_nonces, expected_qualities, attempts
+               requested_nonces, expected_qualities, attempts, kind
         FROM batch_audit
         WHERE status = 'pending'
           AND attempts < %s
-        ORDER BY leaves_received_at ASC NULLS LAST, id ASC
+        ORDER BY (kind = 'fetch') DESC, leaves_received_at ASC NULLS LAST, id ASC
         LIMIT %s
         """,
         (int(s.max_attempts), int(s.batch_limit)),
@@ -260,7 +286,8 @@ def process_pending(db: DB, s: AuditorSettings) -> int:
     to_verify = []
     for row in rows:
         trust = _trust_state(db, row["slave"])
-        if not should_verify(trust, s):
+        # Fetches were asked for by the operator: always verify them.
+        if row.get("kind") != "fetch" and not should_verify(trust, s):
             db.execute(
                 """
                 UPDATE batch_audit
@@ -317,15 +344,16 @@ def process_pending(db: DB, s: AuditorSettings) -> int:
             ),
         )
         done += 1
+        tag = f"fetch #{row['id']}" if row.get("kind") == "fetch" else f"audit #{row['id']}"
         if outcome.status == "failed":
             logger.error(
-                "AUDIT FAILED %s_%s slave=%s challenge=%s result=%s",
-                row["benchmark_id"], row["batch_idx"], row["slave"], row["challenge"], json.dumps(outcome.result_json()),
+                "AUDIT FAILED %s %s_%s slave=%s challenge=%s result=%s",
+                tag, row["benchmark_id"], row["batch_idx"], row["slave"], row["challenge"], json.dumps(outcome.result_json()),
             )
         else:
             logger.info(
-                "audit %s_%s slave=%s %s (%s leaves)",
-                row["benchmark_id"], row["batch_idx"], row["slave"], outcome.status, len(outcome.verdicts),
+                "%s %s_%s slave=%s %s (%s leaves)",
+                tag, row["benchmark_id"], row["batch_idx"], row["slave"], outcome.status, len(outcome.verdicts),
             )
     return done
 
@@ -532,10 +560,11 @@ def main() -> None:
     s = AuditorSettings.from_env()
     logger.info(
         "auditor start: challenges=%s trusted_sample_rate=%s fail_threshold=%s missing_threshold=%s "
-        "retention_days=%s promote=%s passed/%sh",
+        "retention_days=%s promote=%s passed/%sh fetch_ttl=%sh",
         ",".join(s.challenges), s.trusted_sample_rate, s.fail_quarantine_threshold,
         s.missing_quarantine_threshold, s.retention_days,
         s.promote_min_passed or "off", s.promote_window_ms // 3600000,
+        s.fetch_ttl_ms // 3600000,
     )
     db = DB()
     wait_for_schema(db)

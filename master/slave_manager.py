@@ -27,13 +27,20 @@ from master.capability_scheduler import (
 )
 from master.assign_views import AssignViews
 from master.batch_audit import (
+    AUDIT_FETCH_HEADER,
+    AUDIT_FETCH_MAX_PER_POLL,
     audit_settings,
     choose_audit_nonces,
     ensure_audit_schema,
     fetch_audit_request,
+    fetch_batch_root,
+    fetch_header_value,
+    mark_audit_unavailable,
+    pending_fetch_requests,
     record_audit_request,
     store_audit_leaves,
     validate_audit_leaves,
+    verify_leaf_branch,
 )
 from master.cpu_tier_caps import (
     cpu_assign_inflight_cap,
@@ -1587,6 +1594,11 @@ class SlaveManager:
         # Batch ids submitted this process. Fast get-batches never hits ready=
         # in Postgres, so these must not be re-listed as live work.
         self._ready_batch_ids: Set[str] = set()
+        # Audit fetch requests (batch_audit kind='fetch', status='requested')
+        # cached per slave so get-batches never queries for them per poll.
+        self._audit_fetch_lock = Lock()
+        self._audit_fetch_by_slave: Dict[str, List[dict]] = {}
+        self._audit_fetch_refreshed_mono = 0.0
         self._get_batches_inflight = 0
         self._get_batches_inflight_lock = Lock()
         self._get_batches_max_inflight = GET_BATCHES_MAX_INFLIGHT
@@ -1985,6 +1997,52 @@ class SlaveManager:
         if not self._is_authorized_slave(slave_name):
             logger.warning(f"slave {slave_name} is not registered or trusted. rejecting request")
             raise HTTPException(status_code=403, detail="Unregistered slave")
+
+    # ── audit fetch queue (operator asks a slave for archived leaves) ─────────
+
+    _AUDIT_FETCH_REFRESH_SEC = 10.0
+
+    def _refresh_audit_fetches(self, *, force: bool = False) -> None:
+        """Reload outstanding fetch rows at most every 10s, across all polls."""
+        mono = time.monotonic()
+        with self._audit_fetch_lock:
+            if not force and mono - self._audit_fetch_refreshed_mono < self._AUDIT_FETCH_REFRESH_SEC:
+                return
+            self._audit_fetch_refreshed_mono = mono
+        try:
+            rows = pending_fetch_requests(get_db_conn())
+        except Exception as exc:
+            logger.debug("audit fetch refresh failed: %s", exc)
+            return
+        by_slave: Dict[str, List[dict]] = {}
+        for row in rows:
+            by_slave.setdefault(str(row["slave"]), []).append(dict(row))
+        with self._audit_fetch_lock:
+            self._audit_fetch_by_slave = by_slave
+
+    def _forget_audit_fetch(self, audit_id: int) -> None:
+        """Drop a fetch from the cache as soon as it is answered."""
+        with self._audit_fetch_lock:
+            for slave, items in list(self._audit_fetch_by_slave.items()):
+                kept = [i for i in items if int(i["id"]) != int(audit_id)]
+                if kept:
+                    self._audit_fetch_by_slave[slave] = kept
+                else:
+                    self._audit_fetch_by_slave.pop(slave, None)
+
+    def _audit_fetch_headers(self, slave_name: str) -> Dict[str, str]:
+        """Header for this slave's get-batches reply; empty dict when idle."""
+        try:
+            self._refresh_audit_fetches()
+            with self._audit_fetch_lock:
+                items = list(self._audit_fetch_by_slave.get(slave_name) or ())
+            if not items:
+                return {}
+            value = fetch_header_value(items[:AUDIT_FETCH_MAX_PER_POLL])
+            return {AUDIT_FETCH_HEADER: value} if value else {}
+        except Exception as exc:
+            logger.debug("audit fetch header for %s failed: %s", slave_name, exc)
+            return {}
 
     def _quarantine_slave(self, slave_name: str, reason: str):
         """Deactivate a misconfigured public slave and release its unfinished work."""
@@ -4948,7 +5006,10 @@ class SlaveManager:
                 self._get_batches_starts[poll_token] = started_mono
             try:
                 mailbox = self._peek_assigned_batches(slave_name)
-                return JSONResponse(content=jsonable_encoder(mailbox))
+                return JSONResponse(
+                    content=jsonable_encoder(mailbox),
+                    headers=self._audit_fetch_headers(slave_name),
+                )
             except Exception as exc:
                 logger.warning("get-batches mailbox failed for %s: %s", slave_name, exc)
                 return JSONResponse(content=jsonable_encoder([]))
@@ -5766,7 +5827,10 @@ class SlaveManager:
             )
             with self._get_batches_inflight_lock:
                 self._get_batches_inflight = max(0, self._get_batches_inflight - 1)
-            return JSONResponse(content=jsonable_encoder(concurrent))
+            return JSONResponse(
+                content=jsonable_encoder(concurrent),
+                headers=self._audit_fetch_headers(slave_name),
+            )
 
         def find_batch(batch_id: str, request: Request):
             if (slave_name := canonicalize_pool_slave_name(request.headers.get('User-Agent', None))) is None:
@@ -6210,7 +6274,18 @@ class SlaveManager:
                 batch_idx = int(batch_idx_s)
             except Exception:
                 raise HTTPException(status_code=400, detail="bad batch id")
-            req = fetch_audit_request(get_db_conn(), benchmark_id=benchmark_id, batch_idx=batch_idx)
+            try:
+                body = await request.json()
+            except Exception:
+                raise HTTPException(status_code=400, detail="INVALID audit body")
+            # Slaves >= 0.1.23 name the row (fetches); older ones mean the sample.
+            audit_id = None
+            if isinstance(body, dict) and body.get("audit_id") is not None:
+                try:
+                    audit_id = int(body["audit_id"])
+                except Exception:
+                    raise HTTPException(status_code=400, detail="bad audit_id")
+            req = fetch_audit_request(get_db_conn(), benchmark_id=benchmark_id, batch_idx=batch_idx, audit_id=audit_id)
             if req is None:
                 # No request outstanding (audit disabled, row pruned, or never asked).
                 # Ack so the slave drops it instead of retrying forever.
@@ -6223,8 +6298,13 @@ class SlaveManager:
                 raise HTTPException(status_code=403, detail="audit was requested from a different slave")
             if req["status"] != "requested":
                 return submit_ack("duplicate_accepted", note=f"audit_{req['status']}")
+            if isinstance(body, dict) and body.get("unavailable") and not body.get("leaves"):
+                # Fetch the slave cannot serve (archive expired / never written).
+                mark_audit_unavailable(get_db_conn(), audit_id=int(req["id"]), reason=str(body["unavailable"]))
+                self._forget_audit_fetch(int(req["id"]))
+                logger.warning("slave %s cannot serve audit #%s for %s: %s", slave_name, req["id"], batch_id, body["unavailable"])
+                return submit_ack("accepted", note="unavailable_recorded")
             try:
-                body = await request.json()
                 leaves = validate_audit_leaves(
                     body,
                     requested_nonces=req["requested_nonces"],
@@ -6235,9 +6315,29 @@ class SlaveManager:
             except Exception as exc:
                 logger.error("slave %s submitted INVALID audit leaves for %s: %s", slave_name, batch_id, exc)
                 raise HTTPException(status_code=400, detail="INVALID audit leaves")
-            store_audit_leaves(get_db_conn(), audit_id=int(req["id"]), leaves=leaves)
+            # Merkle check: the leaf must be the one committed under the
+            # batch's merkle_root at root submit. Only possible when the slave
+            # sent a branch and the root is still in batch_data.
+            merkle_ok = {}
+            if any(leaf.get("branch") for leaf in leaves):
+                root_row = fetch_batch_root(get_db_conn(), benchmark_id=benchmark_id, batch_idx=batch_idx)
+                if root_row and root_row.get("merkle_root"):
+                    start_nonce = batch_idx * int(root_row["batch_size"])
+                    for leaf in leaves:
+                        merkle_ok[int(leaf["nonce"])] = verify_leaf_branch(
+                            leaf, merkle_root=root_row["merkle_root"], start_nonce=start_nonce
+                        )
+                    bad = [n for n, ok in merkle_ok.items() if ok is False]
+                    if bad:
+                        logger.error(
+                            "slave %s audit #%s for %s: leaves %s do NOT match committed merkle root",
+                            slave_name, req["id"], batch_id, bad,
+                        )
+            store_audit_leaves(get_db_conn(), audit_id=int(req["id"]), leaves=leaves, merkle_ok=merkle_ok)
+            if req.get("kind") == "fetch":
+                self._forget_audit_fetch(int(req["id"]))
             _heartbeat(slave_name)
-            logger.debug("slave %s delivered %s audit leaves for %s", slave_name, len(leaves), batch_id)
+            logger.debug("slave %s delivered %s audit leaves for %s (audit #%s)", slave_name, len(leaves), batch_id, req["id"])
             return submit_ack("accepted")
 
         @app.post('/submit-batch-proofs/{batch_id}')
