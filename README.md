@@ -266,7 +266,11 @@ Outcomes per batch: `passed`, `failed`, `skipped` (not sampled / GPU challenge),
 python3 admin.py audit              # per-slave pass/fail/missing, backlog
 python3 admin.py audit --failures   # expected vs verifier quality per nonce
 python3 admin.py audit <id>         # one audit with its kept leaves
+python3 admin.py audit --benchmark <bid> --nonce <n> --dump ./evidence
+                                    # answer a TIG report for one benchmark/nonce
 ```
+
+**If TIG reports one of the pool's benchmarks**, run `audit --benchmark <bid> --nonce <n>`. It shows which slave computed that batch, the quality the slave posted for that exact nonce (`batch_data`), whether the nonce was in our sample, what `tig-verifier` returned, and whether we still hold the original `{nonce}.json`. `--dump DIR` writes the kept leaves out so you can re-run `tig-verifier` in front of anyone. A nonce that was not sampled still tells you who computed it and their audit record; the slave keeps its own copies of sampled leaves for 30 days (`AUDIT_DIR`).
 
 Tuning lives in `.env` (`AUDIT_*`, see `.env.example`) and, for the master side, under `"audit"` in the master config (`enabled`, `leaves_per_batch`, `include_max_quality`, `max_leaf_bytes`, `request_ttl_ms`). Leave `AUDIT_MISSING_QUARANTINE_THRESHOLD=0` until every member runs a slave ≥ 0.1.22 — older slaves never answer audit requests. GPU challenges are stored but not verified (the VPS has no GPU).
 
@@ -290,6 +294,7 @@ python3 admin.py hit-rate --json                      # Same, machine-readable
 python3 admin.py audit [--json]                       # Quality spot-check: per-slave pass/fail, backlog
 python3 admin.py audit --failures                     # Failed audits with expected vs verifier quality
 python3 admin.py audit <id>                           # One audit incl. kept leaves (dispute evidence)
+python3 admin.py audit --benchmark <bid> [--nonce N] [--dump DIR]  # Answer a TIG report for one benchmark
 
 python3 admin.py members                              # List all registered members (with trust/preflight state)
 python3 admin.py fleets                               # List registered fleets

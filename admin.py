@@ -18,6 +18,9 @@ Usage:
   python3 admin.py audit [--json]            # quality spot-check: per-slave pass/fail, backlog
   python3 admin.py audit --failures          # recent failed audits with expected vs actual
   python3 admin.py audit <id>                # one audit incl. kept leaves (dispute evidence)
+  python3 admin.py audit --benchmark <bid> [--nonce N] [--dump DIR]
+                                             # answer a TIG report: who computed each batch,
+                                             # posted vs verifier quality, write kept leaves
   python3 admin.py ai-optimizer [--json]     # run read-only DeepSeek analyst
   python3 admin.py ai-decisions [N]          # show recent AI recommendations
   python3 admin.py compute-types [--apply]   # validate/add TIG 0.0.7 compute_type
@@ -513,7 +516,94 @@ def _fmt_ms(ms):
     import datetime
     return datetime.datetime.fromtimestamp(int(ms) / 1000).strftime("%m-%d %H:%M")
 
+def _opt(args, flag):
+    if flag in args:
+        i = args.index(flag)
+        if i + 1 < len(args):
+            return args[i + 1]
+    return None
+
+def cmd_audit_benchmark(args):
+    """audit --benchmark <id> [--nonce N] [--dump DIR] [--json]"""
+    bid = _opt(args, "--benchmark")
+    nonce = _opt(args, "--nonce")
+    dump = _opt(args, "--dump")
+    q = []
+    if nonce is not None:
+        q.append(f"nonce={int(nonce)}")
+    if dump:
+        q.append("leaves=true")
+    rep = _get(f"/admin/ops/audit/benchmark/{bid}" + (("?" + "&".join(q)) if q else ""))
+    if "--json" in args:
+        print(json.dumps(rep, indent=2, sort_keys=True, default=str))
+        return
+    job = rep.get("job")
+    batches = rep.get("batches") or []
+    print(f"Benchmark {bid}")
+    if not job and not batches:
+        print("  nothing known — outside job retention and never audited")
+        return
+    if job:
+        print(
+            f"  challenge={job.get('challenge')} algorithm={job.get('algorithm')} "
+            f"nonces={job.get('num_nonces')} batch_size={job.get('batch_size')} started={_fmt_ms(job.get('start_time'))}"
+            + (f"  ({job['note']})" if job.get("note") else "")
+        )
+    focus = rep.get("focus")
+    if focus:
+        v = focus.get("verifier") or {}
+        print(f"\n  nonce {focus['nonce']} -> batch {focus['batch_idx']} computed by {focus.get('slave') or '?'}")
+        print(f"    posted quality : {focus.get('posted_quality') if focus.get('posted_quality') is not None else 'unknown (batch_data pruned)'}")
+        if focus.get("audited"):
+            ok = "MATCH" if v.get("ok") else "MISMATCH"
+            print(f"    audited        : yes (#{focus.get('audit_id')}, {focus.get('audit_status')}) verifier={v.get('actual')} {ok} {v.get('error') or ''}")
+            print(f"    leaf kept      : {'yes — --dump DIR writes it for re-verification' if focus.get('leaf_kept') else 'no (pruned)'}")
+        else:
+            print(f"    audited        : no — not in the sample for this batch (audit #{focus.get('audit_id') or '—'} {focus.get('audit_status') or ''})")
+    print()
+    print(f"{'BATCH':>5} {'SLAVE':<34} {'AUDIT':<9} {'SAMPLED NONCES -> posted/verifier':<50} {'LEAVES':>6}")
+    print("-" * 108)
+    for b in batches:
+        a = b.get("audit") or {}
+        res = a.get("result") or {}
+        parts = []
+        for n in (a.get("requested_nonces") or []):
+            v = res.get(str(n)) or {}
+            exp = v.get("expected")
+            if exp is None:
+                idx = (a.get("requested_nonces") or []).index(n)
+                eq = a.get("expected_qualities") or []
+                exp = eq[idx] if idx < len(eq) else "?"
+            act = v.get("actual")
+            mark = "" if act is None else ("=" if v.get("ok") else "!=")
+            parts.append(f"{n}:{exp}{mark}{'' if act is None else act}")
+        print(
+            f"{int(b.get('batch_idx')):>5} {str(b.get('slave') or '—'):<34} {str(a.get('status') or '—'):<9} "
+            f"{' '.join(parts)[:50]:<50} {int(a.get('leaves_kept') or 0):>6}"
+        )
+        if a.get("error"):
+            print(f"      error: {a['error']}")
+    if dump:
+        import os
+        os.makedirs(dump, exist_ok=True)
+        n = 0
+        for b in batches:
+            for l in ((b.get("audit") or {}).get("leaves") or []):
+                path = os.path.join(dump, f"{int(l['nonce'])}.json")
+                with open(path, "w") as f:
+                    json.dump(l["leaf"], f, separators=(",", ":"))
+                n += 1
+        print(f"\n  wrote {n} leaf file(s) to {dump}/ — re-verify with:")
+        if job:
+            print(
+                f"  docker exec {job.get('challenge')} tig-verifier '{json.dumps(job.get('settings'), separators=(',', ':'))}' "
+                f"{job.get('rand_hash')} <nonce> /path/in/container/<nonce>.json"
+            )
+
 def cmd_audit(args):
+    if "--benchmark" in args:
+        cmd_audit_benchmark(args)
+        return
     if args and args[0].isdigit():
         row = _get(f"/admin/ops/audit/{args[0]}")
         print(json.dumps(row, indent=2, sort_keys=True, default=str))

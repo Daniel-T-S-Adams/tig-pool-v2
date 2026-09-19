@@ -1796,6 +1796,18 @@ def admin_ops_audit(window_ms: int | None = None, x_admin_secret: str = Header(N
     return audit_report.build_audit_report(window_ms=window_ms)
 
 
+@router.get("/admin/ops/audit/benchmark/{benchmark_id}")
+def admin_ops_audit_benchmark(
+    benchmark_id: str,
+    nonce: int | None = None,
+    leaves: bool = False,
+    x_admin_secret: str = Header(None),
+):
+    """Answer a TIG report: who computed each batch, posted vs verifier quality, kept leaves."""
+    _check_admin(x_admin_secret)
+    return audit_report.fetch_benchmark_audits(benchmark_id, nonce=nonce, with_leaves=leaves)
+
+
 @router.get("/admin/ops/audit/{audit_id}")
 def admin_ops_audit_detail(audit_id: int, x_admin_secret: str = Header(None)):
     """One audit row with its kept leaves — the evidence for a dispute."""
