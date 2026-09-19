@@ -264,7 +264,7 @@ Outcomes per batch: `passed`, `failed`, `skipped` (not sampled / GPU challenge),
 
 ### Every leaf, on demand (fetch)
 
-The sample covers a few nonces per batch. If TIG reports a nonce we did **not** sample, the pool can still produce it: slaves ≥ 0.1.23 archive **every** leaf of every batch (`AUDIT_DIR/<batch>/leaves.json.gz`, 14 days) and the master pulls specific nonces on demand:
+The sample covers a few nonces per batch. If someone reports a nonce we did **not** sample, the pool can still produce it: slaves ≥ 0.1.23 archive **every** leaf of every batch (`AUDIT_DIR/<batch>/leaves.json.gz`, 14 days) and the master pulls specific nonces on demand:
 
 1. `admin.py audit --benchmark <bid> --nonce <n> --fetch` creates a `batch_audit` row with `kind = fetch` for the slave that computed that batch.
 2. The master advertises it in the `X-Innopool-Audit-Fetch` header of that slave's next `get-batches` reply (seconds if online; older slaves ignore the header).
@@ -282,7 +282,7 @@ python3 admin.py audit --benchmark <bid> --nonce <n> --fetch --wait
 python3 admin.py audit --benchmark <bid> --nonces 12,57,301 --fetch --wait 900 --note "tig report #123"
 ```
 
-**If TIG reports one of the pool's benchmarks**, run `audit --benchmark <bid> --nonce <n>`. It shows which slave computed that batch, the quality the slave posted for that exact nonce (`batch_data`), whether the nonce was in our sample, what `tig-verifier` returned, and whether we still hold the original `{nonce}.json`. If it was not sampled, the output prints the `--fetch` command to run; `--wait` blocks until the leaf arrives and is verified (default 600 s). `--dump DIR` writes kept leaves out so you can re-run `tig-verifier` in front of anyone. Fetches need the job and its roots to still be in the DB (14-day job retention) and the slave to still hold its archive (`AUDIT_TTL`, 14 days).
+**If one of the pool's benchmarks is reported**, run `audit --benchmark <bid> --nonce <n>`. It shows which slave computed that batch, the quality the slave posted for that exact nonce (`batch_data`), whether the nonce was in our sample, what `tig-verifier` returned, and whether we still hold the original `{nonce}.json`. If it was not sampled, the output prints the `--fetch` command to run; `--wait` blocks until the leaf arrives and is verified (default 600 s). `--dump DIR` writes kept leaves out so you can re-run `tig-verifier` in front of anyone. Fetches need the job and its roots to still be in the DB (14-day job retention) and the slave to still hold its archive (`AUDIT_TTL`, 14 days).
 
 Tuning lives in `.env` (`AUDIT_*`, see `.env.example`) and, for the master side, under `"audit"` in the master config (`enabled`, `leaves_per_batch`, `include_max_quality`, `max_leaf_bytes`, `request_ttl_ms`). Leave `AUDIT_MISSING_QUARANTINE_THRESHOLD=0` until every member runs a slave ≥ 0.1.22 — older slaves never answer audit requests. GPU challenges are stored but not verified (the VPS has no GPU).
 
