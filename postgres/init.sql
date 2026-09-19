@@ -168,6 +168,21 @@ CREATE INDEX IF NOT EXISTS idx_batch_audit_requested_at ON batch_audit(requested
 CREATE INDEX IF NOT EXISTS idx_batch_audit_kind_status ON batch_audit(kind, status);
 CREATE INDEX IF NOT EXISTS idx_batch_audit_benchmark ON batch_audit(benchmark_id);
 
+-- Per-block snapshot of how much of the pool's TIG reward each challenge
+-- earned (from /get-opow + /get-challenges). Drives PAY_MODE=revenue and the
+-- admin payout-revenue report. Pruned after REVENUE_SAMPLE_KEEP_DAYS.
+CREATE TABLE IF NOT EXISTS challenge_reward_samples (
+    block_height BIGINT PRIMARY KEY,
+    round_id INTEGER,
+    sampled_at_ms BIGINT NOT NULL,
+    blocks_covered INTEGER NOT NULL DEFAULT 1,
+    reward_tig DOUBLE PRECISION NOT NULL,
+    influence DOUBLE PRECISION,
+    -- {challenge_name: {id, type, factor, attribution, pool_q, total_q}}
+    attribution JSONB NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_crs_round ON challenge_reward_samples(round_id);
+
 -- Default config (pool operator sets their real api_key/player_id via the benchmarker UI)
 INSERT INTO config
 SELECT '{

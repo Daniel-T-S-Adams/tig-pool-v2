@@ -52,10 +52,13 @@ def is_gpu_challenge(challenge: str) -> bool:
 
 
 def pay_mode() -> str:
-    """Live coinbase mode. effort = work credits; family = GPU/CPU pots."""
+    """Live coinbase mode. effort = work credits; family = GPU/CPU pots;
+    revenue = effort within each challenge, challenge pots from TIG earnings."""
     raw = (os.environ.get("PAY_MODE") or "effort").strip().lower()
     if raw in {"family", "pots", "gpu_frac"}:
         return "family"
+    if raw in {"revenue", "attribution", "earned"}:
+        return "revenue"
     return "effort"
 
 

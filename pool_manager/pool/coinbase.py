@@ -15,7 +15,9 @@ at round end.
 This module keeps that split accurate by recalculating each member's share
 of the current round and calling /set-coinbase. Default PAY_MODE=effort
 splits the member pot by work credits (nonces × seconds/nonce). PAY_MODE=family
-restores GPU PAY_GPU_POT_FRAC / CPU pots. We update every
+restores GPU PAY_GPU_POT_FRAC / CPU pots. PAY_MODE=revenue keeps effort
+within each challenge but sizes each challenge's pot by the TIG it actually
+earned (see revenue_split.py). We update every
 `coinbase_update_period` blocks.
 
 Members receive their share directly into their own wallet from TIG at
@@ -25,7 +27,7 @@ import os
 import time
 import logging
 import requests
-from . import challenge_share, work_credits
+from . import challenge_share, revenue_split, work_credits
 from . import database as db
 
 logger = logging.getLogger(__name__)
@@ -154,6 +156,9 @@ def _compute_allocation() -> dict[str, float]:
 
     PAY_MODE=effort (default): wallet share is effort credits / pool
     credits. PAY_MODE=family: GPU PAY_GPU_POT_FRAC, CPU the rest.
+    PAY_MODE=revenue: effort within each challenge, challenge pots sized by
+    what TIG actually paid the pool there (falls back to effort until the
+    round has reward samples).
     Members who worked early and then stopped still keep that work.
     """
     member_share = 1.0 - POOL_FEE
@@ -161,7 +166,18 @@ def _compute_allocation() -> dict[str, float]:
     if round_start_ms is not None:
         mode = work_credits.pay_mode()
         try:
-            if mode == "effort":
+            if mode == "revenue":
+                allocation = revenue_split.wallet_shares(
+                    int(round_start_ms),
+                    scale=member_share,
+                )
+                if not allocation:
+                    logger.warning("revenue allocation empty (no round samples yet); using effort.")
+                    allocation = work_credits.wallet_shares(
+                        int(round_start_ms),
+                        scale=member_share,
+                    )
+            elif mode == "effort":
                 allocation = work_credits.wallet_shares(
                     int(round_start_ms),
                     scale=member_share,

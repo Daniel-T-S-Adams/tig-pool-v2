@@ -17,7 +17,7 @@ from decimal import Decimal
 from fastapi import APIRouter, HTTPException, Header
 from pydantic import BaseModel
 from . import database as db
-from . import audit_report, autopilot, ai_optimizer, challenge_share, hit_rate_report, ops_metrics, worker_earnings, work_credits
+from . import audit_report, autopilot, ai_optimizer, challenge_share, hit_rate_report, ops_metrics, revenue_split, worker_earnings, work_credits
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -1850,6 +1850,37 @@ def admin_payout_shadow(force: bool = False, x_admin_secret: str = Header(None))
         round_start_ms=worker_earnings.round_start_ms(),
         force=bool(force),
     )
+
+
+@router.get("/admin/payout-revenue")
+def admin_payout_revenue(
+    force: bool = False,
+    blend: float | None = None,
+    x_admin_secret: str = Header(None),
+):
+    """Effort vs revenue-attributed split (per challenge / wallet / slave).
+
+    Read-only unless PAY_MODE=revenue. ``blend`` overrides PAY_EFFORT_BLEND
+    for what-if comparisons.
+    """
+    _check_admin(x_admin_secret)
+    return revenue_split.build_report(
+        pool_fee=POOL_FEE,
+        round_start_ms=worker_earnings.round_start_ms(),
+        force=bool(force),
+        blend=blend,
+    )
+
+
+@router.post("/admin/payout-revenue/sample")
+def admin_payout_revenue_sample(x_admin_secret: str = Header(None)):
+    """Take one attribution sample now (normally every REVENUE_SAMPLE_INTERVAL_S)."""
+    _check_admin(x_admin_secret)
+    try:
+        row = revenue_split.sample_once()
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"TIG fetch failed: {exc}")
+    return {"stored": row is not None, "sample": row}
 
 
 @router.post("/admin/ai-optimizer/run")

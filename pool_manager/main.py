@@ -13,7 +13,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from pool.routes import router
-from pool import tracker, coinbase, scheduler, autopilot, ai_optimizer, retention
+from pool import tracker, coinbase, scheduler, autopilot, ai_optimizer, retention, revenue_split
 
 logging.basicConfig(
     level=logging.INFO,
@@ -41,6 +41,7 @@ def background_loop():
     """
     Runs every 30 seconds:
     - Take a contribution snapshot (tracker will skip if < 60s since last)
+    - Sample TIG per-challenge reward attribution (REVENUE_SAMPLE_INTERVAL_S)
     - Check if coinbase needs updating
     - Hourly retention sweep of job history / decision logs (RETENTION_DAYS)
     """
@@ -53,6 +54,11 @@ def background_loop():
             tracker.take_snapshot()
         except Exception as e:
             logger.error(f"Snapshot error: {e}")
+
+        try:
+            revenue_split.maybe_sample()
+        except Exception as e:
+            logger.error(f"Revenue sample error: {e}")
 
         try:
             coinbase.maybe_update_coinbase()

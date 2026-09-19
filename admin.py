@@ -34,6 +34,9 @@ Usage:
   python3 admin.py coinbase --failures       # only failed /set-coinbase calls, with error text
   python3 admin.py member-earnings <wallet> [rounds]  # on-chain earnings by round for a wallet
   python3 admin.py payout-shadow             # nonce vs effort-credit split (shadow; live pay unchanged)
+  python3 admin.py payout-revenue [--sample] [--blend 0.2] [--json]
+                                             # effort vs TIG-revenue-attributed split per challenge /
+                                             # wallet / slave (shadow unless PAY_MODE=revenue)
 """
 import json
 import os
@@ -1050,6 +1053,98 @@ def cmd_payout_shadow(args):
     print(report.get("note") or "")
 
 
+def cmd_payout_revenue(args):
+    """Effort vs revenue-attributed split. --sample takes a TIG sample first."""
+    if "--sample" in args:
+        out = _post("/admin/payout-revenue/sample")
+        s = out.get("sample") or {}
+        if out.get("stored"):
+            print(
+                f"sampled block {s.get('block_height')} round {s.get('round_id')} "
+                f"reward {float(s.get('reward_tig') or 0):.4f} TIG/block"
+            )
+        else:
+            print("no new block since last sample")
+    path = "/admin/payout-revenue"
+    q = []
+    if "--force" in args or "--sample" in args:
+        q.append("force=true")
+    if "--blend" in args:
+        q.append(f"blend={float(args[args.index('--blend') + 1])}")
+    if q:
+        path += "?" + "&".join(q)
+    report = _get(path)
+    if "--json" in args:
+        print(json.dumps(report, indent=2, sort_keys=True))
+        return
+    live = report.get("live_payout")
+    tag = "LIVE" if live == "revenue" else f"shadow; live pay is {live}"
+    print(f"Payout revenue attribution ({tag})")
+    print(
+        f"  round {report.get('round_id')}  samples={report.get('samples')}  "
+        f"blocks={report.get('blocks_covered')}  latest block={report.get('latest_block')}  "
+        f"reward/block={report.get('latest_reward_tig_per_block')} TIG"
+    )
+    print(f"  effort blend: {float(report.get('blend') or 0):.0%}   member share: {report.get('member_share')}")
+    fam = report.get("family") or {}
+    for k in ("cpu", "gpu"):
+        f = fam.get(k) or {}
+        print(f"  {k.upper():<3} effort {float(f.get('effort_pct') or 0):>5.1f}%  earns {float(f.get('revenue_pct') or 0):>5.1f}%")
+    print()
+    for note in report.get("notes") or []:
+        print(f"  - {note}")
+    print()
+    print(f"{'CHALLENGE':<22} {'TYP':<3} {'EFFORT%':>8} {'EARNS%':>7} {'VALUE':>6} {'POOLQ':>6} {'TOTQ':>6} {'HOURS':>8}")
+    print("-" * 74)
+    for row in report.get("challenges") or []:
+        vi = row.get("value_index")
+        print(
+            f"{str(row.get('challenge') or ''):<22} "
+            f"{str(row.get('type') or ''):<3} "
+            f"{float(row.get('effort_pct') or 0):>8.2f} "
+            f"{float(row.get('revenue_pct') or 0):>7.2f} "
+            f"{(f'{vi:.2f}' if vi is not None else '-'):>6} "
+            f"{str(row.get('pool_q') if row.get('pool_q') is not None else '-'):>6} "
+            f"{str(row.get('total_q') if row.get('total_q') is not None else '-'):>6} "
+            f"{float(row.get('effort_hours') or 0):>8.1f}"
+        )
+    print()
+    print(f"WALLETS ({report.get('wallets_total')})  EFFORT=current pay  REV=pure attribution  BLEND=proposed")
+    print(f"{'WALLET':<44} {'EFFORT':>7} {'REV':>7} {'BLEND':>7} {'DELTA':>7} {'%':>6} {'HOURS':>8}")
+    print("-" * 92)
+    for row in report.get("wallets") or []:
+        pct = row.get("delta_pct_of_effort")
+        print(
+            f"{str(row.get('wallet_address') or ''):<44} "
+            f"{float(row.get('effort_share') or 0):>7.3f} "
+            f"{float(row.get('revenue_share') or 0):>7.3f} "
+            f"{float(row.get('blended_share') or 0):>7.3f} "
+            f"{float(row.get('delta') or 0):>+7.3f} "
+            f"{(f'{pct:+.1f}' if pct is not None else '-'):>6} "
+            f"{float(row.get('credit_hours') or 0):>8.1f}"
+        )
+    print()
+    print("SLAVES by |delta|")
+    print(f"{'SLAVE':<40} {'TYP':<3} {'EFFORT':>7} {'REV':>7} {'BLEND':>7} {'DELTA':>7} {'%':>6}")
+    print("-" * 82)
+    for row in report.get("slaves") or []:
+        name = str(row.get("slave_name") or "")
+        if len(name) > 40:
+            name = name[:18] + "…" + name[-21:]
+        pct = row.get("delta_pct_of_effort")
+        print(
+            f"{name:<40} "
+            f"{str(row.get('profile') or ''):<3} "
+            f"{float(row.get('effort_share') or 0):>7.3f} "
+            f"{float(row.get('revenue_share') or 0):>7.3f} "
+            f"{float(row.get('blended_share') or 0):>7.3f} "
+            f"{float(row.get('delta') or 0):>+7.3f} "
+            f"{(f'{pct:+.1f}' if pct is not None else '-'):>6}"
+        )
+    print()
+    print(report.get("note") or "")
+
+
 def cmd_new_round(_):
     """
     Run this AFTER you have claimed the round on TIG.
@@ -1083,6 +1178,7 @@ COMMANDS = {
     "coinbase":  cmd_coinbase,
     "member-earnings": cmd_member_earnings,
     "payout-shadow": cmd_payout_shadow,
+    "payout-revenue": cmd_payout_revenue,
     "new-round": cmd_new_round,
 }
 

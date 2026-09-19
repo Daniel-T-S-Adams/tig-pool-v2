@@ -434,6 +434,27 @@ All endpoints are prefixed with `/api/`.
 
 ---
 
+## Payouts
+
+`/set-coinbase` splits the round's member pot (`1 - POOL_FEE`) between wallets. `PAY_MODE` picks how:
+
+| Mode | Wallet share | Notes |
+|---|---|---|
+| `effort` (default) | Σ nonces × fleet seconds/nonce for that challenge+track | One rate for CPU and GPU time. Simple and predictable, but pays a challenge the pool earns nothing on the same as one that pays well. |
+| `revenue` | Within each challenge, effort share as above; each challenge's pot is the fraction of the pool's TIG that challenge actually earned | Attribution comes from TIG block data: `pool qualifiers × legacy multiplier / total qualifiers` per challenge, the same term TIG's influence uses. Sampled every `REVENUE_SAMPLE_INTERVAL_S` into `challenge_reward_samples`. `PAY_EFFORT_BLEND` (default 0.2) keeps that much of the pot on pure effort so work the operator assigned to a dead challenge is not paid zero. Falls back to `effort` until the round has samples. |
+| `family` | GPU challenges share `PAY_GPU_POT_FRAC`, CPU the rest | Legacy fixed split. |
+
+Compare before switching — the report is read-only unless `PAY_MODE=revenue`:
+
+```bash
+python3 admin.py payout-revenue            # per challenge: effort % vs earned %; per wallet/slave: effort vs revenue vs blended
+python3 admin.py payout-revenue --blend 0  # what pure attribution would pay
+python3 admin.py payout-revenue --sample   # take a TIG sample now instead of waiting for the loop
+python3 admin.py payout-shadow             # older: nonce split vs effort credits
+```
+
+`VALUE` in the challenge table is `earned % / effort %`: above 1 that challenge pays more per effort-hour than the pool average. Members who worked early and then stopped keep their share in every mode.
+
 ## Notes
 
 - The pool operator is the on-chain benchmarker. Members trust you to call `/set-coinbase` proportionally to their contributions. The code is open source — they can verify it does exactly that.
