@@ -17,7 +17,7 @@ from decimal import Decimal
 from fastapi import APIRouter, HTTPException, Header
 from pydantic import BaseModel
 from . import database as db
-from . import autopilot, ai_optimizer, challenge_share, hit_rate_report, ops_metrics, worker_earnings, work_credits
+from . import audit_report, autopilot, ai_optimizer, challenge_share, hit_rate_report, ops_metrics, worker_earnings, work_credits
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -1787,6 +1787,23 @@ def admin_ops_hit_rate(x_admin_secret: str = Header(None)):
     """Observe-only per-track quality vs TIG qualifier floor, bundles, and time."""
     _check_admin(x_admin_secret)
     return hit_rate_report.build_hit_rate_report()
+
+
+@router.get("/admin/ops/audit")
+def admin_ops_audit(window_ms: int | None = None, x_admin_secret: str = Header(None)):
+    """Observe-only quality-audit report: per-slave pass/fail/missing, backlog, recent failures."""
+    _check_admin(x_admin_secret)
+    return audit_report.build_audit_report(window_ms=window_ms)
+
+
+@router.get("/admin/ops/audit/{audit_id}")
+def admin_ops_audit_detail(audit_id: int, x_admin_secret: str = Header(None)):
+    """One audit row with its kept leaves — the evidence for a dispute."""
+    _check_admin(x_admin_secret)
+    row = audit_report.fetch_audit_detail(audit_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="audit not found")
+    return row
 
 
 @router.get("/admin/payout-shadow")

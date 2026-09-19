@@ -120,6 +120,44 @@ CREATE TABLE IF NOT EXISTS batch_data (
 CREATE INDEX idx_proofs_batch_data_benchmark_id ON batch_data(benchmark_id);
 CREATE INDEX idx_proofs_batch_data_batch_idx ON batch_data(batch_idx);
 
+-- Quality spot-check audit. The master asks each root-submitting slave for a
+-- few original {nonce}.json leaves (chosen AFTER the quality list is posted);
+-- the auditor service re-scores them with tig-verifier only and compares to
+-- the posted quality. Leaves for failed audits are kept forever as evidence.
+-- Mirrored in master/batch_audit.py::SCHEMA_STATEMENTS for existing DBs.
+CREATE TABLE IF NOT EXISTS batch_audit (
+    id BIGSERIAL PRIMARY KEY,
+    benchmark_id TEXT NOT NULL,
+    batch_idx INTEGER NOT NULL,
+    slave TEXT NOT NULL,
+    challenge TEXT NOT NULL,
+    algorithm TEXT,
+    settings JSONB NOT NULL,
+    rand_hash TEXT NOT NULL,
+    requested_nonces JSONB NOT NULL,
+    expected_qualities JSONB NOT NULL,
+    -- requested -> pending -> (passed | failed | error | skipped) ; requested -> missing
+    status TEXT NOT NULL DEFAULT 'requested',
+    requested_at BIGINT NOT NULL,
+    leaves_received_at BIGINT,
+    verified_at BIGINT,
+    attempts INTEGER NOT NULL DEFAULT 0,
+    result JSONB,
+    error TEXT,
+    UNIQUE (benchmark_id, batch_idx)
+);
+
+CREATE TABLE IF NOT EXISTS batch_audit_leaf (
+    audit_id BIGINT NOT NULL REFERENCES batch_audit(id) ON DELETE CASCADE,
+    nonce BIGINT NOT NULL,
+    leaf JSONB NOT NULL,
+    PRIMARY KEY (audit_id, nonce)
+);
+
+CREATE INDEX IF NOT EXISTS idx_batch_audit_status ON batch_audit(status);
+CREATE INDEX IF NOT EXISTS idx_batch_audit_slave ON batch_audit(slave);
+CREATE INDEX IF NOT EXISTS idx_batch_audit_requested_at ON batch_audit(requested_at);
+
 -- Default config (pool operator sets their real api_key/player_id via the benchmarker UI)
 INSERT INTO config
 SELECT '{

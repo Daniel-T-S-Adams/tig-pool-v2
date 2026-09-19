@@ -362,6 +362,92 @@ services:
       master:
         condition: service_started
 
+  # ── Quality audit ──────────────────────────────────────────────────────────
+  # Re-scores a few original leaves per root batch with tig-verifier ONLY and
+  # compares to the quality the slave posted. Separate container so the master
+  # never waits on a verifier and docker.sock stays out of the master.
+  auditor:
+    build:
+      context: ./auditor
+    container_name: innopool_auditor
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "3"
+    environment:
+      - POSTGRES_USER=${POSTGRES_USER}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+      - POSTGRES_DB=${POSTGRES_DB}
+      - POSTGRES_HOST=db
+      - VERBOSE=${VERBOSE}
+      - AUDIT_CHALLENGES=${AUDIT_CHALLENGES:-satisfiability,vehicle_routing,knapsack,job_scheduling,energy_arbitrage}
+      - AUDIT_TRUSTED_SAMPLE_RATE=${AUDIT_TRUSTED_SAMPLE_RATE:-0.10}
+      - AUDIT_FAIL_QUARANTINE_THRESHOLD=${AUDIT_FAIL_QUARANTINE_THRESHOLD:-1}
+      - AUDIT_MISSING_QUARANTINE_THRESHOLD=${AUDIT_MISSING_QUARANTINE_THRESHOLD:-0}
+      - AUDIT_STRIKE_WINDOW_MS=${AUDIT_STRIKE_WINDOW_MS:-604800000}
+      - AUDIT_REQUEST_TTL_MS=${AUDIT_REQUEST_TTL_MS:-1800000}
+      - AUDIT_RETENTION_DAYS=${AUDIT_RETENTION_DAYS:-14}
+      - AUDIT_MAX_ATTEMPTS=${AUDIT_MAX_ATTEMPTS:-3}
+      - AUDIT_VERIFIER_TIMEOUT_S=${AUDIT_VERIFIER_TIMEOUT_S:-120}
+      - AUDIT_POLL_INTERVAL_S=${AUDIT_POLL_INTERVAL_S:-5}
+      - AUDIT_BATCH_LIMIT=${AUDIT_BATCH_LIMIT:-8}
+      - AUDIT_WORKERS=${AUDIT_WORKERS:-2}
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ${AUDIT_DIR:-./data/audit}:/app/audit
+    networks:
+      - innopool
+    depends_on:
+      db:
+        condition: service_healthy
+      master:
+        condition: service_started
+
+  # CPU challenge runtimes for the auditor's tig-verifier. Same images the
+  # slaves use; they idle on `sleep infinity` and cost nothing until exec'd.
+  # ${AUDIT_DIR} is the shared scratch the auditor writes leaves into.
+  satisfiability:
+    image: ghcr.io/tig-foundation/tig-monorepo/satisfiability/runtime:${TIG_VERSION}
+    container_name: satisfiability
+    restart: unless-stopped
+    volumes:
+      - ${AUDIT_DIR:-./data/audit}:/app/audit
+    command: ["sleep", "infinity"]
+
+  vehicle_routing:
+    image: ghcr.io/tig-foundation/tig-monorepo/vehicle_routing/runtime:${TIG_VERSION}
+    container_name: vehicle_routing
+    restart: unless-stopped
+    volumes:
+      - ${AUDIT_DIR:-./data/audit}:/app/audit
+    command: ["sleep", "infinity"]
+
+  knapsack:
+    image: ghcr.io/tig-foundation/tig-monorepo/knapsack/runtime:${TIG_VERSION}
+    container_name: knapsack
+    restart: unless-stopped
+    volumes:
+      - ${AUDIT_DIR:-./data/audit}:/app/audit
+    command: ["sleep", "infinity"]
+
+  job_scheduling:
+    image: ghcr.io/tig-foundation/tig-monorepo/job_scheduling/runtime:${TIG_VERSION}
+    container_name: job_scheduling
+    restart: unless-stopped
+    volumes:
+      - ${AUDIT_DIR:-./data/audit}:/app/audit
+    command: ["sleep", "infinity"]
+
+  energy_arbitrage:
+    image: ghcr.io/tig-foundation/tig-monorepo/energy_arbitrage/runtime:${TIG_VERSION}
+    container_name: energy_arbitrage
+    restart: unless-stopped
+    volumes:
+      - ${AUDIT_DIR:-./data/audit}:/app/audit
+    command: ["sleep", "infinity"]
+
   benchmarker_ui:
     image: ghcr.io/tig-foundation/tig-monorepo/benchmarker/ui:${TIG_VERSION}
     container_name: innopool_benchmarker_ui

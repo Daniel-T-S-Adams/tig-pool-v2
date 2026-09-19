@@ -26,6 +26,15 @@ from master.capability_scheduler import (
     update_slave_track_ema,
 )
 from master.assign_views import AssignViews
+from master.batch_audit import (
+    audit_settings,
+    choose_audit_nonces,
+    ensure_audit_schema,
+    fetch_audit_request,
+    record_audit_request,
+    store_audit_leaves,
+    validate_audit_leaves,
+)
 from master.cpu_tier_caps import (
     cpu_assign_inflight_cap,
     cpu_earnable_from_live,
@@ -6119,6 +6128,115 @@ class SlaveManager:
             get_db_conn().execute_many(*queries)
             _retire_batch_id(batch_id, is_proof=False)
             _heartbeat(slave_name)
+
+            # Quality audit: pick nonces only now that the slave has committed
+            # to its quality list. Old slaves ignore the extra ack field.
+            audit_nonces = _request_audit(
+                benchmark_id=benchmark_id,
+                batch_idx=batch_idx,
+                slave_name=slave_name,
+                batch=(b or {}).get("batch"),
+                solution_quality=solution_quality,
+            )
+            ack = submit_ack("accepted")
+            if audit_nonces:
+                ack["audit_nonces"] = audit_nonces
+            return ack
+
+        def _request_audit(*, benchmark_id, batch_idx, slave_name, batch, solution_quality):
+            """Insert a batch_audit request row and return the nonces to ask for.
+
+            Never raises: an audit bookkeeping failure must not fail the root.
+            """
+            try:
+                settings = audit_settings(CONFIG)
+                if not settings["enabled"]:
+                    return []
+                # No-op once created; retries if the DB was not up at boot.
+                ensure_audit_schema(get_db_conn())
+                if not (batch and batch.get("settings") and batch.get("rand_hash")):
+                    row = get_db_conn().fetch_one(
+                        """
+                        SELECT settings, rand_hash, challenge, algorithm, batch_size
+                        FROM job
+                        WHERE benchmark_id = %s
+                        """,
+                        (benchmark_id,),
+                    )
+                    if row is None:
+                        return []
+                    batch = {
+                        "settings": row["settings"],
+                        "rand_hash": row["rand_hash"],
+                        "challenge": row["challenge"],
+                        "algorithm": row["algorithm"],
+                        "start_nonce": int(batch_idx) * int(row["batch_size"]),
+                    }
+                start_nonce = int(batch.get("start_nonce") or 0)
+                nonces = choose_audit_nonces(
+                    start_nonce,
+                    solution_quality,
+                    leaves_per_batch=settings["leaves_per_batch"],
+                    include_max_quality=settings["include_max_quality"],
+                )
+                if not nonces:
+                    return []
+                record_audit_request(
+                    get_db_conn(),
+                    benchmark_id=benchmark_id,
+                    batch_idx=batch_idx,
+                    slave=slave_name,
+                    challenge=str(batch.get("challenge") or ""),
+                    algorithm=batch.get("algorithm"),
+                    settings=batch["settings"],
+                    rand_hash=str(batch["rand_hash"]),
+                    nonces=nonces,
+                    expected_qualities=[solution_quality[n - start_nonce] for n in nonces],
+                )
+                return nonces
+            except Exception as exc:
+                logger.warning("audit request for %s_%s failed: %s", benchmark_id, batch_idx, exc)
+                return []
+
+        @app.post('/submit-batch-audit/{batch_id}')
+        async def submit_batch_audit(batch_id: str, request: Request):
+            """Slave delivers the original leaves the root ack asked for."""
+            if (slave_name := canonicalize_pool_slave_name(request.headers.get('User-Agent', None))) is None:
+                raise HTTPException(status_code=403, detail="User-Agent header is required")
+            self._require_authorized_slave(slave_name)
+            try:
+                benchmark_id, batch_idx_s = batch_id.split("_", 1)
+                batch_idx = int(batch_idx_s)
+            except Exception:
+                raise HTTPException(status_code=400, detail="bad batch id")
+            req = fetch_audit_request(get_db_conn(), benchmark_id=benchmark_id, batch_idx=batch_idx)
+            if req is None:
+                # No request outstanding (audit disabled, row pruned, or never asked).
+                # Ack so the slave drops it instead of retrying forever.
+                return submit_ack("duplicate_accepted", note="no_audit_request")
+            if req["slave"] != slave_name:
+                logger.warning(
+                    "audit leaves for %s from %s but requested from %s",
+                    batch_id, slave_name, req["slave"],
+                )
+                raise HTTPException(status_code=403, detail="audit was requested from a different slave")
+            if req["status"] != "requested":
+                return submit_ack("duplicate_accepted", note=f"audit_{req['status']}")
+            try:
+                body = await request.json()
+                leaves = validate_audit_leaves(
+                    body,
+                    requested_nonces=req["requested_nonces"],
+                    max_leaf_bytes=audit_settings(CONFIG)["max_leaf_bytes"],
+                )
+                if not leaves:
+                    raise ValueError("no leaves")
+            except Exception as exc:
+                logger.error("slave %s submitted INVALID audit leaves for %s: %s", slave_name, batch_id, exc)
+                raise HTTPException(status_code=400, detail="INVALID audit leaves")
+            store_audit_leaves(get_db_conn(), audit_id=int(req["id"]), leaves=leaves)
+            _heartbeat(slave_name)
+            logger.debug("slave %s delivered %s audit leaves for %s", slave_name, len(leaves), batch_id)
             return submit_ack("accepted")
 
         @app.post('/submit-batch-proofs/{batch_id}')
@@ -6192,6 +6310,7 @@ class SlaveManager:
             ).start()
             return submit_ack("accepted")
             
+        ensure_audit_schema(get_db_conn())
         thread = Thread(target=lambda: uvicorn.run(app, host="0.0.0.0", port=5115, access_log=False))  # nosec B104 — container binds all interfaces; nginx controls external exposure
         thread.daemon = True
         thread.start()

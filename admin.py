@@ -15,6 +15,9 @@ Usage:
   python3 admin.py member-health <slave>     # show slave assignment health
   python3 admin.py autopilot [--json]        # read-only scheduler/scale readiness report
   python3 admin.py hit-rate [--json]         # quality vs qualifier floor, bundles, time
+  python3 admin.py audit [--json]            # quality spot-check: per-slave pass/fail, backlog
+  python3 admin.py audit --failures          # recent failed audits with expected vs actual
+  python3 admin.py audit <id>                # one audit incl. kept leaves (dispute evidence)
   python3 admin.py ai-optimizer [--json]     # run read-only DeepSeek analyst
   python3 admin.py ai-decisions [N]          # show recent AI recommendations
   python3 admin.py compute-types [--apply]   # validate/add TIG 0.0.7 compute_type
@@ -504,6 +507,77 @@ def cmd_hit_rate(args):
     if not (report.get("tracks") or []):
         print("  No jobs with solution_quality in this window.")
 
+def _fmt_ms(ms):
+    if not ms:
+        return "—"
+    import datetime
+    return datetime.datetime.fromtimestamp(int(ms) / 1000).strftime("%m-%d %H:%M")
+
+def cmd_audit(args):
+    if args and args[0].isdigit():
+        row = _get(f"/admin/ops/audit/{args[0]}")
+        print(json.dumps(row, indent=2, sort_keys=True, default=str))
+        return
+    report = _get("/admin/ops/audit")
+    if "--json" in args:
+        print(json.dumps(report, indent=2, sort_keys=True, default=str))
+        return
+    if not report.get("available"):
+        print(report.get("note") or "audit not available")
+        return
+    window_d = (report.get("window_ms") or 0) / 86400000
+    totals = report.get("totals") or {}
+    backlog = report.get("backlog") or {}
+    print(f"Quality audit report (observe-only) — last {window_d:.0f}d")
+    print(
+        "  totals    : "
+        + "  ".join(f"{k}={totals.get(k, 0)}" for k in ("passed", "failed", "missing", "skipped", "pending", "requested", "error"))
+    )
+    print(
+        f"  backlog   : pending={backlog.get('pending') or 0} awaiting_leaves={backlog.get('awaiting_leaves') or 0} "
+        f"error={backlog.get('error') or 0} oldest_pending={_fmt_ms(backlog.get('oldest_pending_at'))}"
+    )
+
+    if "--failures" in args:
+        fails = report.get("recent_failures") or []
+        print(f"\nRecent failed audits ({len(fails)}):")
+        if not fails:
+            print("  none")
+        for f in fails:
+            print(
+                f"  #{f.get('id')} {f.get('benchmark_id')}_{f.get('batch_idx')} slave={f.get('slave')} "
+                f"chal={f.get('challenge')} algo={f.get('algorithm')} at={_fmt_ms(f.get('verified_at'))} "
+                f"leaves_kept={f.get('leaves_kept')}"
+            )
+            result = f.get("result") or {}
+            for nonce, v in sorted(result.items(), key=lambda kv: int(kv[0])):
+                flag = "ok " if v.get("ok") else "BAD"
+                print(f"      {flag} nonce {nonce}: posted={v.get('expected')} verifier={v.get('actual')} {v.get('error') or ''}")
+            if f.get("error"):
+                print(f"      error: {f['error']}")
+        return
+
+    print()
+    print(f"{'SLAVE':<34} {'TRUST':<12} {'ACT':<4} {'REQ':>5} {'PASS':>5} {'FAIL':>5} {'MISS':>5} {'SKIP':>5} {'OPEN':>5} {'LAST':>12}")
+    print("-" * 104)
+    for r in report.get("per_slave") or []:
+        print(
+            f"{str(r.get('slave') or ''):<34} "
+            f"{str(r.get('trust_state') or ''):<12} "
+            f"{'yes' if r.get('active') else 'no':<4} "
+            f"{int(r.get('requested') or 0):>5} "
+            f"{int(r.get('passed') or 0):>5} "
+            f"{int(r.get('failed') or 0):>5} "
+            f"{int(r.get('missing') or 0):>5} "
+            f"{int(r.get('skipped') or 0):>5} "
+            f"{int(r.get('open') or 0):>5} "
+            f"{_fmt_ms(r.get('last_verified_at')):>12}"
+        )
+    if not (report.get("per_slave") or []):
+        print("  No audits in window yet.")
+    if totals.get("failed"):
+        print("\nRun `python3 admin.py audit --failures` for expected vs verifier qualities.")
+
 def cmd_ai_optimizer(args):
     result = _post("/admin/ai-optimizer/run", {})
     if "--json" in args:
@@ -787,6 +861,7 @@ COMMANDS = {
     "member-health": cmd_member_health,
     "autopilot": cmd_autopilot,
     "hit-rate": cmd_hit_rate,
+    "audit": cmd_audit,
     "ai-optimizer": cmd_ai_optimizer,
     "ai-decisions": cmd_ai_decisions,
     "compute-types": cmd_compute_types,
