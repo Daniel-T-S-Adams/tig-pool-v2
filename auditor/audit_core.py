@@ -46,6 +46,13 @@ class AuditorSettings:
     batch_limit: int = 8
     # Parallel verifier execs per loop tick.
     workers: int = 2
+    # Auto-promotion probation -> trusted. A probation member is verified on
+    # every batch, so honesty shows fast: this many passed audits, first audit
+    # at least min_age ago, and zero failed/missing inside the window.
+    # 0 = never auto-promote.
+    promote_min_passed: int = 50
+    promote_min_age_ms: int = 24 * 3600 * 1000
+    promote_window_ms: int = 24 * 3600 * 1000
 
     @classmethod
     def from_env(cls, env: Optional[Dict[str, str]] = None) -> "AuditorSettings":
@@ -76,6 +83,9 @@ class AuditorSettings:
             poll_interval_s=max(0.5, _f("AUDIT_POLL_INTERVAL_S", 5.0, float)),
             batch_limit=max(1, _f("AUDIT_BATCH_LIMIT", 8, int)),
             workers=max(1, min(8, _f("AUDIT_WORKERS", 2, int))),
+            promote_min_passed=max(0, _f("AUDIT_PROMOTE_MIN_PASSED", 50, int)),
+            promote_min_age_ms=max(0, int(_f("AUDIT_PROMOTE_MIN_AGE_H", 24.0, float) * 3600 * 1000)),
+            promote_window_ms=max(3600_000, int(_f("AUDIT_PROMOTE_WINDOW_H", 24.0, float) * 3600 * 1000)),
         )
 
 
@@ -90,6 +100,42 @@ def should_verify(trust_state: Optional[str], settings: AuditorSettings, rng: Op
     if rate <= 0.0:
         return False
     return (rng or random.SystemRandom()).random() < rate
+
+
+def promotion_decision(
+    trust_state: Optional[str],
+    trust_source: Optional[str],
+    *,
+    passed_in_window: int,
+    failed_in_window: int,
+    missing_in_window: int,
+    first_audit_at_ms: Optional[int],
+    settings: AuditorSettings,
+    now_ms: int,
+) -> Optional[str]:
+    """Return 'promote', 'demote' or None for one member.
+
+    promote: probation member with a clean window of enough passed audits
+             whose first audit is old enough (seen across a day of tracks).
+    demote : member the auditor itself promoted (trust_source='auditor')
+             that has a failed audit in the window. Operator-set trust is
+             never touched; quarantine handles outright cheats first.
+    """
+    if settings.promote_min_passed <= 0:
+        return None
+    state = str(trust_state or "probation").lower()
+    if state == "probation":
+        if failed_in_window or missing_in_window:
+            return None
+        if passed_in_window < settings.promote_min_passed:
+            return None
+        if first_audit_at_ms is None or now_ms - int(first_audit_at_ms) < settings.promote_min_age_ms:
+            return None
+        return "promote"
+    if state == "trusted" and str(trust_source or "").lower() == "auditor":
+        if failed_in_window:
+            return "demote"
+    return None
 
 
 def parse_verifier_quality(stdout: str) -> Optional[int]:

@@ -9,6 +9,7 @@ from audit_core import (
     classify_verifier_failure,
     judge,
     parse_verifier_quality,
+    promotion_decision,
     should_verify,
 )
 
@@ -104,3 +105,58 @@ def test_judge_partial_delivery_passes_on_delivered():
     # bookkeeping, not a mismatch.
     out = judge([100, 200], [5, 9], {5: _v(5, 100, 100)}, delivered=[5])
     assert out.status == "passed"
+
+
+H = 3600 * 1000
+NOW = 1_800_000_000_000
+
+
+def _decide(state, source=None, passed=60, failed=0, missing=0, first_age_h=30.0, settings=None):
+    s = settings or AuditorSettings()
+    return promotion_decision(
+        state, source,
+        passed_in_window=passed, failed_in_window=failed, missing_in_window=missing,
+        first_audit_at_ms=None if first_age_h is None else NOW - int(first_age_h * H),
+        settings=s, now_ms=NOW,
+    )
+
+
+def test_promotion_env_defaults():
+    s = AuditorSettings.from_env({})
+    assert s.promote_min_passed == 50
+    assert s.promote_min_age_ms == 24 * H
+    assert s.promote_window_ms == 24 * H
+    s = AuditorSettings.from_env({"AUDIT_PROMOTE_MIN_PASSED": "0", "AUDIT_PROMOTE_MIN_AGE_H": "6", "AUDIT_PROMOTE_WINDOW_H": "0.1"})
+    assert s.promote_min_passed == 0
+    assert s.promote_min_age_ms == 6 * H
+    assert s.promote_window_ms == H  # floor 1h
+
+
+def test_promote_clean_probation_member():
+    assert _decide("probation") == "promote"
+    assert _decide(None) == "promote"  # DB default
+
+
+def test_no_promote_when_not_enough_evidence():
+    assert _decide("probation", passed=49) is None
+    assert _decide("probation", first_age_h=23.9) is None
+    assert _decide("probation", first_age_h=None) is None
+
+
+def test_no_promote_with_any_strike_in_window():
+    assert _decide("probation", failed=1) is None
+    assert _decide("probation", missing=1) is None
+
+
+def test_promotion_disabled_by_zero():
+    assert _decide("probation", settings=AuditorSettings(promote_min_passed=0)) is None
+    assert _decide("trusted", "auditor", failed=1, settings=AuditorSettings(promote_min_passed=0)) is None
+
+
+def test_demote_only_auditor_promoted_members():
+    assert _decide("trusted", "auditor", failed=1) == "demote"
+    assert _decide("trusted", "auditor", failed=0, missing=3) is None
+    assert _decide("trusted", None, failed=1) is None       # operator-set trust
+    assert _decide("trusted", "operator", failed=1) is None
+    assert _decide("operator", "auditor", failed=1) is None
+    assert _decide("quarantined", "auditor", failed=1) is None

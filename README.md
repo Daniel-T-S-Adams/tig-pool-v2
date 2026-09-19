@@ -245,7 +245,9 @@ View trust state for all members:
 python3 admin.py members
 ```
 
-Trust state is managed via the pool database or admin API. The `members` command shows `trust_state` and `preflight_status` columns for every registered slave.
+**Promotion is driven by the quality audit.** A probation member is verified on every batch, so the auditor promotes it to `trusted` once it has `AUDIT_PROMOTE_MIN_PASSED` (50) passed audits, its first audit is at least `AUDIT_PROMOTE_MIN_AGE_H` (24 h) old, and it has zero failed or missing audits in the last `AUDIT_PROMOTE_WINDOW_H` (24 h). A typical CPU slave gets there in about a day. Any failed audit drops an auditor-promoted member straight back to `probation` (quarantine usually fires first). Members you set to `trusted` yourself are never demoted by the auditor — the `trust_source` column records who promoted whom.
+
+Trust state can also be set directly in the pool database. The `members` command shows `trust_state` and `preflight_status` columns for every registered slave.
 
 ---
 

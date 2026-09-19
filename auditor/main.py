@@ -9,6 +9,9 @@ docker.sock is not mounted into the master. Loop:
   3. strikes : failed (and optionally missing) counts per slave inside the
                window -> deactivate + trust_state='quarantined' + release
                that slave's unfinished batches
+  3b. trust  : probation members with a clean window of enough passed
+               audits -> trust_state='trusted' (trust_source='auditor');
+               auditor-promoted members with a failed audit -> probation.
   4. prune   : leaves of passed/skipped audits older than retention_days.
                Failed audits and their leaves are kept forever.
 
@@ -38,6 +41,7 @@ from audit_core import (
     classify_verifier_failure,
     judge,
     parse_verifier_quality,
+    promotion_decision,
     should_verify,
 )
 
@@ -134,6 +138,14 @@ def wait_for_schema(db: DB) -> None:
         except Exception as exc:
             logger.warning("db not ready: %s", exc)
         time.sleep(5)
+
+
+def ensure_trust_columns(db: DB) -> None:
+    """pool_manager owns trust_state/trusted_at; trust_source is ours and
+    marks promotions the auditor made so it never undoes an operator's."""
+    db.execute("ALTER TABLE pool_members ADD COLUMN IF NOT EXISTS trust_state TEXT NOT NULL DEFAULT 'probation'")
+    db.execute("ALTER TABLE pool_members ADD COLUMN IF NOT EXISTS trusted_at BIGINT")
+    db.execute("ALTER TABLE pool_members ADD COLUMN IF NOT EXISTS trust_source TEXT")
 
 
 # ── phase 1: expire undelivered requests ─────────────────────────────────────
@@ -391,6 +403,98 @@ def apply_strikes(db: DB, s: AuditorSettings) -> None:
             quarantine_slave(db, row["slave"], f"{missing} undelivered audit request(s) in window")
 
 
+# ── phase 3b: probation -> trusted (and back) ───────────────────────────────
+
+def _trust_candidates(db: DB, s: AuditorSettings) -> List[dict]:
+    """Active probation/trusted members with their audit tallies."""
+    window_start = now_ms() - int(s.promote_window_ms)
+    return db.fetch_all(
+        """
+        SELECT m.slave_name,
+               LOWER(COALESCE(m.trust_state, 'probation')) AS trust_state,
+               m.trust_source,
+               COALESCE(a.passed, 0)  AS passed,
+               COALESCE(a.failed, 0)  AS failed,
+               COALESCE(a.missing, 0) AS missing,
+               f.first_audit_at
+        FROM pool_members m
+        LEFT JOIN (
+            SELECT slave,
+                   COUNT(*) FILTER (WHERE status = 'passed')  AS passed,
+                   COUNT(*) FILTER (WHERE status = 'failed')  AS failed,
+                   COUNT(*) FILTER (WHERE status = 'missing') AS missing
+            FROM batch_audit
+            WHERE requested_at >= %s
+            GROUP BY slave
+        ) a ON a.slave = m.slave_name
+        LEFT JOIN (
+            SELECT slave, MIN(requested_at) AS first_audit_at
+            FROM batch_audit
+            GROUP BY slave
+        ) f ON f.slave = m.slave_name
+        WHERE m.active = true
+          AND LOWER(COALESCE(m.trust_state, 'probation')) IN ('probation', 'trusted')
+        """,
+        (window_start,),
+    )
+
+
+def promote_slave(db: DB, slave: str, passed: int, s: AuditorSettings) -> None:
+    note = (
+        f"auto-promoted to trusted by auditor: {passed} passed quality audits, "
+        f"0 failed/missing in {s.promote_window_ms // 3600000}h"
+    )
+    logger.info("TRUST %s: %s", slave, note)
+    db.execute(
+        """
+        UPDATE pool_members
+        SET trust_state = 'trusted',
+            trusted_at = %s,
+            trust_source = 'auditor',
+            notes = CONCAT_WS(E'\n', NULLIF(notes, ''), %s)
+        WHERE slave_name = %s AND LOWER(COALESCE(trust_state, 'probation')) = 'probation'
+        """,
+        (now_ms(), note, slave),
+    )
+
+
+def demote_slave(db: DB, slave: str, failed: int) -> None:
+    note = f"auto-demoted to probation by auditor: {failed} failed quality audit(s)"
+    logger.warning("DEMOTE %s: %s", slave, note)
+    db.execute(
+        """
+        UPDATE pool_members
+        SET trust_state = 'probation',
+            trusted_at = NULL,
+            trust_source = NULL,
+            notes = CONCAT_WS(E'\n', NULLIF(notes, ''), %s)
+        WHERE slave_name = %s AND trust_source = 'auditor' AND LOWER(trust_state) = 'trusted'
+        """,
+        (note, slave),
+    )
+
+
+def apply_promotions(db: DB, s: AuditorSettings) -> None:
+    if s.promote_min_passed <= 0:
+        return
+    t = now_ms()
+    for row in _trust_candidates(db, s):
+        decision = promotion_decision(
+            row["trust_state"],
+            row.get("trust_source"),
+            passed_in_window=int(row["passed"] or 0),
+            failed_in_window=int(row["failed"] or 0),
+            missing_in_window=int(row["missing"] or 0),
+            first_audit_at_ms=row.get("first_audit_at"),
+            settings=s,
+            now_ms=t,
+        )
+        if decision == "promote":
+            promote_slave(db, row["slave_name"], int(row["passed"] or 0), s)
+        elif decision == "demote":
+            demote_slave(db, row["slave_name"], int(row["failed"] or 0))
+
+
 # ── phase 4: retention ───────────────────────────────────────────────────────
 
 def prune(db: DB, s: AuditorSettings) -> None:
@@ -427,22 +531,29 @@ def prune(db: DB, s: AuditorSettings) -> None:
 def main() -> None:
     s = AuditorSettings.from_env()
     logger.info(
-        "auditor start: challenges=%s trusted_sample_rate=%s fail_threshold=%s missing_threshold=%s retention_days=%s",
+        "auditor start: challenges=%s trusted_sample_rate=%s fail_threshold=%s missing_threshold=%s "
+        "retention_days=%s promote=%s passed/%sh",
         ",".join(s.challenges), s.trusted_sample_rate, s.fail_quarantine_threshold,
         s.missing_quarantine_threshold, s.retention_days,
+        s.promote_min_passed or "off", s.promote_window_ms // 3600000,
     )
     db = DB()
     wait_for_schema(db)
+    ensure_trust_columns(db)
     for c in s.challenges:
         if not _container_running(c):
             logger.warning("challenge container %s is not running; audits for it will retry", c)
     last_prune = 0.0
+    last_promote = 0.0
     while True:
         t0 = time.time()
         try:
             expire_requests(db, s)
             process_pending(db, s)
             apply_strikes(db, s)
+            if t0 - last_promote > 60:
+                apply_promotions(db, s)
+                last_promote = t0
             if t0 - last_prune > 3600:
                 prune(db, s)
                 last_prune = t0

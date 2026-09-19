@@ -398,6 +398,9 @@ services:
       - AUDIT_POLL_INTERVAL_S=${AUDIT_POLL_INTERVAL_S:-5}
       - AUDIT_BATCH_LIMIT=${AUDIT_BATCH_LIMIT:-8}
       - AUDIT_WORKERS=${AUDIT_WORKERS:-2}
+      - AUDIT_PROMOTE_MIN_PASSED=${AUDIT_PROMOTE_MIN_PASSED:-50}
+      - AUDIT_PROMOTE_MIN_AGE_H=${AUDIT_PROMOTE_MIN_AGE_H:-24}
+      - AUDIT_PROMOTE_WINDOW_H=${AUDIT_PROMOTE_WINDOW_H:-24}
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       - ${AUDIT_DIR:-./data/audit}:/app/audit
