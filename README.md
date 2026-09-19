@@ -12,6 +12,7 @@ Pool members run TIG slave nodes pointing at your server. The pool manager track
 - **Live pool website** — public stats, leaderboard, per-member dashboard, and fleet install scripts
 - **Autopilot** — continuously tunes benchmark slots, capacities, and workload based on live pool health
 - **Worker trust system** — probation/trust states gate capacity contributions from community miners
+- **Quality audit** — master spot-checks the qualities every slave posts by re-scoring original solutions with `tig-verifier`; mismatches auto-quarantine the member and keep the evidence
 - **AI co-pilot** — optional DeepSeek-backed advisor that reviews pool health and surfaces recommendations (read-only, operator-approved)
 - **Scheduler** — optional benchmark pre-seeding to keep the master active during quiet periods
 - **Admin CLI** — `admin.py` for all operator tasks without needing to call the API directly
@@ -30,6 +31,8 @@ Community Miners (slave nodes)
         ▼
   Pool Manager (FastAPI)       ← tracks contributions, autopilot, coinbase
         │
+  Auditor (Docker)             ← re-scores sampled leaves with tig-verifier
+        │   └─ CPU challenge runtimes (knapsack, energy_arbitrage, …)
   PostgreSQL (Docker)          ← shared schema for master + pool
         │
   Nginx (Docker)               ← serves pool website, proxies /api/ and /benchmarker/
@@ -44,6 +47,7 @@ Community Miners (slave nodes)
 | Master (slave) | 5115 | 5115 | Slave node connections |
 | Benchmarker UI | 7777 | 8081 | Operator-only master admin |
 | Pool Manager | 8080 | — | Internal only (proxied via nginx) |
+| Auditor | — | — | No ports; talks to Postgres and the host Docker socket |
 | PostgreSQL | 5432 | — | Internal only |
 
 > Port 3336 (master internal API) and 5432 (postgres) must **never** be exposed publicly.
@@ -229,8 +233,10 @@ Trust states:
 
 | State | Meaning |
 |---|---|
-| `probation` | New miner, limited capacity contribution |
-| `trusted` | Verified miner, full capacity counted |
+| `probation` | New miner, limited capacity contribution; every audit request is verified |
+| `trusted` | Verified miner, full capacity counted; audits are sampled (`AUDIT_TRUSTED_SAMPLE_RATE`) |
+| `operator` | Pool operator's own machines; never auto-quarantined |
+| `quarantined` | Failed a quality audit — deactivated, unfinished batches released |
 | `suspended` | Removed from capacity calculations |
 
 View trust state for all members:
@@ -240,6 +246,27 @@ python3 admin.py members
 ```
 
 Trust state is managed via the pool database or admin API. The `members` command shows `trust_state` and `preflight_status` columns for every registered slave.
+
+---
+
+## Quality Audit
+
+A root submit commits to the *solutions* (merkle root) but not to the *quality numbers* the slave posts alongside them. A hostile member could post real solutions with inflated qualities; TIG only re-checks a few nonces per benchmark, and a disagreement is clawed back from the pool. The audit closes that gap without re-solving anything:
+
+1. Slave POSTs `/submit-batch-root` as normal.
+2. Master picks the audit nonces **after** seeing the quality list — the highest-quality nonce plus `leaves_per_batch` random ones — and returns them in the ack as `audit_nonces`. The slave cannot know the sample before committing.
+3. Slave (≥ 0.1.22) POSTs the original `{nonce}.json` leaves to `/submit-batch-audit/{batch_id}` and keeps its own copy for 30 days.
+4. The `auditor` container runs **`tig-verifier` only** on each leaf inside the matching challenge container and compares the result to the posted quality.
+
+Outcomes per batch: `passed`, `failed`, `skipped` (not sampled / GPU challenge), `missing` (slave never delivered), `error` (verifier infrastructure problem, retried). A `failed` audit deactivates the member, sets `trust_state = quarantined` and releases its unfinished work. Failed audits and their leaves are kept **forever** as evidence; passed ones are pruned after `AUDIT_RETENTION_DAYS`.
+
+```bash
+python3 admin.py audit              # per-slave pass/fail/missing, backlog
+python3 admin.py audit --failures   # expected vs verifier quality per nonce
+python3 admin.py audit <id>         # one audit with its kept leaves
+```
+
+Tuning lives in `.env` (`AUDIT_*`, see `.env.example`) and, for the master side, under `"audit"` in the master config (`enabled`, `leaves_per_batch`, `include_max_quality`, `max_leaf_bytes`, `request_ttl_ms`). Leave `AUDIT_MISSING_QUARANTINE_THRESHOLD=0` until every member runs a slave ≥ 0.1.22 — older slaves never answer audit requests. GPU challenges are stored but not verified (the VPS has no GPU).
 
 ---
 
@@ -258,6 +285,9 @@ python3 admin.py autopilot                            # Pool health + scale read
 python3 admin.py autopilot --json                     # Same, machine-readable
 python3 admin.py hit-rate                             # Quality vs TIG qualifier floor, bundles, time
 python3 admin.py hit-rate --json                      # Same, machine-readable
+python3 admin.py audit [--json]                       # Quality spot-check: per-slave pass/fail, backlog
+python3 admin.py audit --failures                     # Failed audits with expected vs verifier quality
+python3 admin.py audit <id>                           # One audit incl. kept leaves (dispute evidence)
 
 python3 admin.py members                              # List all registered members (with trust/preflight state)
 python3 admin.py fleets                               # List registered fleets
@@ -349,6 +379,8 @@ All endpoints are prefixed with `/api/`.
 | GET | `/admin/invites` | List invite codes |
 | GET | `/admin/pool-settings` | View pool configuration |
 | POST | `/admin/pool-settings` | Update pool configuration |
+| GET | `/admin/ops/audit` | Quality-audit report: per-slave totals, backlog, recent failures |
+| GET | `/admin/ops/audit/{id}` | One audit row with its kept leaves |
 
 ---
 
@@ -367,7 +399,10 @@ All endpoints are prefixed with `/api/`.
 | `pool_manager/pool/ai_optimizer.py` | AI co-pilot advisor |
 | `pool_manager/pool/scheduler.py` | Lightweight dynamic tuner — adjusts `max_concurrent_benchmarks` based on active slave count (superseded by autopilot) |
 | `master/slave_manager.py` | Slave connection and batch assignment |
+| `master/batch_audit.py` | Audit nonce sampling, leaf validation, `batch_audit` schema |
 | `master/precommit_manager.py` | Precommit selection and submission |
+| `auditor/` | Auditor service: `tig-verifier`-only re-scoring, strikes, retention |
+| `pool_manager/pool/audit_report.py` | Observe-only audit report for `/admin/ops/audit` |
 | `pool_website/` | Static HTML/CSS/JS pool site |
 | `admin.py` | Operator CLI |
 | `configure_innopool.py` | Migrates an existing tig-master config into InnoPool with pool slave routing |
