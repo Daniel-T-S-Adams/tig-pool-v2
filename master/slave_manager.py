@@ -4898,6 +4898,7 @@ class SlaveManager:
             "/submit-batch-root/",
             "/submit-batch-proofs/",
             "/submit-batch-error/",
+            "/submit-batch-audit/",
         )
 
         @app.middleware("http")
