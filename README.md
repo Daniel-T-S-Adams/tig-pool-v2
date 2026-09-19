@@ -418,3 +418,4 @@ All endpoints are prefixed with `/api/`.
 - `/set-coinbase` is rate-limited by TIG to once per `coinbase_update_period` blocks. The pool manager tracks this automatically.
 - Fleet labels (the display name shown on the website) are cosmetic only. The pool identifies workers by their fleet token hash, which cannot be changed after registration.
 - The benchmarker UI (port 8081) should **not** be exposed publicly. Nginx restricts it to requests with valid `OPERATOR_USER`/`OPERATOR_PASSWORD` HTTP basic auth.
+- **Data retention.** The pool manager runs an hourly sweep that deletes job/batch rows and autopilot/AI decision logs older than `RETENTION_DAYS` (default 14). Without it the `batch_data`/`root_batch` tables grow by roughly 1 GB/day. The payout ledger (`pool_coinbase_history`), member earnings (`pool_contributions`), the member roster, and failed quality audits are never trimmed.

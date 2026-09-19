@@ -13,7 +13,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from pool.routes import router
-from pool import tracker, coinbase, scheduler, autopilot, ai_optimizer
+from pool import tracker, coinbase, scheduler, autopilot, ai_optimizer, retention
 
 logging.basicConfig(
     level=logging.INFO,
@@ -42,6 +42,7 @@ def background_loop():
     Runs every 30 seconds:
     - Take a contribution snapshot (tracker will skip if < 60s since last)
     - Check if coinbase needs updating
+    - Hourly retention sweep of job history / decision logs (RETENTION_DAYS)
     """
     # Give the master a moment to fully start
     time.sleep(15)
@@ -73,6 +74,11 @@ def background_loop():
             ai_optimizer.maybe_run()
         except Exception as e:
             logger.error(f"AI optimizer error: {e}")
+
+        try:
+            retention.maybe_run()
+        except Exception as e:
+            logger.error(f"Retention error: {e}")
 
         time.sleep(30)
 
