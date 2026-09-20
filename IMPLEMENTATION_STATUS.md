@@ -118,7 +118,9 @@ with 12 new worker tests and all 17 inherited worker regressions for that pair.
 
 ## Submission recovery and saved algorithms
 
-The next increment on `feature/submission-recovery` connects the queue to a
+The merged [pool PR](https://github.com/Daniel-T-S-Adams/tig-pool-v2/pull/6)
+and [worker PR](https://github.com/Daniel-T-S-Adams/innopool-slave-v2/pull/3)
+connect the queue to a
 separate, explicitly enabled TIG coordinator. It records potentially-sent
 operations, persists positive benchmark IDs before fetching details, reconciles
 lost responses without resending, and distinguishes confirmed proof receipt
@@ -132,8 +134,33 @@ the worker's artifact increment supports both. See
 [submission recovery notes](docs/SUBMISSION_RECOVERY.md) for evidence and
 remaining live-adapter checks. No actual algorithm or benchmark was run.
 
+All 96 pool tests passed in hosted CI, with 13 new worker tests, the 17 inherited
+worker tests and the legacy pool accounting checks. The pool CI uses the exact
+worker artifact commit `4ff2cceed89b98ec65bc0a062ebcf391a8d23778`.
+
+## Arbitration and round settlement
+
+The increment on `feature/round-settlement` adds independent public arbitration
+capture with local outage recovery, immutable report and decision history,
+positive protocol reporting-round associations, versioned post-X+2 evidence,
+benchmark-specific collateral return/forfeiture, verified reward-receipt
+attribution, actual operator reimbursement of withheld costs, and previewed or
+posted round allocations. It keeps round credit separate from benchmark
+creation rounds and requires complete recorded data before using the
+zero-credit operator allocation. See [round settlement notes](docs/ROUND_SETTLEMENT.md).
+
+The accelerated PostgreSQL simulations include concurrent/replayed payments,
+multiple upheld nonce reports, multiplier snapshots, failed handover, pending
+arbitration, missing block data, exact tied credit and unfunded earnings. The
+deployment-specific reporting scope and final reward-receipt classification
+remain explicit verified-adapter inputs. They are not inferred from a single
+public sample or an estimated earnings response.
+
+All 116 pool tests pass locally, including the paired worker/API tests and
+20 new reporting/settlement tests. Hosted checks are required before integration.
+
 Funds and work flags still default to disabled. No live service or wallet was
-changed. Intended-account submission/rejection and expiry validation, finalization, completed withdrawal
+changed. Intended-account submission/rejection and expiry validation, live finalization adapters, completed withdrawal
 payments, product screens and isolated production deployment remain unfinished.
 Real challenge execution and live protocol integration are not demonstrated by
 these tests. There is no production v2 release yet. The remaining Stage 0 checks
