@@ -141,10 +141,8 @@ def begin(database, identity, request_key, preflight, *, fee_limit, actor):
         observed=status(database,cursor=cursor)
         if observed['initialized'] and not observed['ready']:
             raise Conflict('custody observer requires reconciliation before another payment attempt')
-        cursor.execute('SELECT 1 FROM withdrawal_attempts WHERE chain_id=%s AND sender=%s AND nonce=%s',
-                       (review['chain_id'], review['sender'], preflight.nonce))
-        if cursor.fetchone(): raise Conflict('custody nonce is already reserved by another send attempt')
         attempt_id = uuid.uuid4()
+        custody.reserve_nonce(cursor,attempt_id,preflight.network,preflight.nonce,'withdrawal')
         account = ledger.account(cursor, gas_hold(attempt_id), 'operator_commitment', asset='NATIVE')
         ledger.post(cursor, f'withdrawal-attempt:{attempt_id}:gas', 'operator_withdrawal_fee_reservation',
             [('operator:custody:NATIVE', -fee_limit), (account, fee_limit)], {'withdrawal_id': str(identity), 'actor': actor})
@@ -248,6 +246,7 @@ def reconcile(database, attempt_id, transaction, transfer=None):
             {'withdrawal_id': str(row['id']), 'attempt_id': str(attempt_id), 'chain_id': transaction.network.chain_id,
              'tx_hash': transaction.tx_hash, 'fee': transaction.fee, 'fee_model': transaction.fee_model,
              'transfer_event': transfer.event_id if transfer else None})
+        custody.record_payment(cursor,attempt_id,transaction,transfer.event_id if transfer else None,journal_id)
         cursor.execute('''INSERT INTO withdrawal_attempt_outcomes(attempt_id,chain_id,tx_hash,outcome,fee,journal_id)
             VALUES (%s,%s,%s,%s,%s,%s) RETURNING *''',
             (attempt_id, transaction.network.chain_id, transaction.tx_hash, outcome, transaction.fee, journal_id))

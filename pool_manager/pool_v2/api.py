@@ -20,7 +20,7 @@ from .database import Database
 from .chain import Chain, Network, Rpc, FEE_MODELS
 from . import members, withdrawals, work_requests, member_protocol
 from . import artifacts
-from . import controls,custody,dashboard,deposits,settlement,chain_observer
+from . import controls,custody,dashboard,deposits,settlement,chain_observer,funding,topups
 from .protocol import ProtocolDataError
 from .money import Conflict, FundsError, InsufficientFunds
 
@@ -86,6 +86,10 @@ class WithdrawalSend(Input):
 class WithdrawalReconcile(Input):
     tx_hash: StrictStr | None = Field(default=None, pattern=r"^0x[0-9a-fA-F]{64}$")
     log_index: StrictInt | None = Field(default=None, ge=0)
+
+
+class TopupRequest(WithdrawalSend):
+    amount: StrictStr = Field(pattern=r'^[1-9][0-9]{0,77}$')
 
 
 class PauseChange(WithdrawalRelease):
@@ -330,6 +334,68 @@ def create_app(settings):
     def pause_new_work(body:PauseChange,actor=Depends(operator)):
         return response(controls.set_pause(database,body.paused,actor=actor,reason=body.reason,event_key=body.event_key))
 
+    @app.get('/api/v2/operator/funding')
+    def funding_dashboard(actor=Depends(operator)):
+        state=funding.status(database)
+        policy=None
+        if state.get('observation',{}).get('complete'):
+            observed=funding.read(database,state['observation']['id'])
+            policy={'recipient':observed['recipient'],'minimum':str(observed['minimum'])}
+        with database.transaction() as cursor:
+            cursor.execute('''SELECT t.id,t.amount,t.fee_limit,t.recipient,t.state,t.sent_at,s.nonce,p.tx_hash,p.fee
+                FROM protocol_topups t JOIN custody_sends s ON s.id=t.id
+                LEFT JOIN custody_payments p ON p.send_id=t.id
+                ORDER BY (t.state IN ('uncertain','awaiting_protocol')) DESC,t.sent_at DESC LIMIT 100''')
+            return response({'observation':state,'policy':policy,'topups':cursor.fetchall()})
+
+    @app.post('/api/v2/operator/topups')
+    def prepare_topup(body:TopupRequest,actor=Depends(operator)):
+        # Recover the original recorded intent even if new sends or RPC are unavailable.
+        with database.transaction() as cursor:
+            cursor.execute('SELECT id,amount,fee_limit,actor FROM protocol_topups WHERE request_key=%s',(body.request_key,))
+            previous=cursor.fetchone()
+        if previous:
+            if (int(previous['amount']),int(previous['fee_limit']),previous['actor'])!=(int(body.amount),int(body.fee_limit),actor):
+                raise Conflict('top-up request key was reused')
+            identity=previous['id']
+        else:
+            if not settings.funds_enabled:raise HTTPException(503,'new operator payments are paused')
+            chain=custody_chain()
+            if not settings.pool_player_id or members.address(settings.pool_player_id)!=chain.network.custody:
+                raise HTTPException(503,'protocol top-ups require the configured custody wallet as benchmarker')
+            state=funding.status(database)
+            if not state['ready']:raise Conflict('a fresh reconciled protocol fee observation is required')
+            identity=topups.begin(database,body.request_key,chain.preflight(),state['observation']['id'],
+                amount=int(body.amount),fee_limit=int(body.fee_limit),fee_model=settings.withdrawal_fee_model,actor=actor)['id']
+        value=topups.instructions(database,identity)
+        value.pop('preflight',None)
+        return response(value)
+
+    @app.get('/api/v2/operator/topups/{identity}')
+    def topup_instructions(identity:uuid.UUID,actor=Depends(operator)):
+        value=topups.instructions(database,identity)
+        value.pop('preflight',None)
+        return response(value)
+
+    @app.post('/api/v2/operator/topups/{identity}/reconcile')
+    def reconcile_topup(identity:uuid.UUID,body:WithdrawalReconcile,actor=Depends(operator)):
+        chain=custody_chain()
+        attempt=topups.instructions(database,identity)
+        tx_hash=body.tx_hash or chain.find_nonce(int(attempt['nonce']),after_height=attempt['preflight']['block_number'])
+        if not tx_hash:return response({'status':'awaiting_final_transaction','id':str(identity)})
+        topups.claim(database,identity,tx_hash,actor=actor)
+        tx=chain.transaction(tx_hash,fee_model=attempt['fee_model'])
+        index=matching_event(chain,tx,attempt,body.log_index)
+        token=chain.transfer(tx_hash,index) if index is not None else None
+        return response(exact_json(topups.reconcile(database,identity,tx,token)))
+
+    @app.post('/api/v2/operator/topups/{identity}/confirm')
+    def confirm_topup(identity:uuid.UUID,actor=Depends(operator)):
+        state=funding.status(database)
+        if not state.get('observation',{}).get('complete'):
+            raise Conflict('complete protocol funding observation is required')
+        return response(topups.credit(database,identity,state['observation']['id']))
+
     def latest_seal(number):
         with database.transaction() as cursor:
             cursor.execute('SELECT id FROM round_report_seals WHERE creation_round=%s ORDER BY created_at DESC LIMIT 1',(number,))
@@ -450,21 +516,24 @@ def create_app(settings):
             return response({'status':'awaiting_final_transaction','attempt_id':str(identity)})
         withdrawals.claim_transaction(database,identity,tx_hash,actor=actor)
         tx = chain.transaction(tx_hash,fee_model=attempt['fee_model'])
-        index = body.log_index
+        index = matching_event(chain,tx,attempt,body.log_index)
+        token = chain.transfer(tx_hash,index) if index is not None else None
+        return response(withdrawals.reconcile(database,identity,tx,token))
+
+    def matching_event(chain,tx,attempt,index):
         if tx.successful and index is None:
             # Recover a lost event index only when one exact verified event matches.
             matches = []
             for log in tx.evidence['receipt']['logs']:
                 try:
-                    value = chain.transfer(tx_hash,int(log['logIndex'],16))
+                    value = chain.transfer(tx.tx_hash,int(log['logIndex'],16))
                     if (value.sender,value.recipient,value.amount)==(attempt['sender'],attempt['recipient'],int(attempt['amount'])):
                         matches.append(value.log_index)
                 except FundsError:
                     continue
             if len(matches)>1: raise Conflict('several matching token events require an explicit event index')
             if matches:index=matches[0]
-        token = chain.transfer(tx_hash,index) if index is not None else None
-        return response(withdrawals.reconcile(database,identity,tx,token))
+        return index
 
     @app.get('/api/v2/operator/withdrawal-attempts/{identity}')
     def payment_instructions(identity:uuid.UUID,actor=Depends(operator)):

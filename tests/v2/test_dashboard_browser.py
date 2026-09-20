@@ -16,12 +16,13 @@ from eth_account.messages import encode_defunct
 from fastapi.testclient import TestClient
 import uvicorn
 
-from pool_manager.pool_v2 import custody, deposits, ledger, members
+from pool_manager.pool_v2 import custody, deposits, funding, ledger, members
 from pool_manager.pool_v2.api import Settings, create_app
 from pool_manager.pool_v2.chain import CustodyPreflight
 from pool_manager.pool_v2.money import TIG
 from funds_helpers import DatabaseCase, NETWORK, CUSTODY, chain_fixture, transfer
 from test_withdrawals import payment_fixture
+from test_funding import TOPUP,funding_capture,protocol_topup
 
 
 @unittest.skipUnless(os.environ.get('POOL_V2_BROWSER_TESTS') == '1',
@@ -51,7 +52,7 @@ class DashboardBrowserTests(DatabaseCase):
         self.addCleanup(listener.close)
         self.origin='https://127.0.0.1:'+str(listener.getsockname()[1])
         settings=Settings(self.db.dsn,self.origin,8453,hashlib.sha256(self.operator.encode()).hexdigest(),
-            funds_enabled=True,work_enabled=True,pool_player_id='0x'+'6'*40,custody_network=NETWORK,
+            funds_enabled=True,work_enabled=True,pool_player_id=CUSTODY,custody_network=NETWORK,
             custody_rpc_url='https://rpc.example',withdrawal_fee_model='op-jovian')
         self.app=create_app(settings)
         test=self
@@ -59,11 +60,15 @@ class DashboardBrowserTests(DatabaseCase):
             network=NETWORK
             def preflight(self):
                 with test.db.transaction() as cursor:
-                    return CustodyPreflight(NETWORK,1,ledger.backing(cursor),ledger.backing(cursor,'NATIVE'),90,
+                    cursor.execute('SELECT coalesce(max(s.nonce),0)+1 AS next FROM custody_payments p JOIN custody_sends s ON s.id=p.send_id')
+                    nonce=int(cursor.fetchone()['next'])
+                    return CustodyPreflight(NETWORK,nonce,ledger.backing(cursor),ledger.backing(cursor,'NATIVE'),90,
                         datetime.now(timezone.utc),{'fixture':True})
             def find_nonce(self,nonce,*,after_height):
-                test.assertEqual((nonce,after_height),(1,90))
-                _,self.chain,self.tx_hash=payment_fixture(amount=40*TIG+1,recipient=test.wallet)
+                test.assertEqual(after_height,90)
+                test.assertIn(nonce,(1,2))
+                _,self.chain,self.tx_hash=payment_fixture(amount=40*TIG+1 if nonce==1 else 5*TIG+1,
+                    recipient=test.wallet if nonce==1 else TOPUP,nonce=nonce)
                 return self.tx_hash
             def transaction(self,tx_hash,**kwargs):
                 return (test.extra_native if tx_hash==test.native_hash else self.chain).transaction(tx_hash,**kwargs)
@@ -184,6 +189,30 @@ class DashboardBrowserTests(DatabaseCase):
         expect(page.locator('#worker-token-box')).not_to_be_visible()
         with TestClient(self.app) as client:
             self.assertEqual(client.get('/api/v2/member/balance',headers={'Authorization':'Bearer '+execution}).status_code,401)
+
+        funding.record(self.db,funding_capture())
+        operator.locator('#refresh-operator').click()
+        expect(operator.locator('#funding-health')).to_have_text('Reconciled')
+        operator.get_by_role('button',name='Prepare fee top-up',exact=True).click()
+        operator.get_by_label('Amount · TIG',exact=True).fill('5.000000000000000001')
+        operator.get_by_label('Maximum reserved operator fee · native token').fill('0.0000000000000001')
+        operator.locator('#action-submit').click()
+        expect(operator.locator('#action-title')).to_have_text('Manual fee top-up details')
+        expect(operator.locator('#action-fields')).to_contain_text('5.000000000000000001 TIG')
+        operator.locator('#close-dialog').click()
+        operator.locator('#operator-topups').get_by_role('button',name='Check transfer',exact=True).click()
+        operator.locator('#action-submit').click()
+        expect(operator.locator('#action-dialog')).not_to_be_visible()
+        expect(operator.locator('#operator-topups')).to_contain_text('Awaiting TIG credit')
+        self.assertEqual(self.row("SELECT balance FROM accounts WHERE id='operator:protocol:TIG'")['balance'],0)
+        funding.record(self.db,funding_capture(5*TIG+1,protocol_topup(self.app.state.payment_chain.tx_hash,amount=5*TIG+1)))
+        operator.locator('#operator-topups').get_by_role('button',name='Check TIG credit',exact=True).click()
+        expect(operator.locator('#operator-topups')).to_contain_text('Credited')
+        expect(operator.locator('#funding-health')).to_have_text('Reconciled')
+        self.assertEqual(self.row("SELECT balance FROM accounts WHERE id='operator:protocol:TIG'")['balance'],5*TIG+1)
+        self.assertEqual(self.row("SELECT balance FROM accounts WHERE id='operator:custody:NATIVE'")['balance'],980)
+        self.assertEqual(members.balances(self.db,self.browser_member)['available'],10*TIG)
+        self.assertNotIn('eth_sendTransaction',wallet_methods)
 
         output=os.environ.get('POOL_V2_BROWSER_ARTIFACTS')
         if output:

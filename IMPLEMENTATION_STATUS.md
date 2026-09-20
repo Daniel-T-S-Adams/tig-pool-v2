@@ -199,7 +199,8 @@ passed.
 
 ## Custody observation and incoming funding review
 
-The increment on `feature/custody-observer` adds continuous finalized TIG
+The merged [custody observer PR](https://github.com/Daniel-T-S-Adams/tig-pool-v2/pull/10)
+adds continuous finalized TIG
 transfer capture, local outage archives, offline replay, checksummed database
 evidence, once-only deposit attribution and protected collection cursors. It
 compares captured token-balance changes with verified receipts and checks all
@@ -212,14 +213,31 @@ funding and reviewed attribution of unknown deposits. A read-only public Base
 capture reproduced a real 1.151417509939734543 TIG transfer and its balance
 change from 22 archived RPC responses. See [custody observation notes](docs/CUSTODY_OBSERVER.md).
 
-All 158 pool tests pass locally, including 13 custody capture/replay tests,
-funding API checks and the expanded browser flow. Hosted checks are required
-before this increment can merge. No public probe was credited to a member
+All 158 pool tests passed locally and in hosted CI, including 13 custody
+capture/replay tests, funding API checks and the expanded browser flow.
+No public probe was credited to a member
 ledger and no live tokens were moved.
+
+## Operator protocol fee funding
+
+The increment on `feature/protocol-fee-funding` adds public fee-balance
+collection and outage replay, operator-funded manual top-ups, shared withdrawal
+and top-up nonce reservations, actual operator gas accounting, and once-only
+protocol credit after both chain and TIG confirmation. New work pauses when
+the observed prepaid fee balance is stale, incomplete or does not reconcile.
+The operator dashboard supports the full review and recovery flow. See
+[protocol funding notes](docs/PROTOCOL_FUNDING.md).
+
+A public 30 TIG top-up matches its exact Base token event, player, destination
+and amount. It is retained as an offline regression fixture; it does not fund
+the test or deployment ledger. All 175 pool tests passed locally, including 16
+funding and observer integration tests, the withdrawal migration and the
+expanded browser flow. The inherited accounting checks also passed. Required
+hosted checks must pass before this increment merges.
 
 Funds and work flags still default to disabled. No live service or wallet was
 changed. Intended-account submission/rejection and expiry validation, live
-finalization adapters, unconfirmed deposit views, protocol fee top-ups,
+finalization adapters, unconfirmed deposit views,
 other operator expense/correction workflows, the pinned worker installer and isolated
 production deployment remain unfinished.
 Real challenge execution and live protocol integration are not demonstrated by

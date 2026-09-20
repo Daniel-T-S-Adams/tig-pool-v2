@@ -15,9 +15,12 @@ def paused(database, *, cursor=None):
 
 def blocked(database,*,cursor=None):
     from .chain_observer import status
+    from . import funding
     if paused(database,cursor=cursor):return 'operator-pause'
     custody=status(database,cursor=cursor)
     if custody['initialized'] and not custody['ready']:return 'custody-reconciliation'
+    protocol=funding.status(database,cursor=cursor)
+    if protocol['initialized'] and not protocol['ready']:return 'protocol-fee-reconciliation'
     return None
 
 

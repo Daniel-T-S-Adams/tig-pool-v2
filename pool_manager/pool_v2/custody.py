@@ -10,6 +10,10 @@ from .money import Conflict, FundsError
 
 def bind(cursor, network):
     lock(cursor, 'custody-identity')
+    cursor.execute("SELECT player_id FROM protocol_identity WHERE name='fees'")
+    protocol=cursor.fetchone()
+    if protocol and protocol['player_id']!=network.custody:
+        raise Conflict('custody wallet differs from the bound protocol funding account')
     cursor.execute('SELECT * FROM custody_identity WHERE name=\'custody\'')
     existing = cursor.fetchone()
     values = (network.chain_id, network.token, network.custody, network.decimals)
@@ -62,3 +66,35 @@ def receive_native(database, transaction):
         ledger.post(cursor, f'native-receipt:{transaction.network.chain_id}:{transaction.tx_hash}', 'operator_native_funding',
             [('external:custody:NATIVE', -transaction.value), ('operator:custody:NATIVE', transaction.value)],
             {'chain_id': transaction.network.chain_id, 'tx_hash': transaction.tx_hash, 'sender': transaction.sender})
+
+
+def reserve_nonce(cursor,identity,network,nonce,kind):
+    """Caller holds custody identity; all send purposes share this fence."""
+    from .money import units
+    units(nonce)
+    if kind not in ('withdrawal','protocol_topup'):raise FundsError('unknown custody send purpose')
+    bind(cursor,network)
+    cursor.execute('SELECT id FROM custody_sends WHERE chain_id=%s AND sender=%s AND nonce=%s',
+        (network.chain_id,network.custody,nonce))
+    if cursor.fetchone():raise Conflict('custody nonce is already reserved by another send attempt')
+    cursor.execute('INSERT INTO custody_sends(id,chain_id,sender,nonce,kind) VALUES (%s,%s,%s,%s,%s)',
+        (identity,network.chain_id,network.custody,nonce,kind))
+
+
+def record_payment(cursor,identity,transaction,transfer_event,journal_id):
+    """One verified finalized transaction can explain only one custody send."""
+    cursor.execute('SELECT chain_id,sender,nonce FROM custody_sends WHERE id=%s',(identity,))
+    route=cursor.fetchone()
+    if not route or (route['chain_id'],route['sender'],int(route['nonce']))!=(
+        transaction.network.chain_id,transaction.sender,transaction.nonce):
+        raise Conflict('payment does not match the shared custody nonce reservation')
+    cursor.execute('SELECT * FROM custody_payments WHERE send_id=%s OR (chain_id=%s AND tx_hash=%s)',
+        (identity,transaction.network.chain_id,transaction.tx_hash))
+    old=cursor.fetchone()
+    if old:
+        if (str(old['send_id']),old['tx_hash'],old['transfer_event'],int(old['fee']),str(old['journal_id']))!=(
+            str(identity),transaction.tx_hash,transfer_event,transaction.fee,str(journal_id)):
+            raise Conflict('custody transaction already has a different financial attribution')
+        return
+    cursor.execute('INSERT INTO custody_payments(send_id,chain_id,tx_hash,transfer_event,fee,journal_id) VALUES (%s,%s,%s,%s,%s,%s)',
+        (identity,transaction.network.chain_id,transaction.tx_hash,transfer_event,transaction.fee,journal_id))
