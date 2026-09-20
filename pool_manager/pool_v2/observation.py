@@ -65,7 +65,7 @@ class CaptureError(ProtocolDataError):
         self.observation = observation
 
 
-def capture_snapshot(client, start=None, max_workers=4):
+def capture_snapshot(client, start=None, max_workers=4, pool_player_id=None):
     """Collect complete player feeds between two reads of the same block.
 
     The caller validates the result. Partial successful responses are retained
@@ -87,6 +87,12 @@ def capture_snapshot(client, start=None, max_workers=4):
             ("players", player, "/get-benchmarks", {"block_id": block_id, "player_id": player})
             for player in players
         ]
+        if pool_player_id and pool_player_id not in players:
+            # A fresh dedicated pool has pending work before it enters OPoW.
+            # Preserve that feed without pretending it is an active qualifier.
+            requests.append(("pool_pending", None, "/get-benchmarks", {"block_id": block_id, "player_id": pool_player_id}))
+        if pool_player_id:
+            observation["pool_player_id"] = pool_player_id
         errors = []
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
             futures = {

@@ -40,7 +40,7 @@ jobs:
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           repository: Daniel-T-S-Adams/innopool-slave-v2
-          ref: 6ff56f2833191e6d9885f1bdefe4ed1e3d268d6f
+          ref: 4ff2cceed89b98ec65bc0a062ebcf391a8d23778
           path: .paired-worker
           persist-credentials: false
       - name: Run existing accounting regression checks

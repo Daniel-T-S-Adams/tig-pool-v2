@@ -47,7 +47,7 @@ because a worker lease or HTTP timeout elapsed.
 - `state`, `benchmark_id` and `handed_over_at` (null until confirmed).
 - `assignment_payload`: the **exact JSON string**, containing API version,
   benchmark ID, all TIG settings, random hash, nonce/bundle counts, fuel budget,
-  compute type, hyperparameters (including explicit null), algorithm archive
+  compute type, hyperparameters (including explicit null), algorithm name, archive
   URL and its SHA-256.
 - `assignment_digest`: SHA-256 of `assignment_payload.encode('utf-8')`.
 - `sampled_nonces`: null until TIG supplies the authoritative list.
@@ -89,10 +89,11 @@ available for existing work.
 ## Implementation boundary and tests
 
 The API, transactional queue, handover and upload storage are implemented.
-The live TIG dispatcher and outcome reconciler are a separate integration
-increment. Their tests currently supply explicit simulated acceptance,
-sampling and activation evidence; no API module starts a legacy scheduler or
-submits anything on import. Both funds and work flags default to false.
+The [submission coordinator](SUBMISSION_RECOVERY.md) persists external-call
+fences and recovers accepted work from archived TIG observations. Its tests
+currently supply explicit simulated acceptance, sampling and activation
+evidence; no API module starts a legacy scheduler or submits anything on import.
+Both funds and work flags default to false.
 
 The pool CI checks out an exact worker commit and runs its real client/runner
 against the actual FastAPI application with PostgreSQL. CPU and GPU fixtures
@@ -101,5 +102,10 @@ proofs and slot release while collateral remains held. Runtime execution and
 TIG responses in that test are simulated. Separate worker tests check durable
 restart recovery and reproduce a recorded public TIG Merkle root.
 
-Current worker pin: `6ff56f2833191e6d9885f1bdefe4ed1e3d268d6f`. This is an
+`GET /api/v2/artifacts/{sha256}` serves the exact saved public algorithm
+archive. The worker verifies it against the assignment's checksum before
+extracting the expected named library. It does not require a token: these are
+already-public TIG algorithm binaries, and no member files are served.
+
+Current worker pin: `4ff2cceed89b98ec65bc0a062ebcf391a8d23778`. This is an
 integration-test pairing, not a production release manifest.

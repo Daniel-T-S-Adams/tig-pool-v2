@@ -103,9 +103,11 @@ def reserve_next(database, player_id, *, now, max_age=120):
         if cursor.fetchone():
             raise ProtocolDataError("current snapshot has conflicting evidence")
         cursor.execute("UPDATE work_requests SET state='expired' WHERE state='queued' AND expires_at<=clock_timestamp()")
-        cursor.execute("SELECT * FROM work_requests WHERE state='queued' ORDER BY created_at,id LIMIT 100 FOR UPDATE SKIP LOCKED")
+        cursor.execute("""SELECT * FROM work_requests WHERE state='queued'
+            ORDER BY coalesce(last_attempted_at,created_at),created_at,id LIMIT 100 FOR UPDATE SKIP LOCKED""")
         requests = cursor.fetchall()
         for request in requests:
+            cursor.execute("UPDATE work_requests SET last_attempted_at=clock_timestamp() WHERE id=%s", (request["id"],))
             offer = request["offer"]
             try:
                 selection = choose(snapshot, observation["algorithms"]["binarys"], player_id=player_id,

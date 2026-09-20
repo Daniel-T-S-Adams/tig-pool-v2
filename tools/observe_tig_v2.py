@@ -18,6 +18,7 @@ from pool_manager.pool_v2.block_observer import BlockStore
 from pool_manager.pool_v2.database import Database
 from pool_manager.pool_v2.observation import CaptureError, PublicTigClient, capture_snapshot
 from pool_manager.pool_v2.protocol import ProtocolDataError, validate_snapshot
+from pool_manager.pool_v2.members import address
 from pool_manager.pool_v2.spool import Spool
 
 
@@ -28,12 +29,15 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--api-url", default="https://mainnet-api.tig.foundation")
     parser.add_argument("--collector", required=True)
+    parser.add_argument("--pool-player-id", help="also archive this pool's pending work before its first activation")
     parser.add_argument("--spool", required=True)
     parser.add_argument("--launch-height", required=True, type=int)
     parser.add_argument("--poll-seconds", type=float, default=3)
     parser.add_argument("--max-block-age", type=int, default=180)
     parser.add_argument("--captures", type=int, default=0, help="stop after this many new blocks; zero runs continuously")
     args = parser.parse_args(argv)
+    if args.pool_player_id:
+        args.pool_player_id = address(args.pool_player_id)
     if not 0 < args.poll_seconds <= 30 or args.max_block_age <= 0 or args.captures < 0:
         parser.error("invalid polling interval, age or capture count")
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -84,7 +88,7 @@ def main(argv=None):
                         # Preserve every observable block even if publication is
                         # delayed. Work selection enforces freshness separately.
                         log.warning("TIG block timestamp differs from wall time by %.1fs; preserving history", age)
-                    observation = capture_snapshot(client, start=start)
+                    observation = capture_snapshot(client, start=start, pool_player_id=args.pool_player_id)
                 except CaptureError as exc:
                     observation, error = exc.observation, str(exc)
                 except Exception as exc:
