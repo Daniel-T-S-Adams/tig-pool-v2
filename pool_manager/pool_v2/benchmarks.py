@@ -86,6 +86,7 @@ def reserve(database, member_id, request_key, *, creation_round, resource, selec
     with (database.transaction() if _cursor is None else nullcontext(_cursor)) as cursor:
         # All budget-using paths use budget -> member -> reservation -> accounts.
         lock(cursor, "operator:protocol-budget")
+        from .controls import paused
         member = member_lock(cursor, member_id)
         cursor.execute("SELECT * FROM reservations WHERE member_id=%s AND request_key=%s", (member_id, request_key))
         existing = cursor.fetchone()
@@ -93,6 +94,8 @@ def reserve(database, member_id, request_key, *, creation_round, resource, selec
             if existing["request_hash"] != request_hash:
                 raise Conflict("work request key was reused with different inputs")
             return dict(existing)
+        if paused(database,cursor=cursor):
+            raise Conflict('new benchmark reservations are paused')
         cursor.execute("SELECT clock_timestamp() AS now")
         if offer_expires_at <= cursor.fetchone()["now"]:
             raise Conflict("compute offer has expired")

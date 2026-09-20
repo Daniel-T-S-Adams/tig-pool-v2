@@ -141,23 +141,29 @@ def preview(database,round_number,seal_id):
     return _settle(database,round_number,seal_id,post=False)
 
 
-def allocate(database,round_number,seal_id):
+def allocate(database,round_number,seal_id,*,expected_digest=None):
     """Credit one complete reward round, even if no benchmark was created in it."""
-    return _settle(database,round_number,seal_id,post=True)
+    return _settle(database,round_number,seal_id,post=True,expected_digest=expected_digest)
 
 
-def _settle(database,round_number,seal_id,*,post):
+def _settle(database,round_number,seal_id,*,post,expected_digest=None):
     units(round_number,positive=True)
     with database.transaction() as cursor:
         cursor.execute('SELECT * FROM round_settlements WHERE round=%s',(round_number,))
         previous=cursor.fetchone()
-        if previous:return dict(previous)
+        if previous:
+            if expected_digest is not None and previous['input_digest']!=expected_digest:
+                raise Conflict('settlement differs from the reviewed preview')
+            return dict(previous)
     credits=qualifiers.round_credits(database,round_number)
     with database.transaction() as cursor:
         lock(cursor,'reports-store');lock(cursor,'round:'+str(round_number));lock(cursor,'observation-stream')
         cursor.execute('SELECT * FROM round_settlements WHERE round=%s',(round_number,))
         previous=cursor.fetchone()
-        if previous:return dict(previous)
+        if previous:
+            if expected_digest is not None and previous['input_digest']!=expected_digest:
+                raise Conflict('settlement differs from the reviewed preview')
+            return dict(previous)
         reports.require_seal(cursor,seal_id,round_number)
         # Recheck coverage while the observer cannot add a conflicting block.
         if not BlockStore(database).round_coverage(round_number):
@@ -193,6 +199,8 @@ def _settle(database,round_number,seal_id,*,post):
             return {'round':round_number,'rule':RULE,'input_digest':ledger.fingerprint(inputs),
                 'inputs':inputs,'pot':amount,'operator_allocation':operator,
                 'member_allocations':allocations,'preview':True}
+        if expected_digest is not None and ledger.fingerprint(inputs)!=expected_digest:
+            raise Conflict('settlement inputs changed; review a fresh preview')
         journal_id=None
         if amount:
             journal_id=ledger.post(cursor,f'round:{round_number}:settle','round_rewards',

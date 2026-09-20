@@ -10,7 +10,7 @@ from urllib.request import Request
 
 from fastapi.testclient import TestClient
 
-from pool_manager.pool_v2 import benchmarks, member_protocol, submissions, work_requests
+from pool_manager.pool_v2 import benchmarks, controls, member_protocol, submissions, work_requests
 from pool_manager.pool_v2.block_observer import BlockStore
 from pool_manager.pool_v2.api import Settings,create_app
 from pool_manager.pool_v2.artifacts import ArtifactRedirect,DEFAULT_HOSTS
@@ -65,6 +65,35 @@ class SubmissionTests(DatabaseCase):
         self.assertEqual(saved["state"],"uncertain")
         self.assertIsNotNone(saved["sent_at"])
         self.assertEqual(self.row("SELECT state FROM reservations WHERE id=%s",(row["id"],))["state"],"uncertain")
+
+    def test_pause_fences_new_reservations_and_first_precommit_sends(self):
+        row,intent=self.queued()
+        controls.set_pause(self.db,True,actor='operator',reason='maintenance',event_key='pause')
+        with self.assertRaisesRegex(Conflict,'paused'):
+            submissions.begin(self.db,intent['id'],preflight=self.preflight())
+        with self.assertRaisesRegex(Conflict,'paused'):
+            self.reserve('direct-reservation')
+        work_requests.create(self.db,self.member,'waiting',resource='CPU',compute_type='aws_c7a',capacity={'workers':1})
+        self.assertIsNone(work_requests.reserve_next(self.db,self.player,now=self.obs['start']['block']['details']['timestamp']))
+        self.assertEqual(self.balance()['slots'],1)
+        submissions.cancel_unsent(self.db,intent['id'],evidence={'operator_pause':True})
+        self.assertEqual(self.balance()['collateral'],0)
+        controls.set_pause(self.db,False,actor='operator',reason='ready',event_key='resume')
+        self.assertIsNotNone(work_requests.reserve_next(self.db,self.player,now=self.obs['start']['block']['details']['timestamp']))
+
+    def test_pause_keeps_uncertain_recovery_handover_and_results_available(self):
+        row,intent=self.queued()
+        submissions.begin(self.db,intent['id'],preflight=self.preflight())
+        controls.set_pause(self.db,True,actor='operator',reason='maintenance',event_key='pause')
+        confirmed=self.precommit(row)
+        self.assertEqual(submissions.recover_precommit(self.db,intent['id'],[confirmed],evidence={'block':9}),confirmed['benchmark_id'])
+        assigned=submissions.publish_assignment(self.db,row['id'],confirmed,evidence={'block':9})
+        member_protocol.acknowledge(self.db,assigned['benchmark_id'],self.member,assigned['assignment_digest'])
+        member_protocol.results(self.db,assigned['benchmark_id'],self.member,
+            {'merkle_root':'a'*64,'solution_quality':[1]*assigned['assignment']['num_nonces']})
+        payload=self.row("SELECT id FROM protocol_outbox WHERE reservation_id=%s AND kind='results'",(row['id'],))
+        self.assertIsNotNone(payload)
+        self.assertEqual(submissions.begin(self.db,payload['id'])['state'],'uncertain')
 
     def test_lost_response_reconciles_one_new_match_without_resending(self):
         row,intent=self.queued()

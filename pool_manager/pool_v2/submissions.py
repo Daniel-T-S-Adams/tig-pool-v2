@@ -68,6 +68,8 @@ def begin(database, identity, *, preflight=None):
             if intent["state"] != "ready":
                 raise Conflict("intent is not unsent; reconcile instead of retrying")
             if intent["kind"] == "precommit":
+                from .controls import paused
+                if paused(database,cursor=cursor):raise Conflict('new precommit submissions are paused')
                 payload = json.loads(intent["payload_text"])
                 if not isinstance(preflight, dict) or preflight.get("block_id") != payload["settings"]["block_id"]:
                     raise Conflict("current TIG block differs from immutable precommit; cancel unsent work")
