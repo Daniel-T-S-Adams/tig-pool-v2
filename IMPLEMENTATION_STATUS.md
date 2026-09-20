@@ -220,7 +220,8 @@ ledger and no live tokens were moved.
 
 ## Operator protocol fee funding
 
-The increment on `feature/protocol-fee-funding` adds public fee-balance
+The merged [protocol funding PR](https://github.com/Daniel-T-S-Adams/tig-pool-v2/pull/11)
+adds public fee-balance
 collection and outage replay, operator-funded manual top-ups, shared withdrawal
 and top-up nonce reservations, actual operator gas accounting, and once-only
 protocol credit after both chain and TIG confirmation. New work pauses when
@@ -230,15 +231,33 @@ The operator dashboard supports the full review and recovery flow. See
 
 A public 30 TIG top-up matches its exact Base token event, player, destination
 and amount. It is retained as an offline regression fixture; it does not fund
-the test or deployment ledger. All 175 pool tests passed locally, including 16
+the test or deployment ledger. All 175 pool tests passed locally and in hosted CI, including 16
 funding and observer integration tests, the withdrawal migration and the
-expanded browser flow. The inherited accounting checks also passed. Required
-hosted checks must pass before this increment merges.
+expanded browser flow. The inherited accounting checks also passed.
+
+## Paired installer and release metadata
+
+The pool's paired-release increment and
+[worker installer PR](https://github.com/Daniel-T-S-Adams/innopool-slave-v2/pull/4)
+add checked release metadata,
+installer downloads and hardware-specific Join-page instructions. The worker
+installs a detached fork revision from a verified tag, preserves its private
+configuration and evidence, refuses conflicting directories or modified code,
+and requires a durable drain before upgrades. Routine restarts do not update
+Git or rebuild legacy containers. See [paired release notes](docs/PAIRED_RELEASES.md).
+
+The worker's 22 tests and 17 inherited regressions passed locally, including
+real temporary Git checkouts, isolated environments, interrupted activation,
+retained evidence and process-lock checks. All 180 pool tests passed locally,
+including the expanded browser flow and paired installer/API check. Pool CI
+pins worker commit `e6f4eadc24c81af4506d2080f795d00318911a2d`. Both increments
+require passing hosted checks before merging into the protected integration
+branches; neither is a production release.
 
 Funds and work flags still default to disabled. No live service or wallet was
 changed. Intended-account submission/rejection and expiry validation, live
 finalization adapters, unconfirmed deposit views,
-other operator expense/correction workflows, the pinned worker installer and isolated
+other operator expense/correction workflows, production release rehearsal and isolated
 production deployment remain unfinished.
 Real challenge execution and live protocol integration are not demonstrated by
 these tests. There is no production v2 release yet. The remaining Stage 0 checks

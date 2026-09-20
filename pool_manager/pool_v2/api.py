@@ -20,7 +20,7 @@ from .database import Database
 from .chain import Chain, Network, Rpc, FEE_MODELS
 from . import members, withdrawals, work_requests, member_protocol
 from . import artifacts
-from . import controls,custody,dashboard,deposits,settlement,chain_observer,funding,topups
+from . import controls,custody,dashboard,deposits,settlement,chain_observer,funding,topups,releases
 from .protocol import ProtocolDataError
 from .money import Conflict, FundsError, InsufficientFunds
 
@@ -44,6 +44,9 @@ class Settings:
     custody_rpc_url: str | None = None
     withdrawal_fee_model: str | None = None
     settlement_enabled: bool = False
+    release_manifest: dict | None = None
+    build_commit: str | None = None
+    worker_installer: bytes | None = None
 
 
 class Input(BaseModel):
@@ -136,6 +139,8 @@ def response(value):
 
 
 def create_app(settings):
+    release=releases.validate(settings.release_manifest,settings.build_commit,settings.worker_installer)
+    release_digest=hashlib.sha256(releases.canonical(release).encode()).hexdigest() if release else None
     if len(settings.operator_token_sha256) != 64:
         raise ValueError("operator token SHA-256 must be configured explicitly")
     if settings.work_enabled:
@@ -220,9 +225,28 @@ def create_app(settings):
                          "work_block_reason":blocked,
                          "work_configured":settings.work_enabled,"settlement_enabled":settings.settlement_enabled,
                          "chain_id":settings.chain_id,"origin":settings.origin,
+                         "release_digest":release_digest,"pool_commit":release['pool']['commit'] if release else None,
                          "custody":settings.custody_network.custody if settings.custody_network else None,
                          "token":settings.custody_network.token if settings.custody_network else None,
                          "assignment_unit": "whole-benchmark"})
+
+    def recorded_release():
+        if release is None:raise HTTPException(503,'a verified paired release has not been configured')
+        return release
+
+    @app.get('/api/v2/release')
+    def paired_release():
+        return response(recorded_release())
+
+    @app.get('/api/v2/install-worker')
+    def installer_download():
+        recorded_release()
+        return Response(settings.worker_installer,media_type='text/x-python',headers={
+            'Content-Disposition':'attachment; filename="install_worker_v2.py"','Cache-Control':'no-store'})
+
+    @app.get('/api/v2/worker-installation')
+    def worker_installation(resource:str,compute_type:str,workers:int=1):
+        return response(releases.installation(recorded_release(),settings.origin,resource,compute_type,workers))
 
     @app.post("/api/v2/auth/challenges")
     def challenge(body: WalletChallenge):
