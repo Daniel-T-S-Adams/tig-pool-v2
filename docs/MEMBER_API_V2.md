@@ -95,6 +95,11 @@ currently supply explicit simulated acceptance, sampling and activation
 evidence; no API module starts a legacy scheduler or submits anything on import.
 Both funds and work flags default to false.
 
+The v2 API also serves [member and operator screens](DASHBOARD_V2.md).
+Its audited operator pause fences new reservations and first precommit sends
+while retaining the existing-work routes above. A separate settlement flag
+defaults to false until live finalization adapters are configured and verified.
+
 The pool CI checks out an exact worker commit and runs its real client/runner
 against the actual FastAPI application with PostgreSQL. CPU and GPU fixtures
 exercise requests, full assignments, acknowledgements, all nonce results,

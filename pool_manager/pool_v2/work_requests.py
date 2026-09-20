@@ -96,6 +96,9 @@ def reserve_next(database, player_id, *, now, max_age=120):
     with database.transaction() as cursor:
         # Fence updates to the selected block/coverage while making the decision.
         lock(cursor, "observation-stream")
+        lock(cursor, "operator:protocol-budget")
+        from .controls import paused
+        if paused(database,cursor=cursor):return None
         cursor.execute("SELECT id FROM observed_blocks ORDER BY height DESC LIMIT 1")
         if cursor.fetchone()["id"] != block_id:
             raise ProtocolDataError("new block arrived before work reservation")

@@ -4,7 +4,7 @@ from copy import deepcopy
 from fractions import Fraction
 import uuid
 
-from pool_manager.pool_v2 import benchmarks, deposits, members, qualifiers, reports, settlement
+from pool_manager.pool_v2 import benchmarks, dashboard, deposits, members, qualifiers, reports, settlement
 from pool_manager.pool_v2.block_observer import BlockStore
 from pool_manager.pool_v2.money import Conflict, InsufficientFunds, TIG
 from pool_manager.pool_v2.protocol import ProtocolDataError
@@ -127,6 +127,51 @@ class SettlementTests(DatabaseCase):
         with self.assertRaisesRegex(Conflict, "definitive"):
             settlement.finalize_collateral(self.db, row["id"], seal["id"])
         self.assertEqual(self.balance()["collateral"], 50*TIG)
+
+    def test_reviewed_preview_must_still_match_when_the_operator_posts(self):
+        self.credits()
+        seal=self.seal()
+        self.earnings(100*TIG+1)
+        preview=settlement.preview(self.db,3,seal['id'])
+        newer=self.seal(height=21)
+        with self.assertRaisesRegex(Conflict,'fresh preview'):
+            settlement.allocate(self.db,3,newer['id'],expected_digest=preview['input_digest'])
+        self.assertEqual(self.row('SELECT count(*) AS n FROM round_settlements')['n'],0)
+        updated=settlement.preview(self.db,3,newer['id'])
+        result=settlement.allocate(self.db,3,newer['id'],expected_digest=updated['input_digest'])
+        self.assertEqual(result['input_digest'],updated['input_digest'])
+        self.assertEqual(settlement.allocate(self.db,3,newer['id'],expected_digest=updated['input_digest']),result)
+        with self.assertRaisesRegex(Conflict,'reviewed preview'):
+            settlement.allocate(self.db,3,newer['id'],expected_digest=preview['input_digest'])
+
+    def test_dashboard_shows_exact_fractional_credit_and_only_own_reward(self):
+        self.credits()
+        seal=self.seal()
+        self.earnings(100*TIG+1)
+        before=dashboard.member(self.db,self.member)['rounds']
+        self.assertEqual(before[0]['allocation'],None)
+        self.assertEqual(Fraction(int(before[0]['credit_numerator']),int(before[0]['credit_denominator'])),Fraction(36,5))
+        import hashlib
+        from fastapi.testclient import TestClient
+        from pool_manager.pool_v2.api import Settings,create_app
+        operator='fixture-reviewer'
+        client=TestClient(create_app(Settings(self.db.dsn,'https://pool.example',8453,
+            hashlib.sha256(operator.encode()).hexdigest(),settlement_enabled=True)))
+        headers={'Authorization':'Bearer '+operator}
+        preview=client.get('/api/v2/operator/rounds/3/preview',headers=headers)
+        self.assertEqual(preview.status_code,200,preview.text)
+        self.assertEqual(preview.json()['pot'],str(100*TIG+1))
+        self.assertEqual(preview.json()['member_wallets'][str(self.member)],WALLET)
+        posted=client.post('/api/v2/operator/rounds/3/settle',headers=headers,
+            json={'input_digest':preview.json()['input_digest']})
+        self.assertEqual(posted.status_code,200,posted.text)
+        result=settlement.allocate(self.db,3,seal['id'])
+        after=dashboard.member(self.db,self.member)['rounds']
+        self.assertEqual(after[0]['allocation'],str(result['member_allocations'][str(self.member)]))
+        self.assertIsNotNone(after[0]['settled_at'])
+        shown=next(row for row in dashboard.operator(self.db)['rounds'] if row['round']==3)
+        self.assertEqual(shown['credited_blocks'],4)
+        self.assertEqual(shown['pot'],100*TIG+1)
 
     def test_reproducible_and_inconclusive_release_the_recorded_hold(self):
         first = self.benchmark("first")

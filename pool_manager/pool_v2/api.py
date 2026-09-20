@@ -6,18 +6,22 @@ import hashlib
 import re
 import secrets
 import uuid
+from pathlib import Path
 from typing import Literal
 
 from fastapi import Depends, FastAPI, Header, HTTPException
 from fastapi.encoders import jsonable_encoder
-from fastapi.responses import JSONResponse,Response
-from pydantic import BaseModel, ConfigDict, Field, StrictInt, StrictStr
+from fastapi.responses import FileResponse,JSONResponse,Response
+from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel, ConfigDict, Field, StrictBool,StrictInt, StrictStr
 
 from .auth import Auth, AuthenticationError
 from .database import Database
 from .chain import Chain, Network, Rpc, FEE_MODELS
 from . import members, withdrawals, work_requests, member_protocol
 from . import artifacts
+from . import controls,dashboard,settlement
+from .protocol import ProtocolDataError
 from .money import Conflict, FundsError, InsufficientFunds
 
 
@@ -39,6 +43,7 @@ class Settings:
     custody_network: Network | None = None
     custody_rpc_url: str | None = None
     withdrawal_fee_model: str | None = None
+    settlement_enabled: bool = False
 
 
 class Input(BaseModel):
@@ -83,6 +88,14 @@ class WithdrawalReconcile(Input):
     log_index: StrictInt | None = Field(default=None, ge=0)
 
 
+class PauseChange(WithdrawalRelease):
+    paused: StrictBool
+
+
+class SettlementApproval(Input):
+    input_digest: StrictStr = Field(pattern=r'^[0-9a-f]{64}$')
+
+
 class RevokeToken(Input):
     token: StrictStr = Field(min_length=32, max_length=128)
 
@@ -125,6 +138,22 @@ def create_app(settings):
     app = FastAPI(title="InnoPool v2", version=API_VERSION)
     app.state.database, app.state.auth = database, auth
     app.state.payment_chain = payment_chain
+    web_directory=Path(__file__).with_name('web')
+    app.mount('/assets',StaticFiles(directory=web_directory),name='v2-assets')
+
+    @app.middleware('http')
+    async def browser_headers(request,call_next):
+        result=await call_next(request)
+        result.headers['X-Content-Type-Options']='nosniff'
+        result.headers['Referrer-Policy']='no-referrer'
+        result.headers['Content-Security-Policy']="default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' data:; frame-ancestors 'none'; base-uri 'none'; form-action 'self'"
+        return result
+
+    @app.get('/',include_in_schema=False)
+    @app.get('/operator',include_in_schema=False)
+    @app.get('/join',include_in_schema=False)
+    def website():
+        return FileResponse(web_directory/'index.html',headers={'Cache-Control':'no-store'})
 
     @app.exception_handler(FundsError)
     async def funds_error(request, exc):
@@ -134,6 +163,10 @@ def create_app(settings):
     @app.exception_handler(AuthenticationError)
     async def authentication_error(request, exc):
         return JSONResponse({"detail": str(exc)}, status_code=401, headers={"Cache-Control": "no-store"})
+
+    @app.exception_handler(ProtocolDataError)
+    async def protocol_error(request,exc):
+        return JSONResponse({'detail':str(exc)},status_code=409,headers={'Cache-Control':'no-store'})
 
     def bearer(authorization: str | None = Header(default=None)):
         if not authorization or not authorization.startswith("Bearer "):
@@ -165,8 +198,14 @@ def create_app(settings):
 
     @app.get("/api/v2/capabilities")
     def capabilities():
+        paused=controls.paused(database)
         return response({"api_version": API_VERSION, "funds_enabled": settings.funds_enabled,
-                         "work_enabled": settings.work_enabled, "assignment_unit": "whole-benchmark"})
+                         "work_enabled": settings.work_enabled and not paused,"new_work_paused":paused,
+                         "work_configured":settings.work_enabled,"settlement_enabled":settings.settlement_enabled,
+                         "chain_id":settings.chain_id,"origin":settings.origin,
+                         "custody":settings.custody_network.custody if settings.custody_network else None,
+                         "token":settings.custody_network.token if settings.custody_network else None,
+                         "assignment_unit": "whole-benchmark"})
 
     @app.post("/api/v2/auth/challenges")
     def challenge(body: WalletChallenge):
@@ -187,6 +226,23 @@ def create_app(settings):
     def execution_token(token=Depends(bearer)):
         return response({"token": auth.issue_execution_token(token), "expires_in": 30 * 86400})
 
+    @app.get('/api/v2/auth/execution-tokens')
+    def execution_tokens(member_id=Depends(wallet_principal)):
+        with database.transaction() as cursor:
+            cursor.execute("""SELECT digest AS id,created_at,expires_at FROM tokens WHERE member_id=%s
+                AND kind='execution' AND revoked_at IS NULL AND expires_at>clock_timestamp()
+                ORDER BY created_at DESC LIMIT 100""",(member_id,))
+            return response({'tokens':cursor.fetchall()})
+
+    @app.post('/api/v2/auth/execution-tokens/{identity}/revoke')
+    def revoke_execution_token(identity:str,member_id=Depends(wallet_principal)):
+        if not re.fullmatch(r'[0-9a-f]{64}',identity):raise HTTPException(404,'unknown execution token')
+        with database.transaction() as cursor:
+            cursor.execute("""UPDATE tokens SET revoked_at=coalesce(revoked_at,clock_timestamp())
+                WHERE digest=%s AND member_id=%s AND kind='execution' RETURNING digest""",(identity,member_id))
+            if not cursor.fetchone():raise HTTPException(404,'unknown execution token')
+        return response({'revoked':True})
+
     @app.post("/api/v2/auth/revoke")
     def revoke(body: RevokeToken, token=Depends(bearer)):
         auth.revoke(token, body.token)
@@ -206,6 +262,53 @@ def create_app(settings):
         for key in ("available", "collateral", "pending_withdrawals"):
             result[key] = str(result[key])
         return response(result)
+
+    @app.get('/api/v2/member/dashboard')
+    def member_dashboard(limit:int=50,offset:int=0,member_id=Depends(principal)):
+        return response(dashboard.member(database,member_id,limit=limit,offset=offset))
+
+    @app.get('/api/v2/operator/dashboard')
+    def operator_dashboard(limit:int=50,offset:int=0,actor=Depends(operator)):
+        return response(dashboard.operator(database,limit=limit,offset=offset))
+
+    @app.post('/api/v2/operator/controls/new-work')
+    def pause_new_work(body:PauseChange,actor=Depends(operator)):
+        return response(controls.set_pause(database,body.paused,actor=actor,reason=body.reason,event_key=body.event_key))
+
+    def latest_seal(number):
+        with database.transaction() as cursor:
+            cursor.execute('SELECT id FROM round_report_seals WHERE creation_round=%s ORDER BY created_at DESC LIMIT 1',(number,))
+            row=cursor.fetchone()
+            if not row:raise Conflict('verified final arbitration evidence is not ready for this round')
+            return row['id']
+
+    def exact_json(value):
+        if type(value) is int:return str(value)
+        if isinstance(value,dict):return {key:exact_json(child) for key,child in value.items()}
+        if isinstance(value,(list,tuple)):return [exact_json(child) for child in value]
+        return value
+
+    @app.get('/api/v2/operator/rounds/{number}/preview')
+    def preview_round(number:int,actor=Depends(operator)):
+        value=settlement.preview(database,number,latest_seal(number))
+        with database.transaction() as cursor:
+            cursor.execute('SELECT id,wallet FROM members WHERE id=ANY(%s::uuid[])',(list(value['member_allocations']),))
+            value['member_wallets']={str(row['id']):row['wallet'] for row in cursor.fetchall()}
+        return response(exact_json(value))
+
+    @app.post('/api/v2/operator/rounds/{number}/settle')
+    def settle_round(number:int,body:SettlementApproval,actor=Depends(operator)):
+        if not settings.settlement_enabled:raise HTTPException(503,'verified live settlement adapters are not enabled')
+        return response(exact_json(settlement.allocate(database,number,latest_seal(number),expected_digest=body.input_digest)))
+
+    @app.post('/api/v2/operator/collateral/{identity}/finalize')
+    def finalize_hold(identity:uuid.UUID,actor=Depends(operator)):
+        if not settings.settlement_enabled:raise HTTPException(503,'verified live settlement adapters are not enabled')
+        with database.transaction() as cursor:
+            cursor.execute('SELECT creation_round FROM reservations WHERE id=%s',(identity,))
+            row=cursor.fetchone()
+            if not row:raise FundsError('unknown collateral hold')
+        return response(settlement.finalize_collateral(database,identity,latest_seal(row['creation_round'])))
 
     @app.get("/api/v2/member/journal")
     def journal(member_id=Depends(principal), limit: int = 100):
@@ -308,9 +411,15 @@ def create_app(settings):
         token = chain.transfer(tx_hash,index) if index is not None else None
         return response(withdrawals.reconcile(database,identity,tx,token))
 
+    @app.get('/api/v2/operator/withdrawal-attempts/{identity}')
+    def payment_instructions(identity:uuid.UUID,actor=Depends(operator)):
+        value=withdrawals.instructions(database,identity)
+        value.pop('preflight',None)
+        return response(value)
+
     @app.post("/api/v2/work-requests", dependencies=[Depends(compatible)])
     def work_request(body: WorkRequest, member_id=Depends(principal)):
-        if not settings.work_enabled:
+        if not settings.work_enabled or controls.paused(database):
             raise HTTPException(503, "new work is currently disabled")
         return response(work_requests.create(database, member_id, body.request_key,
             resource=body.resource, compute_type=body.compute_type, capacity=body.capacity.model_dump(),

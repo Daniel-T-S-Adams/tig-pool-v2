@@ -9,7 +9,7 @@ import time
 from urllib.parse import urlsplit
 from urllib.request import Request,build_opener
 
-from . import submissions,work_requests
+from . import controls,submissions,work_requests
 from .artifacts import ArtifactRedirect,DEFAULT_HOSTS
 from .money import Conflict,FundsError
 from .protocol import ProtocolDataError,_index
@@ -86,8 +86,9 @@ class Coordinator:
         for intent in ready:
             preflight=None
             if intent["kind"]=="precommit":
-                if not self.new_work or intent["offer_expires_at"]<=datetime.now(timezone.utc):
-                    reason="new-work-paused" if not self.new_work else "offer-expired-before-send"
+                work_allowed=self.new_work and not controls.paused(self.database)
+                if not work_allowed or intent["offer_expires_at"]<=datetime.now(timezone.utc):
+                    reason="new-work-paused" if not work_allowed else "offer-expired-before-send"
                     submissions.cancel_unsent(self.database,intent["id"],evidence={"reason":reason})
                     continue
                 if not self.writer.enabled:continue
@@ -131,7 +132,7 @@ class Coordinator:
         reconcile_block(self.database,latest["id"],self.player_id,artifact_origin=self.artifact_origin)
         submitted=self.dispatch_one()
         reserved=None
-        if self.new_work and self.writer.enabled:
+        if self.new_work and self.writer.enabled and not controls.paused(self.database):
             reserved=work_requests.reserve_next(self.database,self.player_id,now=int(time.time()),max_age=self.max_age)
         return {"submitted":str(submitted) if submitted else None,"reserved":str(reserved["id"]) if reserved else None,
                 "reconciliation":replay}

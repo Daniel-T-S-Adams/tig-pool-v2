@@ -36,6 +36,8 @@ jobs:
       - name: Install isolated v2 test dependencies
         # The API suite imports the exact worker checkout below.
         run: python3 -m pip install -r tests/v2/requirements.txt
+      - name: Install the browser for member and operator flow checks
+        run: python3 -m playwright install --with-deps --only-shell chromium
       - name: Check out the paired whole-benchmark worker
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -54,4 +56,5 @@ jobs:
           PYTHONDONTWRITEBYTECODE: "1"
           POOL_V2_TEST_DSN: "host=127.0.0.1 port=5432 user=postgres password=isolated-ci-only dbname=innopool_v2_test"
           POOL_V2_WORKER_CHECKOUT: "${{ github.workspace }}/.paired-worker"
+          POOL_V2_BROWSER_TESTS: "1"
         run: python3 -m unittest discover -s tests/v2 -v

@@ -162,7 +162,8 @@ worker/API tests and 20 new reporting/settlement tests.
 
 ## Operator-reviewed withdrawal implementation
 
-The increment on `feature/reviewed-withdrawals` adds operator review, frozen
+The merged [withdrawal PR](https://github.com/Daniel-T-S-Adams/tig-pool-v2/pull/8)
+adds operator review, frozen
 payment routes, native operator fee reservations, durable manual-send attempts,
 recovery from a lost transaction hash through its recorded nonce, verified full
 payment and failed-transaction reconciliation. It also implements signed
@@ -175,12 +176,30 @@ backing mismatches, authority, changed destinations and recovery. A public
 finalized Base transaction verifies the current receipt shape; no member
 withdrawal was sent.
 
-All 134 pool tests pass locally, including 18 new withdrawal, chain and API
-tests. Hosted checks are required before this increment is merged.
+All 134 pool tests passed locally and in hosted CI, including 18 new
+withdrawal, chain and API tests.
+
+## Member and operator screens
+
+The increment on `feature/member-operator-dashboard` adds the isolated v2
+website, member funds and benchmark views, qualifying credit and settled
+rewards, signed wallet login, execution-token management, reviewed withdrawals,
+multiplier editing and audit history, finalization views and an audited pause
+for new work. Round posting verifies the fingerprint of the operator's preview
+inside its ledger transaction. See [dashboard notes](docs/DASHBOARD_V2.md).
+
+Browser validation uses Chromium against the real HTTPS API and PostgreSQL,
+generated wallets and simulated chain receipts. It covers exact 18-decimal
+amounts, the complete withdrawal review flow, worker authority, multiplier
+snapshots, pause/resume, token revocation and desktop/mobile layouts. It sends
+no live transaction. All 143 pool tests pass locally, including the browser
+flow and paired worker/API tests. Both inherited pool accounting checks also
+pass. Hosted checks are required before this increment can merge.
 
 Funds and work flags still default to disabled. No live service or wallet was
 changed. Intended-account submission/rejection and expiry validation, live
-finalization adapters, continuous chain indexing, product screens and isolated
+finalization adapters, continuous chain indexing, operator wallet reconciliation
+and funding screens, the pinned worker installer and isolated
 production deployment remain unfinished.
 Real challenge execution and live protocol integration are not demonstrated by
 these tests. There is no production v2 release yet. The remaining Stage 0 checks
