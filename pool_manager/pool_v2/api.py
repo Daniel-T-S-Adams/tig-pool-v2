@@ -5,15 +5,16 @@ from decimal import Decimal
 import hashlib
 import secrets
 import uuid
+from typing import Literal
 
 from fastapi import Depends, FastAPI, Header, HTTPException
 from fastapi.encoders import jsonable_encoder
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, ConfigDict, Field, StrictStr
+from pydantic import BaseModel, ConfigDict, Field, StrictInt, StrictStr
 
 from .auth import Auth, AuthenticationError
 from .database import Database
-from . import members, withdrawals
+from . import members, withdrawals, work_requests, member_protocol
 from .money import Conflict, FundsError, InsufficientFunds
 
 
@@ -29,6 +30,9 @@ class Settings:
     # Keep monetary API actions closed until custody/observation integration is
     # configured and verified. No runtime is deployed by this module.
     funds_enabled: bool = False
+    work_enabled: bool = False
+    pool_player_id: str | None = None
+    offer_ttl_seconds: int = 60
 
 
 class Input(BaseModel):
@@ -59,6 +63,21 @@ class RevokeToken(Input):
     token: StrictStr = Field(min_length=32, max_length=128)
 
 
+class Capacity(Input):
+    workers: StrictInt = Field(ge=1, le=4096)
+
+
+class WorkRequest(Input):
+    request_key: StrictStr = Field(min_length=1, max_length=128)
+    resource: Literal["CPU", "GPU"]
+    compute_type: StrictStr = Field(max_length=32)
+    capacity: Capacity
+
+
+class Acknowledge(Input):
+    assignment_digest: StrictStr = Field(pattern=r"^[0-9a-f]{64}$")
+
+
 def response(value):
     return JSONResponse(jsonable_encoder(value, custom_encoder={Decimal: str}),
                         headers={"Cache-Control": "no-store"})
@@ -67,6 +86,10 @@ def response(value):
 def create_app(settings):
     if len(settings.operator_token_sha256) != 64:
         raise ValueError("operator token SHA-256 must be configured explicitly")
+    if settings.work_enabled:
+        if not settings.funds_enabled or not settings.pool_player_id:
+            raise ValueError("work requires explicit member-funds and pool-account configuration")
+        members.address(settings.pool_player_id)
     database = Database(settings.database_dsn)
     auth = Auth(database, origin=settings.origin, chain_id=settings.chain_id)
     app = FastAPI(title="InnoPool v2", version=API_VERSION)
@@ -100,10 +123,14 @@ def create_app(settings):
             raise HTTPException(403, "operator authentication required")
         return "operator:" + settings.operator_token_sha256[:12]
 
+    def compatible(x_innopool_version: str | None = Header(default=None)):
+        if x_innopool_version != API_VERSION:
+            raise HTTPException(426, "unsupported member protocol version")
+
     @app.get("/api/v2/capabilities")
     def capabilities():
         return response({"api_version": API_VERSION, "funds_enabled": settings.funds_enabled,
-                         "work_enabled": False, "assignment_unit": "whole-benchmark"})
+                         "work_enabled": settings.work_enabled, "assignment_unit": "whole-benchmark"})
 
     @app.post("/api/v2/auth/challenges")
     def challenge(body: WalletChallenge):
@@ -153,5 +180,37 @@ def create_app(settings):
         if not settings.funds_enabled:
             raise HTTPException(503, "member funds operations are not enabled")
         return response(withdrawals.request(database, member_id, body.request_key, int(body.amount)))
+
+    @app.post("/api/v2/work-requests", dependencies=[Depends(compatible)])
+    def work_request(body: WorkRequest, member_id=Depends(principal)):
+        if not settings.work_enabled:
+            raise HTTPException(503, "new work is currently disabled")
+        return response(work_requests.create(database, member_id, body.request_key,
+            resource=body.resource, compute_type=body.compute_type, capacity=body.capacity.model_dump(),
+            ttl_seconds=settings.offer_ttl_seconds))
+
+    @app.get("/api/v2/work-requests/{identity}", dependencies=[Depends(compatible)])
+    def work_request_status(identity: uuid.UUID, member_id=Depends(principal)):
+        return response(work_requests.get(database, identity, member_id))
+
+    @app.post("/api/v2/work-requests/{identity}/refresh", dependencies=[Depends(compatible)])
+    def refresh_work_request(identity: uuid.UUID, member_id=Depends(principal)):
+        return response(work_requests.refresh(database, identity, member_id, settings.offer_ttl_seconds))
+
+    @app.get("/api/v2/benchmarks/{identity}", dependencies=[Depends(compatible)])
+    def benchmark_status(identity: str, member_id=Depends(principal)):
+        return response(member_protocol.get(database, identity, member_id))
+
+    @app.post("/api/v2/benchmarks/{identity}/acknowledge", dependencies=[Depends(compatible)])
+    def handover(identity: str, body: Acknowledge, member_id=Depends(principal)):
+        return response(member_protocol.acknowledge(database, identity, member_id, body.assignment_digest))
+
+    @app.post("/api/v2/benchmarks/{identity}/results", dependencies=[Depends(compatible)])
+    def result_upload(identity: str, body: dict, member_id=Depends(principal)):
+        return response(member_protocol.results(database, identity, member_id, body))
+
+    @app.post("/api/v2/benchmarks/{identity}/proofs", dependencies=[Depends(compatible)])
+    def proof_upload(identity: str, body: dict, member_id=Depends(principal)):
+        return response(member_protocol.proofs(database, identity, member_id, body))
 
     return app
