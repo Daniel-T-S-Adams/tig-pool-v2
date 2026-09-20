@@ -137,6 +137,10 @@ def begin(database, identity, request_key, preflight, *, fee_limit, actor):
             raise Conflict('withdrawal confirmation policy cannot be weakened')
         if (ledger.backing(cursor, 'TIG'), ledger.backing(cursor, 'NATIVE')) != (preflight.token_balance, preflight.native_balance):
             raise Conflict('confirmed wallet balances do not reconcile to all recorded custody funds')
+        from .chain_observer import status
+        observed=status(database,cursor=cursor)
+        if observed['initialized'] and not observed['ready']:
+            raise Conflict('custody observer requires reconciliation before another payment attempt')
         cursor.execute('SELECT 1 FROM withdrawal_attempts WHERE chain_id=%s AND sender=%s AND nonce=%s',
                        (review['chain_id'], review['sender'], preflight.nonce))
         if cursor.fetchone(): raise Conflict('custody nonce is already reserved by another send attempt')

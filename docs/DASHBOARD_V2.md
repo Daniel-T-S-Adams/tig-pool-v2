@@ -86,7 +86,9 @@ pool database: it deliberately recreates its isolated test schema.
 
 Funds, work and settlement capability flags default to disabled. This screen
 does not establish live reporting scope, final reward-receipt attribution or
-definitive benchmark expiry. Those verified adapters, continuous deposit
-indexing, operator funding/review workflows and the pinned worker installer
-remain rollout work. The worker connection page labels the installer as
+definitive benchmark expiry. [Custody observation](CUSTODY_OBSERVER.md) adds
+continuous finalized-deposit indexing, wallet checks and incoming funding
+review. The remaining live finalization and expense adapters, unconfirmed
+deposit views and the pinned worker installer remain rollout work.
+The worker connection page labels the installer as
 unreleased until the paired deployment is verified.

@@ -20,7 +20,7 @@ from .database import Database
 from .chain import Chain, Network, Rpc, FEE_MODELS
 from . import members, withdrawals, work_requests, member_protocol
 from . import artifacts
-from . import controls,dashboard,settlement
+from . import controls,custody,dashboard,deposits,settlement,chain_observer
 from .protocol import ProtocolDataError
 from .money import Conflict, FundsError, InsufficientFunds
 
@@ -94,6 +94,17 @@ class PauseChange(WithdrawalRelease):
 
 class SettlementApproval(Input):
     input_digest: StrictStr = Field(pattern=r'^[0-9a-f]{64}$')
+
+
+class CustodyReceipt(Input):
+    tx_hash: StrictStr = Field(pattern=r'^0x[0-9a-fA-F]{64}$')
+    log_index: StrictInt | None = Field(default=None,ge=0)
+
+
+class DepositAttribution(CustodyReceipt):
+    member_wallet: StrictStr | None = Field(default=None,max_length=42)
+    operator_funding: StrictBool = False
+    reason: StrictStr = Field(min_length=1,max_length=1000)
 
 
 class RevokeToken(Input):
@@ -199,8 +210,10 @@ def create_app(settings):
     @app.get("/api/v2/capabilities")
     def capabilities():
         paused=controls.paused(database)
+        blocked=controls.blocked(database)
         return response({"api_version": API_VERSION, "funds_enabled": settings.funds_enabled,
-                         "work_enabled": settings.work_enabled and not paused,"new_work_paused":paused,
+                         "work_enabled": settings.work_enabled and not blocked,"new_work_paused":paused,
+                         "work_block_reason":blocked,
                          "work_configured":settings.work_enabled,"settlement_enabled":settings.settlement_enabled,
                          "chain_id":settings.chain_id,"origin":settings.origin,
                          "custody":settings.custody_network.custody if settings.custody_network else None,
@@ -270,6 +283,48 @@ def create_app(settings):
     @app.get('/api/v2/operator/dashboard')
     def operator_dashboard(limit:int=50,offset:int=0,actor=Depends(operator)):
         return response(dashboard.operator(database,limit=limit,offset=offset))
+
+    @app.get('/api/v2/operator/custody')
+    def custody_dashboard(actor=Depends(operator)):
+        state=chain_observer.status(database)
+        with database.transaction() as cursor:
+            cursor.execute('''SELECT t.* FROM transfers t LEFT JOIN transfer_attributions a ON a.event_id=t.event_id
+                LEFT JOIN round_receipts r ON r.event_id=t.event_id JOIN custody_identity c ON c.name='custody'
+                WHERE t.recipient=c.wallet AND t.sender<>c.wallet AND a.event_id IS NULL AND r.event_id IS NULL
+                ORDER BY t.block_number,t.log_index LIMIT 100''')
+            unmatched=cursor.fetchall()
+            for row in unmatched:row.pop('evidence',None)
+            cursor.execute('SELECT id,kind,details,created_at FROM chain_alerts ORDER BY id DESC LIMIT 50')
+            return response({'observation':state,'unattributed':unmatched,'alerts':cursor.fetchall()})
+
+    @app.post('/api/v2/operator/custody/receive-token')
+    def receive_token(body:CustodyReceipt,actor=Depends(operator)):
+        if body.log_index is None:raise HTTPException(400,'an exact transfer event index is required')
+        chain=custody_chain()
+        return response({'destination':deposits.receive(database,chain.transfer(body.tx_hash,body.log_index))})
+
+    @app.post('/api/v2/operator/custody/receive-native')
+    def receive_native(body:CustodyReceipt,actor=Depends(operator)):
+        if body.log_index is not None:raise HTTPException(400,'a native funding transaction has no token event index')
+        chain=custody_chain()
+        custody.receive_native(database,chain.transaction(body.tx_hash,fee_model=settings.withdrawal_fee_model))
+        return response({'received':True})
+
+    @app.post('/api/v2/operator/custody/attribute-deposit')
+    def attribute_deposit(body:DepositAttribution,actor=Depends(operator)):
+        if body.log_index is None:raise HTTPException(400,'an exact transfer event index is required')
+        if bool(body.member_wallet)==body.operator_funding:raise HTTPException(400,'choose a verified member wallet or operator funding')
+        member_id=None
+        if body.member_wallet:
+            wallet=members.address(body.member_wallet)
+            with database.transaction() as cursor:
+                cursor.execute('SELECT id FROM members WHERE wallet=%s',(wallet,))
+                member=cursor.fetchone()
+            if not member:raise HTTPException(400,'member wallet has not been verified')
+            member_id=member['id']
+        chain=custody_chain()
+        return response({'destination':deposits.attribute_reviewed(database,chain.transfer(body.tx_hash,body.log_index),
+            actor=actor,evidence={'operator_review':body.reason},member_id=member_id,operator=body.operator_funding)})
 
     @app.post('/api/v2/operator/controls/new-work')
     def pause_new_work(body:PauseChange,actor=Depends(operator)):
@@ -419,7 +474,7 @@ def create_app(settings):
 
     @app.post("/api/v2/work-requests", dependencies=[Depends(compatible)])
     def work_request(body: WorkRequest, member_id=Depends(principal)):
-        if not settings.work_enabled or controls.paused(database):
+        if not settings.work_enabled or controls.blocked(database):
             raise HTTPException(503, "new work is currently disabled")
         return response(work_requests.create(database, member_id, body.request_key,
             resource=body.resource, compute_type=body.compute_type, capacity=body.capacity.model_dump(),

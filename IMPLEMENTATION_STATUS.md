@@ -181,7 +181,8 @@ withdrawal, chain and API tests.
 
 ## Member and operator screens
 
-The increment on `feature/member-operator-dashboard` adds the isolated v2
+The merged [dashboard PR](https://github.com/Daniel-T-S-Adams/tig-pool-v2/pull/9)
+adds the isolated v2
 website, member funds and benchmark views, qualifying credit and settled
 rewards, signed wallet login, execution-token management, reviewed withdrawals,
 multiplier editing and audit history, finalization views and an audited pause
@@ -192,14 +193,34 @@ Browser validation uses Chromium against the real HTTPS API and PostgreSQL,
 generated wallets and simulated chain receipts. It covers exact 18-decimal
 amounts, the complete withdrawal review flow, worker authority, multiplier
 snapshots, pause/resume, token revocation and desktop/mobile layouts. It sends
-no live transaction. All 143 pool tests pass locally, including the browser
+no live transaction. All 143 pool tests passed locally and in hosted CI, including the browser
 flow and paired worker/API tests. Both inherited pool accounting checks also
-pass. Hosted checks are required before this increment can merge.
+passed.
+
+## Custody observation and incoming funding review
+
+The increment on `feature/custody-observer` adds continuous finalized TIG
+transfer capture, local outage archives, offline replay, checksummed database
+evidence, once-only deposit attribution and protected collection cursors. It
+compares captured token-balance changes with verified receipts and checks all
+custody funds and outgoing nonces before permitting new work or payment sends.
+Catch-up, stale observations, unknown costs and canonical conflicts keep new
+spending closed while existing work and reconciliation remain available.
+
+The operator page now supports verified TIG receipt imports, direct native
+funding and reviewed attribution of unknown deposits. A read-only public Base
+capture reproduced a real 1.151417509939734543 TIG transfer and its balance
+change from 22 archived RPC responses. See [custody observation notes](docs/CUSTODY_OBSERVER.md).
+
+All 158 pool tests pass locally, including 13 custody capture/replay tests,
+funding API checks and the expanded browser flow. Hosted checks are required
+before this increment can merge. No public probe was credited to a member
+ledger and no live tokens were moved.
 
 Funds and work flags still default to disabled. No live service or wallet was
 changed. Intended-account submission/rejection and expiry validation, live
-finalization adapters, continuous chain indexing, operator wallet reconciliation
-and funding screens, the pinned worker installer and isolated
+finalization adapters, unconfirmed deposit views, protocol fee top-ups,
+other operator expense/correction workflows, the pinned worker installer and isolated
 production deployment remain unfinished.
 Real challenge execution and live protocol integration are not demonstrated by
 these tests. There is no production v2 release yet. The remaining Stage 0 checks

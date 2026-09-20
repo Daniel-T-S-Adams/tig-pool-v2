@@ -13,6 +13,14 @@ def paused(database, *, cursor=None):
         return bool(row and row['value'])
 
 
+def blocked(database,*,cursor=None):
+    from .chain_observer import status
+    if paused(database,cursor=cursor):return 'operator-pause'
+    custody=status(database,cursor=cursor)
+    if custody['initialized'] and not custody['ready']:return 'custody-reconciliation'
+    return None
+
+
 def set_pause(database,value,*,actor,reason,event_key):
     if type(value) is not bool or not actor or not reason or not event_key:
         raise FundsError('pause changes require an operator, reason and event key')

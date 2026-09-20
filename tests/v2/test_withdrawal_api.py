@@ -9,7 +9,7 @@ from pool_manager.pool_v2 import custody, deposits, ledger
 from pool_manager.pool_v2.api import Settings, create_app
 from pool_manager.pool_v2.chain import CustodyPreflight
 from pool_manager.pool_v2.money import TIG
-from funds_helpers import DatabaseCase, NETWORK, CUSTODY, transfer
+from funds_helpers import DatabaseCase, NETWORK, CUSTODY, chain_fixture, transfer
 from test_withdrawals import payment_fixture
 
 
@@ -88,6 +88,38 @@ class WithdrawalApiTests(DatabaseCase):
         balance=self.client.get('/api/v2/member/balance',headers=self.member_headers).json()
         self.assertEqual(balance['available'],str(100*TIG))
         self.assertIsNone(balance['last_paid_at'])
+
+    def test_only_operator_can_import_and_attribute_a_verified_external_receipt(self):
+        _,chain,identity=chain_fixture(sender='0x'+'8'*40,amount=7*TIG+1)
+        self.app.state.payment_chain=chain
+        body={'tx_hash':identity,'log_index':2}
+        path='/api/v2/operator/custody/'
+        self.assertEqual(self.client.post(path+'receive-token',json=body,headers=self.member_headers).status_code,403)
+        imported=self.client.post(path+'receive-token',json=body,headers=self.operator_headers)
+        self.assertEqual(imported.status_code,200,imported.text)
+        self.assertEqual(imported.json()['destination'],'unattributed:TIG')
+        shown=self.client.get(path.rstrip('/'),headers=self.operator_headers)
+        self.assertEqual(shown.status_code,200,shown.text)
+        self.assertEqual(shown.json()['unattributed'][0]['amount'],str(7*TIG+1))
+        attribution={**body,'member_wallet':self.wallet,'reason':'independently verified source ownership'}
+        credited=self.client.post(path+'attribute-deposit',json=attribution,headers=self.operator_headers)
+        self.assertEqual(credited.status_code,200,credited.text)
+        self.assertEqual(self.client.post(path+'attribute-deposit',json=attribution,headers=self.operator_headers).status_code,200)
+        self.assertEqual(self.client.get('/api/v2/member/balance',headers=self.member_headers).json()['available'],str(107*TIG+1))
+        self.assertEqual(self.client.get(path.rstrip('/'),headers=self.operator_headers).json()['unattributed'],[])
+        self.assertEqual(self.client.post(path+'attribute-deposit',json={**body,'operator_funding':True,'reason':'changed destination'},headers=self.operator_headers).status_code,409)
+
+    def test_operator_native_funding_is_verified_and_replay_does_not_credit_twice(self):
+        _,chain,identity=payment_fixture(sender='0x'+'7'*40,to=CUSTODY,value=123,nonce=2)
+        self.app.state.payment_chain=chain
+        path='/api/v2/operator/custody/receive-native'
+        body={'tx_hash':identity}
+        self.assertEqual(self.client.post(path,json=body,headers=self.execution_headers).status_code,403)
+        for _ in range(2):
+            result=self.client.post(path,json=body,headers=self.operator_headers)
+            self.assertEqual(result.status_code,200,result.text)
+        self.assertEqual(self.row("SELECT balance FROM accounts WHERE id='operator:custody:NATIVE'")['balance'],1123)
+        self.assertEqual(self.client.get('/api/v2/member/balance',headers=self.member_headers).json()['available'],str(100*TIG))
 
     def test_new_destination_requires_its_signature_and_does_not_change_a_pending_request(self):
         identity=self.request()

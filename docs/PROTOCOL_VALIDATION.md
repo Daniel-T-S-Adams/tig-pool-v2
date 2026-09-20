@@ -91,6 +91,12 @@ advertised metadata. Do not copy that advertised chain ID into wallet-signing
 messages, deposit attribution, or withdrawal checks. No deployment network
 configuration or wallet has been changed by this probe.
 
+The custody observer now also reproduces a complete public token transfer and
+its wallet balance change from archived RPC responses. See the
+[custody observation evidence](CUSTODY_OBSERVER.md). This validates the read-only
+adapter against current Base responses; it does not select or fund the user's
+deployment wallet.
+
 ## Remaining Stage 0 work
 
 - Prove precommit acceptance/rejection and ambiguous-response reconciliation
