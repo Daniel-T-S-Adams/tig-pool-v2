@@ -23,6 +23,7 @@ from pool_manager.pool_v2.money import TIG
 from funds_helpers import DatabaseCase, NETWORK, CUSTODY, chain_fixture, transfer
 from test_withdrawals import payment_fixture
 from test_funding import TOPUP,funding_capture,protocol_topup
+from test_releases import INSTALLER,release_fixture
 
 
 @unittest.skipUnless(os.environ.get('POOL_V2_BROWSER_TESTS') == '1',
@@ -53,7 +54,8 @@ class DashboardBrowserTests(DatabaseCase):
         self.origin='https://127.0.0.1:'+str(listener.getsockname()[1])
         settings=Settings(self.db.dsn,self.origin,8453,hashlib.sha256(self.operator.encode()).hexdigest(),
             funds_enabled=True,work_enabled=True,pool_player_id=CUSTODY,custody_network=NETWORK,
-            custody_rpc_url='https://rpc.example',withdrawal_fee_model='op-jovian')
+            custody_rpc_url='https://rpc.example',withdrawal_fee_model='op-jovian',
+            release_manifest=release_fixture(),build_commit='a'*40,worker_installer=INSTALLER)
         self.app=create_app(settings)
         test=self
         class SimulatedChain:
@@ -113,6 +115,11 @@ class DashboardBrowserTests(DatabaseCase):
         expect(page.locator('#work-status')).to_have_text('Accepting work')
         page.get_by_role('button',name='Connect wallet',exact=True).click()
         expect(page.locator('#available')).to_have_text('50.000000000000000001')
+        page.get_by_label('Worker hardware').select_option('aws_g4dn')
+        page.get_by_label('Concurrent nonce workers').fill('3')
+        page.get_by_role('button',name='Show installation steps',exact=True).click()
+        expect(page.locator('#worker-install-command')).to_contain_text('--resource GPU --compute-type aws_g4dn --workers 3')
+        expect(page.locator('#worker-installer-download')).to_have_attribute('href','/api/v2/install-worker')
         expect(page.locator('#collateral')).to_have_text('50')
         page.get_by_label('Withdraw TIG',exact=True).fill('40.000000000000000001')
         page.get_by_role('button',name='Request withdrawal').click()

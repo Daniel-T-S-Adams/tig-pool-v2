@@ -45,6 +45,8 @@ function table(id, rows, columns, empty = 'No records yet.') {
 async function loadCapabilities() {
   capabilities = await api('capabilities');
   $('work-status').textContent = capabilities.work_enabled ? 'Accepting work' : capabilities.new_work_paused ? 'New work paused' : capabilities.work_block_reason==='custody-reconciliation' ? 'Checking pool funds' : capabilities.work_block_reason==='protocol-fee-reconciliation' ? 'Checking submission funds' : 'Work not enabled';
+  $('worker-install-options').hidden=!capabilities.release_digest;
+  $('worker-install-status').textContent=capabilities.release_digest?'Download the installer paired with this pool. It asks privately for your execution token.':'The paired v2 installer will be available with the verified release.';
   $('work-status').classList.toggle('active', capabilities.work_enabled);
 }
 function field(label, id, value = '', options = {}) {
@@ -112,6 +114,16 @@ async function loadTokens() {
 }
 $('issue-worker-token').addEventListener('click',()=>run(async()=>{const result=await api('auth/execution-tokens',{});$('worker-token').value=result.token;$('worker-token-box').hidden=false;await loadTokens();},$('issue-worker-token')));
 $('copy-worker-token').addEventListener('click',()=>run(async()=>{await navigator.clipboard.writeText($('worker-token').value);notice('Execution token copied.');}));
+$('worker-install-form').addEventListener('submit',event=>{
+  event.preventDefault();run(async()=>{
+    const compute=$('worker-compute').value,resource=compute==='aws_g4dn'?'GPU':'CPU',workers=$('worker-capacity').value;
+    const guide=await api('worker-installation?'+new URLSearchParams({resource,compute_type:compute,workers}));
+    $('worker-install-command').textContent=guide.command+'\n'+guide.start_command;
+    $('worker-installer-download').href=guide.installer_url;
+    $('worker-installer-checksum').textContent='Installer SHA-256: '+guide.installer_sha256;
+    $('worker-install-guide').hidden=false;
+  },$('worker-install-form').querySelector('button'));
+});
 $('change-wallet').addEventListener('click',()=>{
   dialog('Change withdrawal wallet','Sign with the new wallet to verify it. Current withdrawal requests keep their existing destination.','Verify wallet',async()=>{
     if (!window.ethereum) throw Error('A wallet extension is required.');

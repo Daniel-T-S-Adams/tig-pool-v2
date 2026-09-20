@@ -1,10 +1,18 @@
-# InnoPool
+# InnoPool v2 (development)
 
 This independent repository preserves the original pool's complete local Git
 history for the InnoPool v2 redesign. V2 is under development; the instructions
-below still describe the legacy pool. See the
+below describe the legacy pool for reference. The v2 system uses whole-benchmark
+member work, custodial balances and collateral, equal qualifying-bundle credit,
+round settlement and operator-reviewed withdrawals. See the
 [redesign plan](POOL_REDESIGN_PLAN.md) and
 [implementation status](IMPLEMENTATION_STATUS.md) before using this repository.
+The new API serves its own member/operator screens and
+[paired worker installer](docs/PAIRED_RELEASES.md). No production v2 release or
+deployment is published yet. The old `/static/install.sh` installer is retired
+in this fork; use the checked download from a configured v2 pool's Join page.
+
+## Legacy implementation reference
 
 A self-hosted, open-source mining pool for [The Innovation Game (TIG)](https://tig.foundation), built on the official `tig-benchmarker` master/slave architecture.
 
