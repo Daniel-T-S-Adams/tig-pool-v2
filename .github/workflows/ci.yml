@@ -27,3 +27,7 @@ jobs:
         run: |
           python3 tools/test_revenue_split.py
           python3 tools/test_work_credits.py
+      - name: Replay protocol fixtures and accounting boundaries
+        env:
+          PYTHONDONTWRITEBYTECODE: "1"
+        run: python3 -m unittest discover -s tests/v2 -v
