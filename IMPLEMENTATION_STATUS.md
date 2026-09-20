@@ -140,7 +140,8 @@ worker artifact commit `4ff2cceed89b98ec65bc0a062ebcf391a8d23778`.
 
 ## Arbitration and round settlement
 
-The increment on `feature/round-settlement` adds independent public arbitration
+The merged [round settlement PR](https://github.com/Daniel-T-S-Adams/tig-pool-v2/pull/7)
+adds independent public arbitration
 capture with local outage recovery, immutable report and decision history,
 positive protocol reporting-round associations, versioned post-X+2 evidence,
 benchmark-specific collateral return/forfeiture, verified reward-receipt
@@ -156,12 +157,31 @@ deployment-specific reporting scope and final reward-receipt classification
 remain explicit verified-adapter inputs. They are not inferred from a single
 public sample or an estimated earnings response.
 
-All 116 pool tests pass locally, including the paired worker/API tests and
-20 new reporting/settlement tests. Hosted checks are required before integration.
+All 116 pool tests passed locally and in hosted CI, including the paired
+worker/API tests and 20 new reporting/settlement tests.
+
+## Operator-reviewed withdrawal implementation
+
+The increment on `feature/reviewed-withdrawals` adds operator review, frozen
+payment routes, native operator fee reservations, durable manual-send attempts,
+recovery from a lost transaction hash through its recorded nonce, verified full
+payment and failed-transaction reconciliation. It also implements signed
+withdrawal-wallet changes for future requests, custody-identity binding and
+zero-valued token-event handling. See [withdrawal notes](docs/WITHDRAWALS_V2.md).
+
+Targeted database and API tests cover successful/failed payments, replay,
+concurrent nonce and fee-budget reservations, operator fee shortfalls, wallet
+backing mismatches, authority, changed destinations and recovery. A public
+finalized Base transaction verifies the current receipt shape; no member
+withdrawal was sent.
+
+All 134 pool tests pass locally, including 18 new withdrawal, chain and API
+tests. Hosted checks are required before this increment is merged.
 
 Funds and work flags still default to disabled. No live service or wallet was
-changed. Intended-account submission/rejection and expiry validation, live finalization adapters, completed withdrawal
-payments, product screens and isolated production deployment remain unfinished.
+changed. Intended-account submission/rejection and expiry validation, live
+finalization adapters, continuous chain indexing, product screens and isolated
+production deployment remain unfinished.
 Real challenge execution and live protocol integration are not demonstrated by
 these tests. There is no production v2 release yet. The remaining Stage 0 checks
 still gate dependent live monetary operations.

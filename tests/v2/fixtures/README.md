@@ -14,3 +14,10 @@ error. See [the validation report](../../../docs/PROTOCOL_VALIDATION.md).
 Fixtures exercise the observed deployment's response shapes. They do not
 provide historical inputs for a subsequently launched pool, establish
 internal member ownership, or authorize payouts.
+
+`base-transaction.json` records a public finalized Base transaction at block
+51,570,607, captured on 20 September 2026 from `https://mainnet.base.org`.
+It includes the raw transaction, receipt and header for exact fee-model tests.
+The v2 transaction verifier independently confirmed its canonical inclusion and
+finality. No test withdrawal was submitted. See
+[withdrawal implementation notes](../../../docs/WITHDRAWALS_V2.md).

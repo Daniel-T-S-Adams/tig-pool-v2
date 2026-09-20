@@ -15,6 +15,7 @@ from pydantic import BaseModel, ConfigDict, Field, StrictInt, StrictStr
 
 from .auth import Auth, AuthenticationError
 from .database import Database
+from .chain import Chain, Network, Rpc, FEE_MODELS
 from . import members, withdrawals, work_requests, member_protocol
 from . import artifacts
 from .money import Conflict, FundsError, InsufficientFunds
@@ -35,6 +36,9 @@ class Settings:
     work_enabled: bool = False
     pool_player_id: str | None = None
     offer_ttl_seconds: int = 60
+    custody_network: Network | None = None
+    custody_rpc_url: str | None = None
+    withdrawal_fee_model: str | None = None
 
 
 class Input(BaseModel):
@@ -59,6 +63,24 @@ class MultiplierChange(Input):
 class WithdrawalRequest(Input):
     amount: StrictStr = Field(pattern=r"^[1-9][0-9]{0,77}$")
     request_key: StrictStr = Field(min_length=1, max_length=128)
+
+
+class WithdrawalReview(Input):
+    reason: StrictStr = Field(min_length=1, max_length=1000)
+
+
+class WithdrawalRelease(WithdrawalReview):
+    event_key: StrictStr = Field(min_length=1, max_length=128)
+
+
+class WithdrawalSend(Input):
+    request_key: StrictStr = Field(min_length=1, max_length=128)
+    fee_limit: StrictStr = Field(pattern=r"^[1-9][0-9]{0,77}$")
+
+
+class WithdrawalReconcile(Input):
+    tx_hash: StrictStr | None = Field(default=None, pattern=r"^0x[0-9a-fA-F]{64}$")
+    log_index: StrictInt | None = Field(default=None, ge=0)
 
 
 class RevokeToken(Input):
@@ -93,9 +115,16 @@ def create_app(settings):
             raise ValueError("work requires explicit member-funds and pool-account configuration")
         members.address(settings.pool_player_id)
     database = Database(settings.database_dsn)
+    payment_chain = None
+    if any(value is not None for value in (settings.custody_network, settings.custody_rpc_url, settings.withdrawal_fee_model)):
+        if (not settings.custody_network or not settings.custody_rpc_url
+                or settings.withdrawal_fee_model not in FEE_MODELS or settings.chain_id != settings.custody_network.chain_id):
+            raise ValueError('custody network, RPC, fee model and matching authentication chain must be configured together')
+        payment_chain = Chain(settings.custody_network, Rpc(settings.custody_rpc_url))
     auth = Auth(database, origin=settings.origin, chain_id=settings.chain_id)
     app = FastAPI(title="InnoPool v2", version=API_VERSION)
     app.state.database, app.state.auth = database, auth
+    app.state.payment_chain = payment_chain
 
     @app.exception_handler(FundsError)
     async def funds_error(request, exc):
@@ -129,6 +158,11 @@ def create_app(settings):
         if x_innopool_version != API_VERSION:
             raise HTTPException(426, "unsupported member protocol version")
 
+    def custody_chain():
+        if app.state.payment_chain is None:
+            raise HTTPException(503, 'verified custody payment configuration is not enabled')
+        return app.state.payment_chain
+
     @app.get("/api/v2/capabilities")
     def capabilities():
         return response({"api_version": API_VERSION, "funds_enabled": settings.funds_enabled,
@@ -157,6 +191,14 @@ def create_app(settings):
     def revoke(body: RevokeToken, token=Depends(bearer)):
         auth.revoke(token, body.token)
         return response({"revoked": True})
+
+    @app.post('/api/v2/member/withdrawal-wallet/challenges')
+    def withdrawal_wallet_challenge(body: WalletChallenge, member_id=Depends(wallet_principal)):
+        return response(auth.withdrawal_wallet_challenge(member_id,body.wallet))
+
+    @app.post('/api/v2/member/withdrawal-wallet')
+    def change_withdrawal_wallet(body: WalletSignature, member_id=Depends(wallet_principal)):
+        return response(auth.verify_withdrawal_wallet(member_id,body.challenge_id,body.signature))
 
     @app.get("/api/v2/member/balance")
     def balance(member_id=Depends(principal)):
@@ -189,6 +231,82 @@ def create_app(settings):
         if not settings.funds_enabled:
             raise HTTPException(503, "member funds operations are not enabled")
         return response(withdrawals.request(database, member_id, body.request_key, int(body.amount)))
+
+    @app.get('/api/v2/member/withdrawals')
+    def member_withdrawals(member_id=Depends(principal)):
+        with database.transaction() as cursor:
+            cursor.execute('SELECT * FROM withdrawals WHERE member_id=%s ORDER BY created_at DESC LIMIT 100', (member_id,))
+            return response({'withdrawals': cursor.fetchall()})
+
+    @app.post('/api/v2/withdrawals/{identity}/cancel')
+    def cancel_withdrawal(identity: uuid.UUID, body: WithdrawalRelease, member_id=Depends(wallet_principal)):
+        return response(withdrawals.release(database, identity, member_id=member_id, actor='member:'+str(member_id),
+            reason=body.reason, event_key=body.event_key))
+
+    @app.get('/api/v2/operator/withdrawals')
+    def operator_withdrawals(actor=Depends(operator)):
+        with database.transaction() as cursor:
+            cursor.execute('''SELECT w.*,m.wallet,r.chain_id,r.token,r.sender,r.fee_model FROM withdrawals w
+                JOIN members m ON m.id=w.member_id LEFT JOIN withdrawal_reviews r ON r.withdrawal_id=w.id
+                ORDER BY (w.state IN ('requested','approved','uncertain')) DESC,w.created_at DESC LIMIT 200''')
+            requests = cursor.fetchall()
+            cursor.execute('''SELECT a.id,a.withdrawal_id,a.nonce,a.fee_limit,a.sent_at,o.outcome,o.fee,o.tx_hash
+                FROM withdrawal_attempts a LEFT JOIN withdrawal_attempt_outcomes o ON o.attempt_id=a.id
+                WHERE a.withdrawal_id=ANY(%s) ORDER BY a.sent_at''', ([row['id'] for row in requests],))
+            return response({'withdrawals': requests, 'attempts': cursor.fetchall()})
+
+    @app.post('/api/v2/operator/withdrawals/{identity}/approve')
+    def approve_withdrawal(identity: uuid.UUID, body: WithdrawalReview, actor=Depends(operator)):
+        if not settings.funds_enabled: raise HTTPException(503, 'new payments are paused')
+        chain = custody_chain()
+        return response(withdrawals.approve(database, identity, chain.network, fee_model=settings.withdrawal_fee_model,
+            actor=actor, evidence={'operator_review': body.reason}))
+
+    @app.post('/api/v2/operator/withdrawals/{identity}/reject')
+    def reject_withdrawal(identity: uuid.UUID, body: WithdrawalRelease, actor=Depends(operator)):
+        return response(withdrawals.release(database, identity, actor=actor, reason=body.reason, event_key=body.event_key))
+
+    @app.post('/api/v2/operator/withdrawals/{identity}/begin')
+    def begin_withdrawal(identity: uuid.UUID, body: WithdrawalSend, actor=Depends(operator)):
+        if not settings.funds_enabled: raise HTTPException(503, 'new payments are paused')
+        chain = custody_chain()
+        # Recovery of an already committed intent does not require an available RPC.
+        with database.transaction() as cursor:
+            cursor.execute('SELECT id,fee_limit FROM withdrawal_attempts WHERE withdrawal_id=%s AND request_key=%s', (identity,body.request_key))
+            prior = cursor.fetchone()
+        if prior:
+            if int(prior['fee_limit']) != int(body.fee_limit): raise Conflict('send attempt key was reused')
+            attempt_id = prior['id']
+        else:
+            attempt_id = withdrawals.begin(database,identity,body.request_key,chain.preflight(),fee_limit=int(body.fee_limit),actor=actor)['id']
+        value = withdrawals.instructions(database,attempt_id)
+        value.pop('preflight',None)
+        return response(value)
+
+    @app.post('/api/v2/operator/withdrawal-attempts/{identity}/reconcile')
+    def reconcile_withdrawal(identity: uuid.UUID, body: WithdrawalReconcile, actor=Depends(operator)):
+        chain = custody_chain()
+        attempt = withdrawals.instructions(database,identity)
+        tx_hash = body.tx_hash or chain.find_nonce(int(attempt['nonce']),after_height=attempt['preflight']['block_number'])
+        if not tx_hash:
+            return response({'status':'awaiting_final_transaction','attempt_id':str(identity)})
+        withdrawals.claim_transaction(database,identity,tx_hash,actor=actor)
+        tx = chain.transaction(tx_hash,fee_model=attempt['fee_model'])
+        index = body.log_index
+        if tx.successful and index is None:
+            # Recover a lost event index only when one exact verified event matches.
+            matches = []
+            for log in tx.evidence['receipt']['logs']:
+                try:
+                    value = chain.transfer(tx_hash,int(log['logIndex'],16))
+                    if (value.sender,value.recipient,value.amount)==(attempt['sender'],attempt['recipient'],int(attempt['amount'])):
+                        matches.append(value.log_index)
+                except FundsError:
+                    continue
+            if len(matches)>1: raise Conflict('several matching token events require an explicit event index')
+            if matches:index=matches[0]
+        token = chain.transfer(tx_hash,index) if index is not None else None
+        return response(withdrawals.reconcile(database,identity,tx,token))
 
     @app.post("/api/v2/work-requests", dependencies=[Depends(compatible)])
     def work_request(body: WorkRequest, member_id=Depends(principal)):

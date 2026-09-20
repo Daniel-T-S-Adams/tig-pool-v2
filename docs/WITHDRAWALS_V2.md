@@ -1,0 +1,112 @@
+# Operator-reviewed withdrawals
+
+V2 keeps the full requested TIG amount reserved while the operator reviews and
+sends a withdrawal using their own wallet software. The service holds no signing
+key and its RPC adapter cannot send transactions. Native transaction fees use
+separate operator funds, including fees on a failed or cancelled transaction.
+
+## State and recovery
+
+1. A wallet-authenticated member requests an amount within their available
+   balance. One request may be pending at a time. Seven days must have elapsed
+   since the last successful payment's chain block timestamp.
+2. Operator approval freezes the configured chain, TIG token, custody sender,
+   confirmation policy and fee model. The amount and recipient were already
+   frozen by the member's request. Approval records the operator's review.
+3. Before using their wallet, the operator starts a payment attempt. The service
+   verifies finalized wallet balances against **all** custody accounts, checks
+   the pending transaction nonce, and atomically reserves that nonce and an
+   operator-native fee budget. The withdrawal becomes `uncertain` before the
+   response is returned. Its instructions include the exact token contract,
+   recipient, amount and nonce for the manual send. Reading or replaying those
+   instructions is not evidence that another transfer is needed.
+4. The operator supplies a transaction hash, or the service recovers the
+   finalized transaction that consumed the recorded nonce. Recovery binary
+   searches historical nonce counts and then reads the relevant block; it does
+   not scan every intervening Base block. RPC providers must support those
+   reads. An unavailable or still-pending transaction leaves the request held.
+5. The verifier checks the configured chain, token, custody source, full amount,
+   frozen destination, nonce, successful canonical receipt, confirmation count
+   and finality. One matching transfer event pays one withdrawal. Actual native
+   fees are charged to the operator in the same balanced transaction that
+   records payment. The member's seven-day interval starts at the successful
+   transfer's block timestamp. Replay never resets that timestamp.
+
+A confirmed failed transaction consumes its nonce and charges the operator's
+actual fee. It returns the same withdrawal to `approved`, retaining the member's
+full reservation. A new attempt requires a new nonce and a fresh operator fee
+reservation. An ordinary finalized, empty self-transfer with no logs can also
+prove nonce cancellation. Other successful unmatched transactions require
+explicit wallet reconciliation; their disappearance or a supplied hash cannot
+release funds. Rejection or member cancellation releases the request only while
+it has no unresolved send attempt.
+
+If an actual fee exceeds its reservation and the operator's remaining native
+funds are insufficient, the confirmed transaction evidence is retained while
+the withdrawal remains uncertain. Operator funding must be replenished before
+reconciliation can complete. Member funds cannot cover that difference.
+
+## API
+
+Existing member authentication and execution-token boundaries still apply.
+Amounts are integer token-unit strings in requests and monetary API fields.
+
+| Route | Authority and purpose |
+|---|---|
+| `POST /api/v2/withdrawals` | Wallet session; reserve a positive amount with a member request key. |
+| `GET /api/v2/member/withdrawals` | Member; show only that member's requests and outcomes. |
+| `POST /api/v2/withdrawals/{id}/cancel` | Owner's wallet session; reason and event key, before an unresolved send. |
+| `POST /api/v2/member/withdrawal-wallet/challenges` | Existing member wallet session; request a challenge for a new destination. |
+| `POST /api/v2/member/withdrawal-wallet` | Same member session plus the new wallet's challenge signature; changes future requests only. |
+| `GET /api/v2/operator/withdrawals` | Operator; requests and attempt history. |
+| `POST /api/v2/operator/withdrawals/{id}/approve` | Operator; review reason and frozen configured route. |
+| `POST /api/v2/operator/withdrawals/{id}/reject` | Operator; reason and event key, only before an unresolved send. |
+| `POST /api/v2/operator/withdrawals/{id}/begin` | Operator; request key and native `fee_limit`, then durable manual-send instructions. |
+| `POST /api/v2/operator/withdrawal-attempts/{id}/reconcile` | Operator; optional `tx_hash` and exact `log_index`, or recover from the frozen nonce. |
+
+Beginning or approving a new payment requires `funds_enabled`. Reconciliation
+and cancellation remain available for existing liabilities while new monetary
+activity is paused. Payment routes also require explicit `custody_network`,
+`custody_rpc_url` and `withdrawal_fee_model` settings. Authentication and custody
+must use the same verified chain ID. No payment RPC is enabled by default.
+
+The first verified receipt binds the database's custody identity. Subsequent
+receipts and reviews must use that same chain, token and wallet. Existing
+transfer history is checked before binding an upgraded database. Ledger
+reconciliation includes member balances, collateral, pending withdrawals,
+round accounts, operator funds and unattributed receipts.
+
+The verified adapter now accepts zero-valued ERC-20 events. They are retained
+exactly once without manufacturing a monetary journal or blocking an indexer.
+Direct, confirmed native transfers into custody fund operator-native accounts;
+replay cannot credit them twice. Native deposits are not member TIG deposits.
+
+## Fee verification and current limits
+
+The fee model is configured explicitly and frozen per withdrawal. Supported
+rules are `ethereum`, `op-isthmus` and `op-jovian`. OP receipts require actual
+L1 fee evidence in addition to execution fees. The operator fee calculation
+changed with Jovian, and its `blobGasUsed` field describes DA footprint rather
+than an additional blob payment. These distinctions follow the primary
+[Base fee documentation](https://docs.base.org/specifications/transactions/network-fees),
+[Isthmus specification](https://specs.optimism.io/protocol/isthmus/exec-engine.html#fees)
+and [Jovian specification](https://specs.optimism.io/protocol/jovian/exec-engine.html#operator-fee).
+
+The recorded Base receipt in `tests/v2/fixtures/base-transaction.json` was read
+from `https://mainnet.base.org` at finalized block 51,570,607 on 20 September
+2026. It exercises the actual Jovian receipt shape, L1 fee and DA footprint
+fields. It is public test evidence and is unrelated to any member payment.
+The new transaction verifier also checked that same transaction directly
+against the public RPC, including canonical inclusion and finality; its
+verified fee was 1,160,679,890,131 native units (wei).
+
+This implementation supports ordinary direct EOA custody transactions
+(types 0, 1 and 2). Custody preflight rejects contract or delegated wallets;
+contract-wallet execution and gas sponsorship need their own verified adapter.
+Wallet login and destination verification also currently support EOA signatures.
+
+The withdrawal implementation does not yet provide continuous chain indexing,
+automatic discovery of all incoming deposits, native internal-transfer
+attribution, production funding/receipt reconciliation or product screens.
+Those deployment and interface components remain unfinished. Manual receipt
+fixtures and API/database tests do not constitute a live withdrawal or launch.

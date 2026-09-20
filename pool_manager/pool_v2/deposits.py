@@ -3,6 +3,7 @@
 from psycopg2.extras import Json
 
 from . import ledger
+from . import custody
 from .chain import ConfirmedTransfer
 from .database import lock
 from .members import available, member_lock
@@ -12,6 +13,7 @@ from .money import Conflict, FundsError
 def save_transfer(cursor, transfer):
     if not isinstance(transfer, ConfirmedTransfer):
         raise FundsError("only the chain adapter's verified transfer can be recorded")
+    custody.bind(cursor, transfer.network)
     lock(cursor, "transfer:" + transfer.event_id)
     values = dict(event_id=transfer.event_id, chain_id=transfer.network.chain_id, token=transfer.network.token,
         tx_hash=transfer.tx_hash, log_index=transfer.log_index, block_number=transfer.block_number,
@@ -38,9 +40,10 @@ def _attribute(cursor, transfer, destination, actor, evidence):
         if previous["destination"] != destination:
             raise Conflict("deposit has already been attributed elsewhere")
         return destination
-    ledger.post(cursor, "attribute:" + transfer.event_id, "deposit_attribution",
-        [("unattributed:TIG", -transfer.amount), (destination, transfer.amount)],
-        {"actor": actor, "evidence": evidence})
+    if transfer.amount:
+        ledger.post(cursor, "attribute:" + transfer.event_id, "deposit_attribution",
+            [("unattributed:TIG", -transfer.amount), (destination, transfer.amount)],
+            {"actor": actor, "evidence": evidence})
     cursor.execute("INSERT INTO transfer_attributions(event_id,destination,actor,evidence) VALUES (%s,%s,%s,%s)",
                    (transfer.event_id, destination, actor, Json(evidence)))
     return destination
@@ -50,7 +53,8 @@ def receive(database, transfer):
     if transfer.recipient != transfer.network.custody or transfer.sender == transfer.network.custody:
         raise FundsError("expected an external incoming transfer to custody")
     with database.transaction() as cursor:
-        if save_transfer(cursor, transfer):
+        save_transfer(cursor, transfer)
+        if transfer.amount:
             ledger.post(cursor, "receipt:" + transfer.event_id, "custody_receipt",
                 [("external:custody:TIG", -transfer.amount), ("unattributed:TIG", transfer.amount)])
         cursor.execute("SELECT destination FROM transfer_attributions WHERE event_id=%s", (transfer.event_id,))
@@ -77,6 +81,7 @@ def attribute_reviewed(database, transfer, *, actor, evidence, member_id=None, o
     if transfer.recipient != transfer.network.custody or transfer.sender == transfer.network.custody:
         raise FundsError("expected incoming custody transfer")
     with database.transaction() as cursor:
+        custody.bind(cursor, transfer.network)
         lock(cursor, "transfer:" + transfer.event_id)
         cursor.execute("SELECT 1 FROM transfers WHERE event_id=%s", (transfer.event_id,))
         if not cursor.fetchone():
