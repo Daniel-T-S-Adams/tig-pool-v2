@@ -7,6 +7,7 @@ with protocol evidence, never by expiration of a worker lease.
 
 from datetime import datetime
 from contextlib import nullcontext
+import json
 import uuid
 
 from psycopg2.extras import Json
@@ -121,9 +122,9 @@ def reserve(database, member_id, request_key, *, creation_round, resource, selec
         return result
 
 
-def mark_submitting(database, identity):
+def mark_submitting(database, identity, *, _cursor=None):
     """Commit uncertainty before an external call; this is not a retry lease."""
-    with database.transaction() as cursor:
+    with (database.transaction() if _cursor is None else nullcontext(_cursor)) as cursor:
         row = _locked(cursor, identity, budget=True)
         if row["state"] != "reserved":
             raise Conflict("precommit may already have been sent; reconcile before proceeding")
@@ -131,8 +132,9 @@ def mark_submitting(database, identity):
         if row["offer_expires_at"] <= cursor.fetchone()["now"]:
             raise Conflict("offer expired before submission")
         cursor.execute("UPDATE reservations SET state='uncertain' WHERE id=%s", (identity,))
-        event(cursor, identity, "potentially_sent", {"payload_hash": ledger.fingerprint(row["payload"])})
-        return row["payload"]
+        payload = json.loads(row["payload_text"]) if row["payload_text"] else row["payload"]
+        event(cursor, identity, "potentially_sent", {"payload_hash": ledger.fingerprint(payload)})
+        return payload
 
 
 def _fees(cursor, row, actual):
@@ -147,11 +149,11 @@ def _fees(cursor, row, actual):
     cursor.execute("UPDATE reservations SET fee_actual=%s WHERE id=%s", (actual, row["id"]))
 
 
-def accept(database, identity, benchmark_id, assignment, *, actual_fee, evidence):
+def accept(database, identity, benchmark_id, assignment, *, actual_fee, evidence, _cursor=None):
     if not benchmark_id or not isinstance(assignment, dict) or not assignment or not evidence:
         raise FundsError("acceptance requires benchmark identity, complete assignment and evidence")
     digest = ledger.fingerprint(assignment)
-    with database.transaction() as cursor:
+    with (database.transaction() if _cursor is None else nullcontext(_cursor)) as cursor:
         row = _locked(cursor, identity, budget=True)
         if row["benchmark_id"]:
             if (row["benchmark_id"], row["assignment_digest"], row["fee_actual"]) != (benchmark_id, digest, actual_fee):
@@ -167,11 +169,11 @@ def accept(database, identity, benchmark_id, assignment, *, actual_fee, evidence
         return _row(cursor, identity)
 
 
-def release_unstarted(database, identity, *, rejected=False, actual_fee=0, evidence):
+def release_unstarted(database, identity, *, rejected=False, actual_fee=0, evidence, _cursor=None):
     if not evidence:
         raise FundsError("cancellation/rejection requires durable evidence")
     state = "rejected" if rejected else "cancelled"
-    with database.transaction() as cursor:
+    with (database.transaction() if _cursor is None else nullcontext(_cursor)) as cursor:
         row = _locked(cursor, identity, budget=True)
         if row["state"] == state:
             if row["fee_actual"] != actual_fee:

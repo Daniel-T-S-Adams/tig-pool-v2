@@ -14,7 +14,7 @@ def observation(height=8, identity=None, previous=None, length=4):
                          "prev_block_id": previous, "num_active": {"benchmark": 1, "opow": 1, "code": 3, "challenge": 3}},
              "data": {"active_ids": {"benchmark": ["b"], "opow": [player], "code": ["a1", "a2", "g"], "challenge": list(configs)}}}
     algorithms = [{"id": algorithm, "state": {"banned": False, "round_active": 1},
-                   "details": {"challenge_id": challenge}, "block_data": {"adoption": "11",
+                   "details": {"challenge_id": challenge,"name":"fixture_"+algorithm}, "block_data": {"adoption": "11",
                        "num_qualifiers_by_track_by_player": {"t": {player: 1}} if algorithm == "a1" else {}}}
                   for algorithm, challenge in (("a1", "c1"), ("a2", "c2"), ("g", "g1"))]
     binaries = [{"algorithm_id": row["id"], "details": {"compile_success": True,

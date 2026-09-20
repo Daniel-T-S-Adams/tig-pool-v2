@@ -66,11 +66,16 @@ def _semantic(snapshot, observation):
     scores = defaultdict(list)
     for bundle in snapshot.bundles:
         scores[bundle.benchmark_id].append(bundle.quality)
-    return fingerprint({"block_id": snapshot.block_id, "previous": snapshot.previous_block_id,
+    data={"block_id": snapshot.block_id, "previous": snapshot.previous_block_id,
         "height": snapshot.height, "round": snapshot.round, "timestamp": snapshot.timestamp,
         "config": observation["start"]["block"]["config"], "scores": scores,
         "precommits": snapshot.precommits, "algorithms": snapshot.algorithms, "challenges": snapshot.challenges,
-        "qualifiers": sorted((*key, value) for key, value in snapshot.qualifiers.items())})
+        "qualifiers": sorted((*key, value) for key, value in snapshot.qualifiers.items())}
+    if observation.get("pool_player_id"):
+        player=observation["pool_player_id"]
+        data["pool_player_id"]=player
+        data["pool_feed"]=observation["players"].get(player,observation.get("pool_pending"))
+    return fingerprint(data)
 
 
 class BlockStore:

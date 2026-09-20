@@ -95,8 +95,10 @@ configuration or wallet has been changed by this probe.
 
 - Prove precommit acceptance/rejection and ambiguous-response reconciliation
   against the intended deployment, including retention limits of lookup data.
-- Complete verification-failure and definitive-expiry adapter fixtures. A
-  record disappearing from a current feed is not proof of either outcome.
+- Verify definitive expiry against the deployment's current protocol. A
+  record disappearing from a current feed is not proof of expiry. The separate
+  confirmed verification-failure feed now has a recorded public fixture and
+  adapter tests; see [submission recovery](SUBMISSION_RECOVERY.md).
 - Confirm the creation/reporting-round boundary mapping and preserve both
   identifiers. An elapsed date or an unsuccessful reports fetch is not a
   final-outcome signal.

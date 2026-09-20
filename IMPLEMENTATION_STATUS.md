@@ -99,8 +99,9 @@ All 70 tests in that increment passed locally and in hosted CI.
 
 ## Member benchmark protocol and worker
 
-The paired increment on pool `feature/member-protocol` and worker
-`feature/whole-benchmark-protocol` implements expiring CPU/GPU compute offers,
+The paired [pool PR](https://github.com/Daniel-T-S-Adams/tig-pool-v2/pull/5) and
+[worker PR](https://github.com/Daniel-T-S-Adams/innopool-slave-v2/pull/2), both
+merged into `redesign/v2`, implement expiring CPU/GPU compute offers,
 atomic queue-to-reservation linkage, durable submission intents, exact-byte
 assignment handover, full result upload and sampled Merkle proof validation.
 The separate reference worker saves requests and every completed nonce, recovers
@@ -112,8 +113,27 @@ See [the versioned member API](docs/MEMBER_API_V2.md) and the worker's
 with PostgreSQL for CPU and GPU assignments; it simulates TIG and compute.
 Worker tests also reproduce the Merkle root from a recorded public TIG proof.
 
+All 76 pool tests and the legacy accounting checks passed in hosted CI, along
+with 12 new worker tests and all 17 inherited worker regressions for that pair.
+
+## Submission recovery and saved algorithms
+
+The next increment on `feature/submission-recovery` connects the queue to a
+separate, explicitly enabled TIG coordinator. It records potentially-sent
+operations, persists positive benchmark IDs before fetching details, reconciles
+lost responses without resending, and distinguishes confirmed proof receipt
+from actual activation. It also captures the fresh pool's pending work,
+replays stored blocks, preserves collateral after confirmed failures, and
+prevents unresolved work from starving later eligible queue entries.
+
+The pool serves its saved public algorithm archives by checksum. Real CPU and
+GPU downloads verified the upstream redirect and actual named library layout;
+the worker's artifact increment supports both. See
+[submission recovery notes](docs/SUBMISSION_RECOVERY.md) for evidence and
+remaining live-adapter checks. No actual algorithm or benchmark was run.
+
 Funds and work flags still default to disabled. No live service or wallet was
-changed. Live submission/outcome adapters, finalization, completed withdrawal
+changed. Intended-account submission/rejection and expiry validation, finalization, completed withdrawal
 payments, product screens and isolated production deployment remain unfinished.
 Real challenge execution and live protocol integration are not demonstrated by
 these tests. There is no production v2 release yet. The remaining Stage 0 checks

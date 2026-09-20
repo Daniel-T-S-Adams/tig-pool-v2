@@ -154,5 +154,6 @@ def _choose(snapshot, binary_rows, *, player_id, resource, compute_type, now,
         "compute_type": compute_type, "pool_counts": pool_counts, "challenge_ties": challenge_ties,
         "selected_challenge": challenge_id, "adoption_units": {key: str(value) for key, value in adoptions.items()},
         "algorithm_ties": algorithm_ties, "selected_algorithm": algorithm_id, "references": reference_evidence,
+        "algorithm_name": _text(snapshot.algorithms[algorithm_id]["details"]["name"], "algorithm archive name"),
         "binary": deepcopy(binaries[algorithm_id])}
     return Selection(snapshot.round, payload, evidence, base, fee)

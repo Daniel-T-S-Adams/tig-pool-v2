@@ -3,18 +3,20 @@
 from dataclasses import dataclass
 from decimal import Decimal
 import hashlib
+import re
 import secrets
 import uuid
 from typing import Literal
 
 from fastapi import Depends, FastAPI, Header, HTTPException
 from fastapi.encoders import jsonable_encoder
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse,Response
 from pydantic import BaseModel, ConfigDict, Field, StrictInt, StrictStr
 
 from .auth import Auth, AuthenticationError
 from .database import Database
 from . import members, withdrawals, work_requests, member_protocol
+from . import artifacts
 from .money import Conflict, FundsError, InsufficientFunds
 
 
@@ -135,6 +137,13 @@ def create_app(settings):
     @app.post("/api/v2/auth/challenges")
     def challenge(body: WalletChallenge):
         return response(auth.challenge(body.wallet))
+
+    @app.get("/api/v2/artifacts/{digest}")
+    def public_algorithm_archive(digest: str):
+        if not re.fullmatch(r"[0-9a-f]{64}",digest):raise HTTPException(404,"unknown algorithm archive")
+        archive=artifacts.read_archive(database,digest)
+        return Response(archive,media_type="application/octet-stream",headers={
+            "ETag":'"'+digest+'"',"Cache-Control":"public, max-age=86400, immutable"})
 
     @app.post("/api/v2/auth/sessions")
     def session(body: WalletSignature):
