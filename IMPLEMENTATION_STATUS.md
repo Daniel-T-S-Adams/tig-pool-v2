@@ -63,7 +63,8 @@ integration checks. Those checks still gate the dependent live monetary adapters
 
 ## Member funds implementation
 
-The next increment on `feature/member-ledger` implements the PostgreSQL journal,
+The [member funds PR](https://github.com/Daniel-T-S-Adams/tig-pool-v2/pull/3), merged
+into `redesign/v2`, implements the PostgreSQL journal,
 wallet authentication and scoped tokens, confirmed-transfer verification and
 deposit attribution, operator funding accounts, atomic benchmark collateral and
 fee reservations, audited member multipliers, durable handover, withdrawal
@@ -76,8 +77,25 @@ records, and replay. API tests enforce member/operator/token authority. See
 [member funds implementation notes](docs/MEMBER_FUNDS.md) for the current API,
 test commands, deployment boundaries, and remaining integrations.
 
+All 56 tests in that increment passed locally and in hosted CI, along with the
+legacy accounting checks.
+
+## Block observer and selection
+
+The next increment on `feature/observer-selection` implements the independent
+collector, local outage spool, compressed/deduplicated PostgreSQL history,
+coverage cursors, gap/conflict detection, exact member credit attribution and
+the agreed work selector. Recorded network fixtures exercise CPU and GPU
+selection. Database and collector tests cover replica deduplication, recovery,
+unavailable storage, missing ownership and independently complete reward rounds.
+
+A finite read-only live run captured blocks 1,351,170 and 1,351,171. Replaying
+them from the database again reconciled 4,000 qualifiers per block. The run
+explicitly retained the missed launch height 1,351,169 as a gap. See
+[observation and selection notes](docs/OBSERVATION_AND_SELECTION.md).
+
 Work assignment remains disabled in the API, and funds operations default to
-disabled. No live service or wallet was changed. Production observation,
-selection, submission/outcome adapters, the whole-benchmark worker, finalization,
-withdrawal payments and product screens remain unfinished. There is no paired
-v2 release or production deployment yet.
+disabled. No live service or wallet was changed. Live submission/outcome adapters,
+the whole-benchmark worker, finalization, completed withdrawal payments, product
+screens and isolated production deployment remain unfinished. There is no paired
+v2 release yet. The remaining Stage 0 checks still gate live monetary operations.
