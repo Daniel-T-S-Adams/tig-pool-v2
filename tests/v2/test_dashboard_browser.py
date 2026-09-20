@@ -20,7 +20,7 @@ from pool_manager.pool_v2 import custody, deposits, ledger, members
 from pool_manager.pool_v2.api import Settings, create_app
 from pool_manager.pool_v2.chain import CustodyPreflight
 from pool_manager.pool_v2.money import TIG
-from funds_helpers import DatabaseCase, NETWORK, CUSTODY, transfer
+from funds_helpers import DatabaseCase, NETWORK, CUSTODY, chain_fixture, transfer
 from test_withdrawals import payment_fixture
 
 
@@ -38,6 +38,9 @@ class DashboardBrowserTests(DatabaseCase):
         self.reservation=self.reserve('browser-work',member=self.browser_member)
         _,funding,tx_hash=payment_fixture(sender='0x'+'7'*40,to=CUSTODY,value=1000)
         custody.receive_native(self.db,funding.transaction(tx_hash,fee_model='op-jovian'))
+        _,self.external_deposit,self.external_hash=chain_fixture(sender='0x'+'8'*40,amount=9*TIG)
+        deposits.receive(self.db,self.external_deposit.transfer(self.external_hash,2))
+        _,self.extra_native,self.native_hash=payment_fixture(sender='0x'+'7'*40,to=CUSTODY,value=100,nonce=2)
         self.certificate=tempfile.TemporaryDirectory(prefix='innopool-v2-browser-')
         self.addCleanup(self.certificate.cleanup)
         cert,key=(str(Path(self.certificate.name)/name) for name in ('cert.pem','key.pem'))
@@ -62,8 +65,10 @@ class DashboardBrowserTests(DatabaseCase):
                 test.assertEqual((nonce,after_height),(1,90))
                 _,self.chain,self.tx_hash=payment_fixture(amount=40*TIG+1,recipient=test.wallet)
                 return self.tx_hash
-            def transaction(self,*args,**kwargs):return self.chain.transaction(*args,**kwargs)
-            def transfer(self,*args,**kwargs):return self.chain.transfer(*args,**kwargs)
+            def transaction(self,tx_hash,**kwargs):
+                return (test.extra_native if tx_hash==test.native_hash else self.chain).transaction(tx_hash,**kwargs)
+            def transfer(self,tx_hash,index):
+                return (test.external_deposit if tx_hash==test.external_hash else self.chain).transfer(tx_hash,index)
         self.app.state.payment_chain=SimulatedChain()
         self.server=uvicorn.Server(uvicorn.Config(self.app,log_level='critical',access_log=False,
             ssl_certfile=cert,ssl_keyfile=key))
@@ -124,6 +129,15 @@ class DashboardBrowserTests(DatabaseCase):
         operator.get_by_role('button',name='Open operator dashboard').click()
         expect(operator.locator('#operator-content')).to_be_visible()
         expect(operator.locator('#operator-token')).to_have_value('')
+        operator.locator('#unattributed-deposits').get_by_role('button',name='Operator funding',exact=True).click()
+        operator.get_by_label('Ownership check').fill('Fixture operator source checked independently')
+        operator.locator('#action-submit').click()
+        expect(operator.locator('#unattributed-deposits')).to_contain_text('No deposits await attribution.')
+        operator.get_by_role('button',name='Record native funding',exact=True).click()
+        operator.get_by_label('Transaction hash',exact=True).fill(self.native_hash)
+        operator.locator('#action-submit').click()
+        expect(operator.locator('#action-dialog')).not_to_be_visible()
+        self.assertEqual(self.row("SELECT balance FROM accounts WHERE id='operator:custody:TIG'")['balance'],9*TIG)
         row=operator.locator('#operator-members tr').filter(has=operator.locator('[title="'+self.wallet+'"]'))
         row.get_by_role('button',name='Edit multiplier').click()
         operator.get_by_label('Multiplier · 0 to 1').fill('0.2')
@@ -165,7 +179,7 @@ class DashboardBrowserTests(DatabaseCase):
         expect(page.locator('#message')).to_contain_text('seven days')
         self.assertNotIn('eth_sendTransaction',wallet_methods)
         self.assertEqual(self.row('SELECT count(*) AS n FROM withdrawal_attempt_outcomes')['n'],1)
-        self.assertEqual(self.row("SELECT balance FROM accounts WHERE id='operator:custody:NATIVE'")['balance'],940)
+        self.assertEqual(self.row("SELECT balance FROM accounts WHERE id='operator:custody:NATIVE'")['balance'],1040)
         page.locator('#active-tokens').get_by_role('button',name='Revoke',exact=True).click()
         expect(page.locator('#worker-token-box')).not_to_be_visible()
         with TestClient(self.app) as client:

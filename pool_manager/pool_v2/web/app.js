@@ -44,7 +44,7 @@ function table(id, rows, columns, empty = 'No records yet.') {
 }
 async function loadCapabilities() {
   capabilities = await api('capabilities');
-  $('work-status').textContent = capabilities.work_enabled ? 'Accepting work' : capabilities.new_work_paused ? 'New work paused' : 'Work not enabled';
+  $('work-status').textContent = capabilities.work_enabled ? 'Accepting work' : capabilities.new_work_paused ? 'New work paused' : capabilities.work_block_reason==='custody-reconciliation' ? 'Checking pool funds' : 'Work not enabled';
   $('work-status').classList.toggle('active', capabilities.work_enabled);
 }
 function field(label, id, value = '', options = {}) {
@@ -162,12 +162,18 @@ async function previewRound(row) {
   $('action-fields').append(list);$('action-submit').disabled=!capabilities.settlement_enabled || !preview.preview;
 }
 async function loadOperator() {
-  const [data,payments]=await Promise.all([api('operator/dashboard?limit=50&offset='+operatorOffset),api('operator/withdrawals')]);
+  const [data,payments,custody]=await Promise.all([api('operator/dashboard?limit=50&offset='+operatorOffset),api('operator/withdrawals'),api('operator/custody')]);
   await loadCapabilities();$('operator-login').hidden=true;$('operator-content').hidden=false;$('operator-sign-out').hidden=false;
   const sum=(asset,location,kind)=>data.balances.filter(row=>row.asset===asset&&row.location===location&&(!kind||row.kind===kind)).reduce((total,row)=>total+BigInt(row.balance),0n);
   $('operator-balances').replaceChildren();
   for(const [label,amount,detail] of [['Custody funds',sum('TIG','custody'),'TIG · all recorded accounts'],['Operator funds',sum('TIG','custody','operator'),'TIG · available'],['Network fee funds',sum('NATIVE','custody','operator'),'native token · available'],['Submission balance',sum('TIG','protocol','operator'),'TIG · prepaid operator funds']]){const box=node('article',undefined,'metric');box.append(node('p',label),node('strong',tig(amount)),node('span',detail));$('operator-balances').append(box);}
   const observation=data.observation;$('observation-summary').textContent=observation.initialized?'Observed through block '+observation.latest_seen_height+' · '+observation.missing_heights.length+' listed gaps':'Block collection has not started.';
+  const wallet=custody.observation,check=wallet.check;
+  $('custody-health').textContent=!wallet.initialized?'Collection not started':wallet.ready?'Reconciled':'Check required';
+  $('custody-health').classList.toggle('active',wallet.ready);
+  $('custody-balances').textContent=check?.actual_tig!==null && check?.actual_tig!==undefined ? 'Block '+check.height+' · wallet '+tig(check.actual_tig)+' TIG · ledger '+tig(check.recorded_tig)+' TIG · '+(wallet.ready?'The recorded wallet funds reconcile.':check.healthy?'Waiting for a fresh chain check.':check.reason) : 'Start custody collection before accepting funds. New work waits for a complete, reconciled check once collection is configured.';
+  table('unattributed-deposits',custody.unattributed.map(row=>{const actions=node('div');actions.append(button('Credit member',()=>attributeDeposit(row,false)),button('Operator funding',()=>attributeDeposit(row,true)));return[address(row.sender),tig(row.amount),row.block_number,actions];}),4,'No deposits await attribution.');
+  $('custody-alerts').replaceChildren();for(const alert of custody.alerts){const row=node('p',alert.kind+' · '+(alert.details.reason||'Review recorded evidence'),'small muted');$('custody-alerts').append(row);}
   $('pause-work').textContent=capabilities.new_work_paused?'Resume new work':'Pause new work';
   $('settlement-status').textContent=capabilities.settlement_enabled?'Preview each round before crediting its final allocation.':'Live settlement is awaiting verified protocol configuration. Previews remain available when the evidence is complete.';
   table('operator-members',data.members.map(row=>[address(row.wallet),tig(row.available),tig(row.collateral),row.slots+' / 2',row.multiplier+'×',button('Edit multiplier',()=>editMultiplier(row))]),6);
@@ -178,6 +184,22 @@ async function loadOperator() {
   table('multiplier-history',data.multiplier_changes.map(row=>[address(row.member_id),row.old_value+'×',row.new_value+'×',row.reason,date(row.created_at)]),5);
   $('operator-page-number').textContent='Page '+(operatorOffset/50+1);$('operator-newer').disabled=operatorOffset===0;$('operator-older').disabled=data.members.length<50&&data.collateral.length<50;
 }
+function attributeDeposit(receipt,operator) {
+  dialog(operator?'Confirm operator funding':'Credit verified member',tig(receipt.amount)+' TIG received from '+receipt.sender+'. Record how you established ownership.','Credit funds',async()=>{
+    const body={tx_hash:receipt.tx_hash,log_index:receipt.log_index,operator_funding:operator,reason:$('attribution-reason').value.trim()};
+    if(!operator)body.member_wallet=$('deposit-member-wallet').value.trim();
+    await api('operator/custody/attribute-deposit',body);await loadOperator();notice('Deposit attributed. The amount was credited once.');
+  });if(!operator)field('Verified member wallet','deposit-member-wallet');field('Ownership check','attribution-reason');
+}
+function recordReceipt(native) {
+  dialog(native?'Record native funding':'Record TIG receipt',native?'Verify a direct incoming transfer of the network’s native token to the custody wallet. It funds operator network fees.':'Verify an incoming TIG event. Known member sources are credited automatically; other sources remain for review.','Verify receipt',async()=>{
+    const body={tx_hash:$('receipt-hash').value.trim()};
+    if(!native){const index=Number($('receipt-index').value);if(!Number.isSafeInteger(index)||index<0)throw Error('Enter a valid transfer event index.');body.log_index=index;}
+    await api('operator/custody/'+(native?'receive-native':'receive-token'),body);await loadOperator();notice('Verified receipt recorded. The observer will refresh wallet reconciliation.');
+  });field('Transaction hash','receipt-hash');if(!native)field('Transfer event index','receipt-index');
+}
+$('record-token-receipt').addEventListener('click',()=>recordReceipt(false));
+$('record-native-funding').addEventListener('click',()=>recordReceipt(true));
 $('refresh-operator').addEventListener('click',()=>run(loadOperator,$('refresh-operator')));
 $('pause-work').addEventListener('click',()=>run(async()=>{await api('operator/controls/new-work',{paused:!capabilities.new_work_paused,reason:capabilities.new_work_paused?'Operator resumed new work':'Operator paused new work',event_key:key()});await loadOperator();notice('Work control updated. Existing benchmark recovery remains available.');},$('pause-work')));
 for(const [id,change] of [['operator-newer',-50],['operator-older',50]])$(id).addEventListener('click',()=>run(async()=>{operatorOffset=Math.max(0,operatorOffset+change);await loadOperator();}));

@@ -21,3 +21,11 @@ It includes the raw transaction, receipt and header for exact fee-model tests.
 The v2 transaction verifier independently confirmed its canonical inclusion and
 finality. No test withdrawal was submitted. See
 [withdrawal implementation notes](../../../docs/WITHDRAWALS_V2.md).
+# Custody observation
+
+`custody-block-51572936.json.gz` contains 22 read-only public Base RPC responses
+captured on 20 September 2026. It verifies a TIG transfer of
+1.151417509939734543 TIG to an undelegated public EOA and the corresponding
+balance change. It is an external protocol fixture, not a member deposit in
+the test ledger. The gzip JSON includes the capture time, explicit network,
+request parameters and responses, and a non-secret source label.
