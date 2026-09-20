@@ -22,7 +22,7 @@ class Database:
 
     @contextmanager
     def transaction(self):
-        connection = psycopg2.connect(self.dsn, application_name="innopool-v2")
+        connection = psycopg2.connect(self.dsn, application_name="innopool-v2", connect_timeout=5)
         try:
             with connection:
                 with connection.cursor(cursor_factory=RealDictCursor) as cursor:
