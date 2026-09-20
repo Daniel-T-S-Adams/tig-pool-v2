@@ -201,13 +201,13 @@ def record(database,data,*,initialize=False):
                     with database.transaction() as receipt_cursor:deposits.save_transfer(receipt_cursor,transfer)
             custody.bind(cursor,network)
             recorded_tig,recorded_native=ledger.backing(cursor),ledger.backing(cursor,'NATIVE')
-            cursor.execute('''SELECT count(*) AS count FROM withdrawal_attempt_outcomes o JOIN chain_transactions t
+            cursor.execute('''SELECT count(*) AS count FROM custody_payments o JOIN chain_transactions t
                 ON t.chain_id=o.chain_id AND t.tx_hash=o.tx_hash
                 WHERE t.chain_id=%s AND t.sender=%s AND t.block_number<=%s''',
                 (network.chain_id,network.custody,value['last']))
             accounted=int(cursor.fetchone()['count'])
-            cursor.execute('''SELECT 1 FROM transfers t LEFT JOIN withdrawals w ON w.paid_event=t.event_id
-                WHERE t.sender=%s AND t.recipient<>%s AND t.amount>0 AND t.block_number<=%s AND w.id IS NULL LIMIT 1''',
+            cursor.execute('''SELECT 1 FROM transfers t LEFT JOIN custody_payments w ON w.transfer_event=t.event_id
+                WHERE t.sender=%s AND t.recipient<>%s AND t.amount>0 AND t.block_number<=%s AND w.send_id IS NULL LIMIT 1''',
                 (network.custody,network.custody,value['last']))
             unexplained=bool(cursor.fetchone())
             cursor.execute("SELECT 1 FROM chain_alerts WHERE kind='canonical-conflict' LIMIT 1")

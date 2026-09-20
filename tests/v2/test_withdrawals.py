@@ -185,6 +185,31 @@ class WithdrawalTests(DatabaseCase):
         wrong = replace(transfer(), network=replace(NETWORK, token=OTHER))
         with self.assertRaises(Conflict): deposits.receive(self.db, wrong)
 
+    def test_upgrade_backfills_paid_failed_and_uncertain_withdrawals_into_shared_nonce_history(self):
+        self.fund_gas()
+        paid=self.approved();first=self.begin(paid)
+        _,chain,tx_hash=payment_fixture()
+        withdrawals.reconcile(self.db,first['id'],chain.transaction(tx_hash,fee_model='op-jovian'),chain.transfer(tx_hash,2))
+        pending=self.approved(member=self.other);second=self.begin(pending,nonce=2)
+        _,chain,tx_hash=payment_fixture(nonce=2,status=0)
+        withdrawals.reconcile(self.db,second['id'],chain.transaction(tx_hash,fee_model='op-jovian'))
+        third=self.begin(pending,nonce=3,key='still-uncertain')
+        # Restore the previous schema shape in this disposable test database.
+        # All real withdrawal rows, journals and chain receipts remain intact.
+        with self.db.transaction() as cursor:
+            cursor.execute('DROP TABLE topup_transaction_claims,protocol_topup_credits,protocol_topups,protocol_topup_facts,funding_alerts,funding_captures,protocol_identity,custody_payments,custody_sends CASCADE')
+            cursor.execute('DROP FUNCTION protect_topup()')
+            cursor.execute("DELETE FROM schema_migrations WHERE name='009_protocol_funding.sql'")
+        self.db.migrate()
+        self.assertEqual(self.row('SELECT count(*) AS n FROM custody_sends')['n'],3)
+        self.assertEqual(self.row('SELECT count(*) AS n FROM custody_payments')['n'],2)
+        self.assertEqual(self.row('SELECT transfer_event FROM custody_payments WHERE send_id=%s',(first['id'],))['transfer_event'],
+            self.row('SELECT paid_event FROM withdrawals WHERE id=%s',(paid['id'],))['paid_event'])
+        self.assertIsNone(self.row('SELECT transfer_event FROM custody_payments WHERE send_id=%s',(second['id'],))['transfer_event'])
+        self.assertIsNone(self.row('SELECT send_id FROM custody_payments WHERE send_id=%s',(third['id'],)))
+        self.assertEqual(self.balance()['available'],60*TIG)
+        self.assertEqual(self.balance(self.other)['pending_withdrawals'],40*TIG)
+
 
 class TransactionFeeTests(unittest.TestCase):
     def test_nonce_recovery_finds_a_finalized_transaction_without_its_saved_hash(self):

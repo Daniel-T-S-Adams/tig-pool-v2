@@ -70,8 +70,9 @@ results, proof submission, withdrawal reconciliation and receipt recovery stay
 available.
 
 The check compares all custody ledger funds with actual TIG and native balances
-and accounts for finalized wallet nonces. Recognized withdrawal outcomes explain
-their full transfer and operator-paid fee. Unexplained outgoing transfers,
+and accounts for finalized wallet nonces. Recognized withdrawals and
+[protocol top-ups](PROTOCOL_FUNDING.md) explain their full transfer and
+operator-paid fee through one shared transaction registry. Unexplained outgoing transfers,
 unrecorded native funding or unknown costs hold new spending; they never trigger
 a member haircut. A change to a previously recorded finalized anchor creates a
 persistent conflict requiring explicit investigation and correction.
@@ -93,7 +94,7 @@ concurrent collectors, backfill, stale evidence, canonical conflicts, exact
 attribution, and source/network mismatches. Browser tests exercise operator
 deposit review and native funding against the real API with generated fixtures.
 
-Unconfirmed-deposit display, protocol fee-top-up classification, other operator
+Unconfirmed-deposit display, other operator
 expense reconciliation, automatic native/internal-transfer indexing, and the
 audited correction workflow remain separate adapters. A pending native funding
 or protocol top-up cannot be assumed to explain a discrepancy. Deployment must

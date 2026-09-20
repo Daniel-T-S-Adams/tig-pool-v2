@@ -43,6 +43,12 @@ showing the custody route. The page does not send or sign custody transactions.
 An uncertain attempt can be reopened and recovered from its recorded nonce;
 closing a dialog does not release funds or permit a second payment attempt.
 
+The submission funding panel shows the observed TIG fee balance alongside its
+recorded backing. The operator can reserve a manual fee top-up using available
+operator funds, recover its transaction, and check positive TIG credit. A
+verified outgoing transfer stays separate from spendable submission credit
+until the protocol confirms it. See [protocol funding notes](PROTOCOL_FUNDING.md).
+
 Round posting requires a calculated preview. Its fingerprint is checked again
 inside the posting transaction. Changed evidence requires a fresh preview;
 replaying the same approved allocation cannot credit the round twice. Wallet
