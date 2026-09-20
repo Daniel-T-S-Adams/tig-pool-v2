@@ -45,10 +45,11 @@ and the
 [pull-request checks](https://github.com/Daniel-T-S-Adams/tig-pool-v2/actions/runs/35519033126)
 passed on rerun. That setup blocker is resolved.
 
-## Next implementation stage
+## Protocol observation
 
 Both foundation PRs are merged into `redesign/v2`; `release/v2` remains at its
-original baseline. Stage 0 work is on `feature/protocol-probe`.
+original baseline. The [protocol probe PR](https://github.com/Daniel-T-S-Adams/tig-pool-v2/pull/2)
+is also merged into `redesign/v2`.
 
 The read-only probe captured consecutive live blocks 1,351,111 and 1,351,112,
 covered every active benchmark, and reconciled exactly 4,000 qualifying places
@@ -58,5 +59,25 @@ missing or inconsistent inputs, gaps, and report-result distinctions.
 
 See [the protocol validation report](docs/PROTOCOL_VALIDATION.md) for commands,
 recordings, the discovered chain-ID discrepancy, and the remaining Stage 0
-integration checks. No funds handling, pool/worker v2 compatibility, or
-deployable v2 release has been established yet.
+integration checks. Those checks still gate the dependent live monetary adapters.
+
+## Member funds implementation
+
+The next increment on `feature/member-ledger` implements the PostgreSQL journal,
+wallet authentication and scoped tokens, confirmed-transfer verification and
+deposit attribution, operator funding accounts, atomic benchmark collateral and
+fee reservations, audited member multipliers, durable handover, withdrawal
+reservations, and initial member/operator API routes. It includes exact reward
+allocation arithmetic but does not yet post round settlements.
+
+Real PostgreSQL tests cover simultaneous deposits, work/withdrawal contention,
+shared operator funds and CPU/GPU slots, multiplier ordering, immutable journal
+records, and replay. API tests enforce member/operator/token authority. See
+[member funds implementation notes](docs/MEMBER_FUNDS.md) for the current API,
+test commands, deployment boundaries, and remaining integrations.
+
+Work assignment remains disabled in the API, and funds operations default to
+disabled. No live service or wallet was changed. Production observation,
+selection, submission/outcome adapters, the whole-benchmark worker, finalization,
+withdrawal payments and product screens remain unfinished. There is no paired
+v2 release or production deployment yet.

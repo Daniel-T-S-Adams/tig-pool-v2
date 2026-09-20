@@ -1,0 +1,5 @@
+# Independent v2 environment: never install into the running legacy service.
+psycopg2-binary==2.9.10
+eth-account==0.14.0
+fastapi==0.115.12
+uvicorn==0.34.2
