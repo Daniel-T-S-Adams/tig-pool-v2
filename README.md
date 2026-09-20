@@ -1,6 +1,6 @@
 # InnoPool
 
-This private repository preserves the original pool's complete local Git
+This independent repository preserves the original pool's complete local Git
 history for the InnoPool v2 redesign. V2 is under development; the instructions
 below still describe the legacy pool. See the
 [redesign plan](POOL_REDESIGN_PLAN.md) and
