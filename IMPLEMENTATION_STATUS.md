@@ -47,8 +47,16 @@ passed on rerun. That setup blocker is resolved.
 
 ## Next implementation stage
 
-Stage 0 validates complete live TIG snapshots, benchmark lifecycle events,
-public reports and arbitrations, qualifying-credit inputs, network identity,
-and reward receipt reconciliation before dependent monetary operations are
-enabled. The current baseline checks validate inherited behavior; they do not
-yet establish v2 pool/worker compatibility or a deployable v2 release.
+Both foundation PRs are merged into `redesign/v2`; `release/v2` remains at its
+original baseline. Stage 0 work is on `feature/protocol-probe`.
+
+The read-only probe captured consecutive live blocks 1,351,111 and 1,351,112,
+covered every active benchmark, and reconciled exactly 4,000 qualifying places
+per block. Recorded reports include 16 confirmed arbitrations for round 129
+and 46 for round 130. Twenty-one local tests cover replay, exact equal sharing,
+missing or inconsistent inputs, gaps, and report-result distinctions.
+
+See [the protocol validation report](docs/PROTOCOL_VALIDATION.md) for commands,
+recordings, the discovered chain-ID discrepancy, and the remaining Stage 0
+integration checks. No funds handling, pool/worker v2 compatibility, or
+deployable v2 release has been established yet.
