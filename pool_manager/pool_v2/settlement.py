@@ -2,7 +2,7 @@
 
 from psycopg2.extras import Json
 
-from . import benchmarks,deposits,ledger,members,qualifiers,reports
+from . import benchmarks,custody,deposits,ledger,members,qualifiers,reports
 from .block_observer import BlockStore
 from .database import lock
 from .money import Conflict,FundsError,allocate_rewards,units
@@ -87,6 +87,7 @@ def attribute_receipt(database,round_number,transfer,*,evidence):
     if transfer.recipient!=transfer.network.custody or transfer.sender==transfer.network.custody:
         raise FundsError('reward receipt must be incoming to configured custody')
     with database.transaction() as cursor:
+        custody.bind(cursor,transfer.network)
         lock(cursor,'round:'+str(round_number));lock(cursor,'transfer:'+transfer.event_id)
         cursor.execute('SELECT * FROM round_receipts WHERE event_id=%s',(transfer.event_id,))
         previous=cursor.fetchone()

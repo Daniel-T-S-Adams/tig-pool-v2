@@ -10,7 +10,7 @@ from eth_account import Account
 from eth_account.messages import encode_defunct
 from eth_utils import to_checksum_address
 
-from .members import address, register_verified
+from .members import address, register_verified, member_lock
 
 
 class AuthenticationError(ValueError):
@@ -97,3 +97,41 @@ class Auth:
             member_id = self.authenticate(cursor, wallet_token, wallet=True)
             cursor.execute("UPDATE tokens SET revoked_at=clock_timestamp() WHERE digest=%s AND member_id=%s",
                            (token_digest(token_to_revoke), member_id))
+
+    def withdrawal_wallet_challenge(self, member_id, wallet):
+        """The API requires the existing member's wallet session first."""
+        wallet=address(wallet); identity=uuid.uuid4()
+        with self.database.transaction() as cursor:
+            member=member_lock(cursor,member_id)
+            cursor.execute('SELECT clock_timestamp() AS now');now=cursor.fetchone()['now']
+            expiry=now+timedelta(minutes=5)
+            message=(f'{self.domain} requests withdrawal wallet verification:\n{to_checksum_address(wallet)}\n\n'
+                f'Set this wallet for future withdrawals by InnoPool member {member_id}. Pending requests keep their existing destination.\n\n'
+                f'URI: {self.origin}\nVersion: 1\nChain ID: {self.chain_id}\nNonce: {secrets.token_hex(24)}\n'
+                f'Issued At: {now.isoformat()}\nExpiration Time: {expiry.isoformat()}\nRequest ID: {identity}')
+            cursor.execute('''INSERT INTO withdrawal_wallet_challenges(id,member_id,old_wallet,new_wallet,message,expires_at)
+                VALUES (%s,%s,%s,%s,%s,%s)''',(identity,member_id,member['withdrawal_wallet'],wallet,message,expiry))
+        return {'id':str(identity),'message':message,'expires_at':expiry}
+
+    def verify_withdrawal_wallet(self, member_id, challenge_id, signature):
+        with self.database.transaction() as cursor:
+            member=member_lock(cursor,member_id)
+            cursor.execute('''SELECT * FROM withdrawal_wallet_challenges WHERE id=%s AND member_id=%s
+                AND used_at IS NULL AND expires_at>clock_timestamp() FOR UPDATE''',(challenge_id,member_id))
+            challenge=cursor.fetchone()
+            if not challenge:raise AuthenticationError('wallet change challenge expired, consumed, or belongs to another member')
+            if (member['withdrawal_wallet']!=challenge['old_wallet'] or
+                not challenge['message'].startswith(self.domain+' requests withdrawal wallet verification:') or
+                f'\nURI: {self.origin}\nVersion: 1\nChain ID: {self.chain_id}\n' not in challenge['message']):
+                raise AuthenticationError('wallet change belongs to a different deployment or has been superseded')
+            try:
+                signer=Account.recover_message(encode_defunct(text=challenge['message']),signature=signature)
+            except (ValueError,TypeError) as failure:
+                raise AuthenticationError('invalid withdrawal wallet signature') from failure
+            if signer.lower()!=challenge['new_wallet']:
+                raise AuthenticationError('signature does not prove control of the new withdrawal wallet')
+            cursor.execute('UPDATE withdrawal_wallet_challenges SET used_at=clock_timestamp() WHERE id=%s',(challenge_id,))
+            cursor.execute('INSERT INTO withdrawal_wallet_changes(challenge_id,member_id,old_wallet,new_wallet) VALUES (%s,%s,%s,%s)',
+                (challenge_id,member_id,challenge['old_wallet'],challenge['new_wallet']))
+            cursor.execute('UPDATE members SET withdrawal_wallet=%s WHERE id=%s',(challenge['new_wallet'],member_id))
+            return {'withdrawal_wallet':challenge['new_wallet']}

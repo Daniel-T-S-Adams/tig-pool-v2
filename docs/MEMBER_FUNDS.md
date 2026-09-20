@@ -85,7 +85,7 @@ occupies a slot. Request retries recover the same reservation; changed inputs
 under the same key conflict. Operator multiplier changes take the same member
 lock. Existing holds cannot be repriced.
 
-Before the future submission worker makes a network write, it must commit
+Before the v2 submission worker makes a network write, it commits
 `mark_submitting()`. Uncertain submissions cannot be sent twice or cancelled as
 unsent. Definitive rejection returns the member hold and unused operator fee
 capacity; actual costs debit only the protocol operator budget. The live
@@ -96,12 +96,14 @@ member's acknowledgement is durable and idempotent. Publication alone does not
 establish handover. Activation/failure/definitive expiry frees the slot while
 retaining collateral. A first acknowledgement after expiry is rejected; a retry
 of a previously committed acknowledgement returns the original timestamp.
-Actual X+2 collateral finalization belongs to the settlement increment.
+The [settlement increment](ROUND_SETTLEMENT.md) implements X+2 collateral
+finalization and funded round allocation behind verified protocol adapters.
 
 Withdrawal requests reserve their full amount and freeze the destination;
-execution tokens cannot create them. Operator review, potentially-sent attempts,
-outgoing verification, payment/cancellation and the dashboard remain to be
-implemented. No application signer is planned.
+execution tokens cannot create them. The [withdrawal increment](WITHDRAWALS_V2.md)
+implements operator review, potentially-sent attempts, outgoing verification,
+payment/cancellation and signed destination changes. Continuous chain indexing
+and product screens remain unfinished. No application signer is used.
 
 ## Validation
 
