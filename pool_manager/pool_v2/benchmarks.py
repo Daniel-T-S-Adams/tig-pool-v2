@@ -6,6 +6,7 @@ with protocol evidence, never by expiration of a worker lease.
 """
 
 from datetime import datetime
+from contextlib import nullcontext
 import uuid
 
 from psycopg2.extras import Json
@@ -67,7 +68,7 @@ def _row(cursor, identity):
 
 
 def reserve(database, member_id, request_key, *, creation_round, resource, selection, payload,
-            fee_limit, offer_expires_at):
+            fee_limit, offer_expires_at, _cursor=None):
     if resource not in ("CPU", "GPU") or not request_key or len(request_key) > 128:
         raise FundsError("request requires a key and exactly one CPU or GPU offer")
     units(creation_round, positive=True)
@@ -81,7 +82,7 @@ def reserve(database, member_id, request_key, *, creation_round, resource, selec
     request_hash = ledger.fingerprint({"round": creation_round, "resource": resource,
         "selection": selection, "payload": payload, "fee_limit": fee_limit,
         "offer_expires_at": offer_expires_at.isoformat()})
-    with database.transaction() as cursor:
+    with (database.transaction() if _cursor is None else nullcontext(_cursor)) as cursor:
         # All budget-using paths use budget -> member -> reservation -> accounts.
         lock(cursor, "operator:protocol-budget")
         member = member_lock(cursor, member_id)
@@ -114,6 +115,8 @@ def reserve(database, member_id, request_key, *, creation_round, resource, selec
              member["multiplier"], member["multiplier_revision"], amount, Json(selection), Json(payload),
              offer_expires_at, fee_limit))
         result = dict(cursor.fetchone())
+        cursor.execute("UPDATE reservations SET payload_text=%s WHERE id=%s", (ledger.canonical(payload), identity))
+        result["payload_text"] = ledger.canonical(payload)
         event(cursor, identity, "reserved", {"request_hash": request_hash})
         return result
 
@@ -158,7 +161,8 @@ def accept(database, identity, benchmark_id, assignment, *, actual_fee, evidence
             raise Conflict("acceptance requires a potentially sent submission")
         _fees(cursor, row, actual_fee)
         cursor.execute("""UPDATE reservations SET state='accepted', benchmark_id=%s, assignment=%s,
-            assignment_digest=%s WHERE id=%s""", (benchmark_id, Json(assignment), digest, identity))
+            assignment_digest=%s, assignment_payload=%s WHERE id=%s""",
+            (benchmark_id, Json(assignment), digest, ledger.canonical(assignment), identity))
         event(cursor, identity, "accepted", {"benchmark_id": benchmark_id, "digest": digest, "evidence": evidence})
         return _row(cursor, identity)
 

@@ -82,7 +82,8 @@ legacy accounting checks.
 
 ## Block observer and selection
 
-The next increment on `feature/observer-selection` implements the independent
+The [observer and selection PR](https://github.com/Daniel-T-S-Adams/tig-pool-v2/pull/4),
+merged into `redesign/v2`, implements the independent
 collector, local outage spool, compressed/deduplicated PostgreSQL history,
 coverage cursors, gap/conflict detection, exact member credit attribution and
 the agreed work selector. Recorded network fixtures exercise CPU and GPU
@@ -94,8 +95,26 @@ them from the database again reconciled 4,000 qualifiers per block. The run
 explicitly retained the missed launch height 1,351,169 as a gap. See
 [observation and selection notes](docs/OBSERVATION_AND_SELECTION.md).
 
-Work assignment remains disabled in the API, and funds operations default to
-disabled. No live service or wallet was changed. Live submission/outcome adapters,
-the whole-benchmark worker, finalization, completed withdrawal payments, product
-screens and isolated production deployment remain unfinished. There is no paired
-v2 release yet. The remaining Stage 0 checks still gate live monetary operations.
+All 70 tests in that increment passed locally and in hosted CI.
+
+## Member benchmark protocol and worker
+
+The paired increment on pool `feature/member-protocol` and worker
+`feature/whole-benchmark-protocol` implements expiring CPU/GPU compute offers,
+atomic queue-to-reservation linkage, durable submission intents, exact-byte
+assignment handover, full result upload and sampled Merkle proof validation.
+The separate reference worker saves requests and every completed nonce, recovers
+lost responses and interrupted compute, and retains evidence across restarts.
+It isolates its own pinned challenge containers from existing deployments.
+
+See [the versioned member API](docs/MEMBER_API_V2.md) and the worker's
+`docs/WORKER_V2.md`. The paired test runs the actual worker against the pool API
+with PostgreSQL for CPU and GPU assignments; it simulates TIG and compute.
+Worker tests also reproduce the Merkle root from a recorded public TIG proof.
+
+Funds and work flags still default to disabled. No live service or wallet was
+changed. Live submission/outcome adapters, finalization, completed withdrawal
+payments, product screens and isolated production deployment remain unfinished.
+Real challenge execution and live protocol integration are not demonstrated by
+these tests. There is no production v2 release yet. The remaining Stage 0 checks
+still gate dependent live monetary operations.
