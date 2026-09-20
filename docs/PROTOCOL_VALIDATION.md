@@ -15,7 +15,7 @@ python3 tools/probe_tig_v2.py \
   --snapshots 2 --max-wait 240 \
   --reports-round 129 --reports-round 130
 
-PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests/v2 -v
+PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests/v2 -p 'test_protocol.py' -v
 ```
 
 Use an empty output directory. The probe queries the latest block, its
