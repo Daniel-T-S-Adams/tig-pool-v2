@@ -1,0 +1,29 @@
+name: Pool CI
+
+on:
+  push:
+    branches: ["feature/**", "redesign/v2", "release/v2"]
+  pull_request:
+    branches: ["redesign/v2", "release/v2"]
+
+permissions:
+  contents: read
+
+jobs:
+  pool-baseline:
+    name: pool-baseline
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.12"
+      - name: Run existing accounting regression checks
+        env:
+          PYTHONDONTWRITEBYTECODE: "1"
+        run: |
+          python3 tools/test_revenue_split.py
+          python3 tools/test_work_credits.py

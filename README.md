@@ -1,5 +1,11 @@
 # InnoPool
 
+This private repository preserves the original pool's complete local Git
+history for the InnoPool v2 redesign. V2 is under development; the instructions
+below still describe the legacy pool. See the
+[redesign plan](POOL_REDESIGN_PLAN.md) and
+[implementation status](IMPLEMENTATION_STATUS.md) before using this repository.
+
 A self-hosted, open-source mining pool for [The Innovation Game (TIG)](https://tig.foundation), built on the official `tig-benchmarker` master/slave architecture.
 
 Pool members run TIG slave nodes pointing at your server. The pool manager tracks contributions, distributes rewards on-chain via `/set-coinbase`, and automatically tunes pool capacity through an autopilot system.
