@@ -31,6 +31,8 @@ def begin(database,request_key,preflight,policy_capture,*,amount,fee_limit,fee_m
             if (int(old['amount']),int(old['fee_limit']),old['actor'])!=(amount,fee_limit,actor):
                 raise Conflict('top-up request key was reused')
             return dict(old)
+        from . import pilot
+        pilot.prohibit_topup(cursor)
         now=datetime.now(timezone.utc)
         if not -5<=(now-preflight.checked_at).total_seconds()<=20 or not -5<=(now-policy['checked_at']).total_seconds()<=120:
             raise Conflict('top-up preflight or protocol policy is stale')

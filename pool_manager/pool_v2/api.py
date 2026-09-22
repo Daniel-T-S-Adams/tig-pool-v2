@@ -372,6 +372,11 @@ def create_app(settings):
                 ORDER BY (t.state IN ('uncertain','awaiting_protocol')) DESC,t.sent_at DESC LIMIT 100''')
             return response({'observation':state,'policy':policy,'topups':cursor.fetchall()})
 
+    @app.get('/api/v2/operator/pilot')
+    def pilot_dashboard(actor=Depends(operator)):
+        from . import pilot
+        return response(pilot.status(database))
+
     @app.post('/api/v2/operator/topups')
     def prepare_topup(body:TopupRequest,actor=Depends(operator)):
         # Recover the original recorded intent even if new sends or RPC are unavailable.

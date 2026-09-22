@@ -13,6 +13,7 @@ import threading
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
 
 from pool_manager.pool_v2.coordinator import Coordinator
+from pool_manager.pool_v2 import pilot
 from pool_manager.pool_v2.database import Database,lock
 from pool_manager.pool_v2.members import address
 from pool_manager.pool_v2.observation import PublicTigClient
@@ -27,6 +28,9 @@ def main(argv=None):
     config=json.loads(Path(args.config).read_text())
     database=Database(os.environ.get('POOL_V2_DATABASE_DSN'))
     origin=config['tig_api_url']
+    required=config.get('require_pilot_limits',False)
+    if type(required) is not bool:parser.error('require_pilot_limits must be an explicit boolean')
+    pilot.require_service(database,api_origin=origin,player_id=config['pool_player_id'],required=required)
     enabled=config.get('submissions_enabled',False)
     new_work=config.get('new_work_enabled',False)
     if type(enabled) is not bool or type(new_work) is not bool:
