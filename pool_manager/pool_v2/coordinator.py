@@ -76,6 +76,10 @@ class Coordinator:
                 "observed_at":now,"seen_benchmarks":sorted(seen)},None
 
     def dispatch_one(self):
+        from . import pilot
+        # Check every cycle as well as service startup. This also covers a
+        # direct coordinator caller and an already-running service at setup.
+        pilot.require_service(self.database,api_origin=getattr(self.writer,'origin',None),player_id=self.player_id)
         # Do not mark a request potentially sent if writes are closed. Recovery
         # is still allowed independently through archived observations.
         with self.database.transaction() as cursor:

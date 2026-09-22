@@ -280,3 +280,21 @@ The withdrawal upgrade rehearsal now restores both migrations 009 and 010 while
 preserving real withdrawal fixtures. See [the setup procedure](docs/PROTOCOL_FUNDING.md#fresh-testnet-starter-credit).
 This increment does not enable a live service, submit work or increase the
 pilot's authorized spending budget.
+
+## Bounded CPU testnet pilot
+
+Migration 011 adds an immutable, optional policy for two CPU precommit attempts,
+one per member in order. The second waits for the first to become active.
+Potentially sent and rejected requests count; failure or uncertainty prevents
+further work. Restart, setup replay and operator resume cannot reset the policy.
+Reservations and first sends recheck the limit under the shared budget lock,
+while recovery, results and proofs remain available. Fresh custody and fee
+observers are required. Pilot state is available to the authenticated operator.
+
+The initial allocation is 1 TIG per member, a `0.02` collateral multiplier and
+a 0.01 TIG fee ceiling per attempt: at most 2.02 TIG authorized inside the 5 TIG
+total cap. Extra custody receipts pause spending, and token top-ups are disabled
+in this mode. API/coordinator configuration must match the recorded testnet
+identity. The new ASGI service factory keeps credentials separate from the
+reviewable configuration and defaults funds, work and settlement to disabled.
+See [local deployment and limit instructions](docs/LOCAL_CPU_PILOT.md).
