@@ -67,7 +67,8 @@ def verify(data):
 
 
 def capture(client,player_id):
-    data={'version':1,'player_id':members.address(player_id),'checked_at':datetime.now(timezone.utc).isoformat(),'error':None}
+    data={'version':1,'player_id':members.address(player_id),'api_origin':getattr(client,'base_url',None),
+        'checked_at':datetime.now(timezone.utc).isoformat(),'error':None}
     try:
         data['start']=client.get('/get-block',{'include_data':'true'})
         data['player_data']=client.get('/get-player-data',{'block_id':data['start']['block']['id'],'player_id':data['player_id']})
@@ -124,14 +125,18 @@ def record(database,data):
     return {'capture_id':identity,'complete':result is not None and not conflict,'error':'confirmed-topup-conflict' if conflict else error}
 
 
-def read(database,identity):
+def read_capture(database,identity):
     with database.transaction() as cursor:
         cursor.execute('SELECT payload_gzip FROM funding_captures WHERE id=%s',(identity,))
         row=cursor.fetchone()
     if not row:raise FundsError('unknown protocol funding capture')
     raw=gzip.decompress(bytes(row['payload_gzip']))
     if hashlib.sha256(raw).hexdigest()!=identity:raise Conflict('protocol funding archive checksum differs')
-    return verify(json.loads(raw))
+    return json.loads(raw)
+
+
+def read(database,identity):
+    return verify(read_capture(database,identity))
 
 
 def balance(cursor):

@@ -262,3 +262,21 @@ production deployment remain unfinished.
 Real challenge execution and live protocol integration are not demonstrated by
 these tests. There is no production v2 release yet. The remaining Stage 0 checks
 still gate dependent live monetary operations.
+
+## Testnet starter fee credit
+
+Fresh testnet accounts can receive 10 TIG of prepaid fee credit without a token
+top-up. Migration 010 and the explicit setup command now record that observed
+balance once, solely as operator protocol credit. The setup requires the
+matching testnet custody identity, fresh archived evidence from the official
+testnet API, and no existing protocol funding or work. It cannot create member
+cash or reset a balance after fees have been consumed. Ordinary funding
+reconciliation continues after initialization.
+
+Nine new PostgreSQL/setup-command checks cover duplicate and concurrent calls,
+spending from protocol credit, separation from custody/member funds, wrong
+network or evidence, prior activity, stale observations and immutable records.
+The withdrawal upgrade rehearsal now restores both migrations 009 and 010 while
+preserving real withdrawal fixtures. See [the setup procedure](docs/PROTOCOL_FUNDING.md#fresh-testnet-starter-credit).
+This increment does not enable a live service, submit work or increase the
+pilot's authorized spending budget.

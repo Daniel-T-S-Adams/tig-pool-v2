@@ -43,6 +43,43 @@ seconds. Missing, stale or unexplained fee data pauses new benchmark
 reservations and first precommit sends. Existing results, proofs and recovery
 continue. The operator pause control cannot override this reconciliation gate.
 
+## Fresh testnet starter credit
+
+TIG [documents 10 TIG of free fee credit for new testnet accounts](https://docs.tig.foundation/deposits/make-topups).
+Getting the testnet dashboard API key may initialize the player after an earlier
+public read returned `player: null`. Always check the actual public fee balance;
+the documentation or an API key alone is not evidence of funds.
+
+Migration 010 and `tools/initialize_testnet_credit_v2.py` provide an explicit,
+one-time setup operation for this credit. After migrating and binding the
+verified testnet custody identity, before accepting any work, run:
+
+```sh
+export POOL_V2_DATABASE_DSN='<isolated v2 testnet database connection>'
+python3 tools/initialize_testnet_credit_v2.py \
+  --api-url https://testnet-api.tig.foundation \
+  --player-id '<dedicated custody and benchmarker address>' \
+  --actor '<operator identity>' \
+  --spool '<persistent v2 protocol funding archive>'
+```
+
+This command needs database setup authority, not the TIG API key. It archives
+a fresh public capture before recording it. Initialization requires the latest
+complete observation, exactly 10 TIG available, no top-ups, the official
+testnet origin and the Base Sepolia test TIG chain/token. Custody and protocol
+player identities must match. Existing protocol journals, reservations, top-up
+activity or persistent funding alerts prevent initialization. A missing,
+stale, changed or different-network balance is held for investigation; this
+operation cannot reconcile arbitrary unexplained balances.
+
+The immutable opening entry credits only the operator's prepaid protocol
+account. It creates no custody cash, member funds, collateral or rewards.
+Concurrent calls and retries return the same opening entry. Once fees have
+been spent, running setup again cannot restore the initial balance. Continue
+the ordinary funding collector afterwards to reconcile consumption. Free
+credit does not authorize spending: deployment submission limits and the
+operator's agreed budget still apply to charges against it.
+
 ## Preparing and reconciling a top-up
 
 The operator dashboard shows protocol funding health and pending top-ups.

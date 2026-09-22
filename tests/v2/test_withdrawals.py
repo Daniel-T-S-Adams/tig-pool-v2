@@ -197,11 +197,12 @@ class WithdrawalTests(DatabaseCase):
         # Restore the previous schema shape in this disposable test database.
         # All real withdrawal rows, journals and chain receipts remain intact.
         with self.db.transaction() as cursor:
-            cursor.execute('DROP TABLE topup_transaction_claims,protocol_topup_credits,protocol_topups,protocol_topup_facts,funding_alerts,funding_captures,protocol_identity,custody_payments,custody_sends CASCADE')
+            cursor.execute('DROP TABLE protocol_opening_credits,topup_transaction_claims,protocol_topup_credits,protocol_topups,protocol_topup_facts,funding_alerts,funding_captures,protocol_identity,custody_payments,custody_sends CASCADE')
             cursor.execute('DROP FUNCTION protect_topup()')
-            cursor.execute("DELETE FROM schema_migrations WHERE name='009_protocol_funding.sql'")
+            cursor.execute("DELETE FROM schema_migrations WHERE name IN ('009_protocol_funding.sql','010_testnet_starter_credit.sql')")
         self.db.migrate()
         self.assertEqual(self.row('SELECT count(*) AS n FROM custody_sends')['n'],3)
+        self.assertEqual(self.row('SELECT count(*) AS n FROM protocol_opening_credits')['n'],0)
         self.assertEqual(self.row('SELECT count(*) AS n FROM custody_payments')['n'],2)
         self.assertEqual(self.row('SELECT transfer_event FROM custody_payments WHERE send_id=%s',(first['id'],))['transfer_event'],
             self.row('SELECT paid_event FROM withdrawals WHERE id=%s',(paid['id'],))['paid_event'])
