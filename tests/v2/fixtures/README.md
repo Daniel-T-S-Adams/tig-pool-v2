@@ -37,3 +37,11 @@ contract call at block 47,196,244 delivered 0.1 test ETH to the pilot custody
 wallet at call path `[5,0]`; the outer transaction sent zero ETH to another
 contract. Offline replay verifies every recorded request and the resulting
 receipt. No credentials are present and the capture itself posts no ledger entry.
+
+`mainnet-reward-distribution.json.gz` records 17 public Base RPC responses and
+the public round-132 emissions response on 23 September 2026. Replay verifies
+the deployed TokenLocker code, its token and 28-day pending period, our empty
+reward balances, and the canonical finalized distribution at block 51,476,049.
+All 338 positive player totals match; the extra bootstrap allocation remains
+explicit. The contract events contain no round ID and prove no receipt in our
+custody wallet. The source URLs and reviewed code checksum are in the fixture.

@@ -1,7 +1,8 @@
-"""Opt-in, durable limits for the initial two-member CPU testnet pilot.
+"""Opt-in, cumulative limits for a two-member CPU testnet pilot.
 
 The fixed two-attempt limit is derived from immutable potentially-sent events,
 so restarts, rejected requests, refunds and operator resume cannot reset it.
+Later operator-reviewed phases extend cumulative limits without resetting events.
 All authorization checks run under the normal protocol-budget transaction lock.
 No result/proof or monetary recovery path consumes another attempt.
 """
@@ -54,6 +55,78 @@ def policy(cursor):
     return row['config'] if row else None
 
 
+def phase(cursor, config):
+    cursor.execute('SELECT * FROM pilot_phases ORDER BY number DESC LIMIT 1')
+    row = cursor.fetchone()
+    if row:
+        return dict(row)
+    return {'number': 0, 'config': {'version': 2, 'phase_key': 'initial-cpu-pilot', 'attempt_limit': 2,
+        'members': [{**member, 'attempt_limit': 1} for member in config['members']]}}
+
+
+def extend(database, value, *, expected_phase, actor, reason):
+    """Append a reviewed phase while paused; original network/budget stay fixed."""
+    from . import controls
+    if (type(expected_phase) is not int or expected_phase < 0
+            or not isinstance(actor, str) or not 1 <= len(actor.strip()) <= 200
+            or not isinstance(reason, str) or not 1 <= len(reason.strip()) <= 1000):
+        raise FundsError('phase extension requires an expected revision, operator and reason')
+    if (not isinstance(value, dict) or set(value) != {'version', 'phase_key', 'attempt_limit', 'members'}
+            or type(value['version']) is not int or value['version'] != 2
+            or not isinstance(value['phase_key'], str) or not 1 <= len(value['phase_key'].strip()) <= 128
+            or type(value['attempt_limit']) is not int or value['attempt_limit'] < 2
+            or not isinstance(value['members'], list) or len(value['members']) != 2):
+        raise FundsError('invalid cumulative pilot phase')
+    normalized = []
+    for item in value['members']:
+        if (not isinstance(item, dict) or set(item) != {'wallet', 'funding_units', 'attempt_limit'}
+                or type(item['attempt_limit']) is not int or item['attempt_limit'] < 1):
+            raise FundsError('each phase member needs a cumulative funding and attempt limit')
+        amount = funding.amount(item['funding_units'])
+        if amount <= 0: raise FundsError('member funding allowance must be positive')
+        normalized.append({**item, 'wallet': members.address(item['wallet']), 'funding_units': str(amount)})
+    value = {**value, 'members': normalized}
+    if sum(item['attempt_limit'] for item in normalized) != value['attempt_limit']:
+        raise FundsError('member attempt allowances must sum to the total attempt limit')
+    with database.transaction() as cursor:
+        lock(cursor, 'custody-identity')
+        lock(cursor, 'operator:protocol-budget')
+        config = policy(cursor)
+        if not config: raise Conflict('initial pilot policy must exist before extending it')
+        cursor.execute('SELECT * FROM pilot_phases WHERE phase_key=%s', (value['phase_key'],))
+        old = cursor.fetchone()
+        if old:
+            if (old['config'], old['previous_number'], old['actor'], old['reason']) != (value, expected_phase, actor, reason):
+                raise Conflict('phase key was reused with different inputs')
+            return dict(old)
+        current = phase(cursor, config)
+        if current['number'] != expected_phase:
+            raise Conflict('pilot phase changed; review the current cumulative allowances')
+        if not controls.paused(database, cursor=cursor):
+            raise Conflict('pause new work before reviewing a later pilot phase')
+        cursor.execute("SELECT 1 FROM reservations WHERE state IN ('reserved','uncertain','accepted') LIMIT 1")
+        if cursor.fetchone(): raise Conflict('finish or reconcile in-flight pilot work before extending')
+        for before, after in zip(current['config']['members'], normalized):
+            if before['wallet'] != after['wallet']:
+                raise Conflict('later phases must retain both original member identities and order')
+            if (int(after['funding_units']) < int(before['funding_units'])
+                    or after['attempt_limit'] < before['attempt_limit']):
+                raise Conflict('cumulative phase allowances cannot decrease or reset')
+        if value['members'] == current['config']['members']:
+            raise Conflict('phase does not change the existing allowances')
+        planned = sum(int(item['funding_units']) for item in normalized)
+        if planned + value['attempt_limit'] * int(config['max_fee_per_attempt_units']) > int(config['maximum_total_tig_units']):
+            raise FundsError('cumulative funding and all fee ceilings exceed the original pilot budget')
+        if attributed_receipts(cursor, config) > planned:
+            raise Conflict('existing attributed receipts exceed the proposed phase allocation')
+        cursor.execute("SELECT count(*) AS count FROM reservation_events WHERE kind='potentially_sent'")
+        used = cursor.fetchone()['count']
+        cursor.execute('''INSERT INTO pilot_phases(number,phase_key,config,previous_number,attempts_before,actor,reason)
+            VALUES (%s,%s,%s,%s,%s,%s,%s) RETURNING *''',
+            (expected_phase+1, value['phase_key'], Json(value), expected_phase, used, actor, reason))
+        return dict(cursor.fetchone())
+
+
 def initialize(database, config, *, actor):
     config = validate(config)
     if not isinstance(actor, str) or not actor.strip() or len(actor) > 200:
@@ -102,6 +175,8 @@ def check(database, cursor, *, member, resource, amount, fee_limit, payload, res
     """Caller holds protocol-budget; exclude only this send's own reservation."""
     config = policy(cursor)
     if not config: return
+    current = phase(cursor, config)
+    allowances = current['config']
     from . import chain_observer
     if not chain_observer.status(database, cursor=cursor)['ready'] or not funding.status(database, cursor=cursor)['ready']:
         raise Conflict('pilot requires fresh reconciled custody and fee observers')
@@ -113,12 +188,19 @@ def check(database, cursor, *, member, resource, amount, fee_limit, payload, res
         JOIN reservations r ON r.id=e.reservation_id JOIN members m ON m.id=r.member_id
         WHERE e.kind='potentially_sent' ORDER BY e.created_at,e.event_key""")
     sent = cursor.fetchall()
-    if len(sent) >= 2: raise Conflict('pilot has used both precommit attempts')
+    if len(sent) >= allowances['attempt_limit']:
+        raise Conflict('pilot has used both precommit attempts' if current['number'] == 0
+                       else 'pilot has used its cumulative precommit attempt limit')
     if any(row['state'] != 'active' for row in sent):
         raise Conflict('pilot waits for confirmed activation; failure or uncertainty stops further work')
-    expected = config['members'][len(sent)]
-    if member['wallet'] != expected['wallet'] or any(row['wallet'] == member['wallet'] for row in sent):
-        raise Conflict('pilot permits one attempt per member in the recorded order')
+    if current['number'] == 0:
+        expected = allowances['members'][len(sent)]
+        if member['wallet'] != expected['wallet'] or any(row['wallet'] == member['wallet'] for row in sent):
+            raise Conflict('pilot permits one attempt per member in the recorded order')
+    else:
+        expected = next((item for item in allowances['members'] if item['wallet'] == member['wallet']), None)
+        if expected is None or sum(row['wallet'] == member['wallet'] for row in sent) >= expected['attempt_limit']:
+            raise Conflict('member has used its cumulative pilot attempt limit')
     if not 0 < amount <= int(expected['funding_units']):
         raise Conflict('pilot requires positive collateral within the member funding allowance')
     cursor.execute("SELECT id FROM reservations WHERE state='reserved'")
@@ -126,7 +208,7 @@ def check(database, cursor, *, member, resource, amount, fee_limit, payload, res
         raise Conflict('pilot permits only one outstanding work reservation')
     # Charge the full frozen fee ceilings even after a rejected request or a
     # refund. A restart cannot recycle this authorization into further work.
-    planned = sum(int(item['funding_units']) for item in config['members'])
+    planned = sum(int(item['funding_units']) for item in allowances['members'])
     if planned + sum(int(row['fee_limit']) for row in sent) + fee_limit > int(config['maximum_total_tig_units']):
         raise Conflict('combined pilot funding and submission fees exceed the total budget')
     if attributed_receipts(cursor, config) > planned:
@@ -142,6 +224,7 @@ def status(database):
     with database.transaction() as cursor:
         config = policy(cursor)
         if not config: return {'configured': False}
+        current = phase(cursor, config)
         cursor.execute("""SELECT count(*) AS attempts,coalesce(sum(r.fee_limit),0) AS fee_ceiling
             FROM reservation_events e JOIN reservations r ON r.id=e.reservation_id
             WHERE e.kind='potentially_sent'""")
@@ -149,9 +232,10 @@ def status(database):
         incoming = attributed_receipts(cursor, config)
         cursor.execute("SELECT balance FROM accounts WHERE id='unattributed:TIG'")
         unallocated = int(cursor.fetchone()['balance'])
-        planned = sum(int(item['funding_units']) for item in config['members'])
+        planned = sum(int(item['funding_units']) for item in current['config']['members'])
         return {'configured': True, 'config': config, 'attempts_used': row['attempts'],
-                'attempts_limit': 2, 'committed_fee_units': str(row['fee_ceiling']),
+                'phase_number': current['number'], 'phase': current['config'],
+                'attempts_limit': current['config']['attempt_limit'], 'committed_fee_units': str(row['fee_ceiling']),
                 'member_allocation_units': str(planned),
                 'attributed_custody_receipt_units': str(incoming),
                 'unattributed_custody_units': str(unallocated),

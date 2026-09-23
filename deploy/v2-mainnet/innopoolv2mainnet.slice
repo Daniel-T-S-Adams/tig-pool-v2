@@ -1,0 +1,13 @@
+[Unit]
+Description=InnoPool v2 mainnet application resource budget
+
+[Slice]
+CPUAccounting=yes
+CPUQuota=100%
+CPUWeight=10
+MemoryAccounting=yes
+MemoryHigh=1792M
+MemoryMax=2G
+MemorySwapMax=0
+TasksAccounting=yes
+TasksMax=256

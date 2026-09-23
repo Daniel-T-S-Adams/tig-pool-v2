@@ -197,9 +197,9 @@ class WithdrawalTests(DatabaseCase):
         # Restore the previous schema shape in this disposable test database.
         # All real withdrawal rows, journals and chain receipts remain intact.
         with self.db.transaction() as cursor:
-            cursor.execute('DROP TABLE native_internal_receipts,pilot_limits,protocol_opening_credits,topup_transaction_claims,protocol_topup_credits,protocol_topups,protocol_topup_facts,funding_alerts,funding_captures,protocol_identity,custody_payments,custody_sends CASCADE')
+            cursor.execute('DROP TABLE pilot_phases,native_internal_receipts,pilot_limits,protocol_opening_credits,topup_transaction_claims,protocol_topup_credits,protocol_topups,protocol_topup_facts,funding_alerts,funding_captures,protocol_identity,custody_payments,custody_sends CASCADE')
             cursor.execute('DROP FUNCTION protect_topup()')
-            cursor.execute("DELETE FROM schema_migrations WHERE name IN ('009_protocol_funding.sql','010_testnet_starter_credit.sql','011_pilot_limits.sql','012_internal_native_funding.sql')")
+            cursor.execute("DELETE FROM schema_migrations WHERE name IN ('009_protocol_funding.sql','010_testnet_starter_credit.sql','011_pilot_limits.sql','012_internal_native_funding.sql','013_pilot_phases.sql')")
         self.db.migrate()
         self.assertEqual(self.row('SELECT count(*) AS n FROM custody_sends')['n'],3)
         self.assertEqual(self.row('SELECT count(*) AS n FROM protocol_opening_credits')['n'],0)
