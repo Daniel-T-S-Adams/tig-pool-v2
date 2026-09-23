@@ -19,7 +19,7 @@ from .auth import Auth, AuthenticationError
 from .database import Database
 from .chain import Chain, Network, Rpc, FEE_MODELS
 from . import members, withdrawals, work_requests, member_protocol
-from . import artifacts
+from . import artifacts, native_funding
 from . import controls,custody,dashboard,deposits,settlement,chain_observer,funding,topups,releases
 from .protocol import ProtocolDataError
 from .money import Conflict, FundsError, InsufficientFunds
@@ -47,6 +47,7 @@ class Settings:
     release_manifest: dict | None = None
     build_commit: str | None = None
     worker_installer: bytes | None = None
+    custody_trace_rpc_url: str | None = None
 
 
 class Input(BaseModel):
@@ -114,6 +115,10 @@ class DepositAttribution(CustodyReceipt):
     reason: StrictStr = Field(min_length=1,max_length=1000)
 
 
+class NativeCustodyReceipt(CustodyReceipt):
+    trace_address: list[StrictInt] | None = Field(default=None, min_length=1, max_length=64)
+
+
 class RevokeToken(Input):
     token: StrictStr = Field(min_length=32, max_length=128)
 
@@ -158,6 +163,9 @@ def create_app(settings):
     app = FastAPI(title="InnoPool v2", version=API_VERSION)
     app.state.database, app.state.auth = database, auth
     app.state.payment_chain = payment_chain
+    if settings.custody_trace_rpc_url and payment_chain is None:
+        raise ValueError('native trace RPC requires verified custody configuration')
+    app.state.custody_trace_rpc = Rpc(settings.custody_trace_rpc_url) if settings.custody_trace_rpc_url else None
     web_directory=Path(__file__).with_name('web')
     app.mount('/assets',StaticFiles(directory=web_directory),name='v2-assets')
 
@@ -332,10 +340,15 @@ def create_app(settings):
         return response({'destination':deposits.receive(database,chain.transfer(body.tx_hash,body.log_index))})
 
     @app.post('/api/v2/operator/custody/receive-native')
-    def receive_native(body:CustodyReceipt,actor=Depends(operator)):
+    def receive_native(body:NativeCustodyReceipt,actor=Depends(operator)):
         if body.log_index is not None:raise HTTPException(400,'a native funding transaction has no token event index')
         chain=custody_chain()
-        custody.receive_native(database,chain.transaction(body.tx_hash,fee_model=settings.withdrawal_fee_model))
+        if body.trace_address is None:
+            custody.receive_native(database,chain.transaction(body.tx_hash,fee_model=settings.withdrawal_fee_model))
+        else:
+            receipt=native_funding.verify(chain,app.state.custody_trace_rpc,body.tx_hash,body.trace_address,
+                                          fee_model=settings.withdrawal_fee_model)
+            native_funding.receive(database,receipt,actor=actor)
         return response({'received':True})
 
     @app.post('/api/v2/operator/custody/attribute-deposit')

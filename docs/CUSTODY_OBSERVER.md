@@ -56,7 +56,7 @@ opaque source identifier in captures, rather than persisting provider secrets.
 Verified receipts from a registered member's source wallet are credited once.
 Unknown sources remain in the unattributed account for operator review. The
 operator page can import a specific verified TIG receipt, record a verified
-direct native funding transfer, and assign an unattributed deposit to a
+direct or verified internal native funding transfer, and assign an unattributed deposit to a
 verified member wallet or operator funds with an ownership-review reason.
 Public knowledge of a transaction hash is not ownership evidence.
 
@@ -76,6 +76,41 @@ operator-paid fee through one shared transaction registry. Unexplained outgoing 
 unrecorded native funding or unknown costs hold new spending; they never trigger
 a member haircut. A change to a previously recorded finalized anchor creates a
 persistent conflict requiring explicit investigation and correction.
+
+## Native funding sent through a contract
+
+**Role: pool operator.** Migration 012 records each internal native receipt by
+chain, transaction hash and exact call path, separately from the outer
+transaction. Configure `custody_trace_rpc_url` in the API service with a trusted
+read-only RPC that supports the [Parity-format `trace_transaction` method](https://docs.erigon.tech/interacting-with-erigon/trace).
+The custody RPC still verifies the network, receipt, canonical block, finality
+and fee evidence. The trace RPC must identify the same chain and block.
+
+On the operator page, choose **Record native funding**, enter the transaction
+hash and the verified internal call path, such as `5.0`. Leave the path empty
+for a direct transfer. The equivalent operator API request is:
+
+```json
+{"tx_hash":"<full transaction hash>","trace_address":[5,0]}
+```
+
+Send it to `POST /api/v2/operator/custody/receive-native`. The path comes from
+the verified trace; it is not the transaction's log index or an explorer's
+flattened row number. No amount or sender can be supplied by the caller.
+
+Only a positive, successful `CALL` into undelegated pool custody is accepted.
+Failed calls and descendants of reverted calls, incomplete trees, mismatched
+blocks, and `DELEGATECALL`/`CALLCODE` values cannot create funding. Outer
+transactions sent by custody are rejected from this incoming-funding path.
+Raw receipt and trace evidence is retained in immutable records. Repeated or
+concurrent imports credit the operator's native-fee account once; the external
+sender's gas is not charged to the pool. Member TIG and collateral are unchanged.
+The observer must subsequently reconcile the wallet before new spending resumes.
+
+The optional trace endpoint has the same trust requirement as a configured
+custody RPC. Missing or unsupported tracing keeps the receipt unresolved. No
+balance snapshot, transaction input or explorer display substitutes for verified
+transfer evidence. Automatic native-transfer discovery remains a separate task.
 
 ## Evidence and remaining adapters
 

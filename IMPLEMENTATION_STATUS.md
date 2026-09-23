@@ -307,3 +307,16 @@ attributed receipts, the unattributed balance and whether allocation is within
 the recorded limit. Regression checks cover a 2,000 TIG unallocated receipt,
 replay and restart, the unchanged two-attempt cap, and later attribution to
 either a member or operator blocking a reserved first send.
+
+## Native funding through contracts
+
+Migration 012 and the operator receipt API now support finalized internal
+native transfers identified by their exact call path. An explicitly configured
+trace RPC must match the custody RPC's chain, canonical transaction and block.
+The verifier checks the complete trace tree and rejects reverted ancestors,
+non-transferring call types and custody-originated transactions. Immutable
+receipt identities prevent concurrent imports or restarts from crediting the
+same transfer twice. The outer sender pays its own gas; only the received
+native amount credits the operator. Member TIG, collateral and pilot caps are
+unchanged. The operator form accepts an optional call path, retaining its
+existing direct-transfer behavior. See [native funding instructions](docs/CUSTODY_OBSERVER.md#native-funding-sent-through-a-contract).
