@@ -9,6 +9,8 @@ import os
 from pathlib import Path
 import tempfile
 import threading
+import time
+import uuid
 from urllib.parse import urlencode, urlsplit
 from urllib.request import Request, urlopen
 
@@ -37,14 +39,25 @@ class PublicTigClient:
     def get(self, path, params=None):
         if not path.startswith("/get-") or "?" in path or "#" in path:
             raise ValueError("the probe accepts only public /get- endpoints")
-        params = params or {}
+        params = dict(params or {})
+        if path == "/get-block":
+            if "block_id" in params or "height" in params:
+                raise ValueError("/get-block returns the current head; historical block selectors are unsupported")
+            # TIG's public edge caches this mutable endpoint for 15 seconds,
+            # even with Cache-Control: no-cache. Distinct reads must reach the
+            # current head, especially the two sides of a capture bracket.
+            params["_innopool_read"] = uuid.uuid4().hex
         url = self.base_url + path + ("?" + urlencode(params) if params else "")
         request = Request(url, headers={
             "Accept": "application/json", "Accept-Encoding": "identity",
             "Cache-Control": "no-cache", "User-Agent": "innopool-v2-readonly-probe/0.1",
         })
+        started_at = datetime.now(timezone.utc).isoformat()
+        started = time.monotonic()
         with urlopen(request, timeout=self.timeout) as response:
             raw = response.read(self.max_response_bytes + 1)
+            response_headers = {name.lower(): value for name, value in response.headers.items()
+                if name.lower() in {"date", "age", "cache-control", "cf-cache-status", "last-modified"}}
         if len(raw) > self.max_response_bytes:
             raise ProtocolDataError(f"{path}: response exceeds the configured size limit")
         payload = json.loads(raw)
@@ -53,7 +66,10 @@ class PublicTigClient:
         with self._lock:
             self.records.append({
                 "path": path, "params": params,
+                "started_at": started_at,
                 "observed_at": datetime.now(timezone.utc).isoformat(),
+                "duration_seconds": time.monotonic() - started,
+                "response_headers": response_headers,
                 "canonical_sha256": hashlib.sha256(canonical_json(payload)).hexdigest(),
             })
         return payload
