@@ -18,6 +18,12 @@ from .money import FundsError, units
 TRANSFER_TOPIC = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"
 
 
+class UnsupportedCustodyTransaction(FundsError):
+    def __init__(self, transaction_type):
+        self.transaction_type = transaction_type
+        super().__init__('payment uses a wallet mode that requires separate verified recovery')
+
+
 def hex_bytes(value, size):
     if not isinstance(value, str) or not re.fullmatch(r"0x[0-9a-fA-F]{" + str(size * 2) + "}", value):
         raise FundsError("malformed chain hash or ABI data")
@@ -219,6 +225,13 @@ class Chain:
             evidence)
 
     def transaction(self, tx_hash, *, fee_model):
+        return self._transaction(tx_hash, fee_model=fee_model, allowed_types=(0, 1, 2))
+
+    def authorization_transaction(self, tx_hash, *, fee_model):
+        """Outer relayer facts only; these do not authorize custody accounting."""
+        return self._transaction(tx_hash, fee_model=fee_model, allowed_types=(4,))
+
+    def _transaction(self, tx_hash, *, fee_model, allowed_types):
         tx_hash = hex_bytes(tx_hash, 32)
         evidence = self._confirmed_receipt(tx_hash)
         receipt, header = evidence['receipt'], evidence['header']
@@ -229,8 +242,8 @@ class Chain:
                 or hex_bytes(transaction['blockHash'], 32) != hex_bytes(receipt['blockHash'], 32)
                 or quantity(transaction['blockNumber']) != quantity(receipt['blockNumber'])):
             raise FundsError('transaction network or canonical inclusion differs from its receipt')
-        if quantity(transaction['type']) not in (0, 1, 2):
-            raise FundsError('manual custody payments currently require a standard direct EOA transaction')
+        if quantity(transaction['type']) not in allowed_types:
+            raise UnsupportedCustodyTransaction(quantity(transaction['type']))
         sender = address(transaction['from'])
         recipient = address(transaction['to']) if transaction.get('to') else None
         for key, expected in (('from', sender), ('to', recipient)):

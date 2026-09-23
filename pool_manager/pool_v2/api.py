@@ -17,9 +17,9 @@ from pydantic import BaseModel, ConfigDict, Field, StrictBool,StrictInt, StrictS
 
 from .auth import Auth, AuthenticationError
 from .database import Database
-from .chain import Chain, Network, Rpc, FEE_MODELS
+from .chain import Chain, Network, Rpc, FEE_MODELS, UnsupportedCustodyTransaction
 from . import members, withdrawals, work_requests, member_protocol
-from . import artifacts, native_funding
+from . import artifacts, native_funding, sponsored_withdrawals
 from . import controls,custody,dashboard,deposits,settlement,chain_observer,funding,topups,releases
 from .protocol import ProtocolDataError
 from .money import Conflict, FundsError, InsufficientFunds
@@ -90,6 +90,11 @@ class WithdrawalSend(Input):
 class WithdrawalReconcile(Input):
     tx_hash: StrictStr | None = Field(default=None, pattern=r"^0x[0-9a-fA-F]{64}$")
     log_index: StrictInt | None = Field(default=None, ge=0)
+
+
+class SponsoredWithdrawalRecovery(WithdrawalReview):
+    tx_hash: StrictStr = Field(pattern=r"^0x[0-9a-fA-F]{64}$")
+    log_index: StrictInt = Field(ge=0)
 
 
 class TopupRequest(WithdrawalSend):
@@ -553,14 +558,36 @@ def create_app(settings):
     def reconcile_withdrawal(identity: uuid.UUID, body: WithdrawalReconcile, actor=Depends(operator)):
         chain = custody_chain()
         attempt = withdrawals.instructions(database,identity)
-        tx_hash = body.tx_hash or chain.find_nonce(int(attempt['nonce']),after_height=attempt['preflight']['block_number'])
+        claims = attempt['claimed_tx_hashes']
+        tx_hash = body.tx_hash or (claims[0] if len(claims)==1 else None)
+        tx_hash = tx_hash or chain.find_nonce(int(attempt['nonce']),after_height=attempt['preflight']['block_number'])
         if not tx_hash:
             return response({'status':'awaiting_final_transaction','attempt_id':str(identity)})
         withdrawals.claim_transaction(database,identity,tx_hash,actor=actor)
-        tx = chain.transaction(tx_hash,fee_model=attempt['fee_model'])
+        try:
+            tx = chain.transaction(tx_hash,fee_model=attempt['fee_model'])
+        except UnsupportedCustodyTransaction as failure:
+            if failure.transaction_type != 4:
+                raise
+            outer = chain.authorization_transaction(tx_hash,fee_model=attempt['fee_model'])
+            index = matching_event(chain,outer,attempt,body.log_index)
+            if index is None:
+                raise FundsError('sponsored payment has no unique matching withdrawal event')
+            recovery = sponsored_withdrawals.verify(chain, app.state.custody_trace_rpc,
+                tx_hash, index, nonce=int(attempt['nonce']), fee_model=attempt['fee_model'])
+            return response(withdrawals.reconcile_sponsored(database,identity,recovery,actor=actor,
+                reason='Operator checked the already sent initial EIP-7702 sponsored withdrawal'))
         index = matching_event(chain,tx,attempt,body.log_index)
         token = chain.transfer(tx_hash,index) if index is not None else None
         return response(withdrawals.reconcile(database,identity,tx,token))
+
+    @app.post('/api/v2/operator/withdrawal-attempts/{identity}/recover-sponsored')
+    def recover_sponsored_withdrawal(identity: uuid.UUID, body: SponsoredWithdrawalRecovery, actor=Depends(operator)):
+        chain = custody_chain()
+        attempt = withdrawals.instructions(database, identity)
+        recovery = sponsored_withdrawals.verify(chain, app.state.custody_trace_rpc,
+            body.tx_hash, body.log_index, nonce=int(attempt['nonce']), fee_model=attempt['fee_model'])
+        return response(withdrawals.reconcile_sponsored(database, identity, recovery, actor=actor, reason=body.reason))
 
     def matching_event(chain,tx,attempt,index):
         if tx.successful and index is None:

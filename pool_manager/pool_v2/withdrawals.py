@@ -259,6 +259,73 @@ def reconcile(database, attempt_id, transaction, transfer=None):
         return result
 
 
+def reconcile_sponsored(database, attempt_id, recovery, *, actor, reason):
+    """Account once for a verified initial EIP-7702 payment without a resend."""
+    from .sponsored_withdrawals import SponsoredWithdrawal
+    if not isinstance(recovery, SponsoredWithdrawal) or not actor or not reason:
+        raise FundsError('verified sponsored recovery and operator review required')
+    tx, transfer = recovery.transaction, recovery.transfer
+    if not tx.successful or tx.sender == tx.network.custody:
+        raise Conflict('recovery must be a successful externally sponsored transaction')
+    with database.transaction() as cursor:
+        custody.bind(cursor, tx.network)
+        cursor.execute('SELECT * FROM withdrawal_attempts WHERE id=%s', (attempt_id,))
+        attempt = cursor.fetchone()
+        if not attempt:
+            raise FundsError('unknown withdrawal attempt')
+        row = _locked(cursor, attempt['withdrawal_id'])
+        cursor.execute('SELECT * FROM withdrawal_reviews WHERE withdrawal_id=%s', (row['id'],))
+        review = cursor.fetchone()
+        if (attempt['chain_id'], attempt['sender'], int(attempt['nonce']), review['token'], review['fee_model']) != (
+                tx.network.chain_id, tx.network.custody, recovery.custody_nonce, tx.network.token, tx.fee_model):
+            raise Conflict('sponsored recovery differs from the frozen custody route')
+        if (not tx.network.require_finalized or tx.network.confirmations < review['confirmations']
+                or transfer.network != tx.network):
+            raise Conflict('sponsored recovery cannot weaken finality or change network')
+        if (tx.block_timestamp + timedelta(seconds=5) < attempt['sent_at']
+                or tx.block_number <= attempt['preflight']['block_number']):
+            raise Conflict('sponsored payment predates the prepared attempt')
+        if (transfer.sender, transfer.recipient, transfer.amount, transfer.tx_hash, transfer.block_hash) != (
+                attempt['sender'], row['recipient'], int(row['amount']), tx.tx_hash, tx.block_hash):
+            raise Conflict('sponsored token event differs from the full frozen withdrawal')
+        cursor.execute('SELECT * FROM withdrawal_attempt_outcomes WHERE attempt_id=%s', (attempt_id,))
+        previous = cursor.fetchone()
+        if previous:
+            cursor.execute('SELECT delegate FROM custody_authorization_payments WHERE send_id=%s', (attempt_id,))
+            authorization = cursor.fetchone()
+            if (previous['tx_hash'] != tx.tx_hash or previous['outcome'] != 'paid'
+                    or row['paid_event'] != transfer.event_id or int(previous['fee']) != 0
+                    or not authorization or authorization['delegate'] != recovery.delegate):
+                raise Conflict('attempt already has different financial attribution')
+            custody.save_transaction(cursor, tx); deposits.save_transfer(cursor, transfer)
+            return dict(previous)
+        if row['state'] != 'uncertain':
+            raise Conflict('withdrawal has no unresolved payment to recover')
+        custody.save_transaction(cursor, tx)
+        deposits.save_transfer(cursor, transfer)
+        cursor.execute('SELECT id FROM withdrawals WHERE paid_event=%s', (transfer.event_id,))
+        if cursor.fetchone():
+            raise Conflict('token event already paid another withdrawal')
+        fee_limit = int(attempt['fee_limit'])
+        journal_id = ledger.post(cursor, f'withdrawal-attempt:{attempt_id}:reconcile', 'withdrawal_paid',
+            [(gas_hold(attempt_id), -fee_limit), ('operator:custody:NATIVE', fee_limit),
+             (pending(row['id']), -int(row['amount'])), ('external:custody:TIG', int(row['amount']))],
+            {'withdrawal_id': str(row['id']), 'attempt_id': str(attempt_id), 'chain_id': tx.network.chain_id,
+             'tx_hash': tx.tx_hash, 'fee': 0, 'relayer_fee': tx.fee, 'fee_model': tx.fee_model,
+             'transfer_event': transfer.event_id, 'actor': actor, 'reason': reason,
+             'route': 'initial-eip7702-sponsored'})
+        custody.record_payment(cursor, attempt_id, tx, transfer.event_id, journal_id,
+                               authorization=recovery, actor=actor, reason=reason)
+        cursor.execute('''INSERT INTO withdrawal_attempt_outcomes
+            (attempt_id,chain_id,tx_hash,outcome,fee,journal_id)
+            VALUES (%s,%s,%s,'paid',0,%s) RETURNING *''',
+            (attempt_id, tx.network.chain_id, tx.tx_hash, journal_id))
+        outcome = dict(cursor.fetchone())
+        cursor.execute("UPDATE withdrawals SET state='paid',paid_event=%s WHERE id=%s", (transfer.event_id, row['id']))
+        cursor.execute('UPDATE members SET last_paid_at=%s WHERE id=%s', (tx.block_timestamp, row['member_id']))
+        return outcome
+
+
 def instructions(database, attempt_id):
     """Frozen manual wallet instructions. Reading them never authorizes a resend."""
     with database.transaction() as cursor:
@@ -269,6 +336,8 @@ def instructions(database, attempt_id):
         row = cursor.fetchone()
         if not row: raise FundsError('unknown withdrawal attempt')
         value = dict(row)
+        cursor.execute('SELECT tx_hash FROM withdrawal_transaction_claims WHERE attempt_id=%s ORDER BY created_at', (attempt_id,))
+        value['claimed_tx_hashes'] = [claim['tx_hash'] for claim in cursor.fetchall()]
         value['transaction'] = {'from': row['sender'], 'to': row['token'], 'chainId': hex(row['chain_id']),
             'nonce': hex(int(row['nonce'])), 'value': '0x0',
             'data': '0xa9059cbb'+'0'*24+row['recipient'][2:]+f"{int(row['amount']):064x}"}

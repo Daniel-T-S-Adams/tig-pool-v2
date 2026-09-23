@@ -45,3 +45,14 @@ reward balances, and the canonical finalized distribution at block 51,476,049.
 All 338 positive player totals match; the extra bootstrap allocation remains
 explicit. The contract events contain no round ID and prove no receipt in our
 custody wallet. The source URLs and reviewed code checksum are in the fixture.
+
+`sponsored-withdrawal-47205354.json.gz` contains 28 read-only RPC responses
+captured on 23 September 2026 from Base Sepolia and its PublicNode trace service.
+A finalized 0.05 TIG pilot withdrawal used a relayer and an initial EIP-7702
+custody authorization. The fixture includes the actual outer transaction, full
+canonical block, public authorization signature, token event, custody code/
+nonce/balances before and after, and complete zero-value call trace. Its proof
+establishes zero custody-native cost while preserving the relayer's actual fee.
+No private key, API key or operator/session token is included. Recorded replay
+does not itself authorize a ledger mutation. Accounting tests explicitly shift
+the fixture timestamp into simulated time; the evidence test uses it unchanged.
