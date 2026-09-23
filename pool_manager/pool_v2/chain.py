@@ -129,7 +129,8 @@ def transaction_fee(receipt, model):
 
 class Rpc:
     METHODS = {"eth_chainId", "eth_call", "eth_getTransactionReceipt", "eth_getBlockByNumber", "eth_getLogs",
-               "eth_getTransactionByHash", "eth_getTransactionCount", "eth_getBalance", "eth_getCode"}
+               "eth_getTransactionByHash", "eth_getTransactionCount", "eth_getBalance", "eth_getCode",
+               "trace_transaction"}
 
     def __init__(self, url, timeout=20):
         parsed = urlsplit(url)

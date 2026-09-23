@@ -29,3 +29,11 @@ captured on 20 September 2026. It verifies a TIG transfer of
 balance change. It is an external protocol fixture, not a member deposit in
 the test ledger. The gzip JSON includes the capture time, explicit network,
 request parameters and responses, and a non-secret source label.
+
+`base-sepolia-internal-native.json.gz` records 13 read-only RPC responses on
+23 September 2026. The custody endpoint was `https://sepolia.base.org` and the
+trace endpoint was `https://base-sepolia-rpc.publicnode.com`. A finalized
+contract call at block 47,196,244 delivered 0.1 test ETH to the pilot custody
+wallet at call path `[5,0]`; the outer transaction sent zero ETH to another
+contract. Offline replay verifies every recorded request and the resulting
+receipt. No credentials are present and the capture itself posts no ledger entry.

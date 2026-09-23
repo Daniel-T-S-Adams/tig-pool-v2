@@ -211,11 +211,12 @@ function attributeDeposit(receipt,operator) {
   });if(!operator)field('Verified member wallet','deposit-member-wallet');field('Ownership check','attribution-reason');
 }
 function recordReceipt(native) {
-  dialog(native?'Record native funding':'Record TIG receipt',native?'Verify a direct incoming transfer of the network’s native token to the custody wallet. It funds operator network fees.':'Verify an incoming TIG event. Known member sources are credited automatically; other sources remain for review.','Verify receipt',async()=>{
+  dialog(native?'Record native funding':'Record TIG receipt',native?'Verify incoming network-fee funds. For a transfer sent through a contract, enter its verified call path; leave the path empty for a direct transfer.':'Verify an incoming TIG event. Known member sources are credited automatically; other sources remain for review.','Verify receipt',async()=>{
     const body={tx_hash:$('receipt-hash').value.trim()};
     if(!native){const index=Number($('receipt-index').value);if(!Number.isSafeInteger(index)||index<0)throw Error('Enter a valid transfer event index.');body.log_index=index;}
+    if(native){const path=$('receipt-call-path').value.trim();if(path){if(!/^\d+(\.\d+)*$/.test(path))throw Error('Enter the verified call path, for example 5.0.');body.trace_address=path.split('.').map(Number);if(body.trace_address.length>64||body.trace_address.some(i=>!Number.isSafeInteger(i)||i>=2147483648))throw Error('Invalid call path.');}}
     await api('operator/custody/'+(native?'receive-native':'receive-token'),body);await loadOperator();notice('Verified receipt recorded. The observer will refresh wallet reconciliation.');
-  });field('Transaction hash','receipt-hash');if(!native)field('Transfer event index','receipt-index');
+  });field('Transaction hash','receipt-hash');if(!native)field('Transfer event index','receipt-index');else field('Contract transfer call path · optional','receipt-call-path','',{optional:true,placeholder:'Example: 5.0; empty for direct transfers'});
 }
 $('record-token-receipt').addEventListener('click',()=>recordReceipt(false));
 $('record-native-funding').addEventListener('click',()=>recordReceipt(true));
