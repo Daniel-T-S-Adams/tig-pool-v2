@@ -155,6 +155,41 @@ class PilotTests(DatabaseCase):
         with self.assertRaisesRegex(Conflict, 'top-ups are disabled'):
             with self.db.transaction() as cursor: pilot.prohibit_topup(cursor)
 
+    def test_unattributed_grant_stays_separate_from_member_funding_and_attempt_budget(self):
+        grant = replace(transfer('0x'+'5'*40, amount=2000*TIG), network=TESTNET)
+        deposits.receive(self.db, grant)
+        # Replaying the receipt neither allocates the grant nor doubles it.
+        deposits.receive(self.db, grant)
+        self.assertEqual(self.balance()['available'], TIG)
+        self.assertEqual(self.row("SELECT balance FROM accounts WHERE id='operator:custody:TIG'")['balance'], 0)
+        state = pilot.status(self.db)
+        self.assertEqual(state['attributed_custody_receipt_units'], str(2*TIG))
+        self.assertEqual(state['unattributed_custody_units'], str(2000*TIG))
+        self.assertTrue(state['custody_receipts_within_allocation'])
+        first = self.reserve(); self.send(first); self.active(first)
+        second = self.reserve('b', member=self.other); self.send(second); self.active(second, 'b'*32)
+        self.db = Database(self.db.dsn)
+        with self.assertRaisesRegex(Conflict, 'both precommit attempts'):
+            self.reserve('grant-does-not-buy-more-work')
+        self.assertEqual(pilot.status(self.db)['unattributed_custody_units'], str(2000*TIG))
+
+    def assert_grant_attribution_blocks_send(self, *, operator):
+        grant = replace(transfer('0x'+'5'*40, amount=2000*TIG), network=TESTNET)
+        deposits.receive(self.db, grant)
+        row = self.reserve()
+        deposits.attribute_reviewed(self.db, grant, actor='operator', evidence={'fixture': True},
+            member_id=None if operator else self.member, operator=operator)
+        self.assertFalse(pilot.status(self.db)['custody_receipts_within_allocation'])
+        with self.assertRaisesRegex(Conflict, 'attributed custody receipts exceed'):
+            self.send(row)
+        self.assertEqual(pilot.status(self.db)['attempts_used'], 0)
+
+    def test_grant_attribution_to_member_before_send_rechecks_budget(self):
+        self.assert_grant_attribution_blocks_send(operator=False)
+
+    def test_grant_attribution_to_operator_before_send_rechecks_budget(self):
+        self.assert_grant_attribution_blocks_send(operator=True)
+
     def test_result_submission_remains_available_when_attempt_limit_is_used(self):
         first = self.reserve(); self.send(first); self.active(first)
         second = self.reserve('b', member=self.other); self.send(second); self.accept(second, 'b'*32)
