@@ -293,8 +293,17 @@ observers are required. Pilot state is available to the authenticated operator.
 
 The initial allocation is 1 TIG per member, a `0.02` collateral multiplier and
 a 0.01 TIG fee ceiling per attempt: at most 2.02 TIG authorized inside the 5 TIG
-total cap. Extra custody receipts pause spending, and token top-ups are disabled
+total cap. Extra attributed custody receipts pause spending, and token top-ups are disabled
 in this mode. API/coordinator configuration must match the recorded testnet
 identity. The new ASGI service factory keeps credentials separate from the
 reviewable configuration and defaults funds, work and settlement to disabled.
 See [local deployment and limit instructions](docs/LOCAL_CPU_PILOT.md).
+
+Large unmatched receipts remain in the existing, non-spendable unattributed
+account and do not increase pilot authorization. The funding guard counts
+receipts only after attribution to a member or operator, and rechecks that
+total before both reservation and first send. The operator status includes
+attributed receipts, the unattributed balance and whether allocation is within
+the recorded limit. Regression checks cover a 2,000 TIG unallocated receipt,
+replay and restart, the unchanged two-attempt cap, and later attribution to
+either a member or operator blocking a reserved first send.

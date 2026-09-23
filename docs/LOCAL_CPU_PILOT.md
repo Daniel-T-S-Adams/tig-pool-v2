@@ -67,10 +67,17 @@ review of a new validation scope; its immutable record has no reset API.
 The fee ceiling is 0.01 TIG per attempt, so the configured authorization is at
 most **2.02 TIG**, below the overall 5 TIG cap. Current expected fees are lower,
 but must be checked when selecting work. Charges paid from starter credit count
-the same way. Additional custody receipts above the 2 TIG member allocation
-pause new work, and new token top-ups are disabled. The pool cannot prevent an
-external wallet from making an unsolicited transfer; follow the exact funding
-instructions and reconcile any unexpected receipt. Native gas uses separately
+the same way. Custody receipts attributed to member or operator balances above
+the 2 TIG funding allocation pause new work, and new token top-ups are disabled.
+An unmatched receipt remains in the separate `unattributed:TIG` account: it
+reconciles with the wallet but cannot fund collateral, withdrawals or submission
+fees. Such a receipt is outside the pilot allocation until an operator reviews
+and attributes it. If attributed later, its full original amount counts, and
+the next reservation/first send rechecks the cap. Returns and restarts do not
+reset the receipt total or either attempt. The pilot status endpoint reports
+both attributed receipts and the remaining unattributed balance. The pool cannot
+prevent an external wallet from making an unsolicited transfer; follow the exact
+funding instructions and reconcile any unexpected receipt. Native gas uses separately
 funded Base Sepolia test ETH only. No mainnet spending is authorized.
 
 Set `require_pilot_limits: true` in both API and coordinator service configs.

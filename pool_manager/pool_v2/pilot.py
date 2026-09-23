@@ -87,6 +87,17 @@ def require_service(database, *, api_origin, player_id, required=False):
     return config
 
 
+def attributed_receipts(cursor, config):
+    # Unattributed custody receipts are held in a separate, non-spendable ledger
+    # account. Receiving a grant there does not allocate it to this pilot. If it
+    # is later attributed to a member/operator, count the full original receipt;
+    # withdrawals, collateral releases and restarts cannot recycle the allowance.
+    cursor.execute('''SELECT coalesce(sum(t.amount),0) AS incoming FROM transfers t
+        JOIN transfer_attributions a ON a.event_id=t.event_id
+        WHERE t.recipient=%s AND t.sender<>t.recipient''', (config['pool_wallet'],))
+    return int(cursor.fetchone()['incoming'])
+
+
 def check(database, cursor, *, member, resource, amount, fee_limit, payload, reservation_id=None):
     """Caller holds protocol-budget; exclude only this send's own reservation."""
     config = policy(cursor)
@@ -118,10 +129,8 @@ def check(database, cursor, *, member, resource, amount, fee_limit, payload, res
     planned = sum(int(item['funding_units']) for item in config['members'])
     if planned + sum(int(row['fee_limit']) for row in sent) + fee_limit > int(config['maximum_total_tig_units']):
         raise Conflict('combined pilot funding and submission fees exceed the total budget')
-    cursor.execute('SELECT coalesce(sum(amount),0) AS incoming FROM transfers WHERE recipient=%s AND sender<>recipient',
-                   (config['pool_wallet'],))
-    if int(cursor.fetchone()['incoming']) > planned:
-        raise Conflict('pilot custody receipts exceed the recorded funding allocation')
+    if attributed_receipts(cursor, config) > planned:
+        raise Conflict('pilot attributed custody receipts exceed the recorded funding allocation')
 
 
 def prohibit_topup(cursor):
@@ -137,6 +146,13 @@ def status(database):
             FROM reservation_events e JOIN reservations r ON r.id=e.reservation_id
             WHERE e.kind='potentially_sent'""")
         row = cursor.fetchone()
+        incoming = attributed_receipts(cursor, config)
+        cursor.execute("SELECT balance FROM accounts WHERE id='unattributed:TIG'")
+        unallocated = int(cursor.fetchone()['balance'])
+        planned = sum(int(item['funding_units']) for item in config['members'])
         return {'configured': True, 'config': config, 'attempts_used': row['attempts'],
                 'attempts_limit': 2, 'committed_fee_units': str(row['fee_ceiling']),
-                'member_allocation_units': str(sum(int(item['funding_units']) for item in config['members']))}
+                'member_allocation_units': str(planned),
+                'attributed_custody_receipt_units': str(incoming),
+                'unattributed_custody_units': str(unallocated),
+                'custody_receipts_within_allocation': incoming <= planned}
