@@ -100,6 +100,29 @@ class ChainObserverTests(DatabaseCase):
     def capture(self,first=100,count=1000):
         return chain_observer.capture(NETWORK,self.source.rpc,first,count=count,source='fixture')
 
+    def test_unknown_delegation_is_observed_but_cannot_make_custody_ready(self):
+        self.source.add()
+        self.source.code='0xef0100'+'7'*40
+        data=self.capture()
+        self.assertEqual(data['version'],2)
+        self.assertIsNone(data['error'])
+        result=chain_observer.record(self.db,data,initialize=True)
+        self.assertFalse(result['healthy'])
+        self.assertIn('delegation',result['reason'])
+        self.assertEqual(chain_observer.status(self.db)['check']['custody_code'],self.source.code)
+        self.assertEqual(self.balance()['available'],100*TIG)
+        self.assertEqual(controls.blocked(self.db),'custody-reconciliation')
+        old=deepcopy(data);old['version']=1
+        with self.assertRaises(FundsError):chain_observer.verify(old)
+
+    def test_arbitrary_contract_code_still_cannot_advance_custody_capture(self):
+        self.source.add()
+        self.source.code='0x6000'
+        data=self.capture()
+        self.assertIsNotNone(data['error'])
+        with self.assertRaises(FundsError):chain_observer.record(self.db,data,initialize=True)
+        self.assertFalse(chain_observer.status(self.db)['initialized'])
+
     def test_finalized_deposits_replay_from_archive_once_and_unknown_sources_stay_unattributed(self):
         self.source.add(amount=100*TIG+1)
         self.source.add(sender='0x'+'8'*40,amount=7*TIG,height=101)

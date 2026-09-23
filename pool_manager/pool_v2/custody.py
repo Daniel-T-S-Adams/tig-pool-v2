@@ -81,20 +81,33 @@ def reserve_nonce(cursor,identity,network,nonce,kind):
         (identity,network.chain_id,network.custody,nonce,kind))
 
 
-def record_payment(cursor,identity,transaction,transfer_event,journal_id):
+def record_payment(cursor,identity,transaction,transfer_event,journal_id,*,authorization=None,actor=None,reason=None):
     """One verified finalized transaction can explain only one custody send."""
     cursor.execute('SELECT chain_id,sender,nonce FROM custody_sends WHERE id=%s',(identity,))
     route=cursor.fetchone()
+    sender, nonce, fee = transaction.sender, transaction.nonce, transaction.fee
+    if authorization is not None:
+        from .sponsored_withdrawals import SponsoredWithdrawal
+        if (not isinstance(authorization, SponsoredWithdrawal) or authorization.transaction != transaction
+                or authorization.transfer.event_id != transfer_event or not actor or not reason):
+            raise FundsError('verified sponsored payment and explicit operator review required')
+        sender, nonce, fee = transaction.network.custody, authorization.custody_nonce, 0
     if not route or (route['chain_id'],route['sender'],int(route['nonce']))!=(
-        transaction.network.chain_id,transaction.sender,transaction.nonce):
+        transaction.network.chain_id,sender,nonce):
         raise Conflict('payment does not match the shared custody nonce reservation')
     cursor.execute('SELECT * FROM custody_payments WHERE send_id=%s OR (chain_id=%s AND tx_hash=%s)',
         (identity,transaction.network.chain_id,transaction.tx_hash))
     old=cursor.fetchone()
     if old:
         if (str(old['send_id']),old['tx_hash'],old['transfer_event'],int(old['fee']),str(old['journal_id']))!=(
-            str(identity),transaction.tx_hash,transfer_event,transaction.fee,str(journal_id)):
+            str(identity),transaction.tx_hash,transfer_event,fee,str(journal_id)):
             raise Conflict('custody transaction already has a different financial attribution')
         return
+    if authorization is not None:
+        cursor.execute('''INSERT INTO custody_authorization_payments
+            (send_id,chain_id,tx_hash,authority,nonce,delegate,actor,reason,evidence)
+            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)''',
+            (identity,transaction.network.chain_id,transaction.tx_hash,sender,nonce,authorization.delegate,
+             actor,reason,Json(authorization.evidence)))
     cursor.execute('INSERT INTO custody_payments(send_id,chain_id,tx_hash,transfer_event,fee,journal_id) VALUES (%s,%s,%s,%s,%s,%s)',
-        (identity,transaction.network.chain_id,transaction.tx_hash,transfer_event,transaction.fee,journal_id))
+        (identity,transaction.network.chain_id,transaction.tx_hash,transfer_event,fee,journal_id))

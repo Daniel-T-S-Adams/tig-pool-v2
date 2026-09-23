@@ -36,7 +36,7 @@ def _balances(chain,height):
     return {'tig':int(hex_bytes(token,32),16),'native':quantity(native),'nonce':quantity(nonce)}
 
 
-def _read(network,rpc,first,count,checked_at):
+def _read(network,rpc,first,count,checked_at,*,version=1):
     units(first,positive=True)
     if type(count) is not int or not 1<=count<=1000:raise FundsError('chain batch size must be 1 to 1000')
     if not network.require_finalized:raise FundsError('custody indexing requires finalized evidence')
@@ -81,14 +81,18 @@ def _read(network,rpc,first,count,checked_at):
         -(value.amount if value.sender==network.custody else 0) for value in transfers.values())
     if closing['tig']-opening['tig']!=change:
         raise Conflict('TIG balance change does not match the complete captured transfer range')
-    if rpc('eth_getCode',[network.custody,hex(last)])!='0x':
+    code=rpc('eth_getCode',[network.custody,hex(last)])
+    if version==1 and code!='0x':
         raise FundsError('custody indexing currently requires an undelegated EOA wallet')
+    if version==2:
+        from .sponsored_withdrawals import delegation
+        delegation(code)  # Capture known-format delegation; recording still checks its provenance.
     repeated=rpc('eth_getBlockByNumber',[hex(last),False]);_header(repeated,last)
     if hex_bytes(repeated['hash'],32)!=hex_bytes(end['hash'],32):raise Conflict('finalized custody anchor changed during capture')
     return {'network':network,'first':first,'last':last,'target':target,'before_hash':hex_bytes(before['hash'],32),
         'block_hash':hex_bytes(end['hash'],32),'opening':opening,'closing':closing,
         'transfers':sorted(transfers.values(),key=lambda value:(value.block_number,value.tx_hash,value.log_index)),
-        'checked_at':checked_at}
+        'checked_at':checked_at,'custody_code':code}
 
 
 def capture(network,rpc,first,*,count=1000,source='configured-rpc'):
@@ -99,15 +103,15 @@ def capture(network,rpc,first,*,count=1000,source='configured-rpc'):
         value=rpc(method,params)
         calls.append({'method':method,'params':deepcopy(params),'result':deepcopy(value)})
         return value
-    data={'version':1,'network':asdict(network),'first':first,'count':count,
+    data={'version':2,'network':asdict(network),'first':first,'count':count,
         'checked_at':checked.isoformat(),'source':source,'calls':calls,'error':None}
-    try:_read(network,recorded,first,count,checked)
+    try:_read(network,recorded,first,count,checked,version=2)
     except Exception as failure:data['error']=type(failure).__name__
     return data
 
 
 def verify(data):
-    if data.get('version')!=1 or data.get('error'):raise FundsError('custody capture is incomplete or unsupported')
+    if data.get('version') not in (1,2) or data.get('error'):raise FundsError('custody capture is incomplete or unsupported')
     entries=iter(data['calls'])
     def replay(method,params):
         entry=next(entries,None)
@@ -116,7 +120,7 @@ def verify(data):
         return entry['result']
     checked=datetime.fromisoformat(data['checked_at'])
     if checked.tzinfo is None:raise FundsError('custody capture time requires an explicit timezone')
-    value=_read(Network(**data['network']),replay,data['first'],data['count'],checked)
+    value=_read(Network(**data['network']),replay,data['first'],data['count'],checked,version=data['version'])
     if next(entries,None) is not None:raise FundsError('custody archive has unconsumed RPC evidence')
     return value
 
@@ -203,7 +207,8 @@ def record(database,data,*,initialize=False):
             recorded_tig,recorded_native=ledger.backing(cursor),ledger.backing(cursor,'NATIVE')
             cursor.execute('''SELECT count(*) AS count FROM custody_payments o JOIN chain_transactions t
                 ON t.chain_id=o.chain_id AND t.tx_hash=o.tx_hash
-                WHERE t.chain_id=%s AND t.sender=%s AND t.block_number<=%s''',
+                JOIN custody_sends s ON s.id=o.send_id
+                WHERE t.chain_id=%s AND s.sender=%s AND t.block_number<=%s''',
                 (network.chain_id,network.custody,value['last']))
             accounted=int(cursor.fetchone()['count'])
             cursor.execute('''SELECT 1 FROM transfers t LEFT JOIN custody_payments w ON w.transfer_event=t.event_id
@@ -212,14 +217,25 @@ def record(database,data,*,initialize=False):
             unexplained=bool(cursor.fetchone())
             cursor.execute("SELECT 1 FROM chain_alerts WHERE kind='canonical-conflict' LIMIT 1")
             conflicted=bool(cursor.fetchone())
+            code=value['custody_code']
+            known_code=code=='0x'
+            if not known_code:
+                from .sponsored_withdrawals import delegation
+                cursor.execute('''SELECT a.delegate FROM custody_authorization_payments a
+                    JOIN custody_payments p ON p.send_id=a.send_id
+                    JOIN chain_transactions t ON t.chain_id=a.chain_id AND t.tx_hash=a.tx_hash
+                    WHERE a.chain_id=%s AND a.authority=%s AND t.block_number<=%s
+                    ORDER BY t.block_number DESC LIMIT 1''',(network.chain_id,network.custody,value['last']))
+                authorization=cursor.fetchone()
+                known_code=bool(authorization and authorization['delegate']==delegation(code))
             balances=value['closing']
-            healthy=(recorded_tig,recorded_native)==(balances['tig'],balances['native']) and accounted==balances['nonce'] and not unexplained and not conflicted and value['last']==value['target']
-            reason='reconciled' if healthy else 'custody collection is catching up' if value['last']<value['target'] else 'custody balances, transactions or canonical history require reconciliation'
+            healthy=(recorded_tig,recorded_native)==(balances['tig'],balances['native']) and accounted==balances['nonce'] and not unexplained and not conflicted and known_code and value['last']==value['target']
+            reason='reconciled' if healthy else 'custody collection is catching up' if value['last']<value['target'] else 'custody delegation requires verified recovery' if not known_code else 'custody balances, transactions or canonical history require reconciliation'
             cursor.execute('''INSERT INTO custody_checks(capture_id,height,target_height,block_hash,actual_tig,actual_native,
-                recorded_tig,recorded_native,outgoing_nonce,accounted_nonces,healthy,reason,checked_at)
-                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)''',
+                recorded_tig,recorded_native,outgoing_nonce,accounted_nonces,healthy,reason,checked_at,custody_code)
+                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)''',
                 (identity,value['last'],value['target'],value['block_hash'],balances['tig'],balances['native'],recorded_tig,
-                 recorded_native,balances['nonce'],accounted,healthy,reason,value['checked_at']))
+                 recorded_native,balances['nonce'],accounted,healthy,reason,value['checked_at'],code))
             cursor.execute('INSERT INTO chain_batches(capture_id,first_height,last_height,block_hash) VALUES (%s,%s,%s,%s)',
                 (identity,value['first'],value['last'],value['block_hash']))
             cursor.execute("UPDATE chain_stream SET last_height=%s,last_hash=%s WHERE name='custody'",

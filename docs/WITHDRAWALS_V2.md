@@ -63,6 +63,7 @@ Amounts are integer token-unit strings in requests and monetary API fields.
 | `POST /api/v2/operator/withdrawals/{id}/reject` | Operator; reason and event key, only before an unresolved send. |
 | `POST /api/v2/operator/withdrawals/{id}/begin` | Operator; request key and native `fee_limit`, then durable manual-send instructions. |
 | `POST /api/v2/operator/withdrawal-attempts/{id}/reconcile` | Operator; optional `tx_hash` and exact `log_index`, or recover from the frozen nonce. |
+| `POST /api/v2/operator/withdrawal-attempts/{id}/recover-sponsored` | Operator; exact `tx_hash`, `log_index` and review `reason` for the bounded sponsored recovery below. |
 
 Beginning or approving a new payment requires `funds_enabled`. Reconciliation
 and cancellation remain available for existing liabilities while new monetary
@@ -100,13 +101,50 @@ The new transaction verifier also checked that same transaction directly
 against the public RPC, including canonical inclusion and finality; its
 verified fee was 1,160,679,890,131 native units (wei).
 
-This implementation supports ordinary direct EOA custody transactions
-(types 0, 1 and 2). Custody preflight rejects contract or delegated wallets;
-contract-wallet execution and gas sponsorship need their own verified adapter.
-Wallet login and destination verification also currently support EOA signatures.
+New payments support ordinary direct EOA custody transactions (types 0, 1 and 2).
+Custody preflight rejects contract or delegated wallets. Wallet login and
+destination verification support EOA signatures. Continuous custody indexing,
+member deposits, operator funding and member/operator screens are implemented;
+live validation and production rollout remain separately recorded checks.
 
-The withdrawal implementation does not yet provide continuous chain indexing,
-automatic discovery of all incoming deposits, native internal-transfer
-attribution, production funding/receipt reconciliation or product screens.
-Those deployment and interface components remain unfinished. Manual receipt
-fixtures and API/database tests do not constitute a live withdrawal or launch.
+## Already sent sponsored payments
+
+Migration 014 adds immutable authorization-payment evidence and observed custody
+code. An operator's **Check transfer** can recover an initial EIP-7702 payment
+already sent through a relayer. A single previously supplied hash is remembered;
+checking again need not rediscover it through the direct sender's nonce.
+The explicit recovery endpoint also accepts a review reason. Both require the
+configured trace RPC, exact final receipt and full verification:
+
+- The authorization signature belongs to custody, binds this chain and consumes
+  the reserved nonce. The complete canonical block excludes other custody
+  transactions or authorizations that could explain the change. Custody moves
+  from empty code and nonce N to the signed delegation and nonce N+1.
+- Exactly one token event pays the frozen recipient and amount. The custody
+  balance change agrees. A complete canonical call trace proves zero native
+  transfers and only the exact token call from custody. Extra effects,
+  incomplete traces and reverted frames are rejected.
+- The relayer's real sender, nonce and fee are retained separately from custody's
+  authorization. Relayer gas is not a pool expense: the unused operator gas
+  reserve is returned. The paid timestamp comes from the confirmed transfer.
+  Repeated or concurrent recovery cannot pay twice.
+
+This is recovery of an initial sponsored authorization, not general smart-account
+custody. Arbitrary batching, token-paid gas and subsequent relayed payments
+without a fresh consumed custody authorization remain unsupported and held.
+New payments remain disabled for a delegated wallet, in preflight and the
+operator page. Observation can continue after verified recovery. Restoring
+direct-wallet mode needs its own recorded wallet action, nonce and cost
+accounting; delegation history must never be deleted.
+
+Deploy migration 014 before the application. Grant the restricted runtime
+`SELECT, INSERT` on `pool_v2.custody_authorization_payments`; existing custody-check
+permissions cover its new column. Recovery remains available while new funds
+actions are paused. A prior application will fail closed on delegated custody;
+do not downgrade or delete its recorded financial history to bypass verification.
+
+The recorded Base Sepolia fixture replays a finalized 0.05 TIG test withdrawal
+with its public signature, block, balances and trace; see
+[fixture provenance](../tests/v2/fixtures/README.md). Authorization processing
+follows [EIP-7702](https://eips.ethereum.org/EIPS/eip-7702). The service still holds
+no signing key and has no transaction-sending RPC.

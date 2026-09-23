@@ -11,7 +11,19 @@ It queries incoming and outgoing logs, verifies each event against its receipt
 and canonical block, and checks that the complete range explains the token
 balance change. Self-transfers are recorded without manufacturing income. It
 also captures native balance and the wallet's finalized outgoing nonce.
-The supported custody wallet is an undelegated EOA on the configured network.
+New payments require an undelegated EOA on the configured network. Version-2
+captures also retain EIP-7702 delegation indicators so observation can continue
+after an already sent sponsored payment. Unknown delegation keeps custody
+unhealthy until verified authorization-payment recovery explains it. Arbitrary
+contract code is rejected. Version-1 archives keep their original undelegated
+wallet requirement and remain replayable.
+
+Migration 014 records observed code and immutable authorization evidence.
+Nonce reconciliation counts verified custody sends, including the separately
+proved custody authorization in a relayer transaction. The relayer's sender,
+nonce and gas bill are not recorded as custody's. Unexplained transfers,
+balances, nonces or delegation still block readiness. See the
+[bounded recovery procedure](WITHDRAWALS_V2.md#already-sent-sponsored-payments).
 
 ## Starting and recovering the collector
 
