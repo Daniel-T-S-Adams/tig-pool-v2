@@ -25,7 +25,7 @@ def configuration():
             'members': [{'wallet': WALLET, 'funding_units': str(TIG)}, {'wallet': OTHER, 'funding_units': str(TIG)}]}
 
 
-class PilotTests(DatabaseCase):
+class PilotCase(DatabaseCase):
     def setUp(self):
         super().setUp()
         with self.db.transaction() as cursor: custody.bind(cursor, TESTNET)
@@ -67,6 +67,8 @@ class PilotTests(DatabaseCase):
         self.accept(row, identity)
         benchmarks.record_outcome(self.db, row['id'], 'active', height=20, evidence={'fixture': True})
 
+
+class PilotTests(PilotCase):
     def test_two_sequential_attempts_then_restart_and_resume_cannot_extend_pilot(self):
         with self.assertRaises(Conflict): self.reserve('b-too-early', member=self.other)
         first = self.reserve()

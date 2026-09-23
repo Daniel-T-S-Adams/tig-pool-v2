@@ -113,6 +113,11 @@ token receipts to reward rounds. The public earnings response alone does not
 prove a token receipt. A reporting index alone does not establish scope for
 failed or not-yet-reportable work. Neither assumption is automated here.
 
+The [reward receipt investigation](REWARD_RECEIPTS.md) includes a finalized
+mainnet distribution and a pinned TokenLocker reader. Its 28-day withdrawal
+delay is separate from collateral finalization. Claimable/locked balances are
+not spendable custody money; the reader does not yet automate attribution.
+
 Finalized journal entries and allocations cannot be edited. A later externally
 discovered inconsistency requires an explicit evidenced correction through
 new journals and reconciliation; replay never silently reprices or debits a

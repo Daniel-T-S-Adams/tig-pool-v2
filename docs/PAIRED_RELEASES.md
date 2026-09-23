@@ -1,8 +1,9 @@
 # Serving the recorded pool and worker release
 
-The API can publish a paired release and its worker installer. This is a
-deployment interface, not a production release announcement. No verified
-production pair, image manifest or v2 service deployment has been published.
+The API publishes a paired release and its checked worker installer. A private
+CPU testnet pair is deployed; a production pair has not been released.
+The [mainnet staging procedure](MAINNET_DEPLOYMENT.md) keeps production
+configuration separate and disabled until its inputs and checks are complete.
 
 Supply the API factory with `release_manifest`, the actual running
 `build_commit`, and the paired `worker_installer` bytes. Defaults leave these

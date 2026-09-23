@@ -1,0 +1,31 @@
+[Unit]
+Description=InnoPool v2 mainnet reports
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=innopoolmainnet
+Group=innopoolmainnet
+WorkingDirectory=/opt/innopool-v2-mainnet/releases/REPLACE_TESTED_POOL_COMMIT
+EnvironmentFile=/etc/innopool-v2-mainnet/collector.env
+ExecStart=/opt/innopool-v2-mainnet/venv/bin/python tools/observe_reports_v2.py --api-url https://mainnet-api.tig.foundation --collector mainnet-primary-reports --spool /var/lib/innopool-v2-mainnet/spool/reports --poll-seconds 60 --recent-rounds 4 --player-id 0xd4a076b5335f0fb2da40158b52e0bb6d6ac59ebf --challenge-id c001 --challenge-id c002 --challenge-id c003 --challenge-id c004 --challenge-id c005 --challenge-id c006 --challenge-id c007 --challenge-id c008
+Restart=on-failure
+RestartSec=10
+Slice=innopoolv2mainnet.slice
+Nice=10
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectControlGroups=true
+CapabilityBoundingSet=
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+ReadWritePaths=/var/lib/innopool-v2-mainnet/spool
+TasksMax=48
+TimeoutStopSec=30
+
+[Install]
+WantedBy=multi-user.target
