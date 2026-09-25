@@ -6,7 +6,8 @@ uncached API at **pool-api.tig.foundation**, used by both the dashboard and
 CPU/GPU workers. Both addresses use the same primary **46.62.249.188**; recovery
 is **2.28.230.81** in Germany. The application split is implemented and passed
 255 isolated tests, including the browser's full financial fixture across two
-HTTPS origins. Public deployment and the checks below remain separate.
+HTTPS origins. Release `d3b9d1a` is installed on the primary and German recovery
+VMs; public HTTPS activation and the checks below remain separate.
 See the [structure diagram](POOL_STRUCTURE.md).
 
 ## Current position
@@ -21,6 +22,13 @@ on 25 September. Automated certificate-path probes then returned Cloudflare
 **403 / error 1010 (Browser Integrity Check)**. The primary's HTTP configuration
 accepts both hostnames, but certificate issuance awaits the scoped exception
 below. Mainnet work and financial operations remain paused.
+
+The tested release was installed on recovery at **12:56 UTC** and primary at
+**12:57 UTC**. The primary API remains private on loopback, with both configured
+origins verified. Fourteen migration checksums match; no migrations or financial
+changes occurred. Both collectors retain continuous, conflict-free history.
+The new nginx routing and Cloudflare-only origin access configuration are
+syntax-checked but not activated. [Draft PR 21](https://github.com/Daniel-T-S-Adams/tig-pool-v2/pull/21).
 
 ## Your next steps — pool owner/operator, local browser
 
@@ -77,7 +85,7 @@ for the browser steps.
 
 - [x] Confirm website DNS and HTTP responses pass through Cloudflare.
 - [x] Record Daniel's report that Full (strict) is selected.
-- [ ] Confirm API DNS, then configure HTTPS and routing for both hostnames.
+- [x] Confirm both hostnames resolve through Cloudflare.
 - [x] Make the browser API address configurable; allow only the website origin
   for cross-origin browser access and in its content security policy. Keep
   wallet signatures bound to the website origin. Set installer commands,
@@ -87,9 +95,12 @@ for the browser steps.
 - [x] Use content-hashed URLs for public CSS/JavaScript, with immutable cache
   headers. Keep HTML and all API responses (including errors) `no-store`.
   Tests check content changes, origin isolation and the live dashboard flow.
-- [ ] Deploy the tested release and [nginx configuration](../deploy/v2-mainnet/nginx.conf.example),
-  retaining previous public asset hashes across releases. Verify actual
-  Cloudflare cache behavior and permit website asset caching after rollout.
+- [x] Install the tested release on both VMs; configure the primary's private
+  API and retain previous public asset hashes across releases. Restarts preserve
+  financial state, pause controls, migration checksums and observer continuity.
+- [ ] Activate the staged [nginx configuration](../deploy/v2-mainnet/nginx.conf.example)
+  after certificates are issued. Verify actual Cloudflare cache behavior and
+  permit website asset caching after rollout.
 - [ ] Verify the certificate-validation path through the proxy; obtain and
   install certificates for both hostnames on the **primary Hetzner VM**; activate
   HTTPS and test renewal. If existing Cloudflare rules interfere, identify the

@@ -1,8 +1,10 @@
 # Pool structure
 
-This shows the recommended live setup following the proposed website/API split
-on 25 September 2026. Cloudflare proxies both addresses; the website and backend
-run on the same primary Hetzner server. The split still needs implementation.
+This shows the agreed live setup following the website/API split on
+25 September 2026. Cloudflare proxies both addresses; the website and backend
+run on the same primary Hetzner server. The code is implemented and tested;
+public HTTPS activation still awaits the Cloudflare exception and certificates
+listed in the [setup checklist](CLOUDFLARE_SETUP.md).
 
 ```mermaid
 flowchart TD
@@ -45,9 +47,11 @@ flowchart TD
   distinct from worker permissions. API traffic must not receive browser
   challenge pages.
 - **Updates become live after deployment and activation.** Saving changes to
-  GitHub alone doesn't update the website. Long-lived website assets need
-  release-specific URLs, while HTML needs revalidation or cache refreshes when
-  deploying. Keep the temporary cache bypass until those changes are tested.
+  GitHub alone doesn't update the website. Public CSS/JavaScript now use
+  content-hashed URLs and can be cached for a year; HTML and all API responses
+  use `no-store`. Deployment retains older public asset hashes so pages already
+  open can finish loading. Keep temporary website cache bypass until public
+  routing and caching are verified.
 - **The backend talks directly to TIG.** Outgoing protocol connections and
   backup transfers do not pass through the website's Cloudflare proxy.
 - **Backup takeover is manual.** The German server preserves recovery data until
