@@ -6,13 +6,12 @@ import hashlib
 import re
 import secrets
 import uuid
-from pathlib import Path
 from typing import Literal
 
 from fastapi import Depends, FastAPI, Header, HTTPException
 from fastapi.encoders import jsonable_encoder
-from fastapi.responses import FileResponse,JSONResponse,Response
-from fastapi.staticfiles import StaticFiles
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse,Response
 from pydantic import BaseModel, ConfigDict, Field, StrictBool,StrictInt, StrictStr
 
 from .auth import Auth, AuthenticationError
@@ -23,6 +22,7 @@ from . import artifacts, native_funding, sponsored_withdrawals
 from . import controls,custody,dashboard,deposits,settlement,chain_observer,funding,topups,releases
 from .protocol import ProtocolDataError
 from .money import Conflict, FundsError, InsufficientFunds
+from .frontend import Frontend, https_origin
 
 
 API_VERSION = "2.0"
@@ -48,6 +48,7 @@ class Settings:
     build_commit: str | None = None
     worker_installer: bytes | None = None
     custody_trace_rpc_url: str | None = None
+    api_origin: str | None = None
 
 
 class Input(BaseModel):
@@ -149,6 +150,8 @@ def response(value):
 
 
 def create_app(settings):
+    website_origin = https_origin(settings.origin)
+    api_origin = https_origin(settings.api_origin if settings.api_origin is not None else website_origin)
     release=releases.validate(settings.release_manifest,settings.build_commit,settings.worker_installer)
     release_digest=hashlib.sha256(releases.canonical(release).encode()).hexdigest() if release else None
     if len(settings.operator_token_sha256) != 64:
@@ -164,29 +167,49 @@ def create_app(settings):
                 or settings.withdrawal_fee_model not in FEE_MODELS or settings.chain_id != settings.custody_network.chain_id):
             raise ValueError('custody network, RPC, fee model and matching authentication chain must be configured together')
         payment_chain = Chain(settings.custody_network, Rpc(settings.custody_rpc_url))
-    auth = Auth(database, origin=settings.origin, chain_id=settings.chain_id)
+    auth = Auth(database, origin=website_origin, chain_id=settings.chain_id)
     app = FastAPI(title="InnoPool v2", version=API_VERSION)
     app.state.database, app.state.auth = database, auth
     app.state.payment_chain = payment_chain
     if settings.custody_trace_rpc_url and payment_chain is None:
         raise ValueError('native trace RPC requires verified custody configuration')
     app.state.custody_trace_rpc = Rpc(settings.custody_trace_rpc_url) if settings.custody_trace_rpc_url else None
-    web_directory=Path(__file__).with_name('web')
-    app.mount('/assets',StaticFiles(directory=web_directory),name='v2-assets')
+    frontend = Frontend(api_origin)
+    app.add_middleware(CORSMiddleware, allow_origins=[website_origin],
+        allow_methods=['GET', 'POST'], allow_headers=['Authorization', 'Content-Type', 'X-InnoPool-Version'],
+        allow_credentials=False, max_age=600)
 
     @app.middleware('http')
     async def browser_headers(request,call_next):
-        result=await call_next(request)
+        is_api = request.url.path.startswith('/api/')
+        if is_api and request.headers.get('origin') not in (None, website_origin):
+            result = JSONResponse({'detail': 'browser origin is not allowed'}, status_code=403)
+        else:
+            result=await call_next(request)
+        if is_api:
+            # Include errors, preflights, downloads and immutable artifacts:
+            # the API hostname is deliberately never a shared cache surface.
+            result.headers['Cache-Control']='no-store'
+        else:
+            result.headers.setdefault('Cache-Control','no-store')
         result.headers['X-Content-Type-Options']='nosniff'
         result.headers['Referrer-Policy']='no-referrer'
-        result.headers['Content-Security-Policy']="default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' data:; frame-ancestors 'none'; base-uri 'none'; form-action 'self'"
+        result.headers['Content-Security-Policy']="default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self' "+api_origin+"; img-src 'self' data:; frame-ancestors 'none'; base-uri 'none'; form-action 'self'"
         return result
 
     @app.get('/',include_in_schema=False)
     @app.get('/operator',include_in_schema=False)
     @app.get('/join',include_in_schema=False)
     def website():
-        return FileResponse(web_directory/'index.html',headers={'Cache-Control':'no-store'})
+        return frontend.page()
+
+    @app.get('/assets/{digest}/{name}', include_in_schema=False)
+    def versioned_asset(digest: str, name: str):
+        return frontend.asset(name, digest)
+
+    @app.get('/assets/{name}', include_in_schema=False)
+    def unversioned_asset(name: str):
+        return frontend.asset(name)
 
     @app.exception_handler(FundsError)
     async def funds_error(request, exc):
@@ -237,7 +260,7 @@ def create_app(settings):
                          "work_enabled": settings.work_enabled and not blocked,"new_work_paused":paused,
                          "work_block_reason":blocked,
                          "work_configured":settings.work_enabled,"settlement_enabled":settings.settlement_enabled,
-                         "chain_id":settings.chain_id,"origin":settings.origin,
+                         "chain_id":settings.chain_id,"origin":website_origin,"api_origin":api_origin,
                          "release_digest":release_digest,"pool_commit":release['pool']['commit'] if release else None,
                          "custody":settings.custody_network.custody if settings.custody_network else None,
                          "token":settings.custody_network.token if settings.custody_network else None,
@@ -259,7 +282,7 @@ def create_app(settings):
 
     @app.get('/api/v2/worker-installation')
     def worker_installation(resource:str,compute_type:str,workers:int=1):
-        return response(releases.installation(recorded_release(),settings.origin,resource,compute_type,workers))
+        return response(releases.installation(recorded_release(),api_origin,resource,compute_type,workers))
 
     @app.post("/api/v2/auth/challenges")
     def challenge(body: WalletChallenge):

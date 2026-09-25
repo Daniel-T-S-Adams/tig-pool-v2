@@ -12,6 +12,10 @@ The new API serves its own member/operator screens and
 deployment is published yet. The old `/static/install.sh` installer is retired
 in this fork; use the checked download from a configured v2 pool's Join page.
 
+For a high-level view of hosting, connections and deployments, see the
+[pool structure diagram](docs/POOL_STRUCTURE.md) and
+[Cloudflare setup steps](docs/CLOUDFLARE_SETUP.md).
+
 ## Legacy implementation reference
 
 A self-hosted, open-source mining pool for [The Innovation Game (TIG)](https://tig.foundation), built on the official `tig-benchmarker` master/slave architecture.

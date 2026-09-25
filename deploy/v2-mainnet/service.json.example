@@ -1,5 +1,6 @@
 {
   "origin": "https://REPLACE_POOL_HOSTNAME",
+  "api_origin": "https://REPLACE_POOL_API_HOSTNAME",
   "chain_id": 8453,
   "pool_player_id": "0xd4a076b5335f0fb2da40158b52e0bb6d6ac59ebf",
   "tig_api_url": "https://mainnet-api.tig.foundation",

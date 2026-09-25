@@ -4,6 +4,8 @@ The templates in [deploy/v2-mainnet](../deploy/v2-mainnet) are a staging bundle,
 not an enabled installation. They contain placeholders, no credentials, and
 default to funds, work, settlement and TIG submissions being disabled. The
 coordinator receives no TIG API key in this configuration.
+Current setup progress is recorded in [Cloudflare setup](CLOUDFLARE_SETUP.md);
+this document describes the full deployment and launch procedure.
 
 ## Inputs and roles
 
@@ -41,8 +43,8 @@ Daniel's local computer. Worker execution belongs to the member role.
    evidence merely to keep a service running. A second directory on the same
    host is not an independent archive.
 
-The template mainnet application slice has a separate 1-CPU/2-GiB ceiling.
-It is not installed or running. Before using this same machine, review the
+The mainnet application slice has a separate 1-CPU/2-GiB ceiling, now used by
+the preparation services on the dedicated VMs. Before sharing a host, review the
 combined testnet, mainnet, database and worker limits; separate slice limits
 alone do not impose a shared machine-wide ceiling. A worker belongs on its
 member's machine for the final test.
@@ -77,10 +79,22 @@ member's machine for the final test.
 
 ## HTTPS and services
 
-1. Point the chosen hostname to the server and obtain a valid TLS certificate.
-   Configure the chosen reverse proxy to serve that exact HTTPS origin and
-   forward to `127.0.0.1:18080`. Only the proxy is public. The API trusts
-   forwarded headers from loopback only. Wallet login must use the same origin.
+1. Point the proxied website and API hostnames to the server. For this setup,
+   generate the key/CSR on Hetzner and obtain a Cloudflare Origin CA certificate
+   covering both hosts. Keep Full (strict); verify the signed certificate and
+   record/monitor expiry before activation. No HTTP/ACME challenge is needed.
+   Configure `origin` as the website address and
+   `api_origin` as the worker/dashboard API address; omitting `api_origin`
+   preserves a same-origin deployment. Set the coordinator's `public_origin`
+   to the API address so benchmark artifact URLs use it too. Wallet signatures
+   stay bound to the website origin. Route public website files and API paths
+   to `127.0.0.1:18080`; keep that listener private. The API permits browser
+   access only from the configured website and requires existing bearer
+   permissions. Trust forwarded headers only from the configured proxy.
+   See [Cloudflare setup](CLOUDFLARE_SETUP.md) for the two-host deployment.
+   HTML and all API responses use `no-store`; only content-hashed public
+   website assets use long-lived immutable caching. Keep previous release
+   assets available across a rollout, and bypass API caching at the proxy.
 2. Install the six filled service files and slice, after checking executable
    paths and the pinned commit. Establish startup ordering after the database
    and network. The examples deliberately do not assume how PostgreSQL is hosted.
