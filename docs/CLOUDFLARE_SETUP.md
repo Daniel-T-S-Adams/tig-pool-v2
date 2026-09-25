@@ -1,151 +1,118 @@
 # Cloudflare proxy setup
 
-Selected on 25 September 2026: **members → Cloudflare → primary Hetzner server**.
-The recommended refinement is a website at **pool.tig.foundation** and an
-uncached API at **pool-api.tig.foundation**, used by both the dashboard and
-CPU/GPU workers. Both addresses use the same primary **46.62.249.188**; recovery
-is **2.28.230.81** in Germany. The application split is implemented and passed
-255 isolated tests, including the browser's full financial fixture across two
-HTTPS origins. Release `d3b9d1a` is installed on the primary and German recovery
-VMs; public HTTPS activation and the checks below remain separate.
-See the [structure diagram](POOL_STRUCTURE.md).
+The website is **pool.tig.foundation**. Both the browser dashboard and CPU/GPU
+workers use **pool-api.tig.foundation/api/v2** for live requests. Cloudflare
+proxies both addresses to the primary Hetzner server, **46.62.249.188**.
+The German recovery server is **2.28.230.81**.
+[Structure diagram](POOL_STRUCTURE.md).
 
-## Current position
+## Current position — 25 September 2026
 
-Read-only checks at **10:03 UTC on 25 September 2026** confirmed that public DNS
-already returns Cloudflare addresses and HTTP requests pass through Cloudflare.
-HTTP shows the pool's setup message. HTTPS returns **521**; the primary server
-has no HTTPS certificate installed and is not yet listening on port 443.
-Daniel reported **Full (strict)** and confirmed both DNS records and API cache
-bypass were configured. Both hostnames resolved through Cloudflare at 12:21 UTC
-on 25 September. Automated certificate-path probes then returned Cloudflare
-**403 / error 1010 (Browser Integrity Check)**. The primary's HTTP configuration
-accepts both hostnames, but certificate issuance awaits the scoped exception
-below. Mainnet work and financial operations remain paused.
+DNS, **Full (strict)** and the API cache-bypass rule are reported complete.
+The tested website/API split (`d3b9d1a`) is installed on both VMs. Its 255
+isolated tests passed, including full browser flows across separate HTTPS
+origins. The primary API is private; public HTTPS awaits the signed certificate.
+Mainnet work and financial operations remain paused.
 
-The tested release was installed on recovery at **12:56 UTC** and primary at
-**12:57 UTC**. The primary API remains private on loopback, with both configured
-origins verified. Fourteen migration checksums match; no migrations or financial
-changes occurred. Both collectors retain continuous, conflict-free history.
-The new nginx routing and Cloudflare-only origin access configuration are
-syntax-checked but not activated. A temporary loopback nginx instance also
-passed routing, caching, API authentication/CORS, redirects and untrusted-peer
-rejection checks; its test certificate/listener were removed. Actual public
-TLS and Cloudflare behavior still need verification.
-[Draft PR 21](https://github.com/Daniel-T-S-Adams/tig-pool-v2/pull/21).
+The earlier generic HTTP script received **403 / error 1010** when checking a
+Let's Encrypt validation path. Certificate issuance had not started, and this
+was **not a real worker test**. Daniel has now approved **Cloudflare Origin CA**.
+This removes the HTTP certificate-validation step. **The earlier request for a
+Browser Integrity Check exception is superseded.** Test actual worker requests
+after HTTPS is active; use their results before proposing a scoped rule change.
 
-A fresh preparation backup passed verification on Germany at **13:27 UTC**:
-207,779 file checksums, the exact application archive, retained public assets
-and decrypted settings all passed. Certificates have not yet been issued;
-the final TLS backup remains a later step.
+The Origin CA private key and CSR have been generated on the primary. The CSR
+signature and key match are verified. The revised nginx configuration passed
+syntax and private HTTPS routing, caching, CORS, authentication and direct-peer
+rejection checks at **14:50 UTC**. It is staged, not publicly activated.
+The existing full preparation backup was verified on Germany at **13:27 UTC**;
+the new key/CSR and TLS configuration supplement passed encrypted recovery
+verification on Germany at **14:54 UTC**, without activating any credentials.
 
-## Your next steps — pool owner/operator, local browser
+## Next step — pool owner/operator, on your local computer in your browser
 
-The DNS, Full (strict) and API cache-bypass steps below are **reported complete**.
-The new remaining operator step is the automated-request exception.
+Codex has server access, but no access to your Cloudflare account. The one
+Cloudflare action needed now is signing the prepared public certificate request:
 
-1. Open **Cloudflare → tig.foundation → DNS → Records**. Confirm the website
-   record and add the API record if it does not already exist. Edit existing
-   records rather than adding duplicates.
+1. Open **Cloudflare → tig.foundation → SSL/TLS → Origin Server → Create
+   Certificate** (under **Origin Certificates**).
+2. Choose **Use my private key and CSR**. Open
+   [the prepared CSR](POOL_ORIGIN_CERTIFICATE.csr) as text and paste its entire
+   contents, including the BEGIN and END lines. This is a public request;
+   the private key already exists on Hetzner.
+3. Set the hostnames to exactly **pool.tig.foundation** and
+   **pool-api.tig.foundation**. Remove the default apex/wildcard entries if
+   Cloudflare shows them. Choose **1 year** validity, then **Create**.
+4. Select **PEM** format. Copy the public **Origin Certificate**, including
+   `-----BEGIN CERTIFICATE-----` and `-----END CERTIFICATE-----`, and paste it
+   into this chat. Codex will verify and install it. Do not send a private key.
+   With the CSR option, a new private key is unnecessary.
 
-   | Type | Name | IPv4 address / Content | Proxy status | TTL |
-   |---|---|---|---|---|
-   | A | **pool** | **46.62.249.188** | **Proxied — orange cloud** | Auto |
-   | A | **pool-api** | **46.62.249.188** | **Proxied — orange cloud** | Auto |
+Keep both DNS records **Proxied** and keep **Full (strict)**. No API token is
+needed for these browser steps. If you do not administer `tig.foundation`,
+its Cloudflare administrator can sign this same public CSR.
+[Cloudflare's Origin CA instructions](https://developers.cloudflare.com/ssl/origin-configuration/origin-ca/).
 
-2. **Complete: Full (strict) reported by Daniel.** Keep that setting. It verifies
-   the certificate on Hetzner, which still needs installing for both hostnames.
-   Codex will check for hostname-specific overrides during validation.
+## Existing DNS and cache settings
 
-3. Add the permanent **API Cache Rule**: open **Cache Rules → Create rule**,
-   name it `Pool API cache bypass`, select **Custom filter expression**, match
-   **Hostname equals pool-api.tig.foundation**, and set **Cache eligibility →
-   Bypass cache**. Place it after other matching cache rules, then deploy.
-   If the earlier `pool.tig.foundation` rollout bypass has already been created,
-   keep it during the migration. Enable website caching after the split and
-   release-aware asset URLs are tested. API responses still served on the old
-   website hostname must also remain uncached during the transition.
+These settings are reported complete; there is no DNS action to repeat:
 
-4. In **Rules → Overview → Create rule → Configuration Rule**, create
-   `Pool automated requests`. Select **Custom filter expression → Edit
-   expression** and paste:
+| Type | Name | Content | Proxy status | TTL |
+|---|---|---|---|---|
+| A | pool | 46.62.249.188 | Proxied — orange cloud | Auto |
+| A | pool-api | 46.62.249.188 | Proxied — orange cloud | Auto |
 
-   ```text
-   (http.host eq "pool-api.tig.foundation") or ((http.host eq "pool.tig.foundation") and starts_with(http.request.uri.path, "/.well-known/acme-challenge/"))
-   ```
+The **Pool API cache bypass** Cache Rule matches
+`http.host eq "pool-api.tig.foundation"` and sets **Cache eligibility → Bypass
+cache**. It must take precedence over conflicting cache rules. Only public,
+content-hashed CSS/JavaScript receive long-lived caching. HTML and all API
+responses, including errors, use `no-store`. Keep any temporary website cache
+bypass until public asset caching has been checked.
+[Cloudflare cache rules](https://developers.cloudflare.com/cache/how-to/cache-rules/settings/).
 
-   Add **Browser Integrity Check → Off** and deploy after any conflicting
-   configuration rule. This exception covers the API and the website's
-   certificate-validation path; it preserves browser checks on other website
-   paths and does not disable authentication, rate limits or other protections.
-   Confirm when it is saved. [Cloudflare error 1010](https://developers.cloudflare.com/support/troubleshooting/http-status-codes/cloudflare-1xxx-errors/error-1010/),
-   [scoped Browser Integrity Check settings](https://developers.cloudflare.com/rules/configuration-rules/settings/#browser-integrity-check).
+## Server work and public checks
 
-[Cloudflare proxy status](https://developers.cloudflare.com/dns/proxy-status/),
-[Full (strict)](https://developers.cloudflare.com/ssl/origin-configuration/ssl-modes/full-strict/),
-[creating a cache rule](https://developers.cloudflare.com/cache/how-to/cache-rules/create-dashboard/),
-[cache bypass setting](https://developers.cloudflare.com/cache/how-to/cache-rules/settings/#bypass-cache).
+- [x] Verify proxied DNS for both hosts; record the operator's Full (strict)
+  and API cache-bypass confirmation.
+- [x] Implement and test separate website/API origins, exact browser CORS,
+  website-bound wallet signatures, API installer addresses and hashed assets.
+- [x] Deploy the tested release on both VMs, retaining previous releases and
+  public asset hashes. Verify pause controls and observer continuity.
+- [x] Generate a root-only Origin CA private key and a public CSR for both hosts.
+- [x] Stage Origin CA nginx paths and verify routing/caching/access rules on
+  temporary loopback HTTPS. Keep the production API private pending issuance.
+- [ ] **Operator, local browser:** sign the CSR above and return the public PEM.
+- [ ] **Codex, primary:** verify Cloudflare's issuing chain, both names, expiry
+  and key match; activate the checked nginx configuration with rollback.
+- [ ] **Codex:** verify public browser-trusted HTTPS, redirects, website loading,
+  API responses and Cloudflare caching. Confirm the effective Full (strict)
+  setting with the operator; successful HTTPS alone does not prove that mode.
+- [ ] **Codex:** use the unchanged worker HTTP client for a read-only capabilities
+  call, plus permission-denied API requests. Record status, response type,
+  Cloudflare Ray ID and cache headers. This checks transport without assigning
+  work, sending tokens or enabling funds.
+- [ ] **Codex and operator:** complete wallet login, authenticated worker flows,
+  upload sizes/timeouts and public browser checks in the appropriate validation
+  phase. No real worker compatibility result is claimed before those checks.
+  If Cloudflare challenges a real request, use its evidence to identify and
+  adjust only the applicable security rule; preserve API authentication.
+- [ ] **Codex:** verify direct origin web access is denied while SSH remains
+  usable. Trust forwarded client addresses only from official Cloudflare peers.
+- [x] **Codex:** verify the encrypted key/CSR and configuration supplement on
+  Germany, including decryption and key match. Its DB recovery point remains
+  the 12:59 snapshot; the supplement does not advance that recovery point.
+- [ ] **Codex:** refresh and verify the supplement after the signed certificate
+  is installed, including the activated nginx configuration.
+- [ ] **Codex:** record certificate expiry and add expiry monitoring before
+  launch. Renew by obtaining/installing a replacement Origin CA certificate;
+  this certificate does not use Certbot renewal. Disable the unused Certbot
+  timer on activation only if no other certificates depend on it.
 
-If you do not administer the `tig.foundation` zone, its Cloudflare administrator
-can make these hostname-specific changes. No Cloudflare API token is required
-for the browser steps.
+Origin CA protects the **Cloudflare → Hetzner** connection. Visitors see
+Cloudflare's public certificate. Keep the proxy enabled: a browser connecting
+directly would not trust an Origin CA certificate.
+[Origin CA](https://developers.cloudflare.com/ssl/origin-configuration/origin-ca/),
+[Full (strict)](https://developers.cloudflare.com/ssl/origin-configuration/ssl-modes/full-strict/).
 
-## Codex's server work and checks
-
-- [x] Confirm website DNS and HTTP responses pass through Cloudflare.
-- [x] Record Daniel's report that Full (strict) is selected.
-- [x] Confirm both hostnames resolve through Cloudflare.
-- [x] Make the browser API address configurable; allow only the website origin
-  for cross-origin browser access and in its content security policy. Keep
-  wallet signatures bound to the website origin. Set installer commands,
-  downloads and artifact links to the API address, retaining `/api/v2` and
-  the existing authentication/permission checks. Test both browser and worker
-  clients, including denied origins and permissions.
-- [x] Use content-hashed URLs for public CSS/JavaScript, with immutable cache
-  headers. Keep HTML and all API responses (including errors) `no-store`.
-  Tests check content changes, origin isolation and the live dashboard flow.
-- [x] Install the tested release on both VMs; configure the primary's private
-  API and retain previous public asset hashes across releases. Restarts preserve
-  financial state, pause controls, migration checksums and observer continuity.
-- [ ] Activate the staged [nginx configuration](../deploy/v2-mainnet/nginx.conf.example)
-  after certificates are issued. Verify actual Cloudflare cache behavior and
-  permit website asset caching after rollout.
-- [ ] Verify the certificate-validation path through the proxy; obtain and
-  install certificates for both hostnames on the **primary Hetzner VM**; activate
-  HTTPS and test renewal. If existing Cloudflare rules interfere, identify the
-  exact rule requiring an operator adjustment.
-- [ ] **Operator, local Cloudflare browser, after the certificate is ready:**
-  confirm the effective mode is **Full (strict)** for both hostnames. If it is
-  not, open **Rules → Overview → Create rule → Configuration Rule**. Name it
-  `Pool strict HTTPS`, match **Hostname equals pool.tig.foundation OR Hostname
-  equals pool-api.tig.foundation**, add the
-  **SSL** setting and choose **Full (strict)** (shown as **Strict** in some
-  rule interfaces), then deploy. Check for conflicting matching rules.
-- [ ] Verify Cloudflare's public certificate, the Hetzner certificate, HTTPS
-  redirects, website loading, wallet login and operator access. A working web
-  page does not by itself prove that Full (strict) is selected.
-- [ ] Verify cache bypass and real worker API requests, result/proof uploads,
-  request size and timeout limits. Worker requests must not receive browser
-  challenge pages; browser API calls must also receive API responses. Scope any necessary security-rule adjustments to the
-  affected pool routes; retain authentication and attack protection.
-- [ ] Configure the primary to accept public web traffic only from Cloudflare
-  and trust forwarded client addresses only from Cloudflare. Preserve SSH
-  administration and certificate renewal, and test that direct web access
-  cannot bypass the proxy.
-- [x] Back up the new release, retained public assets and pending web settings
-  on Germany; verify every checksum and decrypt protected settings privately.
-- [ ] Back up the final web/certificate configuration on the German recovery
-  server and record the Cloudflare hostname rules for a manual takeover.
-
-[Hostname-specific SSL rules](https://developers.cloudflare.com/rules/configuration-rules/settings/#ssl),
-[creating a configuration rule](https://developers.cloudflare.com/rules/configuration-rules/create-dashboard/),
-[challenge pages and API compatibility](https://developers.cloudflare.com/cloudflare-challenges/challenge-types/challenge-pages/),
-[protecting the origin](https://developers.cloudflare.com/fundamentals/security/protect-your-origin-server/).
-
-Cache only public website content under this plan; balances, wallet login,
-withdrawals, operator actions and work responses remain uncached.
-[Cloudflare cache behavior](https://developers.cloudflare.com/cache/concepts/default-cache-behavior/).
-
-Completing this setup establishes the public website and API. Mainnet funding
-and work still require the remaining payment, reward, recovery and CPU/GPU
-validation checks in the launch plan.
+Public HTTPS preparation does not complete the mainnet launch. The remaining
+payment, reward, recovery and CPU/GPU validation checks still apply.

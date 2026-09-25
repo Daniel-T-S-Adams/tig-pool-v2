@@ -3,7 +3,7 @@
 This shows the agreed live setup following the website/API split on
 25 September 2026. Cloudflare proxies both addresses; the website and backend
 run on the same primary Hetzner server. The code is implemented and tested;
-public HTTPS activation still awaits the Cloudflare exception and certificates
+public HTTPS activation awaits the signed Cloudflare Origin CA certificate
 listed in the [setup checklist](CLOUDFLARE_SETUP.md).
 
 ```mermaid
@@ -38,8 +38,9 @@ flowchart TD
 
 - **Two addresses, one primary server.** Both DNS records use **Proxied**
   (orange cloud), with HTTPS on both connections. Daniel reports that
-  **Full (strict)** is already selected; the server certificates and effective
-  settings for both hostnames still need verification.
+  **Full (strict)** is already selected. A Cloudflare Origin CA certificate will
+  protect the Cloudflare-to-Hetzner connection; signing and public verification
+  remain pending.
 - **Cache public website files; keep live data uncached.** The browser loads
   the website from `pool.tig.foundation`, then calls
   `pool-api.tig.foundation/api/v2` for login, balances and actions. Workers use

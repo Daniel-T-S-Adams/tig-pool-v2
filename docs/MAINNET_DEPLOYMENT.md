@@ -79,8 +79,11 @@ member's machine for the final test.
 
 ## HTTPS and services
 
-1. Point the website and API hostnames to the server and obtain valid TLS
-   certificates for both. Configure `origin` as the website address and
+1. Point the proxied website and API hostnames to the server. For this setup,
+   generate the key/CSR on Hetzner and obtain a Cloudflare Origin CA certificate
+   covering both hosts. Keep Full (strict); verify the signed certificate and
+   record/monitor expiry before activation. No HTTP/ACME challenge is needed.
+   Configure `origin` as the website address and
    `api_origin` as the worker/dashboard API address; omitting `api_origin`
    preserves a same-origin deployment. Set the coordinator's `public_origin`
    to the API address so benchmark artifact URLs use it too. Wallet signatures

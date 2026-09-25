@@ -1,4 +1,6 @@
-# Install only after both certificates and the loopback API have been checked.
+# Install only after the Cloudflare Origin CA certificate (both hostnames) and
+# the loopback API have been checked. Keep both DNS records proxied and use
+# Full (strict). Origin CA issuance does not use HTTP/ACME validation paths.
 # The generated Cloudflare include must define $innopool_cloudflare_peer using
 # $realip_remote_addr and trust CF-Connecting-IP only from official Cloudflare
 # networks. Keep SSH administration separate from these web access rules.
@@ -22,12 +24,6 @@ server {
     server_name REPLACE_POOL_HOSTNAME REPLACE_POOL_API_HOSTNAME;
     if ($innopool_cloudflare_peer = 0) { return 444; }
     access_log off;
-    location ^~ /.well-known/acme-challenge/ {
-        root /var/lib/innopool-v2-mainnet-acme;
-        default_type text/plain;
-        add_header Cache-Control "no-store" always;
-        try_files $uri =404;
-    }
     location / { return 308 https://$host$request_uri; }
 }
 
@@ -43,20 +39,13 @@ server {
     listen 443 ssl;
     listen [::]:443 ssl;
     server_name REPLACE_POOL_HOSTNAME;
-    ssl_certificate /etc/letsencrypt/live/REPLACE_CERTIFICATE_NAME/fullchain.pem;
-    ssl_certificate_key /etc/letsencrypt/live/REPLACE_CERTIFICATE_NAME/privkey.pem;
+    ssl_certificate /etc/innopool-v2-mainnet/tls/cloudflare-origin.pem;
+    ssl_certificate_key /etc/innopool-v2-mainnet/tls/cloudflare-origin.key;
     ssl_protocols TLSv1.2 TLSv1.3;
     ssl_session_tickets off;
     if ($innopool_cloudflare_peer = 0) { return 444; }
     access_log off;
     add_header Strict-Transport-Security "max-age=3600" always;
-    location ^~ /.well-known/acme-challenge/ {
-        root /var/lib/innopool-v2-mainnet-acme;
-        default_type text/plain;
-        add_header Cache-Control "no-store" always;
-        add_header Strict-Transport-Security "max-age=3600" always;
-        try_files $uri =404;
-    }
     location /assets/ {
         # Deployment copies only content-hashed public assets here and retains
         # prior hashes, so an in-flight page can finish across a release switch.
@@ -86,8 +75,8 @@ server {
     listen 443 ssl;
     listen [::]:443 ssl;
     server_name REPLACE_POOL_API_HOSTNAME;
-    ssl_certificate /etc/letsencrypt/live/REPLACE_CERTIFICATE_NAME/fullchain.pem;
-    ssl_certificate_key /etc/letsencrypt/live/REPLACE_CERTIFICATE_NAME/privkey.pem;
+    ssl_certificate /etc/innopool-v2-mainnet/tls/cloudflare-origin.pem;
+    ssl_certificate_key /etc/innopool-v2-mainnet/tls/cloudflare-origin.key;
     ssl_protocols TLSv1.2 TLSv1.3;
     ssl_session_tickets off;
     if ($innopool_cloudflare_peer = 0) { return 444; }
@@ -96,11 +85,6 @@ server {
     add_header Strict-Transport-Security "max-age=3600" always;
     add_header Cache-Control "no-store" always;
     proxy_hide_header Cache-Control;
-    location ^~ /.well-known/acme-challenge/ {
-        root /var/lib/innopool-v2-mainnet-acme;
-        default_type text/plain;
-        try_files $uri =404;
-    }
     location /api/v2/ {
         proxy_pass http://127.0.0.1:18080;
         proxy_http_version 1.1;
