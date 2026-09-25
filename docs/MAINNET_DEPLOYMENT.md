@@ -4,6 +4,8 @@ The templates in [deploy/v2-mainnet](../deploy/v2-mainnet) are a staging bundle,
 not an enabled installation. They contain placeholders, no credentials, and
 default to funds, work, settlement and TIG submissions being disabled. The
 coordinator receives no TIG API key in this configuration.
+Current setup progress is recorded in [Cloudflare setup](CLOUDFLARE_SETUP.md);
+this document describes the full deployment and launch procedure.
 
 ## Inputs and roles
 
@@ -41,8 +43,8 @@ Daniel's local computer. Worker execution belongs to the member role.
    evidence merely to keep a service running. A second directory on the same
    host is not an independent archive.
 
-The template mainnet application slice has a separate 1-CPU/2-GiB ceiling.
-It is not installed or running. Before using this same machine, review the
+The mainnet application slice has a separate 1-CPU/2-GiB ceiling, now used by
+the preparation services on the dedicated VMs. Before sharing a host, review the
 combined testnet, mainnet, database and worker limits; separate slice limits
 alone do not impose a shared machine-wide ceiling. A worker belongs on its
 member's machine for the final test.

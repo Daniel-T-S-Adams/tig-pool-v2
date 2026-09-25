@@ -28,7 +28,16 @@ The tested release was installed on recovery at **12:56 UTC** and primary at
 origins verified. Fourteen migration checksums match; no migrations or financial
 changes occurred. Both collectors retain continuous, conflict-free history.
 The new nginx routing and Cloudflare-only origin access configuration are
-syntax-checked but not activated. [Draft PR 21](https://github.com/Daniel-T-S-Adams/tig-pool-v2/pull/21).
+syntax-checked but not activated. A temporary loopback nginx instance also
+passed routing, caching, API authentication/CORS, redirects and untrusted-peer
+rejection checks; its test certificate/listener were removed. Actual public
+TLS and Cloudflare behavior still need verification.
+[Draft PR 21](https://github.com/Daniel-T-S-Adams/tig-pool-v2/pull/21).
+
+A fresh preparation backup passed verification on Germany at **13:27 UTC**:
+207,779 file checksums, the exact application archive, retained public assets
+and decrypted settings all passed. Certificates have not yet been issued;
+the final TLS backup remains a later step.
 
 ## Your next steps — pool owner/operator, local browser
 
@@ -123,6 +132,8 @@ for the browser steps.
   and trust forwarded client addresses only from Cloudflare. Preserve SSH
   administration and certificate renewal, and test that direct web access
   cannot bypass the proxy.
+- [x] Back up the new release, retained public assets and pending web settings
+  on Germany; verify every checksum and decrypt protected settings privately.
 - [ ] Back up the final web/certificate configuration on the German recovery
   server and record the Cloudflare hostname rules for a manual takeover.
 
