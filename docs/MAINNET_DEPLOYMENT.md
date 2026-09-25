@@ -77,10 +77,19 @@ member's machine for the final test.
 
 ## HTTPS and services
 
-1. Point the chosen hostname to the server and obtain a valid TLS certificate.
-   Configure the chosen reverse proxy to serve that exact HTTPS origin and
-   forward to `127.0.0.1:18080`. Only the proxy is public. The API trusts
-   forwarded headers from loopback only. Wallet login must use the same origin.
+1. Point the website and API hostnames to the server and obtain valid TLS
+   certificates for both. Configure `origin` as the website address and
+   `api_origin` as the worker/dashboard API address; omitting `api_origin`
+   preserves a same-origin deployment. Set the coordinator's `public_origin`
+   to the API address so benchmark artifact URLs use it too. Wallet signatures
+   stay bound to the website origin. Route public website files and API paths
+   to `127.0.0.1:18080`; keep that listener private. The API permits browser
+   access only from the configured website and requires existing bearer
+   permissions. Trust forwarded headers only from the configured proxy.
+   See [Cloudflare setup](CLOUDFLARE_SETUP.md) for the two-host deployment.
+   HTML and all API responses use `no-store`; only content-hashed public
+   website assets use long-lived immutable caching. Keep previous release
+   assets available across a rollout, and bypass API caching at the proxy.
 2. Install the six filled service files and slice, after checking executable
    paths and the pinned commit. Establish startup ordering after the database
    and network. The examples deliberately do not assume how PostgreSQL is hosted.

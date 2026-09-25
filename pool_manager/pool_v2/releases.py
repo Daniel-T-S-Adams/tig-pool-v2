@@ -49,6 +49,6 @@ def installation(manifest,pool_origin,resource,compute_type,workers):
             or type(workers) is not int or not 1<=workers<=4096):
         raise FundsError('choose a compatible CPU or GPU verification type and capacity from 1 to 4096')
     command='python3 install_worker_v2.py install \\\n  --pool '+shlex.quote(pool_origin)+' \\\n  --directory "$HOME/innopool-v2-member" \\\n  --resource '+resource+' --compute-type '+compute_type+' --workers '+str(workers)
-    return {'installer_url':'/api/v2/install-worker','installer_sha256':manifest['worker']['installer_sha256'],
+    return {'installer_url':pool_origin.rstrip('/')+'/api/v2/install-worker','installer_sha256':manifest['worker']['installer_sha256'],
         'worker_commit':manifest['worker']['commit'],'command':command,
         'start_command':'"$HOME/innopool-v2-member/run"'}

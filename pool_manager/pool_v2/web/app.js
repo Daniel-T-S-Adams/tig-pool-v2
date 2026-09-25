@@ -1,4 +1,5 @@
 const $ = id => document.getElementById(id);
+const apiOrigin = document.querySelector('meta[name="innopool-api-origin"]').content;
 const operatorPage = location.pathname === '/operator';
 let token = '', capabilities = {}, memberOffset = 0, operatorOffset = 0, dialogAction = null;
 const unit = 10n ** 18n;
@@ -32,7 +33,7 @@ async function api(path, body, method) {
   const headers = {'X-InnoPool-Version':'2.0'};
   if (token) headers.Authorization = 'Bearer ' + token;
   if (body !== undefined) headers['Content-Type'] = 'application/json';
-  const response = await fetch('/api/v2/' + path, {method:method || (body === undefined ? 'GET' : 'POST'),headers,body:body === undefined ? undefined : JSON.stringify(body),cache:'no-store',credentials:'omit'});
+  const response = await fetch(apiOrigin + '/api/v2/' + path, {method:method || (body === undefined ? 'GET' : 'POST'),headers,body:body === undefined ? undefined : JSON.stringify(body),cache:'no-store',credentials:'omit'});
   const result = await response.json();
   if (!response.ok) throw Error(typeof result.detail === 'string' ? result.detail : 'The request could not be processed. Check the entered values.');
   return result;

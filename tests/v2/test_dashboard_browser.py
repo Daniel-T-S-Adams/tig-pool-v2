@@ -14,6 +14,7 @@ import unittest
 from eth_account import Account
 from eth_account.messages import encode_defunct
 from fastapi.testclient import TestClient
+from fastapi.responses import JSONResponse
 import uvicorn
 
 from pool_manager.pool_v2 import custody, deposits, funding, ledger, members
@@ -52,10 +53,15 @@ class DashboardBrowserTests(DatabaseCase):
         listener.bind(('127.0.0.1',0));listener.listen(128)
         self.addCleanup(listener.close)
         self.origin='https://127.0.0.1:'+str(listener.getsockname()[1])
+        api_listener=socket.socket()
+        api_listener.bind(('127.0.0.1',0));api_listener.listen(128)
+        self.addCleanup(api_listener.close)
+        self.api_origin='https://127.0.0.1:'+str(api_listener.getsockname()[1])
         settings=Settings(self.db.dsn,self.origin,8453,hashlib.sha256(self.operator.encode()).hexdigest(),
             funds_enabled=True,work_enabled=True,pool_player_id=CUSTODY,custody_network=NETWORK,
             custody_rpc_url='https://rpc.example',withdrawal_fee_model='op-jovian',
-            release_manifest=release_fixture(),build_commit='a'*40,worker_installer=INSTALLER)
+            release_manifest=release_fixture(),build_commit='a'*40,worker_installer=INSTALLER,
+            api_origin=self.api_origin)
         self.app=create_app(settings)
         test=self
         class SimulatedChain:
@@ -77,18 +83,23 @@ class DashboardBrowserTests(DatabaseCase):
             def transfer(self,tx_hash,index):
                 return (test.external_deposit if tx_hash==test.external_hash else self.chain).transfer(tx_hash,index)
         self.app.state.payment_chain=SimulatedChain()
-        self.server=uvicorn.Server(uvicorn.Config(self.app,log_level='critical',access_log=False,
-            ssl_certfile=cert,ssl_keyfile=key))
-        self.thread=threading.Thread(target=self.server.run,kwargs={'sockets':[listener]},daemon=True)
-        def stop():
-            self.server.should_exit=True
-            self.thread.join(timeout=10)
-            if self.thread.is_alive():raise RuntimeError('isolated browser server did not stop')
-        self.addCleanup(stop)
-        self.thread.start()
-        deadline=time.monotonic()+10
-        while not self.server.started and self.thread.is_alive() and time.monotonic()<deadline:time.sleep(.02)
-        self.assertTrue(self.server.started,'isolated HTTPS server failed to start')
+        async def website_only(scope,receive,send):
+            if scope['type']=='http' and scope['path'].startswith('/api/'):
+                return await JSONResponse({'detail':'use the API origin'},status_code=404)(scope,receive,send)
+            await self.app(scope,receive,send)
+        for app,sock in ((website_only,listener),(self.app,api_listener)):
+            server=uvicorn.Server(uvicorn.Config(app,log_level='critical',access_log=False,
+                ssl_certfile=cert,ssl_keyfile=key))
+            thread=threading.Thread(target=server.run,kwargs={'sockets':[sock]},daemon=True)
+            def stop(server=server,thread=thread):
+                server.should_exit=True
+                thread.join(timeout=10)
+                if thread.is_alive():raise RuntimeError('isolated browser server did not stop')
+            self.addCleanup(stop)
+            thread.start()
+            deadline=time.monotonic()+10
+            while not server.started and thread.is_alive() and time.monotonic()<deadline:time.sleep(.02)
+            self.assertTrue(server.started,'isolated HTTPS server failed to start')
 
     def test_member_and_operator_complete_reviewed_payment_without_float_rounding(self):
         from playwright.sync_api import sync_playwright, expect
@@ -104,6 +115,9 @@ class DashboardBrowserTests(DatabaseCase):
             if request['method']=='eth_chainId':return '0x2105'
             if request['method']=='personal_sign':
                 self.assertEqual(request['params'][1].lower(),self.wallet)
+                message=bytes.fromhex(request['params'][0][2:]).decode()
+                self.assertIn('URI: '+self.origin+'\n',message)
+                self.assertNotIn(self.api_origin,message)
                 return '0x'+Account.sign_message(encode_defunct(hexstr=request['params'][0]),self.signer.key).signature.hex()
             raise AssertionError('The browser must never ask to send a transaction: '+request['method'])
         context.expose_function('fixtureWallet',wallet_request)
@@ -119,7 +133,8 @@ class DashboardBrowserTests(DatabaseCase):
         page.get_by_label('Concurrent nonce workers').fill('3')
         page.get_by_role('button',name='Show installation steps',exact=True).click()
         expect(page.locator('#worker-install-command')).to_contain_text('--resource GPU --compute-type aws_g4dn --workers 3')
-        expect(page.locator('#worker-installer-download')).to_have_attribute('href','/api/v2/install-worker')
+        expect(page.locator('#worker-installer-download')).to_have_attribute('href',self.api_origin+'/api/v2/install-worker')
+        expect(page.locator('#worker-install-command')).to_contain_text('--pool '+self.api_origin)
         expect(page.locator('#collateral')).to_have_text('50')
         page.get_by_label('Withdraw TIG',exact=True).fill('40.000000000000000001')
         page.get_by_role('button',name='Request withdrawal').click()

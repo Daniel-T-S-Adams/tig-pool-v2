@@ -26,6 +26,9 @@ Changing the caller's configuration object cannot change the served pair.
 | `GET /api/v2/worker-installation` | Generates instructions for one compatible `resource`, `compute_type` and `workers` capacity. |
 
 These are public setup resources and do not grant member or operator authority.
+For a separate API hostname, set `api_origin` independently of the wallet-login
+website `origin`. Installer instructions and downloads use that API address;
+the member protocol remains `/api/v2`. The default keeps both addresses equal.
 Downloads and metadata use `Cache-Control: no-store`. No installer is served if
 the release is absent or its supplied artifacts do not validate. Merely
 configuring release metadata does not enable member funds, work or settlement.
