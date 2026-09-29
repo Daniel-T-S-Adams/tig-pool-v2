@@ -1,7 +1,7 @@
 const $ = id => document.getElementById(id);
 const apiOrigin = document.querySelector('meta[name="innopool-api-origin"]').content;
 const operatorPage = location.pathname === '/operator';
-let token = '', capabilities = {}, memberOffset = 0, operatorOffset = 0, dialogAction = null;
+let token = '', capabilities = {}, operatorIncome = {}, memberOffset = 0, operatorOffset = 0, dialogAction = null;
 const unit = 10n ** 18n;
 const key = () => crypto.randomUUID();
 function tig(value) {
@@ -141,14 +141,15 @@ function editMultiplier(member) {
   });field('Multiplier · 0 to 1','new-multiplier',member.multiplier);field('Reason','change-reason');
 }
 function reviewWithdrawal(row, approve) {
-  dialog(approve?'Approve withdrawal':'Reject withdrawal',tig(row.amount)+' TIG to '+row.recipient,approve?'Approve':'Reject',async()=>{
+  dialog(approve?'Approve withdrawal':'Reject withdrawal',(row.kind==='operator'?'Operator funds: ':'')+tig(row.amount)+' TIG to '+row.recipient,approve?'Approve':'Reject',async()=>{
     const body={reason:$('review-reason').value.trim()};if(!approve)body.event_key=key();
     await api('operator/withdrawals/'+row.id+(approve?'/approve':'/reject'),body);await loadOperator();
   });field('Review notes','review-reason');
 }
 function prepareWithdrawal(row) {
+  const requestKey=key();
   dialog('Prepare manual payment',tig(row.amount)+' TIG to '+row.recipient+'. The next step reserves a payment attempt before you use the custody wallet.','Prepare payment',async()=>{
-    const attempt=await api('operator/withdrawals/'+row.id+'/begin',{request_key:key(),fee_limit:units($('gas-budget').value.trim())});
+    const attempt=await api('operator/withdrawals/'+row.id+'/begin',{request_key:requestKey,fee_limit:units($('gas-budget').value.trim())});
     $('action-dialog').close();await loadOperator();showPayment(attempt);return false;
   });field('Maximum reserved operator fee · native token','gas-budget','0.0001');
 }
@@ -159,7 +160,7 @@ function showPayment(attempt,topup=false) {
     if(index){const parsed=Number(index);if(!Number.isSafeInteger(parsed)||parsed<0)throw Error('Enter a valid transfer event index.');body.log_index=parsed;}
     const result=await api('operator/'+(topup?'topups/':'withdrawal-attempts/')+attempt.id+'/reconcile',body);
     if(result.status==='awaiting_final_transaction'){ $('action-error').textContent='The transaction is not final yet. The amount remains reserved.';return false; }
-    await loadOperator();notice(topup ? (result.state==='awaiting_protocol'?'Transfer verified. Submission credit is waiting for TIG confirmation.':'Top-up transaction reconciled: '+status(result.state)+'.') : result.outcome==='paid'?'Payment verified. The member received the full requested amount.':'Transaction reconciled. The request can be reviewed for another attempt.');
+    await loadOperator();notice(topup ? (result.state==='awaiting_protocol'?'Transfer verified. Submission credit is waiting for TIG confirmation.':'Top-up transaction reconciled: '+status(result.state)+'.') : result.outcome==='paid'?(attempt.kind==='operator'?'Payment verified. The operator income wallet received the full requested amount.':'Payment verified. The member received the full requested amount.'):'Transaction reconciled. The request can be reviewed for another attempt.');
   });
   for (const [label,value] of [['Amount',tig(attempt.amount)+' TIG'],['From',attempt.sender],['Recipient',attempt.recipient],['Token contract',attempt.token],['Chain',String(attempt.chain_id)],['Nonce',String(attempt.nonce)]]) {const row=node('div',undefined,'payment-fact');row.append(node('span',label),node('span',value,'mono'));$('action-fields').append(row);}
   field('Transaction hash · leave blank to recover it','payment-hash',attempt.claimed_tx_hashes?.length===1?attempt.claimed_tx_hashes[0]:'',{optional:true,placeholder:'0x…'});
@@ -175,7 +176,8 @@ async function previewRound(row) {
   $('action-fields').append(list);$('action-submit').disabled=!capabilities.settlement_enabled || !preview.preview;
 }
 async function loadOperator() {
-  const [data,payments,custody,funding]=await Promise.all([api('operator/dashboard?limit=50&offset='+operatorOffset),api('operator/withdrawals'),api('operator/custody'),api('operator/funding')]);
+  const [data,payments,custody,funding,income]=await Promise.all([api('operator/dashboard?limit=50&offset='+operatorOffset),api('operator/withdrawals'),api('operator/custody'),api('operator/funding'),api('operator/income')]);
+  operatorIncome=income;
   await loadCapabilities();$('operator-login').hidden=true;$('operator-content').hidden=false;$('operator-sign-out').hidden=false;
   const sum=(asset,location,kind)=>data.balances.filter(row=>row.asset===asset&&row.location===location&&(!kind||row.kind===kind)).reduce((total,row)=>total+BigInt(row.balance),0n);
   $('operator-balances').replaceChildren();
@@ -183,6 +185,9 @@ async function loadOperator() {
   const observation=data.observation;$('observation-summary').textContent=observation.initialized?'Observed through block '+observation.latest_seen_height+' · '+observation.missing_heights.length+' listed gaps':'Block collection has not started.';
   const wallet=custody.observation,check=wallet.check;
   const directWallet=!check?.custody_code||check.custody_code==='0x';
+  $('operator-income-wallet').textContent=income.wallet?'Income wallet: '+income.wallet:'An operator income wallet and operating reserve have not been configured.';
+  $('operator-income-balance').textContent=income.wallet?tig(income.withdrawable)+' TIG withdrawable · '+tig(income.reserve)+' TIG retained for operations · '+tig(income.pending)+' TIG pending withdrawal.':'';
+  $('request-operator-withdrawal').disabled=!income.enabled||BigInt(income.pending)>0n||BigInt(income.withdrawable)===0n||!directWallet;
   $('custody-health').textContent=!wallet.initialized?'Collection not started':wallet.ready?'Reconciled':'Check required';
   $('custody-health').classList.toggle('active',wallet.ready);
   $('custody-balances').textContent=check?.actual_tig!==null && check?.actual_tig!==undefined ? 'Block '+check.height+' · wallet '+tig(check.actual_tig)+' TIG · ledger '+tig(check.recorded_tig)+' TIG · '+(wallet.ready?'The recorded wallet funds reconcile.':check.healthy?'Waiting for a fresh chain check.':check.reason) : 'Start custody collection before accepting funds. New work waits for a complete, reconciled check once collection is configured.';
@@ -199,7 +204,7 @@ async function loadOperator() {
   $('pause-work').textContent=capabilities.new_work_paused?'Resume new work':'Pause new work';
   $('settlement-status').textContent=capabilities.settlement_enabled?'Preview each round before crediting its final allocation.':'Live settlement is awaiting verified protocol configuration. Previews remain available when the evidence is complete.';
   table('operator-members',data.members.map(row=>[address(row.wallet),tig(row.available),tig(row.collateral),row.slots+' / 2',row.multiplier+'×',button('Edit multiplier',()=>editMultiplier(row))]),6);
-  table('operator-withdrawals',payments.withdrawals.map(row=>{const actions=node('div');if(row.state==='requested')actions.append(button('Approve',()=>reviewWithdrawal(row,true)),button('Reject',()=>reviewWithdrawal(row,false),'danger'));if(row.state==='approved'){const prepare=button('Prepare payment',()=>prepareWithdrawal(row));prepare.disabled=!directWallet;actions.append(prepare,button('Reject',()=>reviewWithdrawal(row,false),'danger'));}if(row.state==='uncertain'){const attempt=payments.attempts.find(value=>value.withdrawal_id===row.id&&!value.outcome);if(attempt)actions.append(button('Check transfer',async()=>showPayment(await api('operator/withdrawal-attempts/'+attempt.id))));}return[address(row.wallet),tig(row.amount),address(row.recipient),status(row.state),actions];}),5);
+  table('operator-withdrawals',payments.withdrawals.map(row=>{const actions=node('div');if(row.state==='requested')actions.append(button('Approve',()=>reviewWithdrawal(row,true)),button('Reject',()=>reviewWithdrawal(row,false),'danger'));if(row.state==='approved'){const prepare=button('Prepare payment',()=>prepareWithdrawal(row));prepare.disabled=!directWallet;actions.append(prepare,button('Reject',()=>reviewWithdrawal(row,false),'danger'));}if(row.state==='uncertain'){const attempt=payments.attempts.find(value=>value.withdrawal_id===row.id&&!value.outcome);if(attempt)actions.append(button('Check transfer',async()=>showPayment(await api('operator/withdrawal-attempts/'+attempt.id))));}return[row.kind==='operator'?'Operator income':address(row.wallet),tig(row.amount),address(row.recipient),status(row.state),actions];}),5);
   table('operator-rounds',data.rounds.map(row=>[row.round,row.credited_blocks+' / '+row.observed_blocks+' observed',row.pending_collateral,row.pot===null?'—':tig(row.pot),row.settled_at?'Settled':'Awaiting finalization',button(row.settled_at?'View allocation':'Preview',()=>previewRound(row))]),6);
   table('operator-holds',data.collateral.map(row=>{const finalize=button('Finalize',async()=>{await api('operator/collateral/'+row.id+'/finalize',{});await loadOperator();});finalize.disabled=!capabilities.settlement_enabled;return[address(row.benchmark_id),row.creation_round,status(row.state),row.handed_over_at?'Yes':'No',tig(row.amount),finalize];}),6);
   for(const [id,items] of [['uncertain-submissions',data.uncertain_submissions.map(row=>[row.kind+' · '+short(row.benchmark_id),'Awaiting authoritative protocol confirmation since '+date(row.sent_at)])],['observation-alerts',data.alerts.map(row=>[row.kind+' · block '+(row.height??'unknown'),date(row.created_at)])]]) {$(id).replaceChildren();for(const [title,text]of items){const item=node('div',undefined,'alert-item');item.append(node('strong',title),node('span',text));$(id).append(item);}if(!items.length)$(id).append(node('p','No records to show.','muted small'));}
@@ -223,6 +228,13 @@ function recordReceipt(native) {
 }
 $('record-token-receipt').addEventListener('click',()=>recordReceipt(false));
 $('record-native-funding').addEventListener('click',()=>recordReceipt(true));
+$('request-operator-withdrawal').addEventListener('click',()=>{
+  const requestKey=key();
+  dialog('Withdraw operator funds','Send to '+operatorIncome.wallet+'. Keep at least '+tig(operatorIncome.reserve)+' TIG available for operations. This step reserves funds for review.','Request withdrawal',async()=>{
+    await api('operator/income/withdrawals',{request_key:requestKey,amount:units($('operator-withdraw-amount').value.trim()),reason:$('operator-withdraw-reason').value.trim()});
+    await loadOperator();notice('Operator withdrawal reserved. Review it before preparing payment.');
+  });field('Amount · TIG','operator-withdraw-amount');field('Reason','operator-withdraw-reason');
+});
 $('prepare-topup').addEventListener('click',()=>{
   const requestKey=key();
   dialog('Prepare submission fee top-up','Use available operator TIG to fund the pool’s submission balance. The transfer and network fee will be reserved before you send it manually.','Prepare top-up',async()=>{

@@ -14,6 +14,12 @@ location and initial member count. Provide a separate mainnet TIG/ETH budget
 before any transaction. The 5 TIG testnet limit does not authorize mainnet
 spending. Existing testnet collateral and observers remain on their own database.
 
+For [operator income payouts](OPERATOR_INCOME.md), the service template records
+the operator's selected income wallet. The amount of operator TIG to retain for
+running costs is still unset and must be chosen before using this configuration.
+Financial operations remain disabled in the template. Migration 015 and the
+matching API/website are required.
+
 **Codex assisting the pool operator, on the remote server:** complete the steps
 below once those deployment details are known. The member browser runs on
 Daniel's local computer. Worker execution belongs to the member role.

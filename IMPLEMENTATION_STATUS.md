@@ -320,3 +320,22 @@ same transfer twice. The outer sender pays its own gas; only the received
 native amount credits the operator. Member TIG, collateral and pilot caps are
 unchanged. The operator form accepts an optional call path, retaining its
 existing direct-transfer behavior. See [native funding instructions](docs/CUSTODY_OBSERVER.md#native-funding-sent-through-a-contract).
+
+## Operator income withdrawals — 28 September 2026
+
+The local implementation now supports payouts from available operator custody
+funds to a separately configured income wallet. Migration 015 preserves member
+withdrawals and adds operator ownership and an immutable retained budget to the
+shared withdrawal lifecycle. The operator API and dashboard show the configured
+address, withdrawable TIG and pending payouts. Requests reserve only operator
+funds; preparation rechecks the operating reserve and shares nonce/gas controls
+with member payments and protocol top-ups. Final transaction verification pays
+once without changing any member balance or withdrawal cooldown.
+
+The operator balance includes settled fee income and capital contributions.
+Both the income address and retained TIG budget must be explicitly configured.
+The operator selected `0x03f540Af6aAB40Bbf86D94584D4712541FbD6c4a` as the income
+address on 28 September; the mainnet template records it with the retained
+budget still unset. Transfers remain manually signed in the pool wallet.
+This increment is local implementation work, not a deployment
+or a completed live reward cycle. See [operator income procedures](docs/OPERATOR_INCOME.md).

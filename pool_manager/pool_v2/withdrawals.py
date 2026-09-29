@@ -1,4 +1,4 @@
-"""Member withdrawal reservations. Transfer review/sending is a separate process."""
+"""Member and operator withdrawals sharing one verified custody payment lifecycle."""
 
 from datetime import datetime, timedelta, timezone
 import uuid
@@ -8,8 +8,8 @@ from psycopg2.extras import Json
 from . import custody, deposits, ledger
 from .chain import CustodyPreflight, ConfirmedTransfer, ConfirmedTransaction, FEE_MODELS, hex_bytes
 from .database import lock
-from .members import available, member_lock
-from .money import Conflict, FundsError, units
+from .members import address, available, member_lock
+from .money import Conflict, FundsError, InsufficientFunds, units
 
 
 def pending(identity):
@@ -49,9 +49,51 @@ def _locked(cursor, identity):
     cursor.execute('SELECT member_id FROM withdrawals WHERE id=%s', (identity,))
     initial = cursor.fetchone()
     if not initial: raise FundsError('unknown withdrawal request')
-    member_lock(cursor, initial['member_id'])
+    if initial['member_id'] is None:
+        lock(cursor, 'operator-withdrawals')
+    else:
+        member_lock(cursor, initial['member_id'])
     cursor.execute('SELECT * FROM withdrawals WHERE id=%s FOR UPDATE', (identity,))
     return dict(cursor.fetchone())
+
+
+def request_operator(database, request_key, amount, network, *, recipient, reserve, actor, reason):
+    """Freeze the configured destination and retain the operator's running budget."""
+    units(amount, positive=True)
+    units(reserve)
+    recipient = address(recipient)
+    if recipient == network.custody:
+        raise FundsError('operator income wallet must differ from pool custody')
+    if not request_key or len(request_key) > 128 or not actor or not reason:
+        raise FundsError('operator withdrawal requires a bounded key, actor and reason')
+    with database.transaction() as cursor:
+        custody.bind(cursor, network)
+        lock(cursor, 'operator-withdrawals')
+        cursor.execute("SELECT * FROM withdrawals WHERE kind='operator' AND request_key=%s", (request_key,))
+        previous = cursor.fetchone()
+        details = {'recipient': recipient, 'reserve': reserve, 'reason': reason}
+        if previous:
+            if (int(previous['amount']), previous['recipient'], int(previous['operator_reserve'])) != (amount, recipient, reserve):
+                raise Conflict('operator withdrawal request key was reused with different inputs')
+            _event(cursor, previous['id'], 'requested', actor, details, 'operator-request:'+str(previous['id']))
+            return dict(previous)
+        cursor.execute("SELECT id FROM withdrawals WHERE kind='operator' AND state IN ('requested','approved','uncertain')")
+        if cursor.fetchone():
+            raise Conflict('operator already has a pending withdrawal')
+        identity = uuid.uuid4()
+        ledger.account(cursor, pending(identity), 'withdrawal')
+        # This account lock also serializes against operator top-ups/expenses.
+        cursor.execute("SELECT balance FROM accounts WHERE id='operator:custody:TIG' FOR UPDATE")
+        if int(cursor.fetchone()['balance']) < amount + reserve:
+            raise InsufficientFunds('operator funds must cover the withdrawal and retained operating reserve')
+        ledger.post(cursor, f'withdrawal:{identity}:reserve', 'operator_withdrawal_reservation',
+            [('operator:custody:TIG', -amount), (pending(identity), amount)],
+            {'actor': actor, **details})
+        cursor.execute("""INSERT INTO withdrawals(id,kind,request_key,amount,recipient,operator_reserve)
+            VALUES (%s,'operator',%s,%s,%s,%s) RETURNING *""", (identity, request_key, amount, recipient, reserve))
+        result = dict(cursor.fetchone())
+        _event(cursor, identity, 'requested', actor, details, 'operator-request:'+str(identity))
+        return result
 
 
 def _event(cursor, identity, kind, actor, details, key):
@@ -101,8 +143,9 @@ def release(database, identity, *, actor, reason, event_key, member_id=None):
         scoped_key = f'member:{member_id}:{event_key}' if member_id else 'operator:'+event_key
         _event(cursor, identity, state, actor, details, scoped_key)
         if row['state'] == state: return row
+        source = 'operator:custody:TIG' if row['kind'] == 'operator' else available(row['member_id'])
         ledger.post(cursor, f'withdrawal:{identity}:release', 'withdrawal_release',
-            [(pending(identity), -int(row['amount'])), (available(row['member_id']), int(row['amount']))],
+            [(pending(identity), -int(row['amount'])), (source, int(row['amount']))],
             {'actor': actor, 'reason': reason, 'state': state})
         cursor.execute('UPDATE withdrawals SET state=%s WHERE id=%s RETURNING *', (state, identity))
         return dict(cursor.fetchone())
@@ -112,9 +155,11 @@ def gas_hold(identity):
     return 'withdrawal-gas:'+str(identity)
 
 
-def begin(database, identity, request_key, preflight, *, fee_limit, actor):
-    """Commit the nonce, member hold and operator fee budget before manual send."""
+def begin(database, identity, request_key, preflight, *, fee_limit, actor, operator_reserve=None):
+    """Commit the nonce and operator gas budget for the reserved withdrawal."""
     units(fee_limit, positive=True)
+    if operator_reserve is not None:
+        units(operator_reserve)
     if not isinstance(preflight, CustodyPreflight) or not request_key or len(request_key)>128 or not actor:
         raise FundsError('sending requires a verified custody preflight, bounded key and actor')
     with database.transaction() as cursor:
@@ -128,6 +173,11 @@ def begin(database, identity, request_key, preflight, *, fee_limit, actor):
         age = (datetime.now(timezone.utc) - preflight.checked_at).total_seconds()
         if not -5 <= age <= 20: raise Conflict('custody preflight is stale; refresh before starting an attempt')
         if row['state'] != 'approved': raise Conflict('withdrawal is not approved for a new send attempt')
+        if row['kind'] == 'operator':
+            retained = max(int(row['operator_reserve']), operator_reserve or 0)
+            cursor.execute("SELECT balance FROM accounts WHERE id='operator:custody:TIG' FOR UPDATE")
+            if int(cursor.fetchone()['balance']) < retained:
+                raise InsufficientFunds('restore the operator operating reserve before preparing payment')
         cursor.execute('SELECT * FROM withdrawal_reviews WHERE withdrawal_id=%s', (identity,))
         review = cursor.fetchone()
         if not review or (review['chain_id'], review['token'], review['sender']) != (
@@ -253,7 +303,8 @@ def reconcile(database, attempt_id, transaction, transfer=None):
         result = dict(cursor.fetchone())
         if outcome == 'paid':
             cursor.execute("UPDATE withdrawals SET state='paid',paid_event=%s WHERE id=%s", (transfer.event_id, row['id']))
-            cursor.execute('UPDATE members SET last_paid_at=%s WHERE id=%s', (transaction.block_timestamp, row['member_id']))
+            if row['member_id'] is not None:
+                cursor.execute('UPDATE members SET last_paid_at=%s WHERE id=%s', (transaction.block_timestamp, row['member_id']))
         else:
             cursor.execute("UPDATE withdrawals SET state='approved' WHERE id=%s", (row['id'],))
         return result
@@ -322,14 +373,15 @@ def reconcile_sponsored(database, attempt_id, recovery, *, actor, reason):
             (attempt_id, tx.network.chain_id, tx.tx_hash, journal_id))
         outcome = dict(cursor.fetchone())
         cursor.execute("UPDATE withdrawals SET state='paid',paid_event=%s WHERE id=%s", (transfer.event_id, row['id']))
-        cursor.execute('UPDATE members SET last_paid_at=%s WHERE id=%s', (tx.block_timestamp, row['member_id']))
+        if row['member_id'] is not None:
+            cursor.execute('UPDATE members SET last_paid_at=%s WHERE id=%s', (tx.block_timestamp, row['member_id']))
         return outcome
 
 
 def instructions(database, attempt_id):
     """Frozen manual wallet instructions. Reading them never authorizes a resend."""
     with database.transaction() as cursor:
-        cursor.execute('''SELECT a.*,w.recipient,w.amount,w.state,r.token,r.fee_model,
+        cursor.execute('''SELECT a.*,w.recipient,w.amount,w.state,w.kind,r.token,r.fee_model,
             o.outcome,o.tx_hash AS final_tx_hash FROM withdrawal_attempts a
             JOIN withdrawals w ON w.id=a.withdrawal_id JOIN withdrawal_reviews r ON r.withdrawal_id=w.id
             LEFT JOIN withdrawal_attempt_outcomes o ON o.attempt_id=a.id WHERE a.id=%s''', (attempt_id,))

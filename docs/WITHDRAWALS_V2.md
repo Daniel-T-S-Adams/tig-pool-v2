@@ -5,6 +5,10 @@ sends a withdrawal using their own wallet software. The service holds no signing
 key and its RPC adapter cannot send transactions. Native transaction fees use
 separate operator funds, including fees on a failed or cancelled transaction.
 
+[Operator income withdrawals](OPERATOR_INCOME.md) now use this same payment
+lifecycle with a separate funding source, configured destination and retained
+operating budget. The member rules below continue to apply only to members.
+
 ## State and recovery
 
 1. A wallet-authenticated member requests an amount within their available

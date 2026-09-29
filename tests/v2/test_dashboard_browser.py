@@ -61,7 +61,7 @@ class DashboardBrowserTests(DatabaseCase):
             funds_enabled=True,work_enabled=True,pool_player_id=CUSTODY,custody_network=NETWORK,
             custody_rpc_url='https://rpc.example',withdrawal_fee_model='op-jovian',
             release_manifest=release_fixture(),build_commit='a'*40,worker_installer=INSTALLER,
-            api_origin=self.api_origin)
+            api_origin=self.api_origin,operator_income_wallet='0x'+'9'*40,operator_tig_reserve_units=str(TIG))
         self.app=create_app(settings)
         test=self
         class SimulatedChain:
@@ -74,9 +74,10 @@ class DashboardBrowserTests(DatabaseCase):
                         datetime.now(timezone.utc),{'fixture':True})
             def find_nonce(self,nonce,*,after_height):
                 test.assertEqual(after_height,90)
-                test.assertIn(nonce,(1,2))
-                _,self.chain,self.tx_hash=payment_fixture(amount=40*TIG+1 if nonce==1 else 5*TIG+1,
-                    recipient=test.wallet if nonce==1 else TOPUP,nonce=nonce)
+                test.assertIn(nonce,(1,2,3))
+                amounts={1:40*TIG+1,2:5*TIG+1,3:2*TIG+1}
+                recipients={1:test.wallet,2:TOPUP,3:'0x'+'9'*40}
+                _,self.chain,self.tx_hash=payment_fixture(amount=amounts[nonce],recipient=recipients[nonce],nonce=nonce)
                 return self.tx_hash
             def transaction(self,tx_hash,**kwargs):
                 return (test.extra_native if tx_hash==test.native_hash else self.chain).transaction(tx_hash,**kwargs)
@@ -234,6 +235,35 @@ class DashboardBrowserTests(DatabaseCase):
         self.assertEqual(self.row("SELECT balance FROM accounts WHERE id='operator:protocol:TIG'")['balance'],5*TIG+1)
         self.assertEqual(self.row("SELECT balance FROM accounts WHERE id='operator:custody:NATIVE'")['balance'],980)
         self.assertEqual(members.balances(self.db,self.browser_member)['available'],10*TIG)
+        self.assertNotIn('eth_sendTransaction',wallet_methods)
+
+        expect(operator.locator('#operator-income-balance')).to_contain_text('2.999999999999999999 TIG withdrawable')
+        operator.get_by_role('button',name='Withdraw operator funds',exact=True).click()
+        expect(operator.locator('#action-description')).to_contain_text('0x'+'9'*40)
+        operator.get_by_label('Amount · TIG',exact=True).fill('2.000000000000000001')
+        operator.get_by_label('Reason',exact=True).fill('Operator income payout')
+        operator.locator('#action-submit').click()
+        expect(operator.locator('#action-dialog')).not_to_be_visible()
+        expect(operator.locator('#request-operator-withdrawal')).to_be_disabled()
+        income_row=operator.locator('#operator-withdrawals tr').filter(has_text='Operator income')
+        income_row.get_by_role('button',name='Approve',exact=True).click()
+        operator.get_by_label('Review notes').fill('Income wallet and retained budget checked')
+        operator.locator('#action-submit').click()
+        expect(operator.locator('#action-dialog')).not_to_be_visible()
+        income_row.get_by_role('button',name='Prepare payment',exact=True).click()
+        operator.get_by_label('Maximum reserved operator fee · native token').fill('0.0000000000000001')
+        operator.locator('#action-submit').click()
+        expect(operator.locator('#action-title')).to_have_text('Manual payment details')
+        expect(operator.locator('#action-fields')).to_contain_text('2.000000000000000001 TIG')
+        operator.locator('#close-dialog').click()
+        income_row.get_by_role('button',name='Check transfer',exact=True).click()
+        operator.locator('#action-submit').click()
+        expect(operator.locator('#action-dialog')).not_to_be_visible()
+        expect(income_row).to_contain_text('Paid')
+        expect(operator.locator('#message')).to_contain_text('operator income wallet received the full requested amount')
+        self.assertEqual(self.row("SELECT balance FROM accounts WHERE id='operator:custody:TIG'")['balance'],2*TIG-2)
+        self.assertEqual(members.balances(self.db,self.browser_member)['available'],10*TIG)
+        self.assertEqual(self.row('SELECT count(*) AS n FROM custody_payments')['n'],3)
         self.assertNotIn('eth_sendTransaction',wallet_methods)
 
         output=os.environ.get('POOL_V2_BROWSER_ARTIFACTS')

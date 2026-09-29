@@ -49,6 +49,8 @@ class Settings:
     worker_installer: bytes | None = None
     custody_trace_rpc_url: str | None = None
     api_origin: str | None = None
+    operator_income_wallet: str | None = None
+    operator_tig_reserve_units: str | None = None
 
 
 class Input(BaseModel):
@@ -77,6 +79,10 @@ class WithdrawalRequest(Input):
 
 class WithdrawalReview(Input):
     reason: StrictStr = Field(min_length=1, max_length=1000)
+
+
+class OperatorWithdrawalRequest(WithdrawalRequest, WithdrawalReview):
+    pass
 
 
 class WithdrawalRelease(WithdrawalReview):
@@ -167,6 +173,16 @@ def create_app(settings):
                 or settings.withdrawal_fee_model not in FEE_MODELS or settings.chain_id != settings.custody_network.chain_id):
             raise ValueError('custody network, RPC, fee model and matching authentication chain must be configured together')
         payment_chain = Chain(settings.custody_network, Rpc(settings.custody_rpc_url))
+    income_wallet, income_reserve = None, None
+    if settings.operator_income_wallet is not None or settings.operator_tig_reserve_units is not None:
+        if (payment_chain is None or settings.operator_income_wallet is None
+                or not isinstance(settings.operator_tig_reserve_units, str)
+                or not re.fullmatch(r'(0|[1-9][0-9]{0,77})', settings.operator_tig_reserve_units)):
+            raise ValueError('operator payouts require custody, an income wallet and an explicit TIG reserve in integer units')
+        income_wallet = members.address(settings.operator_income_wallet)
+        if income_wallet == settings.custody_network.custody:
+            raise ValueError('operator income wallet must differ from pool custody')
+        income_reserve = int(settings.operator_tig_reserve_units)
     auth = Auth(database, origin=website_origin, chain_id=settings.chain_id)
     app = FastAPI(title="InnoPool v2", version=API_VERSION)
     app.state.database, app.state.auth = database, auth
@@ -541,7 +557,7 @@ def create_app(settings):
     def operator_withdrawals(actor=Depends(operator)):
         with database.transaction() as cursor:
             cursor.execute('''SELECT w.*,m.wallet,r.chain_id,r.token,r.sender,r.fee_model FROM withdrawals w
-                JOIN members m ON m.id=w.member_id LEFT JOIN withdrawal_reviews r ON r.withdrawal_id=w.id
+                LEFT JOIN members m ON m.id=w.member_id LEFT JOIN withdrawal_reviews r ON r.withdrawal_id=w.id
                 ORDER BY (w.state IN ('requested','approved','uncertain')) DESC,w.created_at DESC LIMIT 200''')
             requests = cursor.fetchall()
             cursor.execute('''SELECT a.id,a.withdrawal_id,a.nonce,a.fee_limit,a.sent_at,o.outcome,o.fee,o.tx_hash
@@ -549,9 +565,40 @@ def create_app(settings):
                 WHERE a.withdrawal_id=ANY(%s) ORDER BY a.sent_at''', ([row['id'] for row in requests],))
             return response({'withdrawals': requests, 'attempts': cursor.fetchall()})
 
+    @app.get('/api/v2/operator/income')
+    def operator_income(actor=Depends(operator)):
+        with database.transaction() as cursor:
+            cursor.execute("SELECT balance FROM accounts WHERE id='operator:custody:TIG'")
+            available = cursor.fetchone()['balance']
+            cursor.execute("""SELECT coalesce(sum(amount),0) AS pending FROM withdrawals
+                WHERE kind='operator' AND state IN ('requested','approved','uncertain')""")
+            pending = cursor.fetchone()['pending']
+        return response({'wallet': income_wallet, 'reserve': str(income_reserve) if income_reserve is not None else None,
+            'available': str(available), 'pending': str(pending),
+            'withdrawable': str(max(0, int(available) - income_reserve)) if income_reserve is not None else '0',
+            'enabled': settings.funds_enabled and income_wallet is not None})
+
+    @app.post('/api/v2/operator/income/withdrawals')
+    def request_operator_withdrawal(body: OperatorWithdrawalRequest, actor=Depends(operator)):
+        if not settings.funds_enabled or income_wallet is None:
+            raise HTTPException(503, 'operator income withdrawals are not configured or enabled')
+        return response(withdrawals.request_operator(database, body.request_key, int(body.amount), custody_chain().network,
+            recipient=income_wallet, reserve=income_reserve, actor=actor, reason=body.reason))
+
+    def operator_payout_policy(identity):
+        with database.transaction() as cursor:
+            cursor.execute('SELECT kind,recipient FROM withdrawals WHERE id=%s', (identity,))
+            row = cursor.fetchone()
+        if row and row['kind'] == 'operator':
+            if income_wallet is None:
+                raise HTTPException(503, 'operator income withdrawals are not configured')
+            if row['recipient'] != income_wallet:
+                raise Conflict('income wallet changed; reject this unsent request and create one for the configured wallet')
+
     @app.post('/api/v2/operator/withdrawals/{identity}/approve')
     def approve_withdrawal(identity: uuid.UUID, body: WithdrawalReview, actor=Depends(operator)):
         if not settings.funds_enabled: raise HTTPException(503, 'new payments are paused')
+        operator_payout_policy(identity)
         chain = custody_chain()
         return response(withdrawals.approve(database, identity, chain.network, fee_model=settings.withdrawal_fee_model,
             actor=actor, evidence={'operator_review': body.reason}))
@@ -572,7 +619,9 @@ def create_app(settings):
             if int(prior['fee_limit']) != int(body.fee_limit): raise Conflict('send attempt key was reused')
             attempt_id = prior['id']
         else:
-            attempt_id = withdrawals.begin(database,identity,body.request_key,chain.preflight(),fee_limit=int(body.fee_limit),actor=actor)['id']
+            operator_payout_policy(identity)
+            attempt_id = withdrawals.begin(database,identity,body.request_key,chain.preflight(),fee_limit=int(body.fee_limit),
+                actor=actor,operator_reserve=income_reserve)['id']
         value = withdrawals.instructions(database,attempt_id)
         value.pop('preflight',None)
         return response(value)
