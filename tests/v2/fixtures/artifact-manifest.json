@@ -1,0 +1,62 @@
+[
+  {
+    "algorithm_id": "c008_a050",
+    "algorithm_name": "titan_killer",
+    "compute_type": "aws_c7a",
+    "source": "https://mainnet-api.tig.foundation/get-binary-blob?algorithm_id=c008_a050",
+    "bytes": 4804855,
+    "sha256": "efc1913b60cd83908e1132fd2bc58ee9282bff2f3840c71a715fe6d0f971b967",
+    "entries": [
+      {
+        "name": "amd64",
+        "bytes": 0
+      },
+      {
+        "name": "amd64/titan_killer.so",
+        "bytes": 6071928
+      },
+      {
+        "name": "arm64",
+        "bytes": 0
+      },
+      {
+        "name": "arm64/titan_killer.so",
+        "bytes": 6540456
+      }
+    ]
+  },
+  {
+    "algorithm_id": "c006_a047",
+    "algorithm_name": "parallax_vega",
+    "compute_type": "aws_g4dn",
+    "source": "https://mainnet-api.tig.foundation/get-binary-blob?algorithm_id=c006_a047",
+    "bytes": 2754088,
+    "sha256": "88c59421861e560194003e8ca6e80beee00d173406ec01c83c258dda52931253",
+    "entries": [
+      {
+        "name": "amd64",
+        "bytes": 0
+      },
+      {
+        "name": "amd64/parallax_vega.so",
+        "bytes": 3558224
+      },
+      {
+        "name": "arm64",
+        "bytes": 0
+      },
+      {
+        "name": "arm64/parallax_vega.so",
+        "bytes": 3874640
+      },
+      {
+        "name": "ptx",
+        "bytes": 0
+      },
+      {
+        "name": "ptx/parallax_vega.ptx",
+        "bytes": 1029890
+      }
+    ]
+  }
+]

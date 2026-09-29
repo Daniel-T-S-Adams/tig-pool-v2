@@ -1,0 +1,57 @@
+Pool redesign questions
+
+Short answers are enough. Undecided items can remain open in the plan.
+
+1. Pool versus TIG
+   Does everything still run under the pool's TIG account, with members
+   requesting work from the pool?
+
+Yes every runs under the pools TIG account, members request work from the pool.
+
+2. Benchmark ownership
+   Does a benchmark belong to one machine or one member, who could spread
+   it across their machines? Can a member run several benchmarks
+   simultaneously?
+
+   A benchmark belongs to one member, they can spread it across their machines. However each member is are limited to two concurrent benchmark at a time.
+
+3. Choosing work
+   Who chooses the track, algorithm, and benchmark size: the pool or the
+   member? What should members report about their available compute?
+
+   the pool chooses all of that. what compute they have available and importantly which type of aws hardware you get matching reprducible results on.
+
+4. Failures
+   What happens if a member disconnects, misses a deadline, or submits
+   invalid work? Can another member take over the benchmark?
+
+no, no one can take over the pool member is penalised.
+
+5. Reward formula
+   Would owning 10% of the pool's qualifying contributions on a track
+   entitle someone to 10% of the pool's reward from that track at that
+   block? Is there an operator fee?
+
+   rewards from round X are calculated after round X+2 is finished. After collateral and tig penalisation/arbitrations have taken place. At this point the pool will have an exact figure for the amount of TIG the pool earnt in round X. Now it decides how to split that TIG. During round X, each block, the pool calculates how many qualifying bundles (across all challenges) each members had (we keep a cumulative sum - some a qualifying bundle active in two blocks counts twice in the cumulative sum), then at the end of round X+2 the reward is distributed to the members pro rata depending on their share of that cumulative tally of qualifying bundles from round X. we can leave the operator fee for now.
+
+6. Collateral
+   What asset is deposited, how much is required per benchmark, and who
+   holds it: the pool or a smart contract? When is it released, and what
+   causes a deduction?
+
+   tig can be deposited into that members pot. a members earning also go into the pot (once actually distributed/minted by tig). from a members pot they can use collateral. collateral for benchmark works as follows. after a member requests work but before the pool decides to commit to a benchmark, the pool checks if the member has the available tig in their pot to put into their collateral, the collateral is equal to 10*(max number of bundles) where max number of bundles is the max number of bundles in the (soon to be made) precommit (note each track might have a different number of bundles in the precommit). if the benchmark never goes active then the pool member looses the collateral. in TIG even benchmarks that go active can loose their collateral, benchmarks from round X can be reported for fraud, reports are arbitrated on in round X+2, the pool waits until the end of round X+2,  if any members benchmark contained a reported nonce which was a valid report then the member looses their collateral. note each benchmark needs its own collateral.
+
+7. Payouts
+   Should rewards accumulate each block and be paid on the existing
+   schedule, or do you want a different withdrawal/payment system?
+
+   when TIG mints rewards they are paid out into the members own pot. the members can trigger withdrawl from their pot once per week. they can only withdraw what they have there (minus whatever is current being used for collateral)
+
+8. Rollout
+   Is this replacing a live pool with existing members and earnings, or
+   can it start fresh?
+
+   this is starting completely fresh.
+
+The most consequential answers are who owns a benchmark, the exact reward
+formula, and the collateral rules. Those determine most of the plan.

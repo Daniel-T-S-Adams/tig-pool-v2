@@ -1,0 +1,102 @@
+# Install only after the Cloudflare Origin CA certificate (both hostnames) and
+# the loopback API have been checked. Keep both DNS records proxied and use
+# Full (strict). Origin CA issuance does not use HTTP/ACME validation paths.
+# The generated Cloudflare include must define $innopool_cloudflare_peer using
+# $realip_remote_addr and trust CF-Connecting-IP only from official Cloudflare
+# networks. Keep SSH administration separate from these web access rules.
+
+map $status $innopool_asset_cache_control {
+    default "no-store";
+    200 "public, max-age=31536000, immutable";
+    304 "public, max-age=31536000, immutable";
+}
+
+server {
+    listen 80 default_server;
+    listen [::]:80 default_server;
+    server_name _;
+    return 444;
+}
+
+server {
+    listen 80;
+    listen [::]:80;
+    server_name REPLACE_POOL_HOSTNAME REPLACE_POOL_API_HOSTNAME;
+    if ($innopool_cloudflare_peer = 0) { return 444; }
+    access_log off;
+    location / { return 308 https://$host$request_uri; }
+}
+
+server {
+    listen 443 ssl default_server;
+    listen [::]:443 ssl default_server;
+    ssl_reject_handshake on;
+    server_name _;
+    return 444;
+}
+
+server {
+    listen 443 ssl;
+    listen [::]:443 ssl;
+    server_name REPLACE_POOL_HOSTNAME;
+    ssl_certificate /etc/innopool-v2-mainnet/tls/cloudflare-origin.pem;
+    ssl_certificate_key /etc/innopool-v2-mainnet/tls/cloudflare-origin.key;
+    ssl_protocols TLSv1.2 TLSv1.3;
+    ssl_session_tickets off;
+    if ($innopool_cloudflare_peer = 0) { return 444; }
+    access_log off;
+    add_header Strict-Transport-Security "max-age=3600" always;
+    location /assets/ {
+        # Deployment copies only content-hashed public assets here and retains
+        # prior hashes, so an in-flight page can finish across a release switch.
+        root /opt/innopool-v2-mainnet/web;
+        try_files $uri =404;
+        add_header Cache-Control $innopool_asset_cache_control always;
+        add_header Strict-Transport-Security "max-age=3600" always;
+        add_header X-Content-Type-Options "nosniff" always;
+    }
+    location /api/ {
+        add_header Cache-Control "no-store" always;
+        return 404;
+    }
+    location / {
+        proxy_pass http://127.0.0.1:18080;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $remote_addr;
+        proxy_set_header X-Forwarded-Proto https;
+        proxy_set_header Connection "";
+        proxy_cache off;
+    }
+}
+
+server {
+    listen 443 ssl;
+    listen [::]:443 ssl;
+    server_name REPLACE_POOL_API_HOSTNAME;
+    ssl_certificate /etc/innopool-v2-mainnet/tls/cloudflare-origin.pem;
+    ssl_certificate_key /etc/innopool-v2-mainnet/tls/cloudflare-origin.key;
+    ssl_protocols TLSv1.2 TLSv1.3;
+    ssl_session_tickets off;
+    if ($innopool_cloudflare_peer = 0) { return 444; }
+    access_log off;
+    client_max_body_size 10m;
+    add_header Strict-Transport-Security "max-age=3600" always;
+    add_header Cache-Control "no-store" always;
+    proxy_hide_header Cache-Control;
+    location /api/v2/ {
+        proxy_pass http://127.0.0.1:18080;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $remote_addr;
+        proxy_set_header X-Forwarded-Proto https;
+        proxy_set_header Connection "";
+        proxy_connect_timeout 5s;
+        proxy_read_timeout 60s;
+        proxy_send_timeout 60s;
+        proxy_cache off;
+    }
+    location / { return 404; }
+}

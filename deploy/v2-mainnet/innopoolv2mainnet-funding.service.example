@@ -1,0 +1,31 @@
+[Unit]
+Description=InnoPool v2 mainnet funding
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=innopoolmainnet
+Group=innopoolmainnet
+WorkingDirectory=/opt/innopool-v2-mainnet/releases/REPLACE_TESTED_POOL_COMMIT
+EnvironmentFile=/etc/innopool-v2-mainnet/collector.env
+ExecStart=/opt/innopool-v2-mainnet/venv/bin/python tools/observe_funding_v2.py --api-url https://mainnet-api.tig.foundation --player-id 0xd4a076b5335f0fb2da40158b52e0bb6d6ac59ebf --spool /var/lib/innopool-v2-mainnet/spool/funding --poll-seconds 15
+Restart=on-failure
+RestartSec=10
+Slice=innopoolv2mainnet.slice
+Nice=10
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectControlGroups=true
+CapabilityBoundingSet=
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+ReadWritePaths=/var/lib/innopool-v2-mainnet/spool
+TasksMax=48
+TimeoutStopSec=30
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,60 @@
+name: Pool CI
+
+on:
+  push:
+    branches: ["main", "feature/**", "redesign/v2", "release/v2"]
+  pull_request:
+    branches: ["main", "redesign/v2", "release/v2"]
+
+permissions:
+  contents: read
+
+jobs:
+  pool-baseline:
+    name: pool-baseline
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    services:
+      postgres:
+        image: postgres:18.4-trixie
+        env:
+          POSTGRES_DB: innopool_v2_test
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: isolated-ci-only
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d innopool_v2_test"
+          --health-interval 5s --health-timeout 5s --health-retries 12
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.12"
+      - name: Install isolated v2 test dependencies
+        # The API suite imports the exact worker checkout below.
+        run: python3 -m pip install -r tests/v2/requirements.txt
+      - name: Install the browser for member and operator flow checks
+        run: python3 -m playwright install --with-deps --only-shell chromium
+      - name: Check out the paired whole-benchmark worker
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          repository: Daniel-T-S-Adams/innopool-slave-v2
+          ref: ded5f4b4fe07de0cfeb1845cb50f9ef97ae65c36
+          path: .paired-worker
+          persist-credentials: false
+      - name: Run existing accounting regression checks
+        env:
+          PYTHONDONTWRITEBYTECODE: "1"
+        run: |
+          python3 tools/test_revenue_split.py
+          python3 tools/test_work_credits.py
+      - name: Test protocol replay, funds concurrency and the paired worker API
+        env:
+          PYTHONDONTWRITEBYTECODE: "1"
+          POOL_V2_TEST_DSN: "host=127.0.0.1 port=5432 user=postgres password=isolated-ci-only dbname=innopool_v2_test"
+          POOL_V2_WORKER_CHECKOUT: "${{ github.workspace }}/.paired-worker"
+          POOL_V2_BROWSER_TESTS: "1"
+        run: python3 -m unittest discover -s tests/v2 -v

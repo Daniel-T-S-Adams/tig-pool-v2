@@ -1,0 +1,45 @@
+{
+  "source": "https://mainnet-api.tig.foundation/get-reportable-benchmark-ids",
+  "sample_benchmark_id": "0017d114eead779d2a14567929f45c69",
+  "sample_creation_height": 1351062,
+  "sample_creation_round": 135,
+  "limitations": "One positive association; not a verified rule for round-boundary benchmarks.",
+  "responses": [
+    {
+      "path": "/get-reportable-benchmark-ids",
+      "params": {
+        "round": 134,
+        "player_id": "0xb9a66a0f6c1aedadfd7d03e9d9b2388da67300f5",
+        "challenge_id": "c008"
+      },
+      "observed_at": "2026-09-20T18:34:08.614582+00:00",
+      "canonical_sha256": "722909470ea6fba455f0fd285b1c165b000ed9e81bbf23e4e3c2d529c4ff8e01",
+      "benchmark_count": 3233,
+      "contains_sample": false
+    },
+    {
+      "path": "/get-reportable-benchmark-ids",
+      "params": {
+        "round": 135,
+        "player_id": "0xb9a66a0f6c1aedadfd7d03e9d9b2388da67300f5",
+        "challenge_id": "c008"
+      },
+      "observed_at": "2026-09-20T18:34:08.519932+00:00",
+      "canonical_sha256": "cb4d7e73bb5c39bfdf10e30dc31d131019b97d62314f8b5b3b2cd1b4c6932107",
+      "benchmark_count": 334,
+      "contains_sample": true
+    },
+    {
+      "path": "/get-reportable-benchmark-ids",
+      "params": {
+        "round": 136,
+        "player_id": "0xb9a66a0f6c1aedadfd7d03e9d9b2388da67300f5",
+        "challenge_id": "c008"
+      },
+      "observed_at": "2026-09-20T18:34:08.463155+00:00",
+      "canonical_sha256": "0d032fcf45d7f2513ce56a40709673cc88c764b2be6d45dbc890ecbc99106f08",
+      "benchmark_count": 0,
+      "contains_sample": false
+    }
+  ]
+}

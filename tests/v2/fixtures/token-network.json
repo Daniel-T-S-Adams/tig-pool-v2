@@ -1,0 +1,41 @@
+{
+  "observed_at": "2026-09-20T16:17:14.481698+00:00",
+  "source_block": "c3f0ecba985199e301f3bf8b87512750",
+  "advertised": {
+    "chain_id": "0x14a33",
+    "rpc_url": "https://mainnet.base.org",
+    "token_address": "0x0c03ce270b4826ec62e7dd007f0b716068639f7b"
+  },
+  "requests": [
+    {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "method": "eth_chainId",
+      "params": []
+    },
+    {
+      "jsonrpc": "2.0",
+      "id": 2,
+      "method": "eth_call",
+      "params": [
+        {
+          "to": "0x0c03ce270b4826ec62e7dd007f0b716068639f7b",
+          "data": "0x313ce567"
+        },
+        "latest"
+      ]
+    }
+  ],
+  "responses": [
+    {
+      "jsonrpc": "2.0",
+      "result": "0x2105",
+      "id": 1
+    },
+    {
+      "jsonrpc": "2.0",
+      "result": "0x0000000000000000000000000000000000000000000000000000000000000012",
+      "id": 2
+    }
+  ]
+}
