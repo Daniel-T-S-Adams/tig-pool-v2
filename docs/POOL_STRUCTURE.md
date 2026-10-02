@@ -3,8 +3,8 @@
 This shows the agreed live setup following the website/API split on
 25 September 2026. Cloudflare proxies both addresses; the website and backend
 run on the same primary Hetzner server. The code is implemented and tested;
-public HTTPS is active. Browser access is verified; the normal worker client
-needs the scoped Cloudflare rule in the [setup checklist](CLOUDFLARE_SETUP.md).
+public HTTPS is active. Browser access and the normal worker client both pass
+connectivity checks; see the [setup checklist](CLOUDFLARE_SETUP.md).
 
 ```mermaid
 flowchart TD
@@ -39,8 +39,9 @@ flowchart TD
 - **Two addresses, one primary server.** Both DNS records use **Proxied**
   (orange cloud), with HTTPS on both connections. Daniel reports that
   **Full (strict)** is already selected. A verified Cloudflare Origin CA certificate
-  protects the Cloudflare-to-Hetzner connection. Browser requests work; a
-  scoped Browser Integrity Check exception is pending for worker API requests.
+  protects the Cloudflare-to-Hetzner connection. Browser requests and normal
+  worker API requests work. The scoped Browser Integrity Check exception
+  applies only to `/api/v2/` on the API hostname.
 - **Cache public website files; keep live data uncached.** The browser loads
   the website from `pool.tig.foundation`, then calls
   `pool-api.tig.foundation/api/v2` for login, balances and actions. Workers use

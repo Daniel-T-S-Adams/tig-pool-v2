@@ -8,6 +8,14 @@ The German recovery server is **2.28.230.81**.
 
 ## Current position — 2 October 2026
 
+**21:07 UTC update: worker connectivity now passes.** After Daniel reported
+saving the scoped rule, the unchanged worker client received capabilities
+**200** and an invalid-token response **401** from the pool. API preflight
+succeeded, responses stayed `no-store`, and HTTP API requests redirected to
+HTTPS. The Cloudflare worker blocker is resolved. This verifies transport and
+invalid-token rejection; authenticated work/uploads remain separate checks.
+No benchmark or funds movement occurred, and mainnet stays paused.
+
 **The Origin CA certificate is installed and public HTTPS works.** Daniel
 provided the signed PEM, which matches the server key and covers exactly the
 two pool hostnames. It was activated at **09:14 UTC**. Its expiry is
@@ -25,7 +33,7 @@ when the caller supplies a fake Cloudflare forwarding header. SSH still works.
 The encrypted certificate/key/configuration backup passed verification on
 Germany at **09:22 UTC**. No financial features or paid work were enabled.
 
-**A real worker-client incompatibility is now confirmed.** At **09:16 UTC**,
+**Earlier failure, now resolved:** at **09:16 UTC**,
 the unchanged `worker_v2.client.Client` received **403 / error 1010** for its
 normal capabilities and benchmark requests. It used its normal headers, an
 invalid test execution token and no browser User-Agent override. This was a
@@ -38,10 +46,11 @@ The new worker evidence supports the narrow configuration rule below. No
 website or ACME-path security exception is needed for certificate issuance.
 [Cloudflare error 1010](https://developers.cloudflare.com/support/troubleshooting/http-status-codes/cloudflare-1xxx-errors/error-1010/).
 
-## Next step — pool owner/operator, local browser
+## Completed rule — keep for configuration reference
 
-Codex has server access but no access to your Cloudflare account. Please add
-this rule so the worker's ordinary HTTP client can reach the pool API:
+Daniel completed this as pool operator in the local Cloudflare browser. The
+normal worker client now passes. These are the saved rule instructions; no
+operator action needs repeating:
 
 1. Open **Cloudflare → tig.foundation → Rules → Overview → Create rule →
    Configuration Rule**.
@@ -55,9 +64,8 @@ this rule so the worker's ordinary HTTP client can reach the pool API:
 3. Add the setting **Browser Integrity Check → Off**. Deploy the rule after
    any conflicting configuration rule. Keep **Full (strict)**, API cache bypass
    and other security settings unchanged.
-4. Tell Codex when it is saved. Codex will repeat the same worker-client calls
-   to confirm capabilities succeed and an invalid execution token is still
-   refused by the pool.
+4. **Verified at 21:07 UTC:** the same worker-client calls now succeed for
+   capabilities, and invalid execution tokens are still refused by the pool.
 
 This disables that browser-specific check only for `/api/v2/` on
 `pool-api.tig.foundation`. Pool authentication and other attack protections
@@ -100,9 +108,9 @@ for the tested paths.
   cached public assets, uncached HTML/API responses and invalid-token rejection.
 - [x] Verify direct origin web access is denied and SSH remains available.
 - [x] Test the unchanged worker HTTP client and capture its **403 / 1010** failure.
-- [ ] **Operator, local browser:** deploy the scoped Browser Integrity Check
-  rule above; **Codex:** repeat the worker transport check without changing
-  its headers or treating a browser success as a worker success.
+- [x] **Operator, local browser:** deploy the scoped Browser Integrity Check
+  rule above; **Codex:** repeat the unchanged worker client. Capabilities 200,
+  invalid token 401, preflight and API no-store checks passed at 21:07 UTC.
 - [ ] **Codex and operator:** complete wallet login, authenticated worker work,
   uploads and size/timeout checks in their authorized validation phase.
 - [x] Back up and verify the final certificate, key and nginx settings on
