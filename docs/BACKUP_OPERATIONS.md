@@ -104,6 +104,17 @@ scripts are [database backup](../tools/mainnet_backup_v2.py),
 [evidence verification](../tools/mainnet_verify_evidence_v2.py), and
 [backup health](../tools/mainnet_backup_health_v2.py).
 
+## Bounded reporting replay
+
+If reports are safely archived but await database replay, the operator can run
+[the bounded replay tool](../tools/replay_reports_v2.py) with the observer DSN
+in `POOL_V2_DATABASE_DSN`, an explicit spool path and its default one-hour/
+10,000-record bounds. It refuses to run unless work is paused. The regular
+drainer can remain active: duplicate recording is idempotent. Missing chunks
+remain pending and cause failure; they are not treated as successfully recorded.
+The 4 October catch-up job has its own one-CPU/one-GiB limit on the primary and
+cannot submit work, settle rewards or send tokens.
+
 ## Restore rehearsal
 
 **Role: Codex assisting the pool operator. Computer: Germany.**
@@ -127,7 +138,8 @@ scripts are [database backup](../tools/mainnet_backup_v2.py),
    database or attach live credentials to the test copy.
 
 The 4 October rehearsal restored the actual primary backup and replayed its
-post-backup transaction successfully. Separately, migration 015 was applied
+post-backup transaction successfully. A full evidence audit also verified
+1,649,396 chunk digests and 376,604 manifest references on Germany. Separately, migration 015 was applied
 and replayed against a restored **funded testnet pilot**: member balances,
 both collateral holds, pending withdrawals and journal history were unchanged.
 These are distinct tests. No funded mainnet takeover or token transfer occurred.
