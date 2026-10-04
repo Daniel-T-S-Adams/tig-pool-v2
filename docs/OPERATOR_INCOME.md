@@ -97,3 +97,17 @@ duplicate confirmations and recovery after configuration changes. The HTTPS
 browser test completes member payment, fee funding and operator payment in one
 flow using simulated chain evidence and exact integer amounts. These tests send
 no real funds and do not establish a completed mainnet reward cycle.
+
+## Paused mainnet deployment — 4 October 2026
+
+Release `994739d` and migration 015 are installed on the primary and German
+recovery servers. The matching website assets are deployed; previous asset
+hashes remain available. A restored funded testnet pilot preserved both member
+balances, collateral holds, withdrawal records and journals through the upgrade
+and a second migration run. All 270 current pool tests passed, including the
+browser flow; public authenticated operator reads passed after deployment.
+
+Financial operations remain disabled. The operator income wallet/reserve pair
+is unset in the active service configuration until the operator chooses the
+reserve. The chosen destination remains recorded above. No mainnet payment was
+sent, and the pool has not completed a live mainnet reward cycle.

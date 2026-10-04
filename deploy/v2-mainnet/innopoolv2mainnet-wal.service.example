@@ -1,0 +1,17 @@
+[Unit]
+After=innopoolv2mainnet-wal-tunnel.service docker.service
+Requires=docker.service
+Wants=innopoolv2mainnet-wal-tunnel.service
+[Service]
+UMask=0077
+CPUQuota=50%
+MemoryMax=1G
+MemorySwapMax=0
+Nice=10
+ExecStart=/usr/bin/python3 /opt/innopool-v2-mainnet/operations/mainnet_backup_v2.py receive --config=/etc/innopool-v2-mainnet/continuous-backup.json
+ExecStop=-/usr/bin/docker stop --time 15 innopool-v2-receivewal
+Restart=always
+RestartSec=10
+TimeoutStopSec=30
+[Install]
+WantedBy=multi-user.target

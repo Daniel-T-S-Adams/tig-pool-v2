@@ -49,7 +49,7 @@ Daniel's local computer. Worker execution belongs to the member role.
    evidence merely to keep a service running. A second directory on the same
    host is not an independent archive.
 
-The mainnet application slice has a separate 1-CPU/2-GiB ceiling, now used by
+The mainnet application slice has a separate 1.5-CPU/2-GiB ceiling, now used by
 the preparation services on the dedicated VMs. Before sharing a host, review the
 combined testnet, mainnet, database and worker limits; separate slice limits
 alone do not impose a shared machine-wide ceiling. A worker belongs on its
@@ -123,6 +123,10 @@ A mainnet observation deployment does not authorize member deposits, benchmark
 submissions, reward contract calls or withdrawals.
 
 ## Backups, recovery and monitoring
+
+The installed two-host backup schedule, retention limits and completed October
+restore tests are described in [backup operations](BACKUP_OPERATIONS.md).
+External alerts, sustained storage and funded takeover checks remain open.
 
 - Archive immutable spools on another host as they arrive; monitor both
   collectors for missed/conflicting blocks. Store database backups and the

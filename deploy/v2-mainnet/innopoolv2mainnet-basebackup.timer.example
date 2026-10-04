@@ -1,0 +1,8 @@
+[Unit]
+Description=Daily verified primary database backup in Germany
+[Timer]
+OnCalendar=*-*-* 03:10:00 UTC
+RandomizedDelaySec=300
+Persistent=true
+[Install]
+WantedBy=timers.target
