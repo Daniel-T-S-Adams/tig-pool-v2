@@ -205,15 +205,85 @@ class BlockStore:
             if not result:
                 return {"initialized": False}
             cursor.execute("""SELECT expected.height FROM generate_series(%s,%s) AS expected(height)
-                LEFT JOIN observed_blocks b ON b.height=expected.height WHERE b.id IS NULL ORDER BY expected.height LIMIT 100""",
+                LEFT JOIN observed_blocks b ON b.height=expected.height
+                WHERE b.id IS NULL ORDER BY expected.height LIMIT 100""",
                 (result["contiguous_height"]+1, result["latest_seen_height"]))
-            result["missing_heights"] = [row["height"] for row in cursor.fetchall()]
+            missing = [row["height"] for row in cursor.fetchall()]
+            cursor.execute("""SELECT w.height FROM observation_gap_waivers w
+                LEFT JOIN observed_blocks b ON b.height=w.height
+                WHERE b.id IS NULL ORDER BY w.height""")
+            waived = {row["height"] for row in cursor.fetchall()}
+            result["missing_heights"] = missing
+            result["waived_missing_heights"] = [height for height in missing if height in waived]
+            result["unresolved_missing_heights"] = [height for height in missing if height not in waived]
             cursor.execute("SELECT DISTINCT height FROM observation_alerts WHERE kind='conflicting-block' ORDER BY height LIMIT 100")
             result["conflicting_heights"] = [row["height"] for row in cursor.fetchall()]
             cursor.execute("SELECT max(timestamp) AS latest_timestamp FROM observed_blocks")
             result["latest_timestamp"] = cursor.fetchone()["latest_timestamp"]
             result["initialized"] = True
             return result
+
+    def waive_prelaunch_gap(self, height, *, actor, reason, evidence):
+        """Record the single prelaunch missing-height exception without fabricating a block.
+
+        This is only allowed before any pool reservation exists. The settlement
+        rule treats this one height as having zero pool credit; the raw gap
+        remains visible in observation status and the immutable waiver record.
+        """
+        if type(height) is not int or height < 0:
+            raise ValueError("a nonnegative missing block height is required")
+        if not isinstance(actor, str) or not actor.strip() or not isinstance(reason, str) or not reason.strip():
+            raise ValueError("gap waiver requires an actor and reason")
+        if not isinstance(evidence, dict) or not evidence:
+            raise ValueError("gap waiver requires nonempty evidence")
+        policy = "one-time-prelaunch-zero-pool-credit-v1"
+        with self.database.transaction() as cursor:
+            # Match the lock order in reserve_next: observation stream, then
+            # protocol-budget. This prevents a new reservation racing the waiver.
+            lock(cursor, "observation-stream")
+            lock(cursor, "operator:protocol-budget")
+            cursor.execute("SELECT * FROM observation_gap_waivers WHERE height=%s OR policy=%s", (height, policy))
+            previous = cursor.fetchone()
+            if previous:
+                if (previous["height"], previous["actor"], previous["reason"], previous["evidence"]) == (
+                        height, actor.strip(), reason.strip(), evidence):
+                    return dict(previous)
+                raise ProtocolDataError("the one-time prelaunch gap waiver is already recorded")
+            cursor.execute("SELECT value FROM runtime_controls WHERE name='new_work_paused'")
+            paused = cursor.fetchone()
+            if not paused or not paused["value"]:
+                raise ProtocolDataError("prelaunch gap waiver requires new work to remain paused")
+            cursor.execute("SELECT 1 FROM reservations LIMIT 1")
+            if cursor.fetchone():
+                raise ProtocolDataError("prelaunch gap waiver is unavailable after pool reservations exist")
+            cursor.execute("SELECT * FROM observation_stream WHERE name='tig' FOR UPDATE")
+            stream = cursor.fetchone()
+            if not stream or height < stream["launch_height"] or height >= stream["latest_seen_height"]:
+                raise ProtocolDataError("waiver height is outside the observed stream")
+            cursor.execute("SELECT * FROM observed_blocks WHERE height=ANY(%s)", ([height-1, height, height+1],))
+            neighbors = {row["height"]: row for row in cursor.fetchall()}
+            if height in neighbors or height-1 not in neighbors or height+1 not in neighbors:
+                raise ProtocolDataError("waiver requires one missing height between two captured blocks")
+            previous_block, next_block = neighbors[height-1], neighbors[height+1]
+            length = previous_block["blocks_per_round"]
+            round_number = height // length + 1 if length else 0
+            if (length <= 0 or next_block["blocks_per_round"] != length
+                    or previous_block["round"] != round_number or next_block["round"] != round_number):
+                raise ProtocolDataError("waiver height must be bracketed within one verified round")
+            cursor.execute("SELECT height FROM observed_blocks WHERE id=%s", (next_block["previous_id"],))
+            if cursor.fetchone():
+                raise ProtocolDataError("the successor points to an already recorded block at another height")
+            cursor.execute("""SELECT 1 FROM observation_alerts WHERE kind='conflicting-block'
+                AND height=ANY(%s) LIMIT 1""", ([height-1, height, height+1],))
+            if cursor.fetchone():
+                raise ProtocolDataError("conflicting neighbor evidence prevents a gap waiver")
+            cursor.execute("""INSERT INTO observation_gap_waivers
+                (height,round_number,assumed_block_id,previous_observed_block_id,
+                 next_observed_block_id,policy,actor,reason,evidence)
+                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING *""",
+                (height, round_number, next_block["previous_id"], previous_block["id"],
+                 next_block["id"], policy, actor.strip(), reason.strip(), Json(evidence)))
+            return dict(cursor.fetchone())
 
     def round_coverage(self, round_number, *, require_credits=True):
         with self.database.transaction() as cursor:
@@ -223,9 +293,14 @@ class BlockStore:
                 return False
             length = lengths[0]
             first, last = (round_number-1)*length, round_number*length-1
-            cursor.execute("""SELECT count(*) AS captured, count(c.block_id) AS credited FROM observed_blocks b
-                LEFT JOIN credited_blocks c ON c.block_id=b.id WHERE b.round=%s AND b.height BETWEEN %s AND %s""",
-                (round_number, first, last))
+            cursor.execute("""SELECT
+                    count(*) FILTER (WHERE b.id IS NOT NULL OR w.height IS NOT NULL) AS captured,
+                    count(*) FILTER (WHERE c.block_id IS NOT NULL OR (b.id IS NULL AND w.height IS NOT NULL)) AS credited
+                FROM generate_series(%s,%s) AS expected(height)
+                LEFT JOIN observed_blocks b ON b.height=expected.height AND b.round=%s
+                LEFT JOIN credited_blocks c ON c.block_id=b.id
+                LEFT JOIN observation_gap_waivers w ON w.height=expected.height AND w.round_number=%s""",
+                (first, last, round_number, round_number))
             counts = cursor.fetchone()
             cursor.execute("SELECT 1 FROM observation_alerts WHERE kind='conflicting-block' AND height BETWEEN %s AND %s LIMIT 1", (first, last))
             return not cursor.fetchone() and counts["captured"] == length and (not require_credits or counts["credited"] == length)

@@ -94,8 +94,42 @@ submission or withdrawal charge is taken from the member allocations.
 
 Credit follows the reward round of each recorded block, even for benchmarks
 created earlier. Forfeitures follow the benchmark's creation round. Later
-fraud does not change recorded qualifying credit. Missing block or ownership
-data holds reward settlement; independently eligible collateral can finalize.
+fraud does not change recorded qualifying credit. An unwaived missing block or
+ownership data holds reward settlement; independently eligible collateral can
+finalize.
+
+## One-time prelaunch block-gap exception
+
+If a missing block cannot be recovered before the pool has accepted any mainnet
+work, the operator may record one explicit prelaunch exception. This is a
+documented assumption, not a fabricated block. It leaves the missing height
+visible in observation status and assumes zero pool-owned qualifying credit at
+that height. The waiver is allowed only while new work is paused, before any
+pool reservation exists, when the missing height is bracketed by complete,
+nonconflicting blocks in the same round. It may be used once; later gaps remain
+unwaived and hold settlement for their affected rounds.
+
+The immutable waiver records the operator, reason, evidence, adjacent block
+identities and the missing block ID referenced by its successor. It does not
+remove the gap from raw history or release/forfeit collateral. A later valid
+backfill remains usable as actual evidence. The approximation is safe for the
+current prelaunch gap because no pool benchmark was submitted before the waiver;
+never use it to skip a height after members could have earned credit there.
+
+After the reviewed migration is deployed, prepare a small evidence JSON file
+stating the operator's no-prior-work check and the source attempts to recover
+the block, then invoke the explicit admin tool with the owner database role:
+
+```sh
+python tools/waive_prelaunch_gap_v2.py --height 1372249 \
+  --actor "pool operator" \
+  --reason "unrecoverable prelaunch observation gap; no pool work in round 137" \
+  --evidence-json /secure/path/gap-1372249-evidence.json
+```
+
+The command is deliberately not part of deployment or startup. Do not run it
+against production until the operator has reviewed the evidence and approved
+this one-time accounting assumption.
 
 ## Validation and remaining live gates
 

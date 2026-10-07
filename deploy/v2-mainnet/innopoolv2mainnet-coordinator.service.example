@@ -9,6 +9,8 @@ User=innopoolmainnet
 Group=innopoolmainnet
 WorkingDirectory=/opt/innopool-v2-mainnet/releases/REPLACE_TESTED_POOL_COMMIT
 EnvironmentFile=/etc/innopool-v2-mainnet/collector.env
+# Keep the TIG submission credential out of the observer and API environments.
+EnvironmentFile=-/etc/innopool-v2-mainnet/submission.env
 ExecStart=/opt/innopool-v2-mainnet/venv/bin/python tools/run_tig_v2.py --config /etc/innopool-v2-mainnet/coordinator.json
 Restart=on-failure
 RestartSec=10

@@ -14,9 +14,9 @@ import uuid
 
 from fastapi.testclient import TestClient
 
-from pool_manager.pool_v2 import benchmarks,controls,custody,deposits,funding,ledger,topups,withdrawals
+from pool_manager.pool_v2 import benchmarks,controls,custody,deposits,funding,ledger,prelaunch,topups,withdrawals
 from pool_manager.pool_v2.api import Settings,create_app
-from pool_manager.pool_v2.chain import Chain,CustodyPreflight,Network
+from pool_manager.pool_v2.chain import Chain,ConfirmedTransaction,ConfirmedTransfer,CustodyPreflight,Network
 from pool_manager.pool_v2.money import Conflict,FundsError,InsufficientFunds,TIG
 from pool_manager.pool_v2.spool import Spool
 from funds_helpers import DatabaseCase,NETWORK,CUSTODY,TOKEN,OTHER,transfer
@@ -278,6 +278,27 @@ class FundingTests(DatabaseCase):
                 client.assert_not_called()
         self.assertEqual(self.operator_balance(location='protocol'),30*TIG)
         self.assertEqual(self.row('SELECT count(*) AS n FROM protocol_topup_credits')['n'],1)
+
+class PrelaunchFundingTests(DatabaseCase):
+    def test_prelaunch_mainnet_topup_is_credited_once_to_operator_protocol_funds(self):
+        network=Network(8453,'0x0c03ce270b4826ec62e7dd007f0b716068639f7b',CUSTODY,12)
+        tx_hash='0x'+'a'*64;block_hash='0x'+'b'*64;now=datetime.now(timezone.utc)
+        proof=funding_capture(5*TIG,protocol_topup(tx_hash,5*TIG,index=7))
+        proof['api_origin']=prelaunch.MAINNET_API
+        capture_id=funding.record(self.db,proof)['capture_id']
+        transaction=ConfirmedTransaction(network,tx_hash,CUSTODY,network.token,3,True,0,100,
+            'op-jovian',1000,block_hash,now,{'receipt':{'status':'0x1'}})
+        transfer_event=ConfirmedTransfer(network,tx_hash,7,1000,block_hash,now,CUSTODY,TOPUP,5*TIG,
+            {'receipt':{'logIndex':'0x7'}})
+        self.assertFalse(funding.status(self.db)['ready'])
+        first=prelaunch.credit_mainnet_topup(self.db,capture_id,transaction,transfer_event,actor='Daniel as pool operator',
+            reason='Five TIG was topped up solely for prelaunch mainnet testing.')
+        second=prelaunch.credit_mainnet_topup(self.db,capture_id,transaction,transfer_event,actor='Daniel as pool operator',
+            reason='Five TIG was topped up solely for prelaunch mainnet testing.')
+        self.assertEqual(first['journal_id'],second['journal_id'])
+        self.assertEqual(int(self.row('SELECT balance FROM accounts WHERE id=%s',(benchmarks.OPERATOR_FEES,))['balance']),5*TIG)
+        self.assertTrue(funding.status(self.db)['ready'])
+        self.assertEqual(self.row('SELECT count(*) AS n FROM mainnet_protocol_opening_credits')['n'],1)
 
 
 class FundingEvidenceTests(unittest.TestCase):

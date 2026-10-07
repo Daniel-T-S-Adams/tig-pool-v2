@@ -10,15 +10,63 @@ this document describes the full deployment and launch procedure.
 ## Inputs and roles
 
 **Daniel as pool operator:** choose the hostname, server, independent archive
-location and initial member count. Provide a separate mainnet TIG/ETH budget
-before any transaction. The 5 TIG testnet limit does not authorize mainnet
-spending. Existing testnet collateral and observers remain on their own database.
+location and initial member count. The operator has authorized a maximum of
+**10 TIG total** for the pool wallet's mainnet protocol-fee budget, plus the
+previously stated **0.0005 Base ETH** native-transaction-fee ceiling per spending
+wallet. This authorizes funding that fee balance; it does not enable benchmark
+work or other pool spending. TIG top-ups consume TIG from the pool wallet.
+Existing testnet collateral and observers remain on their own database.
+
+**Funding status:** on 2026-10-06 the operator dashboard and independent
+read-only mainnet TIG API captures agreed: 5 TIG total topped up, 5 TIG
+available and 0 TIG deducted, against the authorized 10 TIG total budget. The
+latest capture was at TIG height 1,372,652 and showed one confirmed top-up. Its
+Base transaction was independently verified on chain 8453, finalized at Base
+height 52,255,649, and transferred exactly 5 TIG from the pool wallet to TIG's
+top-up address. A complete capture at TIG height 1,372,666 is now archived in
+the mainnet funding spool and database (`21b0d47c…89acc5e`) and records the
+confirmed top-up facts. The available 5 TIG has not yet been credited to the
+pool ledger, so funding health correctly remains not-ready. No further top-up
+is currently planned. The runtime role's missing INSERT permission on the
+immutable protocol identity table was corrected narrowly and recorded in the
+deployment SQL grant.
+
+**Custody opening state:** the operator confirmed that all earlier wallet
+transfers and the 10 TIG burn were setup for pre-launch mainnet testing. They
+are not member deposits, collateral or pool rewards and will not be attributed
+to individual pool activity. The mainnet database has no custody identity or
+chain history, reservations or credited top-ups; it has one complete TIG
+funding capture and its confirmed 5 TIG top-up fact. At finalized Base block
+52,255,649 the wallet held 0 TIG and 0.000998944758821286 ETH, with outgoing
+nonce 3. This historical value is a reference only; initialization must fetch a
+fresh finalized opening snapshot.
+
+Initialize custody with a named, immutable pre-launch baseline while new work
+remains paused and before any pool reservations or withdrawals. The baseline
+records the then-current TIG/native balances as operator opening funds and the
+current outgoing nonce as the stream offset. It does not reconstruct or credit
+the prior test transfers. The confirmed 5 TIG fee top-up is credited separately
+to the operator's protocol-fee ledger only after a fresh TIG capture matches its
+finalized Base transaction and exact transfer receipt. The custody collector is
+still masked. The mainnet submission key is stored in the root-only
+`/etc/innopool-v2-mainnet/submission.env`; submission and new work remain
+disabled.
 
 For [operator income payouts](OPERATOR_INCOME.md), the service template records
 the operator's selected income wallet. The amount of operator TIG to retain for
 running costs is still unset and must be chosen before using this configuration.
 Financial operations remain disabled in the template. Migration 015 and the
 matching API/website are required.
+
+The **10 TIG** TIG protocol-fee budget and **0.0005 Base ETH** native-fee
+ceiling are cumulative limits, not per-send limits. In the current design, the
+pool's TIG submission account and Base custody wallet are the same address, so
+the pool limits apply once to that shared account; member balances are internal
+ledger entries and must not multiply the pool's spending allowance. These are
+operator-monitored budgets; the software will not enforce them. Before and
+during a pilot, the operator should check the TIG dashboard's total top-ups,
+available fee balance and deductions, and the pool wallet's Base ETH balance
+and transaction fees. Stop pool spending manually at the authorized budget.
 
 **Codex assisting the pool operator, on the remote server:** complete the steps
 below once those deployment details are known. The member browser runs on
@@ -49,7 +97,7 @@ Daniel's local computer. Worker execution belongs to the member role.
    evidence merely to keep a service running. A second directory on the same
    host is not an independent archive.
 
-The mainnet application slice has a separate 1-CPU/2-GiB ceiling, now used by
+The mainnet application slice has a separate 1.5-CPU/2-GiB ceiling, now used by
 the preparation services on the dedicated VMs. Before sharing a host, review the
 combined testnet, mainnet, database and worker limits; separate slice limits
 alone do not impose a shared machine-wide ceiling. A worker belongs on its
@@ -65,7 +113,10 @@ member's machine for the final test.
    not be superuser, create roles/databases/schemas, own the schema or alter
    tables/triggers. Migrate with the owner, then grant only runtime operations.
    Give the runtime SELECT on migration history and pilot policy/phase tables,
-   not policy mutation rights. Verify privileges before enabling any API action.
+   not policy mutation rights. Public fee collection also needs INSERT on the
+   immutable `protocol_identity` row; apply
+   [the observer grant](../deploy/v2-mainnet/grant-runtime-observer-privileges.sql).
+   Verify privileges before enabling any API action.
 3. Create a dedicated `innopoolmainnet` Unix account. Keep reviewed settings in
    `/etc/innopool-v2-mainnet` and persistent spools in
    `/var/lib/innopool-v2-mainnet/spool`. Keep credentials outside repositories,
@@ -124,6 +175,10 @@ submissions, reward contract calls or withdrawals.
 
 ## Backups, recovery and monitoring
 
+The installed two-host backup schedule, retention limits and completed October
+restore tests are described in [backup operations](BACKUP_OPERATIONS.md).
+External alerts, sustained storage and funded takeover checks remain open.
+
 - Archive immutable spools on another host as they arrive; monitor both
   collectors for missed/conflicting blocks. Store database backups and the
   release/configuration manifest off-host. Protect a separate encrypted copy
@@ -159,11 +214,12 @@ and an actual custody receipt; its 28-day delay is not a reason to stop the
 independent preparation work.
 
 Before enabling a limited mainnet pilot, resolve the remaining authoritative
-outcome/reporting and operator reward-call/correction integrations, confirm
-the deployment inputs, and install an explicit mainnet attempt/funding cap.
-This repository's two-member pilot policy is **testnet-only**. Do not disable
-it and assume the 5 TIG allowance has become a mainnet spending limit.
+outcome/reporting and operator reward-call/correction integrations and confirm
+the deployment inputs. The operator will monitor the authorized 10 TIG and
+0.0005 Base ETH budgets manually; there is no software-enforced mainnet spending
+cap. This repository's two-member pilot policy is **testnet-only** and separate
+from the operator-monitored mainnet budget.
 
-After the operator authorizes the concrete mainnet budget and members are
-ready, start a small monitored pilot. Keep incomplete or unfunded reward
+With the budget authorized and members ready, start a small monitored pilot.
+Keep incomplete or unfunded reward
 settlements held. Expand after its complete financial cycle is demonstrated.

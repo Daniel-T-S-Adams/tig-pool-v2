@@ -182,7 +182,10 @@ async function loadOperator() {
   const sum=(asset,location,kind)=>data.balances.filter(row=>row.asset===asset&&row.location===location&&(!kind||row.kind===kind)).reduce((total,row)=>total+BigInt(row.balance),0n);
   $('operator-balances').replaceChildren();
   for(const [label,amount,detail] of [['Custody funds',sum('TIG','custody'),'TIG · all recorded accounts'],['Operator funds',sum('TIG','custody','operator'),'TIG · available'],['Network fee funds',sum('NATIVE','custody','operator'),'native token · available'],['Submission balance',sum('TIG','protocol','operator'),'TIG · prepaid operator funds']]){const box=node('article',undefined,'metric');box.append(node('p',label),node('strong',tig(amount)),node('span',detail));$('operator-balances').append(box);}
-  const observation=data.observation;$('observation-summary').textContent=observation.initialized?'Observed through block '+observation.latest_seen_height+' · '+observation.missing_heights.length+' listed gaps':'Block collection has not started.';
+  const observation=data.observation;
+  const unresolved=observation.unresolved_missing_heights||observation.missing_heights||[];
+  const waived=observation.waived_missing_heights||[];
+  $('observation-summary').textContent=observation.initialized?'Observed through block '+observation.latest_seen_height+' · '+unresolved.length+' unresolved gaps'+(waived.length?' · '+waived.length+' prelaunch gap waived':''):'Block collection has not started.';
   const wallet=custody.observation,check=wallet.check;
   const directWallet=!check?.custody_code||check.custody_code==='0x';
   $('operator-income-wallet').textContent=income.wallet?'Income wallet: '+income.wallet:'An operator income wallet and operating reserve have not been configured.';

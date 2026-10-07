@@ -27,11 +27,18 @@ balances, nonces or delegation still block readiness. See the
 
 ## Starting and recovering the collector
 
-Start at or before the new custody wallet's first funding or transaction. The
+For a fresh wallet, start at or before its first funding or transaction. The
 preceding block must show zero TIG, zero native balance and zero outgoing nonce,
 and the custody ledger must still be empty. Do this before accepting member or
-operator funds. An existing wallet requires starting earlier and replaying its
-actual history; a balance snapshot cannot silently become operator funding.
+operator funds. An already-used wallet may instead be initialized from an
+explicit pre-launch opening baseline when the operator confirms its earlier
+activity was setup, not pool activity. Work must remain paused, no reservation
+or withdrawal may exist, and the baseline requires a named operator and reason.
+It records the current finalized TIG/native balances as operator opening funds
+and the current outgoing nonce as the observation offset; it does not recreate
+old transfers or member credits. The opening capture and baseline are immutable.
+This exception is only for initialization before the pool accepts live funds or
+work; it cannot be used to reconcile unexplained activity after launch.
 
 ```sh
 # Use the isolated v2 environment and database, after explicit migration.
@@ -42,6 +49,12 @@ python3 tools/observe_custody_v2.py \
   --confirmations 12 --start-height '<first funding block or earlier>' \
   --spool '<persistent v2 custody archive directory>'
 ```
+
+For an approved pre-launch baseline, also pass `--baseline-actor` and
+`--baseline-reason`. Start at the block immediately after the fresh finalized
+opening snapshot. The observer records that snapshot and nonce offset before
+processing later blocks. Use this only while work is paused and the ledger has
+no custody funds, reservations or withdrawals.
 
 The example confirmation depth is an explicit deployment choice, not a default
 inferred from TIG's advertised network metadata. The recorded stream freezes

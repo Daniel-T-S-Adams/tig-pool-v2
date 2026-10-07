@@ -3,7 +3,7 @@ Description=InnoPool v2 mainnet application resource budget
 
 [Slice]
 CPUAccounting=yes
-CPUQuota=100%
+CPUQuota=150%
 CPUWeight=10
 MemoryAccounting=yes
 MemoryHigh=1792M

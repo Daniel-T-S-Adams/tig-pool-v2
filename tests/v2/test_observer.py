@@ -5,7 +5,7 @@ import tempfile
 import threading
 from unittest.mock import patch
 
-from pool_manager.pool_v2 import benchmarks
+from pool_manager.pool_v2 import benchmarks, controls
 from pool_manager.pool_v2.block_observer import BlockStore
 from pool_manager.pool_v2.observation import read_archive
 from pool_manager.pool_v2.protocol import ProtocolDataError
@@ -70,6 +70,53 @@ class ObserverTests(DatabaseCase):
         self.assertTrue(self.store.round_coverage(4))
         self.assertEqual(round_credits(self.db, 4), {})  # Proven zero, not a gap.
         self.assertEqual(self.store.status()["contiguous_height"], 8)
+
+    def test_one_time_prelaunch_gap_waiver_keeps_gap_visible_and_excludes_it_from_credits(self):
+        for height in (8, 10, 11):
+            self.store.record(observation(height), collector="one")
+            credit_block(self.db, f"block-{height}", "new-empty-pool")
+        with self.assertRaisesRegex(ProtocolDataError, "remain paused"):
+            self.store.waive_prelaunch_gap(9, actor="operator", reason="prelaunch capture gap",
+                evidence={"review": "no pool submissions before launch"})
+        controls.set_pause(self.db, True, actor="operator", reason="prelaunch validation",
+                           event_key="pause-for-gap-waiver")
+        waiver = self.store.waive_prelaunch_gap(9, actor="operator", reason="prelaunch capture gap",
+            evidence={"review": "no pool submissions before launch"})
+        replay = self.store.waive_prelaunch_gap(9, actor="operator", reason="prelaunch capture gap",
+            evidence={"review": "no pool submissions before launch"})
+        self.assertEqual(waiver, replay)
+        self.assertEqual(waiver["assumed_block_id"], "block-9")
+        with self.assertRaisesRegex(ProtocolDataError, "already recorded"):
+            self.store.waive_prelaunch_gap(12, actor="operator", reason="second gap",
+                evidence={"review": "not allowed"})
+        self.assertTrue(self.store.round_coverage(3, require_credits=False))
+        self.assertTrue(self.store.round_coverage(3))
+        self.assertEqual(round_credits(self.db, 3), {})
+        status = self.store.status()
+        self.assertEqual(status["missing_heights"], [9])
+        self.assertEqual(status["waived_missing_heights"], [9])
+        self.assertEqual(status["unresolved_missing_heights"], [])
+        self.assertEqual(self.row("SELECT count(*) AS n FROM observed_blocks WHERE height=9")["n"], 0)
+        self.store.record(observation(9), collector="late-backfill")
+        self.assertEqual(self.store.status()["missing_heights"], [])
+        self.assertEqual(self.store.status()["waived_missing_heights"], [])
+        self.assertFalse(self.store.round_coverage(3))  # Real block now needs real credit.
+        credit_block(self.db, "block-9", "new-empty-pool")
+        self.assertTrue(self.store.round_coverage(3))
+
+    def test_prelaunch_gap_waiver_is_unavailable_after_a_pool_reservation(self):
+        for height in (8, 10):
+            self.store.record(observation(height), collector="one")
+        self.fund()
+        benchmarks.reserve(self.db, self.member, "prelaunch-work", creation_round=3, resource="CPU",
+            selection={"block_id": "block-8"},
+            payload={"track_settings": {"t": {"num_bundles": 2}}},
+            fee_limit=0, offer_expires_at=self.expiry)
+        controls.set_pause(self.db, True, actor="operator", reason="prelaunch validation",
+                           event_key="pause-after-reservation")
+        with self.assertRaisesRegex(ProtocolDataError, "after pool reservations exist"):
+            self.store.waive_prelaunch_gap(9, actor="operator", reason="prelaunch capture gap",
+                evidence={"review": "no pool submissions before launch"})
 
     def test_partial_and_conflicting_snapshots_never_support_credit(self):
         incomplete = observation(8)

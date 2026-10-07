@@ -197,12 +197,13 @@ class WithdrawalTests(DatabaseCase):
         # Restore the previous schema shape in this disposable test database.
         # All real withdrawal rows, journals and chain receipts remain intact.
         with self.db.transaction() as cursor:
-            cursor.execute('DROP TABLE custody_authorization_payments,pilot_phases,native_internal_receipts,pilot_limits,protocol_opening_credits,topup_transaction_claims,protocol_topup_credits,protocol_topups,protocol_topup_facts,funding_alerts,funding_captures,protocol_identity,custody_payments,custody_sends CASCADE')
+            cursor.execute('DROP TABLE observation_gap_waivers,custody_opening_baselines,mainnet_protocol_opening_credits,custody_authorization_payments,pilot_phases,native_internal_receipts,pilot_limits,protocol_opening_credits,topup_transaction_claims,protocol_topup_credits,protocol_topups,protocol_topup_facts,funding_alerts,funding_captures,protocol_identity,custody_payments,custody_sends CASCADE')
+            cursor.execute('ALTER TABLE chain_stream DROP COLUMN start_nonce')
             cursor.execute('ALTER TABLE custody_checks DROP COLUMN custody_code')
             cursor.execute('DROP FUNCTION protect_topup()')
             cursor.execute('ALTER TABLE withdrawals DROP COLUMN kind CASCADE, DROP COLUMN operator_reserve CASCADE')
             cursor.execute('ALTER TABLE withdrawals ALTER COLUMN member_id SET NOT NULL')
-            cursor.execute("DELETE FROM schema_migrations WHERE name IN ('009_protocol_funding.sql','010_testnet_starter_credit.sql','011_pilot_limits.sql','012_internal_native_funding.sql','013_pilot_phases.sql','014_sponsored_withdrawal_recovery.sql','015_operator_withdrawals.sql')")
+            cursor.execute("DELETE FROM schema_migrations WHERE name IN ('009_protocol_funding.sql','010_testnet_starter_credit.sql','011_pilot_limits.sql','012_internal_native_funding.sql','013_pilot_phases.sql','014_sponsored_withdrawal_recovery.sql','015_operator_withdrawals.sql','016_prelaunch_gap_waiver.sql','017_custody_opening_baseline.sql')")
         self.db.migrate()
         self.assertEqual(self.row('SELECT count(*) AS n FROM custody_sends')['n'],3)
         self.assertEqual(self.row('SELECT count(*) AS n FROM protocol_opening_credits')['n'],0)
