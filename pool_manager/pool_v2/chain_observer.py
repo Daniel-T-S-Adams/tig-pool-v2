@@ -152,7 +152,7 @@ def _failure(database,identity,reason,*,critical=False):
             VALUES (%s,false,%s,clock_timestamp())''',(identity,reason))
 
 
-def record(database,data,*,initialize=False):
+def record(database,data,*,initialize=False,baseline_actor=None,baseline_reason=None):
     identity=save(database,data)
     try:value=verify(data)
     except Exception as failure:
@@ -168,12 +168,43 @@ def record(database,data,*,initialize=False):
             stream=cursor.fetchone()
             if not stream:
                 if not initialize:raise Conflict('custody observer requires an explicit starting height')
-                if any(value['opening'].values()):raise Conflict('start custody collection before the wallet first receives funds or sends transactions')
+                opening=value['opening']
+                baseline=bool(any(opening.values()) or baseline_actor or baseline_reason)
+                if baseline and (not baseline_actor or not baseline_reason):
+                    raise Conflict('a funded prelaunch wallet requires a named operator and opening reason')
+                if baseline:
+                    if value['custody_code']!='0x':
+                        raise Conflict('a prelaunch custody baseline requires an undelegated wallet')
+                    from .controls import paused
+                    if not paused(database,cursor=cursor):
+                        raise Conflict('a custody opening baseline requires work to remain paused')
+                    cursor.execute('SELECT 1 FROM reservations UNION ALL SELECT 1 FROM withdrawals LIMIT 1')
+                    if cursor.fetchone():raise Conflict('custody opening baseline must precede pool work or withdrawals')
                 custody.bind(cursor,network)
                 if ledger.backing(cursor) or ledger.backing(cursor,'NATIVE'):
-                    raise Conflict('custody observer must initialize before accepting funds')
-                cursor.execute("""INSERT INTO chain_stream(name,network,start_height,last_height,last_hash)
-                    VALUES ('custody',%s,%s,%s,%s)""",(Json(asdict(network)),value['first'],value['first']-1,value['before_hash']))
+                    raise Conflict('custody opening baseline requires an empty internal custody ledger')
+                journals=[]
+                for asset,amount,kind in (('TIG',opening['tig'],'operator_custody_opening_TIG'),
+                                          ('NATIVE',opening['native'],'operator_custody_opening_NATIVE')):
+                    operator=f'operator:custody:{asset}'
+                    external=f'external:custody:{asset}'
+                    ledger.account(cursor,operator,'operator',asset)
+                    ledger.account(cursor,external,'external',asset)
+                    if amount:
+                        journal_id=ledger.post(cursor,f'custody-opening:{identity}:{asset}',kind,
+                            [(external,-amount),(operator,amount)],
+                            {'capture_id':identity,'height':value['first']-1,'actor':baseline_actor or 'observer',
+                             'reason':baseline_reason or 'zero-balance custody initialization'})
+                        journals.append(journal_id)
+                cursor.execute("""INSERT INTO chain_stream(name,network,start_height,last_height,last_hash,start_nonce)
+                    VALUES ('custody',%s,%s,%s,%s,%s)""",
+                    (Json(asdict(network)),value['first'],value['first']-1,value['before_hash'],opening['nonce']))
+                if baseline:
+                    cursor.execute("""INSERT INTO custody_opening_baselines
+                        (name,capture_id,network,height,block_hash,tig,native,start_nonce,actor,reason,journal_ids)
+                        VALUES ('custody',%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
+                        (identity,Json(asdict(network)),value['first']-1,value['before_hash'],opening['tig'],
+                         opening['native'],opening['nonce'],baseline_actor,baseline_reason,journals))
                 # Release the custody lock before external receipt transactions.
                 # Initialization is committed on its own and replay remains safe.
         with database.transaction() as cursor:
@@ -208,12 +239,13 @@ def record(database,data,*,initialize=False):
             cursor.execute('''SELECT count(*) AS count FROM custody_payments o JOIN chain_transactions t
                 ON t.chain_id=o.chain_id AND t.tx_hash=o.tx_hash
                 JOIN custody_sends s ON s.id=o.send_id
-                WHERE t.chain_id=%s AND s.sender=%s AND t.block_number<=%s''',
-                (network.chain_id,network.custody,value['last']))
-            accounted=int(cursor.fetchone()['count'])
+                WHERE t.chain_id=%s AND s.sender=%s AND t.block_number>=%s AND t.block_number<=%s''',
+                (network.chain_id,network.custody,stream['start_height'],value['last']))
+            accounted=int(stream['start_nonce'])+int(cursor.fetchone()['count'])
             cursor.execute('''SELECT 1 FROM transfers t LEFT JOIN custody_payments w ON w.transfer_event=t.event_id
-                WHERE t.sender=%s AND t.recipient<>%s AND t.amount>0 AND t.block_number<=%s AND w.send_id IS NULL LIMIT 1''',
-                (network.custody,network.custody,value['last']))
+                WHERE t.sender=%s AND t.recipient<>%s AND t.amount>0 AND t.block_number>=%s
+                AND t.block_number<=%s AND w.send_id IS NULL LIMIT 1''',
+                (network.custody,network.custody,stream['start_height'],value['last']))
             unexplained=bool(cursor.fetchone())
             cursor.execute("SELECT 1 FROM chain_alerts WHERE kind='canonical-conflict' LIMIT 1")
             conflicted=bool(cursor.fetchone())

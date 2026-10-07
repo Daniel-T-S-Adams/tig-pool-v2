@@ -240,11 +240,39 @@ class ChainObserverTests(DatabaseCase):
 
     def test_initial_collection_cannot_skip_prior_wallet_funding_or_use_a_different_network(self):
         self.source.add(height=99)
-        with self.assertRaisesRegex(Conflict,'before the wallet'):chain_observer.record(self.db,self.capture(),initialize=True)
+        with self.assertRaisesRegex(Conflict,'named operator'):chain_observer.record(self.db,self.capture(),initialize=True)
         self.assertFalse(chain_observer.status(self.db)['initialized'])
         self.source.chain_id=1
         captured=self.capture()
         with self.assertRaises(FundsError):chain_observer.record(self.db,captured,initialize=True)
+        self.assertFalse(chain_observer.status(self.db)['initialized'])
+
+    def test_prelaunch_wallet_uses_audited_opening_balance_and_nonce_baseline(self):
+        self.source.native[99]=500_000_000_000_000
+        self.source.nonces[99]=3
+        controls.set_pause(self.db,True,actor='Daniel',reason='prelaunch mainnet setup',event_key='baseline-pause')
+        captured=self.capture(first=100,count=3)
+        result=chain_observer.record(self.db,captured,initialize=True,baseline_actor='Daniel (pool operator)',
+            baseline_reason='Wallet was funded and used only for prelaunch mainnet validation; earlier activity is excluded from pool accounting.')
+        self.assertTrue(result['healthy'],result)
+        self.assertEqual(self.row("SELECT balance FROM accounts WHERE id='operator:custody:NATIVE'")['balance'],
+            500_000_000_000_000)
+        self.assertEqual(self.balance()['available'],0)
+        self.assertEqual(self.row("SELECT start_nonce FROM chain_stream WHERE name='custody'")['start_nonce'],3)
+        baseline=self.row('SELECT height,native,start_nonce,actor,reason FROM custody_opening_baselines WHERE name=\'custody\'')
+        self.assertEqual((baseline['height'],baseline['native'],baseline['start_nonce']),
+            (99,500_000_000_000_000,3))
+        self.assertEqual(baseline['actor'],'Daniel (pool operator)')
+        self.assertTrue(chain_observer.status(self.db)['ready'])
+
+    def test_opening_baseline_requires_pause_and_operator_reason(self):
+        self.source.native[99]=100
+        with self.assertRaisesRegex(Conflict,'requires work to remain paused'):
+            chain_observer.record(self.db,self.capture(first=100,count=3),initialize=True,
+                baseline_actor='operator',baseline_reason='prelaunch setup')
+        controls.set_pause(self.db,True,actor='Daniel',reason='prelaunch mainnet setup',event_key='baseline-pause')
+        with self.assertRaisesRegex(Conflict,'named operator'):
+            chain_observer.record(self.db,self.capture(first=100,count=3),initialize=True)
         self.assertFalse(chain_observer.status(self.db)['initialized'])
 
     def test_concurrent_capture_replay_and_backfill_never_enable_work_before_catching_up(self):

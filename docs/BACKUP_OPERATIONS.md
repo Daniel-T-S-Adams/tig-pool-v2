@@ -153,7 +153,9 @@ These are distinct tests. No funded mainnet takeover or token transfer occurred.
 - [ ] Separate CPU/GPU execution and interruption/restart validation.
 - [ ] Reward claim/unlock/withdraw integration, final round attribution and
   expense/correction operations; backup completion does not complete these.
-- [ ] Explicit mainnet budget, custody reconciliation and deliberate activation.
+- [x] Operator-approved mainnet budgets: 10 TIG for protocol-fee top-ups and
+  0.0005 Base ETH for pool-wallet transaction fees, monitored manually.
+- [ ] Mainnet custody reconciliation and deliberate activation.
 
 The backup mechanisms follow the PostgreSQL 18 documentation for
 [base backups](https://www.postgresql.org/docs/18/app-pgbasebackup.html),

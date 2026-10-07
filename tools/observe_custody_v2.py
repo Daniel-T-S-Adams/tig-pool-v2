@@ -26,6 +26,8 @@ def main(argv=None):
     parser.add_argument('--custody',required=True)
     parser.add_argument('--confirmations',type=int,required=True)
     parser.add_argument('--start-height',type=int,help='first custody block; must precede initial wallet funding/use')
+    parser.add_argument('--baseline-actor',help='named operator approving a prelaunch opening balance')
+    parser.add_argument('--baseline-reason',help='why the verified opening balances belong to operator funds')
     parser.add_argument('--batch-size',type=int,default=1000)
     parser.add_argument('--spool',required=True)
     parser.add_argument('--poll-seconds',type=float,default=10)
@@ -51,7 +53,8 @@ def main(argv=None):
             pending.append((data['first'],data['checked_at'],path,data))
         for _,_,path,data in sorted(pending):
             try:
-                result=chain_observer.record(database,data,initialize=args.start_height==data['first'])
+                result=chain_observer.record(database,data,initialize=args.start_height==data['first'],
+                    baseline_actor=args.baseline_actor,baseline_reason=args.baseline_reason)
                 spool.recorded(path)
                 logger.info('custody capture recorded: %s',result)
             except Exception as failure:
