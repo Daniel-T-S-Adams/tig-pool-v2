@@ -11,7 +11,7 @@ from .database import lock
 from .members import member_lock
 from .money import Conflict, FundsError, InsufficientFunds
 from .protocol import ProtocolDataError
-from .selection import COMPUTE_FAMILIES, NoCompatibleWork, choose, references
+from .selection import COMPUTE_FAMILIES, NoCompatibleWork, choose
 
 
 def _offer(resource, compute_type, capacity):
@@ -92,7 +92,6 @@ def reserve_next(database, player_id, *, now, max_age=120):
             raise ProtocolDataError("no complete current snapshot")
         block_id = row["id"]
     observation, snapshot = store.read(block_id)
-    reference_index = references(snapshot)
     with database.transaction() as cursor:
         # Fence updates to the selected block/coverage while making the decision.
         lock(cursor, "observation-stream")
@@ -114,8 +113,7 @@ def reserve_next(database, player_id, *, now, max_age=120):
             offer = request["offer"]
             try:
                 selection = choose(snapshot, observation["algorithms"]["binarys"], player_id=player_id,
-                    resource=offer["resource"], compute_type=offer["compute_type"], now=now, max_age=max_age,
-                    reference_index=reference_index)
+                    resource=offer["resource"], compute_type=offer["compute_type"], now=now, max_age=max_age)
             except NoCompatibleWork:
                 continue
             # An unavailable member cannot prevent the next queued member from

@@ -39,8 +39,9 @@ class SubmissionTests(DatabaseCase):
         store = BlockStore(self.db)
         store.initialize(8); store.record(self.obs, collector="fixture")
 
-    def queued(self, key="first", member=None):
-        work_requests.create(self.db, member or self.member, key, resource="CPU", compute_type="aws_c7a", capacity={"workers":1})
+    def queued(self, key="first", member=None, ttl_seconds=60):
+        work_requests.create(self.db, member or self.member, key, resource="CPU", compute_type="aws_c7a",
+                             capacity={"workers":1}, ttl_seconds=ttl_seconds)
         row = work_requests.reserve_next(self.db, self.player, now=self.obs["start"]["block"]["details"]["timestamp"])
         submissions.prepare_archive(self.db, row["id"], row["selection"]["binary"]["details"]["download_url"], b"recorded-archive-fixture")
         intent = self.row("SELECT * FROM protocol_outbox WHERE reservation_id=%s", (row["id"],))
@@ -233,6 +234,40 @@ class SubmissionTests(DatabaseCase):
         self.assertIsNone(coordinator.dispatch_one())
         self.assertEqual(self.balance()["collateral"],0)
         writer.post.assert_not_called();public.get.assert_not_called()
+
+    def test_expired_accepted_assignment_without_handover_returns_collateral(self):
+        row,intent=self.queued(ttl_seconds=5)
+        submissions.begin(self.db,intent["id"],preflight=self.preflight())
+        self.assertTrue(submissions.record_response(self.db,intent["id"],
+            {"status":200,"body":{"benchmark_id":"b"*32}}))
+        published=submissions.publish_assignment(self.db,row["id"],self.precommit(row),evidence={"block":9})
+        self.assertIsNone(published["handed_over_at"])
+        time.sleep(5.1)
+        controls.set_pause(self.db,True,actor="operator",reason="no-handover pilot recovery",event_key="pause-unhanded")
+        before=self.balance()
+        amount=int(row["amount"])
+        result=benchmarks.release_unhanded(self.db,row["id"],actor="operator",reason="member work was never handed over",
+                                           event_key="return-unhanded")
+        self.assertEqual((result["state"],result["collateral_outcome"],result["slot_held"]),
+                         ("cancelled","returned",False))
+        after=self.balance()
+        self.assertEqual(after["available"],before["available"]+amount)
+        self.assertEqual(after["collateral"],before["collateral"]-amount)
+        repeated=benchmarks.release_unhanded(self.db,row["id"],actor="operator",reason="member work was never handed over",
+                                             event_key="return-unhanded")
+        self.assertEqual(repeated["state"],"cancelled")
+        self.assertEqual(self.balance(),after)
+
+    def test_unhanded_collateral_cannot_be_returned_after_member_acknowledges(self):
+        row,intent=self.queued(ttl_seconds=5)
+        submissions.begin(self.db,intent["id"],preflight=self.preflight())
+        submissions.record_response(self.db,intent["id"],{"status":200,"body":{"benchmark_id":"b"*32}})
+        published=submissions.publish_assignment(self.db,row["id"],self.precommit(row),evidence={"block":9})
+        member_protocol.acknowledge(self.db,published["benchmark_id"],self.member,published["assignment_digest"])
+        controls.set_pause(self.db,True,actor="operator",reason="handover happened",event_key="pause-handed")
+        with self.assertRaisesRegex(Conflict,"confirmed handover"):
+            benchmarks.release_unhanded(self.db,row["id"],actor="operator",reason="must not return",
+                                         event_key="reject-handed")
 
     def test_replay_rotates_held_blocks_so_later_complete_blocks_progress(self):
         missing=observation(9)

@@ -517,6 +517,12 @@ def create_app(settings):
             if not row:raise FundsError('unknown collateral hold')
         return response(settlement.finalize_collateral(database,identity,latest_seal(row['creation_round'])))
 
+    @app.post('/api/v2/operator/benchmarks/{identity}/return-unhanded-collateral')
+    def return_unhanded_collateral(identity:uuid.UUID,body:WithdrawalRelease,actor=Depends(operator)):
+        row=benchmarks.release_unhanded(database,identity,actor=actor,reason=body.reason,event_key=body.event_key)
+        return response({'reservation_id':str(row['id']),'benchmark_id':row['benchmark_id'],
+            'state':row['state'],'collateral_outcome':row['collateral_outcome'],'amount':str(row['amount'])})
+
     @app.get("/api/v2/member/journal")
     def journal(member_id=Depends(principal), limit: int = 100):
         if not 1 <= limit <= 200:
