@@ -17,7 +17,7 @@ from pydantic import BaseModel, ConfigDict, Field, StrictBool,StrictInt, StrictS
 from .auth import Auth, AuthenticationError
 from .database import Database
 from .chain import Chain, Network, Rpc, FEE_MODELS, UnsupportedCustodyTransaction
-from . import members, withdrawals, work_requests, member_protocol
+from . import members, withdrawals, work_requests, member_protocol, benchmarks
 from . import artifacts, native_funding, sponsored_withdrawals
 from . import controls,custody,dashboard,deposits,settlement,chain_observer,funding,topups,releases
 from .protocol import ProtocolDataError
