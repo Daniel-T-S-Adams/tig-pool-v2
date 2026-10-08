@@ -8,7 +8,7 @@ Raw captures are bounded-life evidence and expire under this policy.
 | Evidence | Expires when | Cap |
 |---|---|---|
 | Raw block captures (database manifests and chunks, spool archives) | Round X is settled, and never before round X+2 has ended | 4 rounds, even while settlement is disabled |
-| Fraud-report captures and report indices | Every pool benchmark created up to that round has its collateral outcome, and the round is at least three rounds old | 5 rounds |
+| Fraud-report captures and report indices | Every pool benchmark created up to that round has its collateral outcome, and the round is at least three rounds old | 4 rounds |
 | Wallet (custody) and fee-balance captures | Older than 30 days | 30 days |
 | Database backups | Unchanged: three verified bases plus the WAL since the oldest | about 3 days |
 
@@ -24,8 +24,10 @@ What never expires, whatever the cap:
   status checks keep working.
 - The capture rows themselves. Expiry blanks a payload and stamps
   `expired_at` (or replaces a block manifest with an `expired` tombstone
-  carrying the manifest's checksum); foreign keys stay valid and readers fail
-  with "expired under the retention policy" instead of returning data.
+  carrying the manifest's checksum); an expired report capture also replaces
+  its provenance metadata with the tombstone, keeping only identifiers and
+  digests. Foreign keys stay valid and readers fail with "expired under the
+  retention policy" instead of returning data.
 
 ## How a run works
 
@@ -60,7 +62,7 @@ chunks expire only once every block up to it has.
 
 ## Deployment
 
-1. Apply migration 018 with the admin role, then apply
+1. Apply migrations 018 and 019 with the admin role, then apply
    `deploy/v2-mainnet/grant-runtime-observer-privileges.sql`: the observer and
    runtime roles need the chunk index and may read the floors and runs. On
    8 October the grants were applied a minute after the migration; in that

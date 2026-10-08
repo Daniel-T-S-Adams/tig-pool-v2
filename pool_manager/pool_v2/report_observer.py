@@ -41,7 +41,10 @@ def record(database, capture, metadata, error=None):
         block_id = capture["start"]["block"]["id"]
     except (KeyError, TypeError) as failure:
         raise ProtocolDataError("report evidence is missing its block anchor") from failure
-    provenance = {**metadata, "start": capture["start"], "end": capture.get("end")}
+    # The block itself is already in the pool archive; keep only its identity.
+    head = capture["start"]["block"]
+    provenance = {**metadata, "start_block": {"id": block_id, "height": head["details"]["height"]},
+                  "end_block_id": (capture.get("end") or {}).get("block", {}).get("id")}
     arguments = (database, capture["reporting_round"], block_id)
     options = {"metadata": provenance, "error": error}
     if capture["kind"] == "index":

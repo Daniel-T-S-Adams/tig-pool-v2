@@ -211,7 +211,7 @@ class WithdrawalTests(DatabaseCase):
                 cursor.execute(f'CREATE TRIGGER immutable BEFORE UPDATE OR DELETE ON {name} FOR EACH ROW EXECUTE FUNCTION immutable_record()')
             for name in ('report_captures','report_index_captures','chain_captures'):
                 cursor.execute(f'ALTER TABLE {name} DROP COLUMN expired_at')
-            cursor.execute("DELETE FROM schema_migrations WHERE name IN ('009_protocol_funding.sql','010_testnet_starter_credit.sql','011_pilot_limits.sql','012_internal_native_funding.sql','013_pilot_phases.sql','014_sponsored_withdrawal_recovery.sql','015_operator_withdrawals.sql','016_prelaunch_gap_waiver.sql','017_custody_opening_baseline.sql','018_evidence_retention.sql')")
+            cursor.execute("DELETE FROM schema_migrations WHERE name IN ('009_protocol_funding.sql','010_testnet_starter_credit.sql','011_pilot_limits.sql','012_internal_native_funding.sql','013_pilot_phases.sql','014_sponsored_withdrawal_recovery.sql','015_operator_withdrawals.sql','016_prelaunch_gap_waiver.sql','017_custody_opening_baseline.sql','018_evidence_retention.sql','019_report_metadata_tombstones.sql')")
         self.db.migrate()
         self.assertEqual(self.row('SELECT count(*) AS n FROM custody_sends')['n'],3)
         self.assertEqual(self.row('SELECT count(*) AS n FROM protocol_opening_credits')['n'],0)
