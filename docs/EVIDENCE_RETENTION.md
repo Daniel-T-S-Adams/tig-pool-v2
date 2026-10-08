@@ -58,6 +58,20 @@ by expired captures. On a database recorded before migration 018, run
 chunk the newest block does not reference by that block's height, so such
 chunks expire only once every block up to it has.
 
+## Deployment
+
+1. Apply migration 018 with the admin role, then apply
+   `deploy/v2-mainnet/grant-runtime-observer-privileges.sql`: the observer and
+   runtime roles need the chunk index and may read the floors and runs. On
+   8 October the grants were applied a minute after the migration; in that
+   minute the recorder refused every block and the spool replayed them.
+2. Run `tools/retain_evidence_v2.py --initialize-chunk-index` once, before any
+   retention run, while the observer is the only writer.
+3. Install `innopoolv2mainnet-retention.service` and `.timer` with
+   `retention.env` (admin DSN) and a backup proof. The primary fetches the
+   recovery host's `latest.json` through a dedicated key whose only permitted
+   command on that host is printing the file.
+
 ## Operating notes
 
 - `--dry-run` prints the floors a run would set without changing anything.
