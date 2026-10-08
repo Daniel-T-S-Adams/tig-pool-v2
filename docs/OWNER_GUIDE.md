@@ -8,8 +8,8 @@ Prepared 29 September 2026 against pool commit `994739d`; revised 8 October 2026
 against `main` after PR #28. This guide describes the current v2 implementation,
 including operator income withdrawals. A feature must also be deployed and
 enabled before you can use it on your site. The latest deployment record is
-dated 8 October: release tag `mainnet-minimum-bundles-20261008` runs on the
-primary server with public HTTPS active and worker API access verified; member
+dated 8 October: release tag `mainnet-reference-hyperparameters-20261008` runs on
+the primary server with public HTTPS active and worker API access verified; member
 funds are enabled while new work and settlement remain disabled; the recovery
 server still runs the 4 October release. Preparing this guide did not recheck or
 change the running servers. See [Cloudflare setup](CLOUDFLARE_SETUP.md) and
@@ -267,9 +267,9 @@ The pool's v2 code, including operator income, was promoted to `main` in
 [PR 22](https://github.com/Daniel-T-S-Adams/tig-pool-v2/pull/22) on 29 September
 and deployed with migration 015 on 4 October. Confirm the configured operating
 reserve in `service.json` before relying on operator withdrawals. Since
-[PR 28](https://github.com/Daniel-T-S-Adams/tig-pool-v2/pull/28), new benchmarks
-copy the hyperparameters of the selected algorithm's best active bundle per
-track; that change reaches the site only with the next deployed release. Source
+[PR 28](https://github.com/Daniel-T-S-Adams/tig-pool-v2/pull/28), deployed on
+8 October, new benchmarks copy the hyperparameters of the selected algorithm's
+best active bundle per track. Source
 availability is separate from production readiness. The inherited `admin.py`,
 legacy `.env` settings and original Compose instructions do not administer these
 v2 ledger controls.
