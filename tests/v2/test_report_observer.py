@@ -46,6 +46,10 @@ class ReportObserverTests(DatabaseCase):
             store.record(data, collector="block-fixture")
             first = report_observer.record(self.db, *recovered)
             self.assertTrue(first["complete"], first)
+            # Provenance keeps the block identity and request records, not the block headers.
+            stored = self.row("SELECT metadata FROM report_captures WHERE id=%s", (first["id"],))["metadata"]
+            self.assertEqual(stored["start_block"], {"id": data["start"]["block"]["id"], "height": 20})
+            self.assertNotIn("start", stored)
             self.assertEqual(report_observer.record(self.db, *recovered)["id"], first["id"])
             spool.recorded(path)
             self.assertEqual(self.row("SELECT count(*) AS n FROM confirmed_arbitrations")["n"], 1)

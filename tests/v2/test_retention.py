@@ -207,13 +207,26 @@ class RetentionTests(DatabaseCase):
             cursor.execute("INSERT INTO funding_captures(id,payload_gzip,player_id,checked_at,complete,created_at) VALUES ('cited',%s,%s,%s,true,%s)",
                            (gzip.compress(b"{}"), PLAYER, old, old))
             cursor.execute("INSERT INTO funding_alerts(capture_id,details) VALUES ('cited',%s)", (Json({}),))
+            # A row expired before migration 019 still carries its provenance.
+            cursor.execute("""INSERT INTO report_captures(id,reporting_round,block_id,payload_sha256,input_digest,compressed_payload,metadata,complete,created_at,expired_at)
+                VALUES (%s,1,'block-10',%s,'legacy',''::bytea,%s,true,%s,%s)""", (uuid.uuid4(), "b" * 64, Json({"requests": ["old"]}), old, old))
         record = retention.run(self.db, proof=self.proof())
-        # Current round 8, report cap 5: reporting rounds 2 and 3 are under the floor.
-        self.assertEqual(record["floors"]["reporting_round"], 3)
+        # Current round 8, report cap 4: reporting rounds up to 4 are under the floor.
+        self.assertEqual(record["floors"]["reporting_round"], 4)
         states = {row["block_id"]: row["expired_at"] is not None for row in
                   self.rows("SELECT block_id,expired_at FROM report_captures")}
-        self.assertEqual(states, {"block-8": False, "block-9": True, "block-12": False, "block-28": False})
+        self.assertEqual(states, {"block-8": False, "block-9": True, "block-10": True, "block-12": False, "block-28": False})
         self.assertEqual(record["counts"]["expired_report_captures"], 1)
+        # Expired rows keep only identifiers and digests; kept rows keep their provenance.
+        metadata = {row["block_id"]: row["metadata"] for row in self.rows("SELECT block_id,metadata FROM report_captures")}
+        self.assertEqual(set(metadata["block-9"]), {"expired"})
+        self.assertEqual(set(metadata["block-10"]), {"expired"})
+        self.assertEqual(record["counts"]["collapsed_report_captures_metadata"], 1)
+        self.assertEqual(metadata["block-8"], {})
+        with self.assertRaisesRegex(Exception, "retention floor"):
+            with self.db.transaction() as cursor:
+                cursor.execute("SET LOCAL pool_v2.retention TO 'on'")
+                cursor.execute("UPDATE report_captures SET metadata=%s WHERE block_id='block-8'", (Json({"expired": {}}),))
         expired_funding = {row["id"] for row in self.rows("SELECT id FROM funding_captures WHERE expired_at IS NOT NULL")}
         self.assertEqual(expired_funding, {"old"})
         expired_chain = {row["id"] for row in self.rows("SELECT id FROM chain_captures WHERE expired_at IS NOT NULL")}

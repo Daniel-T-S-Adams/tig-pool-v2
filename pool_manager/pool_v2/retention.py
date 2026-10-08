@@ -21,7 +21,7 @@ from .database import lock
 from .observation import canonical_json, read_archive
 from .protocol import ProtocolDataError
 
-POLICY = {"version": "evidence-retention-v1", "raw_block_rounds": 4, "report_rounds": 5,
+POLICY = {"version": "evidence-retention-v2", "raw_block_rounds": 4, "report_rounds": 4,
           "capture_days": 30, "settled_margin_rounds": 3}
 
 
@@ -247,12 +247,18 @@ def run(database, *, proof, policy=POLICY, now=None, spools=(), dry_run=False, b
             removed.extend(digests)
     counts["removed_chunks"] = len(removed)
 
-    def expire(table, payload, where, params, keep_sql, keep_params=()):
-        """Blank payloads in bounded batches; each batch is its own short transaction."""
+    tombstone = Json({"expired": {"run": str(run_id), "at": now.isoformat(), "policy": policy["version"]}})
+
+    def expire(table, payload, where, params, keep_sql, keep_params=(), metadata=False):
+        """Blank payloads in bounded batches; each batch is its own short transaction.
+
+        Report captures also shed their provenance metadata, replaced by a
+        tombstone; rows expired before that rule get a second pass.
+        """
         with database.transaction() as cursor:
             cursor.execute(keep_sql, keep_params)
             keep = sorted({str(row["id"]) for row in cursor.fetchall()})
-        total = 0
+        total, collapsed = 0, 0
         while True:
             with database.transaction() as cursor:
                 _session(cursor)
@@ -260,22 +266,40 @@ def run(database, *, proof, policy=POLICY, now=None, spools=(), dry_run=False, b
                                f"ORDER BY created_at LIMIT %s", (*params, keep, batch))
                 ids = [row["id"] for row in cursor.fetchall()]
                 if not ids:
-                    return total
-                cursor.execute(f"UPDATE {table} SET {payload}=''::bytea,expired_at=%s WHERE id=ANY(%s)", (now, ids))
+                    break
+                if metadata:
+                    cursor.execute(f"UPDATE {table} SET {payload}=''::bytea,expired_at=%s,metadata=%s WHERE id=ANY(%s)", (now, tombstone, ids))
+                else:
+                    cursor.execute(f"UPDATE {table} SET {payload}=''::bytea,expired_at=%s WHERE id=ANY(%s)", (now, ids))
                 total += cursor.rowcount
+        while metadata:
+            with database.transaction() as cursor:
+                _session(cursor)
+                cursor.execute(f"SELECT id FROM {table} WHERE expired_at IS NOT NULL AND NOT (metadata ? 'expired') "
+                               f"ORDER BY created_at LIMIT %s", (batch,))
+                ids = [row["id"] for row in cursor.fetchall()]
+                if not ids:
+                    break
+                cursor.execute(f"UPDATE {table} SET metadata=%s WHERE id=ANY(%s)", (tombstone, ids))
+                collapsed += cursor.rowcount
+        if metadata:
+            counts["collapsed_" + table + "_metadata"] = collapsed
+        return total
 
     counts["expired_report_captures"] = expire(
         "report_captures", "compressed_payload", "reporting_round<=%s AND created_at<=%s",
         (target["reporting_round"], covered_until),
         """SELECT capture_id AS id FROM confirmed_reports UNION SELECT capture_id FROM confirmed_arbitrations
            UNION SELECT unnest(capture_ids) FROM round_report_seals
-           UNION (SELECT DISTINCT ON (reporting_round) id FROM report_captures ORDER BY reporting_round,created_at DESC)""")
+           UNION (SELECT DISTINCT ON (reporting_round) id FROM report_captures ORDER BY reporting_round,created_at DESC)""",
+        metadata=True)
     counts["expired_report_index_captures"] = expire(
         "report_index_captures", "compressed_payload", "reporting_round<=%s AND created_at<=%s",
         (target["reporting_round"], covered_until),
         """SELECT capture_id AS id FROM benchmark_reporting_rounds UNION SELECT unnest(capture_ids) FROM round_report_seals
            UNION (SELECT DISTINCT ON (reporting_round,player_id,challenge_id) id FROM report_index_captures
-           ORDER BY reporting_round,player_id,challenge_id,created_at DESC)""")
+           ORDER BY reporting_round,player_id,challenge_id,created_at DESC)""",
+        metadata=True)
     capture_cutoff = min(target["capture_cutoff"], covered_until)
     counts["expired_funding_captures"] = expire(
         "funding_captures", "payload_gzip", "created_at<=%s", (capture_cutoff,),
