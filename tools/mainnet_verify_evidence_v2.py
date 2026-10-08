@@ -40,6 +40,15 @@ def verify(root):
                 raise ValueError('evidence chunk checksum mismatch')
             verified.add(expected)
 
+        def listed(page):
+            # A page chunk is raw 32-byte record digests back to back; its own
+            # checksum was verified above, so only its references need checking.
+            with gzip.open(directory / 'chunks' / page[:2] / (page + '.gz'), 'rb') as stream:
+                raw = stream.read()
+            if not raw or len(raw) % 32:
+                raise ValueError('evidence page is not a digest list')
+            return [raw[index:index + 32].hex() for index in range(0, len(raw), 32)]
+
         def references(node):
             if not isinstance(node, dict):
                 raise ValueError('invalid manifest node')
@@ -48,6 +57,18 @@ def verify(root):
                     references(child)
             elif 'records' in node:
                 if any(value not in verified for value in node['records']):
+                    raise ValueError('manifest references missing or unverified evidence')
+            elif 'pages' in node:
+                if any(page not in verified for page in node['pages']):
+                    raise ValueError('manifest references missing or unverified evidence')
+                for page in node['pages']:
+                    if any(value not in verified for value in listed(page)):
+                        raise ValueError('manifest page references missing or unverified evidence')
+            elif 'items' in node:
+                if any(page not in verified for page in node['items']):
+                    raise ValueError('manifest references missing or unverified evidence')
+            elif 'blob' in node:
+                if node['blob'] not in verified:
                     raise ValueError('manifest references missing or unverified evidence')
             elif 'value' not in node:
                 raise ValueError('unknown manifest node')

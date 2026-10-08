@@ -4,11 +4,14 @@ from pathlib import Path
 import tempfile
 import threading
 from unittest.mock import patch
+import uuid
+
+from psycopg2.extras import Json, execute_values
 
 from pool_manager.pool_v2 import benchmarks, controls
-from pool_manager.pool_v2.block_observer import BlockStore
+from pool_manager.pool_v2.block_observer import BlockStore, _pack, _semantic, canonical_observation
 from pool_manager.pool_v2.observation import read_archive
-from pool_manager.pool_v2.protocol import ProtocolDataError
+from pool_manager.pool_v2.protocol import ProtocolDataError, validate_snapshot
 from pool_manager.pool_v2.qualifiers import credit_block, round_credits
 from pool_manager.pool_v2.spool import Spool
 from funds_helpers import DatabaseCase, WALLET
@@ -37,10 +40,13 @@ class ObserverTests(DatabaseCase):
         self.assertEqual(self.row("SELECT count(*) AS n FROM observed_blocks")["n"], 1)
         self.assertEqual(self.row("SELECT count(*) AS n FROM capture_attempts")["n"], 2)
         before = self.row("SELECT count(*) AS n FROM observation_chunks")["n"]
-        self.store.record(observation(9), collector="two")
-        self.assertEqual(self.row("SELECT count(*) AS n FROM observation_chunks")["n"], before)
+        attempt = self.store.record(observation(9), collector="two")
+        # The next block shares every record and page; only its manifest chunk is new.
+        self.assertEqual(self.row("SELECT count(*) AS n FROM observation_chunks")["n"], before + 1)
+        reference = self.row("SELECT manifest->>'manifest_ref' AS r FROM capture_attempts WHERE id=%s", (attempt["attempt_id"],))["r"]
+        self.assertEqual(self.row("SELECT count(*) AS n FROM observation_chunks WHERE digest=%s", (reference,))["n"], 1)
         replay, snapshot = BlockStore(self.db).read("block-8")
-        self.assertEqual(replay, data)
+        self.assertEqual(replay, canonical_observation(data))
         self.assertEqual(snapshot.height, 8)
         self.assertEqual(self.store.status()["contiguous_height"], 9)
 
@@ -150,7 +156,7 @@ class ObserverTests(DatabaseCase):
 
     def test_spool_survives_database_outage_and_preserves_partial_evidence(self):
         with tempfile.TemporaryDirectory() as directory:
-            first = Spool(directory)
+            first = Spool(directory, paged=True)
             data = observation(8)
             path = first.save(data, {"collector": "one"})
             chunks = len(list(Path(directory).glob("chunks/*/*.gz")))
@@ -159,7 +165,7 @@ class ObserverTests(DatabaseCase):
             resumed = Spool(directory)
             self.assertEqual(set(resumed.pending()), {path, second_path})
             recovered, metadata, error = resumed.read(path)
-            self.assertEqual(recovered, data)
+            self.assertEqual(recovered, canonical_observation(data))
             result = self.store.record(recovered, collector=metadata["collector"], error=error)
             self.assertTrue(result["complete"])
             resumed.recorded(path)
@@ -169,11 +175,70 @@ class ObserverTests(DatabaseCase):
             self.assertEqual(resumed.read(failed), (partial, {"collector": "one"}, "API unavailable"))
 
     def test_live_fixture_storage_replays_all_protocol_data(self):
-        data = read_archive(next((Path(__file__).parent / "fixtures").glob("block-1351111*")))["observation"]
+        paths = sorted((Path(__file__).parent / "fixtures").glob("block-13511*"))
+        data = read_archive(paths[0])["observation"]
         result = self.store.record(data, collector="recorded-live")
         self.assertTrue(result["complete"], result)
         restored, _ = self.store.read(result["block_id"])
-        self.assertEqual(restored, data)
+        self.assertEqual(restored, canonical_observation(data))
+        # The manifest holds page references, not every record digest inline.
+        legacy_digests = sum(len(node["records"]) for node in self._nodes(_pack(data, paged=False)[0]) if "records" in node)
+        self.assertGreater(legacy_digests, 10000)
+        # The row holds one reference; the manifest tree is a compressed chunk.
+        size = self.row("SELECT pg_column_size(manifest) AS n FROM capture_attempts")["n"]
+        self.assertLess(size, 200, size)
+        reference = self.row("SELECT manifest->>'manifest_ref' AS r FROM capture_attempts")["r"]
+        tree = self.row("SELECT length(compressed) AS n FROM observation_chunks WHERE digest=%s", (reference,))["n"]
+        self.assertLess(tree, 80_000, tree)
+        # The next block reuses every unchanged page; only changed records and pages are new.
+        before = self.row("SELECT count(*) AS n FROM observation_chunks")["n"]
+        following = self.store.record(read_archive(paths[1])["observation"], collector="recorded-live")
+        self.assertTrue(following["complete"], following)
+        added = self.row("SELECT count(*) AS n FROM observation_chunks")["n"] - before
+        self.assertLess(added, 500, added)
+        self.assertEqual(self.row("SELECT count(*) AS n FROM observed_blocks")["n"], 2)
+        self.assertEqual(self.store.status()["conflicting_heights"], [])
+
+    def _nodes(self, manifest):
+        if "dict" in manifest:
+            for _, child in manifest["dict"]:
+                yield from self._nodes(child)
+        else:
+            yield manifest
+
+    def test_legacy_inline_manifests_replay_and_match_a_paged_recapture(self):
+        data = observation(8)
+        manifest, chunks, _ = _pack(data, paged=False)
+        attempt = str(uuid.uuid4())
+        with self.db.transaction() as cursor:
+            execute_values(cursor, "INSERT INTO observation_chunks(digest,compressed) VALUES %s", list(chunks.items()))
+            cursor.execute("INSERT INTO capture_attempts(id,collector,block_id,height,manifest,metadata,error) VALUES (%s,%s,%s,%s,%s,%s,NULL)",
+                           (attempt, "legacy", "block-8", 8, Json(manifest), Json({})))
+            snapshot = validate_snapshot(data)
+            cursor.execute("""INSERT INTO observed_blocks(id,height,previous_id,round,timestamp,blocks_per_round,semantic_digest,attempt_id)
+                VALUES (%s,%s,%s,%s,%s,%s,%s,%s)""", ("block-8", 8, snapshot.previous_block_id, snapshot.round, snapshot.timestamp, 4,
+                _semantic(snapshot, data), attempt))
+            cursor.execute("UPDATE observation_stream SET latest_seen_height=8, contiguous_height=8 WHERE name='tig'")
+        replay, snapshot = self.store.read("block-8")
+        self.assertEqual(replay, data)
+        # A recapture of the same block by the paged code is the same block, not a conflict.
+        self.assertTrue(self.store.record(data, collector="paged")["complete"])
+        self.assertEqual(self.store.status()["conflicting_heights"], [])
+        self.assertEqual(self.store.status()["contiguous_height"], 8)
+
+    def test_reordered_api_lists_are_the_same_block(self):
+        data = observation(8)
+        shuffled = deepcopy(data)
+        for player in shuffled["players"].values():
+            for field in ("precommits", "benchmarks", "proofs"):
+                player[field] = list(reversed(player[field]))
+        shuffled["algorithms"]["codes"] = list(reversed(shuffled["algorithms"]["codes"]))
+        self.assertTrue(self.store.record(data, collector="one")["complete"])
+        self.assertTrue(self.store.record(shuffled, collector="two")["complete"])
+        self.assertEqual(self.store.status()["conflicting_heights"], [])
+        self.assertEqual(self.row("SELECT count(*) AS n FROM observed_blocks")["n"], 1)
+        self.assertEqual(self.store.read("block-8")[0], canonical_observation(shuffled))
+
 
     def test_running_collector_keeps_capturing_while_recorder_is_blocked(self):
         from tools.observe_tig_v2 import main
