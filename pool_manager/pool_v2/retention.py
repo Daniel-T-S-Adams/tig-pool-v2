@@ -247,36 +247,46 @@ def run(database, *, proof, policy=POLICY, now=None, spools=(), dry_run=False, b
             removed.extend(digests)
     counts["removed_chunks"] = len(removed)
 
-    with database.transaction() as cursor:
-        _session(cursor)
-        cursor.execute("""UPDATE report_captures SET compressed_payload=''::bytea,expired_at=%s
-            WHERE expired_at IS NULL AND reporting_round<=%s AND created_at<=%s
-            AND id NOT IN (SELECT capture_id FROM confirmed_reports UNION SELECT capture_id FROM confirmed_arbitrations
-                           UNION SELECT unnest(capture_ids) FROM round_report_seals)
-            AND id NOT IN (SELECT DISTINCT ON (reporting_round) id FROM report_captures ORDER BY reporting_round,created_at DESC)""",
-            (now, target["reporting_round"], covered_until))
-        counts["expired_report_captures"] = cursor.rowcount
-        cursor.execute("""UPDATE report_index_captures SET compressed_payload=''::bytea,expired_at=%s
-            WHERE expired_at IS NULL AND reporting_round<=%s AND created_at<=%s
-            AND id NOT IN (SELECT capture_id FROM benchmark_reporting_rounds UNION SELECT unnest(capture_ids) FROM round_report_seals)
-            AND id NOT IN (SELECT DISTINCT ON (reporting_round,player_id,challenge_id) id FROM report_index_captures
-                           ORDER BY reporting_round,player_id,challenge_id,created_at DESC)""",
-            (now, target["reporting_round"], covered_until))
-        counts["expired_report_index_captures"] = cursor.rowcount
-        cursor.execute("""UPDATE funding_captures SET payload_gzip=''::bytea,expired_at=%s
-            WHERE expired_at IS NULL AND created_at<=%s
-            AND id NOT IN (SELECT policy_capture FROM protocol_topups UNION SELECT capture_id FROM protocol_topup_facts
-                           UNION SELECT capture_id FROM funding_alerts UNION SELECT capture_id FROM protocol_topup_credits
-                           UNION SELECT capture_id FROM protocol_opening_credits UNION SELECT capture_id FROM mainnet_protocol_opening_credits)
-            AND id NOT IN (SELECT DISTINCT ON (player_id) id FROM funding_captures WHERE complete ORDER BY player_id,created_at DESC)""",
-            (now, min(target["capture_cutoff"], covered_until)))
-        counts["expired_funding_captures"] = cursor.rowcount
-        cursor.execute("""UPDATE chain_captures SET payload_gzip=''::bytea,expired_at=%s
-            WHERE expired_at IS NULL AND created_at<=%s
-            AND id NOT IN (SELECT capture_id FROM chain_alerts UNION SELECT capture_id FROM custody_opening_baselines)
-            AND id<>(SELECT id FROM chain_captures ORDER BY created_at DESC LIMIT 1)""",
-            (now, min(target["capture_cutoff"], covered_until)))
-        counts["expired_chain_captures"] = cursor.rowcount
+    def expire(table, payload, where, params, keep_sql, keep_params=()):
+        """Blank payloads in bounded batches; each batch is its own short transaction."""
+        with database.transaction() as cursor:
+            cursor.execute(keep_sql, keep_params)
+            keep = sorted({str(row["id"]) for row in cursor.fetchall()})
+        total = 0
+        while True:
+            with database.transaction() as cursor:
+                _session(cursor)
+                cursor.execute(f"SELECT id FROM {table} WHERE expired_at IS NULL AND {where} AND NOT (id::text=ANY(%s)) "
+                               f"ORDER BY created_at LIMIT %s", (*params, keep, batch))
+                ids = [row["id"] for row in cursor.fetchall()]
+                if not ids:
+                    return total
+                cursor.execute(f"UPDATE {table} SET {payload}=''::bytea,expired_at=%s WHERE id=ANY(%s)", (now, ids))
+                total += cursor.rowcount
+
+    counts["expired_report_captures"] = expire(
+        "report_captures", "compressed_payload", "reporting_round<=%s AND created_at<=%s",
+        (target["reporting_round"], covered_until),
+        """SELECT capture_id AS id FROM confirmed_reports UNION SELECT capture_id FROM confirmed_arbitrations
+           UNION SELECT unnest(capture_ids) FROM round_report_seals
+           UNION (SELECT DISTINCT ON (reporting_round) id FROM report_captures ORDER BY reporting_round,created_at DESC)""")
+    counts["expired_report_index_captures"] = expire(
+        "report_index_captures", "compressed_payload", "reporting_round<=%s AND created_at<=%s",
+        (target["reporting_round"], covered_until),
+        """SELECT capture_id AS id FROM benchmark_reporting_rounds UNION SELECT unnest(capture_ids) FROM round_report_seals
+           UNION (SELECT DISTINCT ON (reporting_round,player_id,challenge_id) id FROM report_index_captures
+           ORDER BY reporting_round,player_id,challenge_id,created_at DESC)""")
+    capture_cutoff = min(target["capture_cutoff"], covered_until)
+    counts["expired_funding_captures"] = expire(
+        "funding_captures", "payload_gzip", "created_at<=%s", (capture_cutoff,),
+        """SELECT policy_capture AS id FROM protocol_topups UNION SELECT capture_id FROM protocol_topup_facts
+           UNION SELECT capture_id FROM funding_alerts UNION SELECT capture_id FROM protocol_topup_credits
+           UNION SELECT capture_id FROM protocol_opening_credits UNION SELECT capture_id FROM mainnet_protocol_opening_credits
+           UNION (SELECT DISTINCT ON (player_id) id FROM funding_captures WHERE complete ORDER BY player_id,created_at DESC)""")
+    counts["expired_chain_captures"] = expire(
+        "chain_captures", "payload_gzip", "created_at<=%s", (capture_cutoff,),
+        """SELECT capture_id AS id FROM chain_alerts UNION SELECT capture_id FROM custody_opening_baselines
+           UNION (SELECT id FROM chain_captures ORDER BY created_at DESC LIMIT 1)""")
 
     for spool in spools:
         counts["spool:" + str(spool)] = prune_spool(spool, block_floor=target["block_height"],
