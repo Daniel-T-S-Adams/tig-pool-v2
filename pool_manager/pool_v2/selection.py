@@ -111,7 +111,7 @@ def _choose(snapshot, binary_rows, *, player_id, resource, compute_type, now,
     default_min = _integer(config["min_num_bundles"], "minimum bundles", 1)
     tracks = {}
     for track_id, track_config in sorted(config["active_tracks"].items()):
-        count = _integer(track_config.get("min_num_bundles", default_min), "track minimum bundles", 1) + 1
+        count = _integer(track_config.get("min_num_bundles", default_min), "track minimum bundles", 1)
         tracks[track_id] = {"num_bundles": count, "fuel_budget": fuel, "hyperparameters": None}
     base, _ = collateral([track["num_bundles"] for track in tracks.values()], "1")
     # Deployed contract uses num_bundles even though the config says per_nonce_fee.

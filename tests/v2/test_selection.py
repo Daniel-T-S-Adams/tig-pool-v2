@@ -24,10 +24,17 @@ class SelectionTests(unittest.TestCase):
         self.assertEqual(cpu.payload["settings"]["challenge_id"], "c2")
         self.assertEqual(gpu.payload["settings"]["challenge_id"], "g1")
         self.assertEqual(cpu.payload["settings"]["track_id"], "")
-        self.assertEqual(cpu.base_collateral, 50*TIG)
-        self.assertEqual(cpu.max_submission_fee, 7 + 3*5)
+        self.assertEqual(cpu.base_collateral, 40*TIG)
+        self.assertEqual(cpu.max_submission_fee, 7 + 3*4)
         for track in cpu.payload["track_settings"].values():
-            self.assertEqual(track, {"num_bundles": 5, "fuel_budget": 99, "hyperparameters": None})
+            self.assertEqual(track, {"num_bundles": 4, "fuel_budget": 99, "hyperparameters": None})
+
+    def test_uses_track_minimum_when_present_and_challenge_minimum_otherwise(self):
+        data = observation()
+        data["challenges"]["challenges"][1]["config"]["active_tracks"]["t"]["min_num_bundles"] = 2
+        result = self.select(data)
+        self.assertEqual(result.payload["track_settings"]["t"]["num_bundles"], 2)
+        self.assertEqual(result.payload["track_settings"]["empty"]["num_bundles"], 4)
 
     def test_highest_overall_adoption_uses_null_hyperparameter_defaults(self):
         data = observation()
