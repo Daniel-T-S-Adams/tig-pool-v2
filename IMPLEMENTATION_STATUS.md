@@ -28,11 +28,14 @@ records the repository-level status and the preserved foundation record.
 - **Open.** Reward claim/unlock/receipt integration and expense accounting, a
   full takeover rehearsal, real member CPU/GPU validation, pointing the recovery
   server's units at the current tag, and the evidence retention work approved
-  on 8 October. Its first half, compact per-block manifests, is implemented on
-  `main` and takes effect with the next deployed release; the second half is
-  expiry of bounded-life captures (raw blocks four rounds, report captures
-  five rounds, wallet and fee captures thirty days) while ledger, credit and
-  settlement records are kept permanently.
+  on 8 October, implemented on `main` and taking effect with the next deployed
+  release: compact per-block manifests, and the retention job that expires
+  bounded-life captures under recorded floors (raw blocks four rounds, report
+  captures five rounds, wallet and fee captures thirty days) while ledger,
+  credit and settlement records are kept permanently; see
+  [evidence retention](docs/EVIDENCE_RETENTION.md). Deploying it means
+  applying migration 018, running the one-time chunk-index initialization and
+  installing the retention timer with the backup proof.
 
 ## Foundation record — 20 September 2026
 

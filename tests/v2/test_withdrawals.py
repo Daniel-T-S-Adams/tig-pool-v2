@@ -203,7 +203,15 @@ class WithdrawalTests(DatabaseCase):
             cursor.execute('DROP FUNCTION protect_topup()')
             cursor.execute('ALTER TABLE withdrawals DROP COLUMN kind CASCADE, DROP COLUMN operator_reserve CASCADE')
             cursor.execute('ALTER TABLE withdrawals ALTER COLUMN member_id SET NOT NULL')
-            cursor.execute("DELETE FROM schema_migrations WHERE name IN ('009_protocol_funding.sql','010_testnet_starter_credit.sql','011_pilot_limits.sql','012_internal_native_funding.sql','013_pilot_phases.sql','014_sponsored_withdrawal_recovery.sql','015_operator_withdrawals.sql','016_prelaunch_gap_waiver.sql','017_custody_opening_baseline.sql')")
+            # Undo migration 018: its guard replaced the plain immutability triggers.
+            cursor.execute('DROP TABLE retention_runs,retention_floors,chunk_last_ref CASCADE')
+            cursor.execute('DROP FUNCTION retention_guard() CASCADE')
+            cursor.execute('DROP FUNCTION protect_retention_floors() CASCADE')
+            for name in ('observation_chunks','capture_attempts','report_captures','report_index_captures','chain_captures'):
+                cursor.execute(f'CREATE TRIGGER immutable BEFORE UPDATE OR DELETE ON {name} FOR EACH ROW EXECUTE FUNCTION immutable_record()')
+            for name in ('report_captures','report_index_captures','chain_captures'):
+                cursor.execute(f'ALTER TABLE {name} DROP COLUMN expired_at')
+            cursor.execute("DELETE FROM schema_migrations WHERE name IN ('009_protocol_funding.sql','010_testnet_starter_credit.sql','011_pilot_limits.sql','012_internal_native_funding.sql','013_pilot_phases.sql','014_sponsored_withdrawal_recovery.sql','015_operator_withdrawals.sql','016_prelaunch_gap_waiver.sql','017_custody_opening_baseline.sql','018_evidence_retention.sql')")
         self.db.migrate()
         self.assertEqual(self.row('SELECT count(*) AS n FROM custody_sends')['n'],3)
         self.assertEqual(self.row('SELECT count(*) AS n FROM protocol_opening_credits')['n'],0)

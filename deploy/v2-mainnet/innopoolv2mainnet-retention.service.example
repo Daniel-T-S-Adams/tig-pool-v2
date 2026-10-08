@@ -1,0 +1,15 @@
+[Unit]
+Description=InnoPool evidence retention under the recorded policy
+After=innopoolv2mainnet-db.service
+Requires=innopoolv2mainnet-db.service
+[Service]
+UMask=0077
+CPUQuota=50%
+MemoryMax=1G
+MemorySwapMax=0
+Nice=10
+Type=oneshot
+EnvironmentFile=/etc/innopool-v2-mainnet/retention.env
+WorkingDirectory=/opt/innopool-v2-mainnet/releases/REPLACE_TESTED_POOL_COMMIT
+ExecStart=/opt/innopool-v2-mainnet/venv/bin/python tools/retain_evidence_v2.py --backup-proof /var/lib/innopool-v2-mainnet/backup-proof/latest.json --spool /var/lib/innopool-v2-mainnet/spool/blocks
+TimeoutStartSec=2h
