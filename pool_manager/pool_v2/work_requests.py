@@ -11,7 +11,7 @@ from .database import lock
 from .members import member_lock
 from .money import Conflict, FundsError, InsufficientFunds
 from .protocol import ProtocolDataError
-from .selection import COMPUTE_FAMILIES, NoCompatibleWork, choose
+from .selection import COMPUTE_FAMILIES, NoCompatibleWork, choose, references
 
 
 def _offer(resource, compute_type, capacity):
@@ -108,12 +108,14 @@ def reserve_next(database, player_id, *, now, max_age=120):
         cursor.execute("""SELECT * FROM work_requests WHERE state='queued'
             ORDER BY coalesce(last_attempted_at,created_at),created_at,id LIMIT 100 FOR UPDATE SKIP LOCKED""")
         requests = cursor.fetchall()
+        reference_index = references(snapshot)
         for request in requests:
             cursor.execute("UPDATE work_requests SET last_attempted_at=clock_timestamp() WHERE id=%s", (request["id"],))
             offer = request["offer"]
             try:
                 selection = choose(snapshot, observation["algorithms"]["binarys"], player_id=player_id,
-                    resource=offer["resource"], compute_type=offer["compute_type"], now=now, max_age=max_age)
+                    resource=offer["resource"], compute_type=offer["compute_type"], now=now, max_age=max_age,
+                    reference_index=reference_index)
             except NoCompatibleWork:
                 continue
             # An unavailable member cannot prevent the next queued member from

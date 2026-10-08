@@ -80,14 +80,17 @@ fail before reservation.
 
 It selects the compatible challenge with the fewest pool qualifying bundles,
 breaks ties uniformly, then selects its usable algorithm with the highest exact
-overall adoption. It sets hyperparameters to JSON `null` on each active track,
-so TIG uses the selected algorithm's defaults.
+overall adoption. For each active track it copies the hyperparameters of that
+algorithm's highest-scoring active bundle, taken from the benchmark that produced
+it; equal scores use benchmark ID and active-array index. Only a complete absence
+of such a bundle produces JSON `null`, so TIG uses the algorithm's defaults.
 
 Bundle counts use exactly each track's minimum, falling back to the challenge
 minimum when TIG does not provide a track-specific minimum. Fuel defaults to the
 protocol maximum, with a validated operator override. All tracks are included;
 `settings.track_id` is an empty placeholder because TIG chooses the actual track.
-The selector records candidates, counts, adoption units, draws, parameters and
+The selector records candidates, counts, adoption units, draws, reference
+bundles, parameters and
 binary metadata. Collateral uses the largest proposed
 track; the funds transaction applies the member's current multiplier afterwards.
 Fee capacity likewise covers the largest proposed track. The deployed Rust
