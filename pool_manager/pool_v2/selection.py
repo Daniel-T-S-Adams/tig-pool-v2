@@ -28,6 +28,24 @@ class Selection:
     max_submission_fee: int
 
 
+@dataclass(frozen=True)
+class ReferenceIndex:
+    block_id: str
+    values: dict
+
+
+def references(snapshot: Snapshot):
+    """Index once per snapshot; equal scores use stable benchmark/array order."""
+    best = {}
+    for bundle in snapshot.bundles:
+        key = (bundle.algorithm_id, bundle.track_id)
+        previous = best.get(key)
+        if previous is None or (-bundle.quality, bundle.benchmark_id, bundle.active_index) < (
+                -previous.quality, previous.benchmark_id, previous.active_index):
+            best[key] = bundle
+    return ReferenceIndex(snapshot.block_id, best)
+
+
 def _precise(value, label):
     if not isinstance(value, str) or not value.isascii() or not value.isdigit():
         raise ProtocolDataError(f"{label}: expected exact nonnegative units")
@@ -35,17 +53,17 @@ def _precise(value, label):
 
 
 def choose(snapshot, binary_rows, *, player_id, resource, compute_type, now,
-           max_age=120, fuel_budget=None, rng=None):
+           max_age=120, fuel_budget=None, rng=None, reference_index=None):
     try:
         return _choose(snapshot, binary_rows, player_id=player_id, resource=resource,
             compute_type=compute_type, now=now, max_age=max_age, fuel_budget=fuel_budget,
-            rng=rng)
+            rng=rng, reference_index=reference_index)
     except (KeyError, TypeError, AttributeError) as exc:
         raise ProtocolDataError(f"incomplete selection data: {exc}") from exc
 
 
 def _choose(snapshot, binary_rows, *, player_id, resource, compute_type, now,
-            max_age, fuel_budget, rng):
+            max_age, fuel_budget, rng, reference_index):
     if not isinstance(snapshot, Snapshot):
         raise ProtocolDataError("selection requires a validated snapshot")
     if resource not in ("CPU", "GPU") or COMPUTE_FAMILIES.get(compute_type) != resource:
@@ -109,10 +127,21 @@ def _choose(snapshot, binary_rows, *, player_id, resource, compute_type, now,
     if fuel > max_fuel:
         raise ProtocolDataError("configured fuel budget exceeds the protocol maximum")
     default_min = _integer(config["min_num_bundles"], "minimum bundles", 1)
-    tracks = {}
+    best = references(snapshot) if reference_index is None else reference_index
+    if not isinstance(best, ReferenceIndex) or best.block_id != snapshot.block_id:
+        raise ProtocolDataError("benchmark reference index belongs to another block")
+    tracks, reference_evidence = {}, {}
     for track_id, track_config in sorted(config["active_tracks"].items()):
         count = _integer(track_config.get("min_num_bundles", default_min), "track minimum bundles", 1)
-        tracks[track_id] = {"num_bundles": count, "fuel_budget": fuel, "hyperparameters": None}
+        reference = best.values.get((algorithm_id, track_id))
+        if reference:
+            parameters = deepcopy(snapshot.precommits[reference.benchmark_id]["details"]["hyperparameters"])
+            reference_evidence[track_id] = {"benchmark_id": reference.benchmark_id,
+                "active_index": reference.active_index, "quality": reference.quality}
+        else:
+            parameters = None
+            reference_evidence[track_id] = {"reason": "complete-snapshot-has-no-reference"}
+        tracks[track_id] = {"num_bundles": count, "fuel_budget": fuel, "hyperparameters": parameters}
     base, _ = collateral([track["num_bundles"] for track in tracks.values()], "1")
     # Deployed contract uses num_bundles even though the config says per_nonce_fee.
     fee = _precise(config["base_fee"], "base fee") + _precise(config["per_nonce_fee"], "per-bundle fee") * max(
@@ -120,8 +149,9 @@ def _choose(snapshot, binary_rows, *, player_id, resource, compute_type, now,
     payload = {"settings": {"player_id": player_id, "block_id": snapshot.block_id,
                             "challenge_id": challenge_id, "algorithm_id": algorithm_id, "track_id": ""},
                "track_settings": tracks, "compute_type": compute_type}
-    evidence = {"rule": "least-qualifiers-overall-adoption-null-hyperparameters-v2",
-        "hyperparameter_policy": "algorithm-default-null-v1", "block_id": snapshot.block_id,
+    evidence = {"rule": "least-qualifiers-overall-adoption-reference-hyperparameters-v3",
+        "hyperparameter_policy": "copy-best-active-bundle-v2", "references": reference_evidence,
+        "block_id": snapshot.block_id,
         "height": snapshot.height, "round": snapshot.round, "resource": resource,
         "compute_type": compute_type, "pool_counts": pool_counts, "challenge_ties": challenge_ties,
         "selected_challenge": challenge_id, "adoption_units": {key: str(value) for key, value in adoptions.items()},
