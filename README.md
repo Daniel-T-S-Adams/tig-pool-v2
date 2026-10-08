@@ -1,16 +1,17 @@
-# InnoPool v2 (development)
+# InnoPool v2
 
 This independent repository preserves the original pool's complete local Git
-history for the InnoPool v2 redesign. V2 is under development; the instructions
-below describe the legacy pool for reference. The v2 system uses whole-benchmark
+history for the InnoPool v2 redesign. V2 is deployed on the mainnet servers with
+new work and settlement still disabled; the legacy instructions below are kept
+for reference only. The v2 system uses whole-benchmark
 member work, custodial balances and collateral, equal qualifying-bundle credit,
 round settlement and operator-reviewed withdrawals. See the
 [redesign plan](POOL_REDESIGN_PLAN.md) and
 [implementation status](IMPLEMENTATION_STATUS.md) before using this repository.
 The new API serves its own member/operator screens and
-[paired worker installer](docs/PAIRED_RELEASES.md). No production v2 release or
-deployment is published yet. The old `/static/install.sh` installer is retired
-in this fork; use the checked download from a configured v2 pool's Join page.
+[paired worker installer](docs/PAIRED_RELEASES.md). Releases are deployed as
+fixed tags; `release/v2` points at the currently deployed one and `main` is the
+integration branch. The old `/static/install.sh` installer is retired in this fork; use the checked download from a configured v2 pool's Join page.
 
 For a high-level view of hosting, connections and deployments, see the
 [pool structure diagram](docs/POOL_STRUCTURE.md) and

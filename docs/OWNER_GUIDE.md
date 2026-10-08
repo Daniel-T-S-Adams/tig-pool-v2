@@ -4,20 +4,20 @@
 movements. Hetzner hosts the services and their configuration. Software changes
 are developed and tested before a fixed release is deployed to Hetzner.**
 
-Prepared 29 September 2026 against pool commit `994739d` on `main`. This guide
-describes the current v2 implementation, including operator income withdrawals.
-A feature must also be deployed and enabled before you can use it on your site.
-The latest deployment records reviewed are dated 25 September: public HTTPS
-was awaiting the signed Origin CA certificate and mainnet financial operations
-were disabled. Preparing this guide did not recheck or change the running
-servers. See [Cloudflare setup](CLOUDFLARE_SETUP.md) and
+Prepared 29 September 2026 against pool commit `994739d`; revised 8 October 2026
+against `main` after PR #28. This guide describes the current v2 implementation,
+including operator income withdrawals. A feature must also be deployed and
+enabled before you can use it on your site. The latest deployment record is
+dated 8 October: release tag `mainnet-minimum-bundles-20261008` runs on the
+primary server with public HTTPS active and worker API access verified; member
+funds are enabled while new work and settlement remain disabled; the recovery
+server still runs the 4 October release. Preparing this guide did not recheck or
+change the running servers. See [Cloudflare setup](CLOUDFLARE_SETUP.md) and
 [mainnet deployment](MAINNET_DEPLOYMENT.md) for the outstanding launch work.
 
-The website address is `https://pool.tig.foundation` once public access is
-activated. Open `/operator` for owner controls, `/` for a member account, and
+The website address is `https://pool.tig.foundation`. Open `/operator` for owner controls, `/` for a member account, and
 `/join` for worker installation instructions. The separate
-`pool-api.tig.foundation` hostname serves browser and worker requests. During
-the private pilot, use the provided testnet dashboard/tunnel address instead.
+`pool-api.tig.foundation` hostname serves browser and worker requests.
 Always identify which deployment you are using before a financial action.
 
 Use this table to decide where a task belongs:
@@ -264,9 +264,12 @@ Editing GitHub alone does not update the running site. Routine restarts use
 the installed release.
 
 The pool's v2 code, including operator income, was promoted to `main` in
-[PR 22](https://github.com/Daniel-T-S-Adams/tig-pool-v2/pull/22) on 29 September.
-Operator income requires migration 015 and matching API/website assets in the
-deployment. Its operating reserve is still unset in the staged template. Source
+[PR 22](https://github.com/Daniel-T-S-Adams/tig-pool-v2/pull/22) on 29 September
+and deployed with migration 015 on 4 October. Confirm the configured operating
+reserve in `service.json` before relying on operator withdrawals. Since
+[PR 28](https://github.com/Daniel-T-S-Adams/tig-pool-v2/pull/28), new benchmarks
+copy the hyperparameters of the selected algorithm's best active bundle per
+track; that change reaches the site only with the next deployed release. Source
 availability is separate from production readiness. The inherited `admin.py`,
 legacy `.env` settings and original Compose instructions do not administer these
 v2 ledger controls.
