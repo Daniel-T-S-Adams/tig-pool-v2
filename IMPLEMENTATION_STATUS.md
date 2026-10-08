@@ -1,8 +1,37 @@
 # InnoPool v2 implementation status
 
-Updated 20 September 2026. The agreed plan is
-[POOL_REDESIGN_PLAN.md](POOL_REDESIGN_PLAN.md). Repository preparation is
-complete and both baseline CI suites pass. No v2 runtime has been deployed.
+Updated 8 October 2026. The agreed plan is
+[POOL_REDESIGN_PLAN.md](POOL_REDESIGN_PLAN.md). The operator keeps the detailed,
+dated deployment log and its evidence files outside this repository; this file
+records the repository-level status and the preserved foundation record.
+
+## Status summary — 8 October 2026
+
+- **Deployed.** Release tag `mainnet-minimum-bundles-20261008` (commit `5296ccf`,
+  schema migrations through 017) runs on the primary mainnet server since
+  8 October 09:13 UTC; the recovery server runs the 4 October release
+  (`994739d`, migration 015). Member funds are enabled; new work and settlement
+  are disabled. The block observer has run from launch height 1356536 with one
+  waived pre-launch gap.
+- **Public access.** `pool.tig.foundation` and `pool-api.tig.foundation` are
+  served through Cloudflare with an Origin CA certificate; browser and worker
+  API access were verified on 2 October.
+- **Protection.** Daily off-host database and encrypted configuration backups,
+  continuous WAL copying and a rehearsed point-in-time restore are in place
+  (4 October).
+- **Code.** `main` carries the deployed code plus PR #28, which restores the
+  plan's hyperparameter rule and is not yet deployed. CI runs the 281 `tests/v2`
+  checks plus the inherited accounting checks.
+- **Branches.** `main` is the protected integration branch, `release/v2` is
+  fast-forwarded to each deployed tag, and `redesign/v2` was retired on
+  8 October; see plan section 10.
+- **Open.** Reward claim/unlock/receipt integration and expense accounting, a
+  full takeover rehearsal, real member CPU/GPU validation, and deploying the
+  current tag to the recovery server.
+
+## Foundation record — 20 September 2026
+
+Repository preparation is complete and both baseline CI suites pass.
 
 ## Repositories and preserved baselines
 
@@ -18,9 +47,10 @@ The pool clone does not share Git object hardlinks with the original checkout.
 Both original checkouts remain unchanged.
 
 Both repositories have an annotated `redesign-base` tag at their pinned
-baseline. Integration and release branches are `redesign/v2` and `release/v2`.
-Branch protection requires a pull request and the corresponding baseline CI
-check, applies to administrators, and forbids force pushes and branch deletion.
+baseline. Integration originally used `redesign/v2` with `release/v2` for
+releases; since 8 October `main` is the protected integration branch (pull
+request and baseline CI check required, applies to administrators, no force
+pushes or deletion) and `release/v2` follows each deployed tag.
 No production service, wallet, or TIG submission has been changed.
 
 ## Foundation changes and validation
