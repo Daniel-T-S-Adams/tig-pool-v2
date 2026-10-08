@@ -14,51 +14,162 @@ from .observation import canonical_json
 from .protocol import ProtocolDataError, validate_snapshot
 
 
-def _pack(observation):
+PAGE_TARGET = 8   # mean record digests per page; a changed record rewrites one page, and changes land in larger pages
+ITEM_PAGE_TARGET = 32   # mean ids per page for the block's active-id lists, which change rarely
+PAGE_MAXIMUM = 1024
+BLOB_THRESHOLD = 8192   # larger inline values become one chunk, order preserved
+
+
+def _is_digest(value):
+    return isinstance(value, str) and len(value) == 64 and all(c in "0123456789abcdef" for c in value)
+
+
+def _pages(values, target=PAGE_TARGET):
+    """Split a sorted list into content-defined pages.
+
+    A boundary falls after any element whose hash's leading bits select it,
+    so one added or removed element changes one page wherever it sits.
+    """
+    pages, current = [], []
+    for value in values:
+        current.append(value)
+        selector = int(hashlib.sha256(value.encode()).hexdigest()[:4], 16)
+        if selector % target == 0 or len(current) >= PAGE_MAXIMUM:
+            pages.append(current)
+            current = []
+    if current:
+        pages.append(current)
+    return pages
+
+
+def _pack(observation, *, paged=True):
+    """Encode an observation as a manifest tree plus content-addressed chunks.
+
+    With ``paged`` (block observations), lists of records are stored in digest
+    order as pages of digests. Records and pages are both deduplicated chunks,
+    so an unchanged list costs nothing on the next block and a manifest holds
+    a few page references per list. Without it (custody and report captures,
+    where order can carry meaning), lists keep their original order inline.
+    Returns the manifest, the chunks, and the observation the manifest
+    replays to.
+    """
     chunks = {}
 
-    def encode(value):
+    def store(raw):
+        digest = hashlib.sha256(raw).hexdigest()
+        if digest not in chunks:
+            chunks[digest] = gzip.compress(raw, mtime=0)
+        return digest
+
+    def encode(value, path):
         if isinstance(value, dict):
-            return {"dict": [[key, encode(item)] for key, item in sorted(value.items())]}
+            node, canonical = [], {}
+            for key, item in sorted(value.items()):
+                child, canonical[key] = encode(item, path + (key,))
+                node.append([key, child])
+            return {"dict": node}, canonical
         if isinstance(value, list) and all(isinstance(item, dict) for item in value):
-            digests = []
-            for item in value:
-                raw = canonical_json(item)
-                digest = hashlib.sha256(raw).hexdigest()
-                chunks[digest] = gzip.compress(raw, mtime=0)
-                digests.append(digest)
-            return {"records": digests}
-        return {"value": value}
+            encoded = [(store(canonical_json(item)), item) for item in value]
+            if not paged:
+                return {"records": [digest for digest, _ in encoded]}, list(value)
+            ordered = sorted(encoded, key=lambda pair: pair[0])
+            # A digest page is the raw 32-byte digests back to back; hex JSON
+            # would double it and compress poorly at this size.
+            pages = [store(b"".join(bytes.fromhex(digest) for digest in page))
+                     for page in _pages([digest for digest, _ in ordered])]
+            return {"pages": pages}, [item for _, item in ordered]
+        if (paged and isinstance(value, list) and value and all(isinstance(item, str) for item in value)
+                and path[-3:-1] == ("data", "active_ids")):
+            # The block's active-id lists are validated as sets and the API
+            # reorders them every block; store them sorted so they deduplicate.
+            ordered = sorted(value)
+            return {"items": [store(canonical_json(page)) for page in _pages(ordered, ITEM_PAGE_TARGET)]}, ordered
+        if paged and len(raw := canonical_json(value)) > BLOB_THRESHOLD:
+            return {"blob": store(raw)}, value
+        return {"value": value}, value
 
-    return encode(observation), chunks
+    manifest, canonical = encode(observation, ())
+    return manifest, chunks, canonical
 
 
-def _unpack(cursor, manifest):
-    wanted = set()
+def canonical_observation(observation):
+    """The replayable form of an observation: record lists in digest order."""
+    return _pack(observation)[2]
 
-    def collect(value):
-        if "records" in value:
-            wanted.update(value["records"])
-        elif "dict" in value:
-            for _, child in value["dict"]:
-                collect(child)
-    collect(manifest)
+
+def _fetch(cursor, wanted):
+    wanted = set(wanted)
+    if not wanted:
+        return {}
     cursor.execute("SELECT digest,compressed FROM observation_chunks WHERE digest=ANY(%s)", (sorted(wanted),))
-    chunks = {}
+    found = {}
     for row in cursor.fetchall():
         raw = gzip.decompress(bytes(row["compressed"]))
         if hashlib.sha256(raw).hexdigest() != row["digest"]:
             raise ProtocolDataError("stored observation chunk failed its checksum")
-        chunks[row["digest"]] = json.loads(raw)
-    if chunks.keys() != wanted:
+        found[row["digest"]] = raw
+    if found.keys() != wanted:
         raise ProtocolDataError("stored observation is missing raw evidence")
+    return found
 
-    def decode(value):
-        if "records" in value:
-            return [chunks[key] for key in value["records"]]
-        if "dict" in value:
-            return {key: decode(child) for key, child in value["dict"]}
-        return value["value"]
+
+def _page_digests(raw):
+    if not raw or len(raw) % 32:
+        raise ProtocolDataError("stored observation page is not a digest list")
+    return [raw[index:index + 32].hex() for index in range(0, len(raw), 32)]
+
+
+def manifest_chunk(manifest):
+    """The manifest tree as one content-addressed, compressed chunk."""
+    raw = canonical_json(manifest)
+    return hashlib.sha256(raw).hexdigest(), gzip.compress(raw, mtime=0)
+
+
+def _page_items(raw):
+    listing = json.loads(raw)
+    if not isinstance(listing, list) or not all(isinstance(item, str) for item in listing):
+        raise ProtocolDataError("stored observation page is not a string list")
+    return listing
+
+
+def _unpack(cursor, manifest):
+    """Replay a manifest; both paged and legacy inline record lists are supported."""
+    if "manifest_ref" in manifest:
+        manifest = json.loads(_fetch(cursor, {manifest["manifest_ref"]})[manifest["manifest_ref"]])
+    page_refs, item_refs, blob_refs, record_refs = set(), set(), set(), set()
+
+    def collect(node):
+        if "pages" in node:
+            page_refs.update(node["pages"])
+        elif "items" in node:
+            item_refs.update(node["items"])
+        elif "blob" in node:
+            blob_refs.add(node["blob"])
+        elif "records" in node:
+            record_refs.update(node["records"])
+        elif "dict" in node:
+            for _, child in node["dict"]:
+                collect(child)
+    collect(manifest)
+    pages = {digest: _page_digests(raw) for digest, raw in _fetch(cursor, page_refs).items()}
+    items = {digest: _page_items(raw) for digest, raw in _fetch(cursor, item_refs).items()}
+    blobs = {digest: json.loads(raw) for digest, raw in _fetch(cursor, blob_refs).items()}
+    for listing in pages.values():
+        record_refs.update(listing)
+    records = {digest: json.loads(raw) for digest, raw in _fetch(cursor, record_refs).items()}
+
+    def decode(node):
+        if "pages" in node:
+            return [records[key] for page in node["pages"] for key in pages[page]]
+        if "items" in node:
+            return [item for page in node["items"] for item in items[page]]
+        if "blob" in node:
+            return blobs[node["blob"]]
+        if "records" in node:
+            return [records[key] for key in node["records"]]
+        if "dict" in node:
+            return {key: decode(child) for key, child in node["dict"]}
+        return node["value"]
     return decode(manifest)
 
 
@@ -116,7 +227,10 @@ class BlockStore:
             height = None
         if not isinstance(block_id, str):
             block_id = None
-        manifest, chunks = _pack(observation)
+        manifest, chunks, canonical = _pack(observation)
+        reference, compressed = manifest_chunk(manifest)
+        chunks[reference] = compressed
+        manifest = {"manifest_ref": reference}
         identity = uuid.uuid4()
         with self.database.transaction() as cursor:
             lock(cursor, "observation-stream")
@@ -130,10 +244,14 @@ class BlockStore:
             if missing:
                 execute_values(cursor, "INSERT INTO observation_chunks(digest,compressed) VALUES %s ON CONFLICT DO NOTHING", missing, page_size=300)
             if snapshot and not error:
-                semantic = _semantic(snapshot, observation)
+                # The stored block replays in canonical order, so its digest is
+                # taken over that form. Blocks recorded before paged manifests
+                # kept the API's order; accept their digest for the same block.
+                semantic = _semantic(snapshot, canonical)
+                accepted = {semantic, _semantic(snapshot, observation)}
                 cursor.execute("SELECT id,semantic_digest FROM observed_blocks WHERE height=%s OR id=%s", (height, block_id))
                 previous = cursor.fetchall()
-                if any(row["id"] != block_id or row["semantic_digest"] != semantic for row in previous):
+                if any(row["id"] != block_id or row["semantic_digest"] not in accepted for row in previous):
                     error = "conflicting block identity or accounting evidence at a captured height"
                     cursor.execute("INSERT INTO observation_alerts(kind,height,details) VALUES ('conflicting-block',%s,%s)",
                                    (height, Json({"block_id": block_id, "collector": collector})))

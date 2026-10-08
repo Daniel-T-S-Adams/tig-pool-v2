@@ -28,10 +28,11 @@ records the repository-level status and the preserved foundation record.
 - **Open.** Reward claim/unlock/receipt integration and expense accounting, a
   full takeover rehearsal, real member CPU/GPU validation, pointing the recovery
   server's units at the current tag, and the evidence retention work approved
-  on 8 October: compact per-block manifests, then expiry of bounded-life
-  captures (raw blocks four rounds, report captures five rounds, wallet and
-  fee captures thirty days) while ledger, credit and settlement records are
-  kept permanently.
+  on 8 October. Its first half, compact per-block manifests, is implemented on
+  `main` and takes effect with the next deployed release; the second half is
+  expiry of bounded-life captures (raw blocks four rounds, report captures
+  five rounds, wallet and fee captures thirty days) while ledger, credit and
+  settlement records are kept permanently.
 
 ## Foundation record — 20 September 2026
 

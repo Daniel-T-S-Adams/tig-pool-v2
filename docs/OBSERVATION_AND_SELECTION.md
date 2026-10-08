@@ -10,8 +10,19 @@ or settle rewards. The coordinator and worker integration are still required.
 thread saves raw evidence to a local spool before a separate recorder thread
 touches PostgreSQL. A database outage, lock or recovery backlog cannot stop the
 capture thread. Immutable response records are content-addressed and compressed
-once across repeated blocks, both in the spool and in PostgreSQL. Manifests retain
-array order and all original fields; checksums are verified when replaying.
+once across repeated blocks, both in the spool and in PostgreSQL. A block's
+manifest stores each list of records as content-defined pages of raw record
+digests, the block's active-id lists as sorted pages of ids, and any other
+oversized value as one chunk; pages are deduplicated chunks like the records,
+and the manifest tree is itself stored as one compressed chunk referenced from
+the capture row. Lists are kept in digest order, so an unchanged list costs
+nothing on the next block. Measured on the two recorded live blocks, a block
+costs about 250 KB of new storage instead of about 950 KB, of which 80 KB is
+the changed records themselves. Replays return the canonical order, which the
+snapshot validation does not depend on; all original fields are kept and every
+checksum is verified when replaying. Manifests recorded before October 2026 keep
+their inline record lists in the API's order and replay unchanged. Custody and
+report captures keep their original order, since there it can carry meaning.
 
 Use a separate spool per collector and run the redundant collector in a different
 failure domain. Both can record the same block into the database: block identity

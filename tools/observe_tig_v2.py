@@ -42,7 +42,7 @@ def main(argv=None):
         parser.error("invalid polling interval, age or capture count")
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     database = Database(os.environ.get("POOL_V2_DATABASE_DSN"))
-    store, spool = BlockStore(database), Spool(args.spool)
+    store, spool = BlockStore(database), Spool(args.spool, paged=True)
     # Schema migration is a separate deployment operation, not a collector privilege.
     stop = threading.Event()
     for name in (signal.SIGINT, signal.SIGTERM):
