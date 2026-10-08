@@ -28,7 +28,9 @@ Use a separate spool per collector and run the redundant collector in a differen
 failure domain. Both can record the same block into the database: block identity
 and credit keys deduplicate it. Neither has a TIG API key or token signing key.
 Back up the database **and** spool chunks/manifests. A backup cannot recover an
-unobserved block. Do not delete these records using legacy retention scripts.
+unobserved block. Do not delete these records using legacy retention scripts;
+bounded-life evidence expires only through the
+[retention job](EVIDENCE_RETENTION.md).
 
 After separately applying the v2 migrations, set `POOL_V2_DATABASE_DSN` in the
 service environment and run, for example:

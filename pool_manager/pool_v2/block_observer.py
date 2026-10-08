@@ -132,8 +132,38 @@ def _page_items(raw):
     return listing
 
 
+def manifest_references(cursor, manifest):
+    """Every chunk digest a stored manifest depends on; an expired manifest has none."""
+    if "expired" in manifest:
+        return set()
+    refs, pages = set(), set()
+    if "manifest_ref" in manifest:
+        refs.add(manifest["manifest_ref"])
+        manifest = json.loads(_fetch(cursor, {manifest["manifest_ref"]})[manifest["manifest_ref"]])
+
+    def collect(node):
+        if "pages" in node:
+            pages.update(node["pages"])
+        elif "items" in node:
+            refs.update(node["items"])
+        elif "blob" in node:
+            refs.add(node["blob"])
+        elif "records" in node:
+            refs.update(node["records"])
+        elif "dict" in node:
+            for _, child in node["dict"]:
+                collect(child)
+    collect(manifest)
+    refs.update(pages)
+    for raw in _fetch(cursor, pages).values():
+        refs.update(_page_digests(raw))
+    return refs
+
+
 def _unpack(cursor, manifest):
     """Replay a manifest; both paged and legacy inline record lists are supported."""
+    if "expired" in manifest:
+        raise ProtocolDataError("block evidence expired under the retention policy on " + str(manifest["expired"].get("at")))
     if "manifest_ref" in manifest:
         manifest = json.loads(_fetch(cursor, {manifest["manifest_ref"]})[manifest["manifest_ref"]])
     page_refs, item_refs, blob_refs, record_refs = set(), set(), set(), set()
@@ -192,6 +222,7 @@ def _semantic(snapshot, observation):
 class BlockStore:
     def __init__(self, database):
         self.database = database
+        self._latest = None   # (block id, chunk references) of the newest block this store recorded
 
     def initialize(self, launch_height):
         if type(launch_height) is not int or launch_height < 0:
@@ -229,7 +260,7 @@ class BlockStore:
             block_id = None
         manifest, chunks, canonical = _pack(observation)
         reference, compressed = manifest_chunk(manifest)
-        chunks[reference] = compressed
+        chunks[reference] = compressed   # tracked like every other chunk
         manifest = {"manifest_ref": reference}
         identity = uuid.uuid4()
         with self.database.transaction() as cursor:
@@ -281,11 +312,35 @@ class BlockStore:
                     (block_id, height, snapshot.previous_block_id, snapshot.round, snapshot.timestamp,
                      blocks_per_round, semantic, identity))
                 self._advance(cursor, stream["contiguous_height"])
+                self._track(cursor, height, block_id, set(chunks))
             else:
                 cursor.execute("INSERT INTO observation_alerts(kind,height,details) VALUES ('incomplete-capture',%s,%s)",
                                (height, Json({"attempt_id": str(identity), "error": error})))
         return {"attempt_id": str(identity), "complete": snapshot is not None and not error,
                 "block_id": block_id, "height": height, "error": error}
+
+    def _track(self, cursor, height, block_id, refs):
+        """Keep chunk_last_ref: rows only for chunks the newest block no longer references."""
+        cursor.execute("SELECT 1 FROM observed_blocks WHERE height>%s LIMIT 1", (height,))
+        if cursor.fetchone():
+            # A recovered older block: its references may outlive their recorded last use.
+            cursor.execute("UPDATE chunk_last_ref SET height=GREATEST(height,%s) WHERE digest=ANY(%s)", (height, sorted(refs)))
+            return
+        cursor.execute("SELECT id,height FROM observed_blocks WHERE height<%s ORDER BY height DESC LIMIT 1", (height,))
+        previous = cursor.fetchone()
+        if previous:
+            if self._latest and self._latest[0] == previous["id"]:
+                previous_refs = self._latest[1]
+            else:
+                cursor.execute("SELECT a.manifest FROM observed_blocks b JOIN capture_attempts a ON a.id=b.attempt_id WHERE b.id=%s", (previous["id"],))
+                previous_refs = manifest_references(cursor, cursor.fetchone()["manifest"])
+            dropped = sorted(previous_refs - refs)
+            if dropped:
+                execute_values(cursor, """INSERT INTO chunk_last_ref(digest,height) VALUES %s
+                    ON CONFLICT (digest) DO UPDATE SET height=GREATEST(chunk_last_ref.height,EXCLUDED.height)""",
+                    [(digest, previous["height"]) for digest in dropped], page_size=500)
+            cursor.execute("DELETE FROM chunk_last_ref WHERE digest=ANY(%s)", (sorted(refs),))
+        self._latest = (block_id, frozenset(refs))
 
     def _advance(self, cursor, contiguous):
         cursor.execute("SELECT id FROM observed_blocks WHERE height=%s", (contiguous,))

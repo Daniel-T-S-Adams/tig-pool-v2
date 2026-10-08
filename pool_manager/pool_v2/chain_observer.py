@@ -136,9 +136,10 @@ def save(database,data):
 
 def read(database,identity):
     with database.transaction() as cursor:
-        cursor.execute('SELECT payload_gzip FROM chain_captures WHERE id=%s',(identity,))
+        cursor.execute('SELECT payload_gzip,expired_at FROM chain_captures WHERE id=%s',(identity,))
         row=cursor.fetchone()
     if not row:raise FundsError('unknown custody capture')
+    if row['expired_at'] is not None:raise FundsError('custody capture payload expired under the retention policy')
     raw=gzip.decompress(bytes(row['payload_gzip']))
     if hashlib.sha256(raw).hexdigest()!=identity:raise Conflict('custody archive checksum differs')
     return json.loads(raw)

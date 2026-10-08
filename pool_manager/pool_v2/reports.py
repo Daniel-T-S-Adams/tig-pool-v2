@@ -142,6 +142,7 @@ def seal(database,creation_round,capture_ids,block_id):
                 WHERE c.reporting_round=%s ORDER BY b.height DESC,c.created_at DESC LIMIT 1''',(capture['reporting_round'],))
             if cursor.fetchone()['id']!=capture['id']:
                 raise Conflict('a later report observation must be reconciled before sealing')
+            if capture.get('expired_at') is not None:raise Conflict('report capture payload expired under the retention policy')
             encoded=gzip.decompress(bytes(capture['compressed_payload']))
             if hashlib.sha256(encoded).hexdigest()!=capture['payload_sha256']:
                 raise Conflict('stored report payload checksum failed')
@@ -175,6 +176,7 @@ def require_seal(cursor,identity,creation_round):
             WHERE reporting_round=%s ORDER BY b.height DESC,c.created_at DESC LIMIT 1''',(capture['reporting_round'],))
         if cursor.fetchone()['id']!=capture['id']:
             raise Conflict('report observations changed after this seal; reconcile a new version')
+        if capture.get('expired_at') is not None:raise Conflict('report capture payload expired under the retention policy')
         encoded=gzip.decompress(bytes(capture['compressed_payload']))
         if hashlib.sha256(encoded).hexdigest()!=capture['payload_sha256']:
             raise Conflict('stored report payload checksum failed')
