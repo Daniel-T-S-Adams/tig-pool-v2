@@ -17,7 +17,7 @@ from pydantic import BaseModel, ConfigDict, Field, StrictBool,StrictInt, StrictS
 from .auth import Auth, AuthenticationError
 from .database import Database
 from .chain import Chain, Network, Rpc, FEE_MODELS, UnsupportedCustodyTransaction
-from . import members, withdrawals, work_requests, member_protocol
+from . import members, withdrawals, work_requests, member_protocol, benchmarks
 from . import artifacts, native_funding, sponsored_withdrawals
 from . import controls,custody,dashboard,deposits,settlement,chain_observer,funding,topups,releases
 from .protocol import ProtocolDataError
@@ -516,6 +516,12 @@ def create_app(settings):
             row=cursor.fetchone()
             if not row:raise FundsError('unknown collateral hold')
         return response(settlement.finalize_collateral(database,identity,latest_seal(row['creation_round'])))
+
+    @app.post('/api/v2/operator/benchmarks/{identity}/return-unhanded-collateral')
+    def return_unhanded_collateral(identity:uuid.UUID,body:WithdrawalRelease,actor=Depends(operator)):
+        row=benchmarks.release_unhanded(database,identity,actor=actor,reason=body.reason,event_key=body.event_key)
+        return response({'reservation_id':str(row['id']),'benchmark_id':row['benchmark_id'],
+            'state':row['state'],'collateral_outcome':row['collateral_outcome'],'amount':str(row['amount'])})
 
     @app.get("/api/v2/member/journal")
     def journal(member_id=Depends(principal), limit: int = 100):

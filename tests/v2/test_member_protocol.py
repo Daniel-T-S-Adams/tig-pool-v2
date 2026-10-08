@@ -85,7 +85,7 @@ class MemberProtocolTests(DatabaseCase):
                                    now=self.observation["start"]["block"]["details"]["timestamp"])]*2)
         self.assertEqual(sum(isinstance(result, dict) for result in results), 1, results)
         self.assertEqual(sum(result is None for result in results), 1, results)
-        self.assertEqual(self.balance()["collateral"], 50*TIG)
+        self.assertEqual(self.balance()["collateral"], 40*TIG)
         self.assertEqual(self.row("SELECT count(*) AS n FROM protocol_outbox")["n"], 1)
         self.assertIsNotNone(work_requests.get(self.db, request["id"], self.member)["reservation_id"])
 
@@ -157,5 +157,5 @@ class MemberProtocolTests(DatabaseCase):
                     self.assertEqual(runner.step(),"active")
                     self.assertEqual(self.balance()["slots"],0)
                     # Active benchmarks free execution slots, not their collateral.
-                    self.assertEqual(self.balance()["collateral"],50*TIG if resource=="CPU" else 100*TIG)
+                    self.assertEqual(self.balance()["collateral"],40*TIG if resource=="CPU" else 80*TIG)
                 finally: store.close()

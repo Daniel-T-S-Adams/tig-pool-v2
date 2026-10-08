@@ -131,12 +131,15 @@ class Coordinator:
             cursor.execute("SELECT id FROM observed_blocks ORDER BY height DESC LIMIT 1")
             latest=cursor.fetchone()
         if not latest:raise ProtocolDataError("no complete block is available")
-        replay=reconcile_pending(self.database,self.player_id,artifact_origin=self.artifact_origin)
-        # A recent receipt may have arrived after this block's first replay.
+        # Keep current work responsive during startup: a large historical
+        # replay must not make queued member offers expire before reservation.
         reconcile_block(self.database,latest["id"],self.player_id,artifact_origin=self.artifact_origin)
         submitted=self.dispatch_one()
         reserved=None
         if self.new_work and self.writer.enabled and not controls.blocked(self.database):
             reserved=work_requests.reserve_next(self.database,self.player_id,now=int(time.time()),max_age=self.max_age)
+        # Historical replay is deliberately bounded to one block per cycle;
+        # current protocol receipts and member work stay ahead of the backlog.
+        replay=reconcile_pending(self.database,self.player_id,limit=1,artifact_origin=self.artifact_origin)
         return {"submitted":str(submitted) if submitted else None,"reserved":str(reserved["id"]) if reserved else None,
                 "reconciliation":replay}

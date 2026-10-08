@@ -25,10 +25,14 @@ def credit_block(database, block_id, player_id):
             by_benchmark[benchmark_id] += credit
     with database.transaction() as cursor:
         lock(cursor, "credit:" + block_id)
-        cursor.execute("SELECT benchmark_id,member_id,handed_over_at FROM reservations WHERE benchmark_id=ANY(%s)",
+        cursor.execute("SELECT benchmark_id,member_id,handed_over_at,state,collateral_outcome FROM reservations WHERE benchmark_id=ANY(%s)",
                        (sorted(owned_ids),))
         owners = {row["benchmark_id"]: row for row in cursor.fetchall()}
-        if owners.keys() != owned_ids or any(row["handed_over_at"] is None for row in owners.values()):
+        unhanded = {identity for identity,row in owners.items() if row["handed_over_at"] is None}
+        returned_before_handover = {identity for identity in unhanded
+            if owners[identity]["state"] == "cancelled" and owners[identity]["collateral_outcome"] == "returned"}
+        if (owners.keys() != owned_ids or unhanded - returned_before_handover
+                or unhanded.intersection(by_benchmark)):
             raise ProtocolDataError("pool benchmark ownership or confirmed handover is missing")
         owner_digest = fingerprint({key: str(row["member_id"]) for key, row in owners.items()})
         total = sum(by_benchmark.values(), Fraction())

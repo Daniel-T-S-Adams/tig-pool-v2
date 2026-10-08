@@ -204,6 +204,42 @@ def release_unstarted(database, identity, *, rejected=False, actual_fee=0, evide
         return _row(cursor, identity)
 
 
+def release_unhanded(database, identity, *, actor, reason, event_key):
+    """Return member collateral when an accepted assignment was never handed over."""
+    if not actor or not reason or not event_key:
+        raise FundsError("unhanded collateral return requires an operator, reason and event key")
+    with database.transaction() as cursor:
+        row = _locked(cursor, identity, budget=True)
+        evidence = {"actor": actor, "reason": reason, "event_key": event_key,
+                    "benchmark_id": row["benchmark_id"], "offer_expires_at": row["offer_expires_at"].isoformat()}
+        if row["state"] == "cancelled" and row["collateral_outcome"] == "returned":
+            event(cursor, identity, "unhanded_returned", evidence)
+            return row
+        if row["state"] != "accepted" or not row["benchmark_id"] or not row["slot_held"]:
+            raise Conflict("only an accepted, collateral-backed assignment can be returned")
+        if row["handed_over_at"] is not None:
+            raise Conflict("member confirmed handover; collateral cannot be returned as unhanded")
+        from .controls import paused
+        if not paused(database, cursor=cursor):
+            raise Conflict("pause new work before returning unhanded collateral")
+        cursor.execute("SELECT clock_timestamp() AS now")
+        if row["offer_expires_at"] > cursor.fetchone()["now"]:
+            raise Conflict("member offer has not expired")
+        cursor.execute("""SELECT 1 FROM benchmark_payloads WHERE benchmark_id=%s
+            UNION ALL SELECT 1 FROM benchmark_progress WHERE benchmark_id=%s LIMIT 1""",
+            (row["benchmark_id"], row["benchmark_id"]))
+        if cursor.fetchone():
+            raise Conflict("benchmark already has member results or progress evidence")
+        amount = int(row["amount"])
+        if amount:
+            ledger.post(cursor, f"reservation:{identity}:unhanded-return", "collateral_return",
+                        [(held(identity), -amount), (available(row["member_id"]), amount)], evidence)
+        cursor.execute("""UPDATE reservations SET state='cancelled',slot_held=false,
+            collateral_outcome='returned' WHERE id=%s""", (identity,))
+        event(cursor, identity, "unhanded_returned", evidence)
+        return _row(cursor, identity)
+
+
 def acknowledge(database, identity, member_id, digest):
     with database.transaction() as cursor:
         row = _locked(cursor, identity)
