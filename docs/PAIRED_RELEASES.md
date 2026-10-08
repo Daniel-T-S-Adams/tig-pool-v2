@@ -69,7 +69,7 @@ work. A durable drain request lets a running worker finish and exit.
 Download the current installer again before updating, since its checksum is
 part of the release. The previous file can still request a drain. See the
 worker fork's
-[installation procedure](https://github.com/Daniel-T-S-Adams/innopool-slave-v2/blob/redesign/v2/docs/INSTALL_V2.md)
+[installation procedure](https://github.com/Daniel-T-S-Adams/innopool-slave-v2/blob/main/docs/INSTALL_V2.md)
 for recovery details. The fork's former startup script now invokes only the
 pinned v2 launcher; its previous Git-reset, Compose and service-installation
 behavior is retired in the fork.

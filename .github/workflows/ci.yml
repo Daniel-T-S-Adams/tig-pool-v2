@@ -2,9 +2,9 @@ name: Pool CI
 
 on:
   push:
-    branches: ["main", "feature/**", "redesign/v2", "release/v2"]
+    branches: ["main", "feature/**", "operations/**", "release/v2"]
   pull_request:
-    branches: ["main", "redesign/v2", "release/v2"]
+    branches: ["main"]
 
 permissions:
   contents: read
