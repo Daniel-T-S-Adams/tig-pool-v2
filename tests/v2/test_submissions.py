@@ -108,8 +108,8 @@ class SubmissionTests(DatabaseCase):
         published=submissions.publish_assignment(self.db,row["id"],new,evidence={"confirmed_block":9})
         self.assertEqual(published["state"],"accepted")
         self.assertIsNone(published["handed_over_at"])
-        self.assertEqual(published["assignment"]["num_nonces"],10)
-        self.assertEqual(self.balance()["collateral"],50*TIG)
+        self.assertEqual(published["assignment"]["num_nonces"],8)
+        self.assertEqual(self.balance()["collateral"],40*TIG)
 
     def test_positive_identity_survives_until_complete_confirmed_metadata_arrives(self):
         row,intent=self.queued()
@@ -133,7 +133,7 @@ class SubmissionTests(DatabaseCase):
         self.assertFalse(submissions.record_response(self.db,intent["id"],{"status":400,"body":"unknown server failure"}))
         self.assertIsNone(submissions.recover_precommit(self.db,intent["id"],[self.precommit(row),self.precommit(row,"c"*32)],evidence={"block":9}))
         with self.assertRaises(FundsError):submissions.definitive_rejection(self.db,intent["id"],evidence={"http_status":400})
-        self.assertEqual(self.balance()["collateral"],50*TIG)
+        self.assertEqual(self.balance()["collateral"],40*TIG)
         self.assertEqual(self.row("SELECT count(*) AS n FROM submission_responses")["n"],1)
 
     def test_indistinguishable_pending_precommit_blocks_another_member(self):
@@ -144,7 +144,7 @@ class SubmissionTests(DatabaseCase):
         with self.assertRaises(Conflict):submissions.begin(self.db,other["id"],preflight=self.preflight())
         self.assertEqual(self.row("SELECT state FROM reservations WHERE id=%s",(second["id"],))["state"],"reserved")
         submissions.cancel_unsent(self.db,other["id"],evidence={"offer_expired_while_waiting":True})
-        self.assertEqual(self.balance()["collateral"],50*TIG)
+        self.assertEqual(self.balance()["collateral"],40*TIG)
         submissions.definitive_rejection(self.db,intent["id"],evidence={"definitive_no_precommit":True,"fixture":"TIG validation rejection"})
         self.assertEqual(self.balance()["collateral"],0)
         self.assertEqual(self.balance()["slots"],0)
@@ -225,7 +225,7 @@ class SubmissionTests(DatabaseCase):
         with self.assertRaises(TimeoutError):coordinator.dispatch_one()
         self.assertIsNone(coordinator.dispatch_one())
         self.assertEqual(writer.post.call_count,1)
-        self.assertEqual(self.balance()["collateral"],50*TIG)
+        self.assertEqual(self.balance()["collateral"],40*TIG)
 
     def test_pause_cancels_only_unsent_precommit_without_calling_tig(self):
         row,intent=self.queued()
@@ -329,7 +329,7 @@ class SubmissionTests(DatabaseCase):
         precommit=self.precommit(row)
         accepted=submissions.publish_assignment(self.db,row["id"],precommit,evidence={"block":9})
         benchmarks.acknowledge(self.db,row["id"],self.member,accepted["assignment_digest"])
-        member_protocol.results(self.db,accepted["benchmark_id"],self.member,{"merkle_root":"a"*64,"solution_quality":[9]*10})
+        member_protocol.results(self.db,accepted["benchmark_id"],self.member,{"merkle_root":"a"*64,"solution_quality":[9]*accepted["assignment"]["num_nonces"]})
         result_intent=self.row("SELECT id FROM protocol_outbox WHERE reservation_id=%s AND kind='results'",(row["id"],))
         submissions.begin(self.db,result_intent["id"])
         submissions.record_response(self.db,result_intent["id"],{"status":200,"body":{"ok":True}})
@@ -379,7 +379,7 @@ class SubmissionTests(DatabaseCase):
         after=self.outcome_observation(row,precommit,13,active=True)
         reconcile_block(self.db,after,self.player)
         self.assertEqual(self.balance()["slots"],0)
-        self.assertEqual(self.balance()["collateral"],50*TIG)
+        self.assertEqual(self.balance()["collateral"],40*TIG)
         self.assertEqual(self.row("SELECT active_at_height FROM reservations WHERE id=%s",(row["id"],))["active_at_height"],13)
 
     def test_confirmed_verification_failure_frees_slot_and_keeps_collateral(self):
@@ -387,7 +387,7 @@ class SubmissionTests(DatabaseCase):
         block_id=self.outcome_observation(row,precommit,12,failure=True)
         reconcile_block(self.db,block_id,self.player)
         self.assertEqual(self.balance()["slots"],0)
-        self.assertEqual(self.balance()["collateral"],50*TIG)
+        self.assertEqual(self.balance()["collateral"],40*TIG)
         self.assertEqual(self.row("SELECT state FROM reservations WHERE id=%s",(row["id"],))["state"],"verification_failed")
 
     def test_disappeared_protocol_records_are_not_inferred_to_be_expired(self):
@@ -395,4 +395,4 @@ class SubmissionTests(DatabaseCase):
         block_id=self.outcome_observation(row,precommit,200,missing=True)
         reconcile_block(self.db,block_id,self.player)
         self.assertEqual(self.balance()["slots"],1)
-        self.assertEqual(self.balance()["collateral"],50*TIG)
+        self.assertEqual(self.balance()["collateral"],40*TIG)
