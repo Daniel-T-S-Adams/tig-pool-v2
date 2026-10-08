@@ -7,10 +7,15 @@ records the repository-level status and the preserved foundation record.
 
 ## Status summary — 8 October 2026
 
-- **Deployed.** Release tag `mainnet-reference-hyperparameters-20261008`
-  (commit `262b49e`, schema migrations through 017) runs on the primary mainnet
-  server since 8 October 13:07 UTC; the same release is staged on the recovery
-  server, whose service units still point at the 4 October release (`994739d`). Member funds are enabled; new work and settlement
+- **Deployed.** Release tag `mainnet-retention-batches-20261008` (commit
+  `f983faf`, schema migrations through 018) runs on the primary mainnet server
+  since 8 October 15:01 UTC, after `mainnet-evidence-retention-20261008`
+  (`99a6688`, 14:42 UTC) applied migration 018 and initialized the chunk index.
+  Block manifests are stored in the paged format since height 1,375,464. The
+  retention timer runs daily at 05:30 UTC; its first run blanked 28,241 report
+  captures and 225,822 report-index captures under reporting round 134 and
+  found no block round eligible before round 139. The same releases are staged
+  on the recovery server, whose service units still point at `994739d`. Member funds are enabled; new work and settlement
   are disabled. The block observer has run from launch height 1356536 with one
   waived pre-launch gap.
 - **Public access.** `pool.tig.foundation` and `pool-api.tig.foundation` are
@@ -19,23 +24,22 @@ records the repository-level status and the preserved foundation record.
 - **Protection.** Daily off-host database and encrypted configuration backups,
   continuous WAL copying and a rehearsed point-in-time restore are in place
   (4 October).
-- **Code.** `main` at `262b49e` is the deployed code, including PR #28, which
-  restores the plan's hyperparameter rule. CI runs the 281 `tests/v2` checks
-  plus the inherited accounting checks.
+- **Code.** `main` at `f983faf` is the deployed code. CI runs the 293
+  `tests/v2` checks plus the inherited accounting checks.
 - **Branches.** `main` is the protected integration branch, `release/v2` is
   fast-forwarded to each deployed tag, and `redesign/v2` was retired on
   8 October; see plan section 10.
 - **Open.** Reward claim/unlock/receipt integration and expense accounting, a
   full takeover rehearsal, real member CPU/GPU validation, pointing the recovery
   server's units at the current tag, and the evidence retention work approved
-  on 8 October, implemented on `main` and taking effect with the next deployed
-  release: compact per-block manifests, and the retention job that expires
-  bounded-life captures under recorded floors (raw blocks four rounds, report
-  captures five rounds, wallet and fee captures thirty days) while ledger,
-  credit and settlement records are kept permanently; see
-  [evidence retention](docs/EVIDENCE_RETENTION.md). Deploying it means
-  applying migration 018, running the one-time chunk-index initialization and
-  installing the retention timer with the backup proof.
+  on 8 October is deployed: compact per-block manifests and the retention
+  job that expires bounded-life captures under recorded floors (raw blocks
+  four rounds, report captures five rounds, wallet and fee captures thirty
+  days) while ledger, credit and settlement records are kept permanently; see
+  [evidence retention](docs/EVIDENCE_RETENTION.md). Still open there:
+  returning blanked space to the operating system (`VACUUM FULL` or
+  `pg_repack` of the capture tables in a maintenance window) and
+  deduplicating unchanged report indices.
 
 ## Foundation record — 20 September 2026
 
