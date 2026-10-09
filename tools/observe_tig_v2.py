@@ -15,6 +15,7 @@ import time
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from pool_manager.pool_v2.block_observer import BlockStore
+from pool_manager.pool_v2.compact import compact_observation, metadata_summary
 from pool_manager.pool_v2.database import Database
 from pool_manager.pool_v2.observation import CaptureError, PublicTigClient, capture_snapshot
 from pool_manager.pool_v2.protocol import ProtocolDataError, validate_snapshot
@@ -29,7 +30,7 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--api-url", default="https://mainnet-api.tig.foundation")
     parser.add_argument("--collector", required=True)
-    parser.add_argument("--pool-player-id", help="also archive this pool's pending work before its first activation")
+    parser.add_argument("--pool-player-id", help="retain compact pool evidence and selection references after full network validation")
     parser.add_argument("--spool", required=True)
     parser.add_argument("--launch-height", required=True, type=int)
     parser.add_argument("--poll-seconds", type=float, default=3)
@@ -93,16 +94,30 @@ def main(argv=None):
                     observation, error = exc.observation, str(exc)
                 except Exception as exc:
                     error = str(exc)
-                path = spool.save(observation, {"collector": args.collector, "requests": client.records,
-                    "captured_at": datetime.now(timezone.utc).isoformat()}, error)
                 # Invalid captures retry the same head while it remains available.
+                complete = False
                 try:
                     if error: raise ProtocolDataError(error)
                     validate_snapshot(observation)
+                    if args.pool_player_id:
+                        observation = compact_observation(observation)
+                    complete = True
+                except ProtocolDataError as failure:
+                    error = error or str(failure)
+                    if args.pool_player_id:
+                        # A partial global feed cannot establish credit. Keep
+                        # its failure and header, without archiving other miners.
+                        observation = {"start": {"block": {key: block[key] for key in ("id", "details", "config")}},
+                            "capture_failure": error[:2000]}
+                    log.warning("incomplete capture for block %s", block["details"]["height"])
+                metadata = {"collector": args.collector, "requests": client.records,
+                    "captured_at": datetime.now(timezone.utc).isoformat()}
+                if args.pool_player_id:
+                    metadata = metadata_summary(metadata)
+                path = spool.save(observation, metadata, error)
+                if complete:
                     last_id = block["id"]
                     captured += 1
-                except ProtocolDataError:
-                    log.warning("incomplete capture for block %s", block["details"]["height"])
                 log.info("saved local observation %s", path.name)
         except Exception:
             log.exception("current block capture failed; retrying")

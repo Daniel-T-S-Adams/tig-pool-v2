@@ -1,6 +1,7 @@
 """Durable, deduplicated block history and independent collection progress."""
 
 from collections import defaultdict
+from dataclasses import asdict
 import gzip
 import hashlib
 import json
@@ -136,6 +137,8 @@ def manifest_references(cursor, manifest):
     """Every chunk digest a stored manifest depends on; an expired manifest has none."""
     if "expired" in manifest:
         return set()
+    if "compact_ref" in manifest:
+        return {manifest["compact_ref"]}
     refs, pages = set(), set()
     if "manifest_ref" in manifest:
         refs.add(manifest["manifest_ref"])
@@ -164,6 +167,8 @@ def _unpack(cursor, manifest):
     """Replay a manifest; both paged and legacy inline record lists are supported."""
     if "expired" in manifest:
         raise ProtocolDataError("block evidence expired under the retention policy on " + str(manifest["expired"].get("at")))
+    if "compact_ref" in manifest:
+        return json.loads(_fetch(cursor, {manifest["compact_ref"]})[manifest["compact_ref"]])
     if "manifest_ref" in manifest:
         manifest = json.loads(_fetch(cursor, {manifest["manifest_ref"]})[manifest["manifest_ref"]])
     page_refs, item_refs, blob_refs, record_refs = set(), set(), set(), set()
@@ -216,6 +221,11 @@ def _semantic(snapshot, observation):
         player=observation["pool_player_id"]
         data["pool_player_id"]=player
         data["pool_feed"]=observation["players"].get(player,observation.get("pool_pending"))
+    if snapshot.selection_references is not None:
+        data["selection_references"] = [{"bundle": asdict(value["bundle"]),
+            "hyperparameters": value["hyperparameters"]}
+            for _, value in sorted(snapshot.selection_references.items())]
+        data["source_semantic_digest"] = observation["source_semantic_digest"]
     return fingerprint(data)
 
 
@@ -252,16 +262,29 @@ class BlockStore:
                 raise ProtocolDataError("block/round boundary mapping differs from the pinned adapter")
         except (ProtocolDataError, KeyError, TypeError) as exc:
             error = error or str(exc)
+        if snapshot and not error and observation.get("pool_player_id"):
+            from .compact import compact_observation, metadata_summary
+            observation = compact_observation(observation)
+            snapshot = validate_snapshot(observation)
+            metadata = metadata_summary(metadata or {}) if "requests" in (metadata or {}) else metadata
         block = observation.get("start", {}).get("block", {})
         height, block_id = block.get("details", {}).get("height"), block.get("id")
         if type(height) is not int or height < 0:
             height = None
         if not isinstance(block_id, str):
             block_id = None
-        manifest, chunks, canonical = _pack(observation)
-        reference, compressed = manifest_chunk(manifest)
-        chunks[reference] = compressed   # tracked like every other chunk
-        manifest = {"manifest_ref": reference}
+        if observation.get("format") == "pool-network-v1":
+            # One small blob avoids a per-field manifest and millions of tiny
+            # chunks. The entire retained projection is checksummed together.
+            raw = canonical_json(observation)
+            reference = hashlib.sha256(raw).hexdigest()
+            chunks, canonical = {reference: gzip.compress(raw, mtime=0)}, observation
+            manifest = {"compact_ref": reference}
+        else:
+            manifest, chunks, canonical = _pack(observation)
+            reference, compressed = manifest_chunk(manifest)
+            chunks[reference] = compressed   # tracked like every other chunk
+            manifest = {"manifest_ref": reference}
         identity = uuid.uuid4()
         with self.database.transaction() as cursor:
             lock(cursor, "observation-stream")
@@ -279,7 +302,7 @@ class BlockStore:
                 # taken over that form. Blocks recorded before paged manifests
                 # kept the API's order; accept their digest for the same block.
                 semantic = _semantic(snapshot, canonical)
-                accepted = {semantic, _semantic(snapshot, observation)}
+                accepted = {semantic, _semantic(snapshot, observation), *observation.get("source_semantic_digests", [])}
                 cursor.execute("SELECT id,semantic_digest FROM observed_blocks WHERE height=%s OR id=%s", (height, block_id))
                 previous = cursor.fetchall()
                 if any(row["id"] != block_id or row["semantic_digest"] not in accepted for row in previous):
@@ -312,7 +335,17 @@ class BlockStore:
                     (block_id, height, snapshot.previous_block_id, snapshot.round, snapshot.timestamp,
                      blocks_per_round, semantic, identity))
                 self._advance(cursor, stream["contiguous_height"])
-                self._track(cursor, height, block_id, set(chunks))
+                cursor.execute('''SELECT a.manifest FROM observed_blocks b
+                    JOIN capture_attempts a ON a.id=b.attempt_id WHERE b.id=%s''', (block_id,))
+                actual_refs = manifest_references(cursor, cursor.fetchone()['manifest'])
+                self._track(cursor, height, block_id, actual_refs)
+                extra = sorted(set(chunks) - actual_refs)
+                if extra:
+                    cursor.execute('SELECT max(height) AS height FROM observed_blocks')
+                    last_height = cursor.fetchone()['height']
+                    execute_values(cursor, '''INSERT INTO chunk_last_ref(digest,height) VALUES %s
+                        ON CONFLICT (digest) DO UPDATE SET height=GREATEST(chunk_last_ref.height,EXCLUDED.height)''',
+                        [(digest, last_height) for digest in extra], page_size=500)
             else:
                 cursor.execute("INSERT INTO observation_alerts(kind,height,details) VALUES ('incomplete-capture',%s,%s)",
                                (height, Json({"attempt_id": str(identity), "error": error})))
@@ -357,17 +390,29 @@ class BlockStore:
 
     def read(self, block_id):
         with self.database.transaction() as cursor:
-            cursor.execute("""SELECT a.manifest,b.semantic_digest,b.height FROM observed_blocks b
-                JOIN capture_attempts a ON a.id=b.attempt_id WHERE b.id=%s""", (block_id,))
+            cursor.execute("""SELECT a.manifest,b.semantic_digest,b.height,c.compressed_payload,
+                c.payload_sha256,c.projection_digest,c.source_semantic_digest,c.expired_at
+                FROM observed_blocks b JOIN capture_attempts a ON a.id=b.attempt_id
+                LEFT JOIN compact_block_copies c ON c.block_id=b.id WHERE b.id=%s""", (block_id,))
             row = cursor.fetchone()
             if not row:
                 raise ProtocolDataError("complete block is not available in the pool archive")
             cursor.execute("SELECT 1 FROM observation_alerts WHERE kind='conflicting-block' AND height=%s LIMIT 1", (row["height"],))
             if cursor.fetchone():
                 raise ProtocolDataError("conflicting observation requires investigation before use")
-            observation = _unpack(cursor, row["manifest"])
+            if row['source_semantic_digest'] is not None:
+                if row['expired_at'] is not None:
+                    raise ProtocolDataError('compact block evidence expired under the retention policy')
+                if row['source_semantic_digest'] != row['semantic_digest']:
+                    raise ProtocolDataError('compact replacement differs from the original block identity')
+                raw = gzip.decompress(bytes(row['compressed_payload']))
+                if hashlib.sha256(raw).hexdigest() != row['payload_sha256']:
+                    raise ProtocolDataError('compact replacement failed its payload checksum')
+                observation = json.loads(raw)
+            else:
+                observation = _unpack(cursor, row["manifest"])
         snapshot = validate_snapshot(observation)
-        if _semantic(snapshot, observation) != row["semantic_digest"]:
+        if _semantic(snapshot, observation) != (row['projection_digest'] or row["semantic_digest"]):
             raise ProtocolDataError("stored block replay differs from its validated evidence")
         return observation, snapshot
 

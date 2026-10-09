@@ -8,6 +8,12 @@ coverage, unresolved gaps and deployment controls.
 
 ## Collection and recovery
 
+The storage cleanup implementation saves validated pool inputs and best network
+reference summaries. It retains legacy readers and a guarded backfill path.
+See [lean storage](LEAN_STORAGE.md) for fields and deployment requirements.
+It is not deployed; the full-snapshot encoding below describes the running
+release and historical format.
+
 `tools/observe_tig_v2.py` runs separately from the API and scheduler. Its capture
 thread saves raw evidence to a local spool before a separate recorder thread
 touches PostgreSQL. A database outage, lock or recovery backlog cannot stop the
@@ -39,6 +45,7 @@ service environment and run, for example:
 
 ```sh
 python3 tools/observe_tig_v2.py --collector primary \
+  --pool-player-id YOUR_POOL_ADDRESS \
   --spool /var/lib/innopool-v2/observations --launch-height YOUR_START_HEIGHT
 ```
 

@@ -153,6 +153,9 @@ def seal(database,creation_round,capture_ids,block_id):
             require_block(cursor,capture['block_id'])
             if not capture['complete'] or capture['observed_round']<creation_round+3:
                 raise Conflict('report capture is incomplete or predates the end of X+2')
+            period = _integer(capture['metadata'].get('report_submission_period', 2), 'report submission period')
+            if capture['observed_round'] < capture['reporting_round'] + period + 1:
+                raise Conflict('capture predates the end of its protocol reporting window')
             cursor.execute('''SELECT c.id FROM report_captures c JOIN observed_blocks b ON b.id=c.block_id
                 WHERE c.reporting_round=%s ORDER BY b.height DESC,c.created_at DESC LIMIT 1''',(capture['reporting_round'],))
             if cursor.fetchone()['id']!=capture['id']:
@@ -183,10 +186,13 @@ def require_seal(cursor,identity,creation_round):
     cursor.execute('SELECT reporting_rounds FROM round_report_scopes WHERE creation_round=%s',(creation_round,))
     _check_scope(cursor,creation_round,cursor.fetchone()['reporting_rounds'])
     require_block(cursor,seal['block_id'])
-    cursor.execute('''SELECT c.*,b.height FROM report_captures c JOIN observed_blocks b ON b.id=c.block_id
+    cursor.execute('''SELECT c.*,b.height,b.round AS observed_round FROM report_captures c JOIN observed_blocks b ON b.id=c.block_id
         WHERE c.id=ANY(%s)''',(seal['capture_ids'],))
     for capture in cursor.fetchall():
         require_block(cursor,capture['block_id'])
+        period = _integer(capture['metadata'].get('report_submission_period', 2), 'report submission period')
+        if capture['observed_round'] < max(creation_round + 3, capture['reporting_round'] + period + 1):
+            raise Conflict('sealed capture predates the final reporting window')
         cursor.execute('''SELECT c.id FROM report_captures c JOIN observed_blocks b ON b.id=c.block_id
             WHERE reporting_round=%s ORDER BY b.height DESC,c.created_at DESC LIMIT 1''',(capture['reporting_round'],))
         if cursor.fetchone()['id']!=capture['id']:
@@ -249,6 +255,31 @@ def record_index(database,reporting_round,block_id,player_id,challenge_id,payloa
                 cursor.execute('''INSERT INTO benchmark_reporting_rounds(benchmark_id,creation_round,reporting_round,capture_id)
                     VALUES (%s,%s,%s,%s) ON CONFLICT DO NOTHING''',(row['benchmark_id'],row['creation_round'],reporting_round,identity))
     return {'id':identity,'complete':error is None,'error':error}
+
+
+def record_confirmation_round(database, benchmark_id, confirmed_height, block_id):
+    """Pinned TIG adapter: reporting membership starts at benchmark confirmation.
+
+    The backend inserts reportable membership using that block's round, not
+    the precommit's creation round. An actual archived confirmation header is
+    required; otherwise the selective public index collector supplies it.
+    """
+    with database.transaction() as cursor:
+        cursor.execute('SELECT id,round FROM observed_blocks WHERE height=%s', (confirmed_height,))
+        anchor = cursor.fetchone()
+        cursor.execute('''SELECT r.assignment,m.reporting_round FROM reservations r
+            LEFT JOIN benchmark_reporting_rounds m ON m.benchmark_id=r.benchmark_id WHERE r.benchmark_id=%s''', (benchmark_id,))
+        owner = cursor.fetchone()
+    if not anchor or not owner:
+        return None
+    if owner['reporting_round'] is not None:
+        if owner['reporting_round'] != anchor['round']:
+            raise Conflict('confirmation header contradicts the recorded reporting round')
+        return {'reporting_round': owner['reporting_round']}
+    settings = owner['assignment']['settings']
+    return record_index(database, anchor['round'], block_id, settings['player_id'], settings['challenge_id'],
+        {'benchmark_ids': [benchmark_id]}, metadata={'source': 'tig-confirmation-reporting-round-v1',
+            'confirmed_block_id': anchor['id'], 'benchmark_confirmed_height': confirmed_height})
 
 
 def require_known_facts(cursor,reporting_round,height,payload):

@@ -1,5 +1,10 @@
 # Pool data and its path to recovery
 
+This surveys the **running release**. The subsequently implemented
+[lean storage design](LEAN_STORAGE.md) is not deployed. Existing data and the
+measurements below have not changed: the running pool still saves binaries,
+full network captures and repeated report responses.
+
 Read-only trace of the running primary and recovery hosts on **9 October 2026,
 14:55 UTC**, plus the code in the installed pool release `8477509` and pinned
 worker `fd29279`. No runtime settings, retention policy or financial/protocol

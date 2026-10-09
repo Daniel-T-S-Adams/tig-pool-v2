@@ -6,6 +6,12 @@ of their checks; they do not override this record.
 
 ## Deployment and controls
 
+The [lean storage implementation](LEAN_STORAGE.md) is prepared on cleanup
+branches and has not been deployed. It adds direct worker binary downloads,
+compact pool evidence, selective final report fetching and guarded legacy
+conversion. Production migrations remain through 019; no existing evidence
+was pruned by this implementation.
+
 | Item | Current state |
 |---|---|
 | Primary | Helsinki, `46.62.249.188`; website, API, coordinator and four observers |

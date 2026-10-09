@@ -7,6 +7,8 @@ import os
 from pathlib import Path
 import tempfile
 import uuid
+import fcntl
+from contextlib import contextmanager
 
 from .block_observer import _is_digest, _pack
 from .observation import read_archive, write_archive
@@ -22,11 +24,38 @@ class Spool:
         (self.directory / "chunks").mkdir(parents=True, exist_ok=True)
         (self.directory / "pending").mkdir(exist_ok=True)
         (self.directory / "recorded").mkdir(exist_ok=True)
+        (self.directory / "writing").mkdir(exist_ok=True)
         _sync(self.directory)
         _sync(self.directory.parent)
 
     def save(self, observation, metadata, error=None):
-        manifest, chunks, _ = _pack(observation, paged=self.paged)
+        if observation.get("format") == "pool-network-v1":
+            from .observation import canonical_json
+            raw = canonical_json(observation)
+            digest = hashlib.sha256(raw).hexdigest()
+            manifest, chunks = {"blob": digest}, {digest: gzip.compress(raw, mtime=0)}
+            metadata = {**metadata, 'block_height': observation['start']['block']['details']['height'],
+                        'block_id': observation['start']['block']['id']}
+        else:
+            manifest, chunks, _ = _pack(observation, paged=self.paged)
+        # Pin all chunks before writing any of them. Cleanup can then run
+        # without holding the capture thread behind a long directory scan.
+        pin = self.directory / 'writing' / (uuid.uuid4().hex + '.json.gz')
+        with spool_lock(self.directory):
+            write_archive(pin, {'digests': list(chunks)})
+            if (self.directory / '.gc-active').exists():
+                with (self.directory / '.gc-pins').open('a') as stream:
+                    stream.write(json.dumps(list(chunks)) + '\n')
+                    stream.flush()
+                    os.fsync(stream.fileno())
+        try:
+            return self._publish(manifest, chunks, metadata, error)
+        finally:
+            with spool_lock(self.directory):
+                pin.unlink()
+                _sync(self.directory / 'writing')
+
+    def _publish(self, manifest, chunks, metadata, error):
         for digest, compressed in chunks.items():
             directory = self.directory / "chunks" / digest[:2]
             directory.mkdir(exist_ok=True)
@@ -90,10 +119,11 @@ class Spool:
         return decode(saved["manifest"]), saved["metadata"], saved["error"]
 
     def recorded(self, path):
-        path = Path(path)
-        os.replace(path, self.directory / "recorded" / path.name)
-        _sync(self.directory / "recorded")
-        _sync(self.directory / "pending")
+        with spool_lock(self.directory):
+            path = Path(path)
+            os.replace(path, self.directory / "recorded" / path.name)
+            _sync(self.directory / "recorded")
+            _sync(self.directory / "pending")
 
     def pending(self):
         return sorted((self.directory / "pending").glob("*.json.gz"))
@@ -105,3 +135,25 @@ def _sync(path):
         os.fsync(descriptor)
     finally:
         os.close(descriptor)
+
+
+@contextmanager
+def spool_lock(directory):
+    """Serialize chunk publication and pruning, including unpublished captures."""
+    with (Path(directory) / '.spool.lock').open('a') as stream:
+        fcntl.flock(stream, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(stream, fcntl.LOCK_UN)
+
+
+@contextmanager
+def pruning_lock(directory):
+    """Serialize maintenance runs without preventing live captures."""
+    with (Path(directory) / '.pruning.lock').open('a') as stream:
+        fcntl.flock(stream, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(stream, fcntl.LOCK_UN)

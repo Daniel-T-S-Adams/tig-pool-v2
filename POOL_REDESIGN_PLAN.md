@@ -73,6 +73,16 @@ Decisions D1–D6 are resolved and incorporated throughout the design. D6 confir
 
 **D6 — resolved: confirm handover; return collateral if the member was never given the work.** The pool must confirm that the member received the complete benchmark assignment. Implement this with an authenticated acknowledgement from the member's client, durably recorded by the pool before execution starts. Making work available for retrieval alone does not establish handover. If TIG accepts a precommit but handover never completes before expiry, release the slot on definitive expiry and return the recorded collateral at the existing end-of-X+2 finalization point once the outcome and handover record are reconciled. Submission costs remain the operator's responsibility. Once handover is confirmed, the member is responsible for all subsequent failures, including pool infrastructure failures. A lost response after the acknowledgement was committed does not undo handover; recover the recorded confirmation through an idempotent retry or status lookup.
 
+**D7 — resolved on 9 October: retain minimal pool evidence.** Members download
+algorithm archives from TIG's public GitHub sources; the pool keeps checked
+URL/hash metadata. Validate current network data, then retain pool credit
+inputs and compact selection references. Keep benchmark reporting-round
+mappings while available, and fetch final relevant reports after X+2 and the
+applicable reporting window close. Preserve ownership, exact per-block credit,
+financial records and final decisions. Existing full snapshots may retire only
+after backed compact replacement and completed reconciliation/credit. Missing
+blocks remain settlement holds. See [lean storage](docs/LEAN_STORAGE.md).
+
 Implementation defaults proposed for the plan, rather than additional economic rules:
 
 - A member has one verified withdrawal wallet. Execution tokens can be replaced without changing ownership or balances.
@@ -158,7 +168,12 @@ Suggested modules under `tig-pool/pool_manager/pool_v2/`:
 
 These names are proposed destinations, not existing files. Keep financial calculations and selection functions independent of HTTP clients and background loops so they can be tested directly.
 
-Run collection independently of the member API and benchmark scheduler, so their restarts or pauses do not interrupt accounting history. Keep durable raw observations and a redundant collector in a separate failure domain, with deduplication by block ID. Back up the database and observation store; a backup can restore captured data but cannot recreate a block that no collector observed.
+Run block collection independently of the member API and benchmark scheduler,
+so their restarts or pauses do not interrupt accounting history. Validate the
+full current network and retain compact pool inputs and selection references
+under D7, with deduplication by block ID and a redundant collector in a separate
+failure domain. Back up captured data; a backup cannot recreate an unobserved
+block. Fetch final reports for unresolved obligations at their deadline.
 
 Only the coordinator creates benchmarks; only the ledger posts money movements; only the settlement worker finalizes round allocations. Background tasks use durable records with leases and unique operation IDs. Recover expired task leases after crashes without repeating completed financial actions. Expiry of a worker lease does not prove that an external submission or transfer was never sent; fence stale workers and reconcile uncertain effects before another worker submits or releases funds.
 

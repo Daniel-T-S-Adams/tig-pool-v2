@@ -38,6 +38,7 @@ def _locked(cursor, identity):
 
 
 def prepare_archive(database, reservation_id, source_url, archive):
+    """Remember checked binary metadata; the worker downloads the public bytes."""
     if not isinstance(archive, bytes) or not 0 < len(archive) <= 64*1024*1024:
         raise FundsError("invalid algorithm archive size")
     digest = hashlib.sha256(archive).hexdigest()
@@ -46,7 +47,7 @@ def prepare_archive(database, reservation_id, source_url, archive):
         expected = row["selection"]["binary"]["details"]["download_url"]
         if source_url != expected:
             raise Conflict("algorithm archive URL differs from reserved selection")
-        cursor.execute("SELECT sha256,source_url FROM reservation_archives WHERE reservation_id=%s", (reservation_id,))
+        cursor.execute("SELECT sha256,source_url FROM reservation_binaries WHERE reservation_id=%s UNION ALL SELECT sha256,source_url FROM reservation_archives WHERE reservation_id=%s", (reservation_id, reservation_id))
         previous = cursor.fetchone()
         if previous:
             if (previous["sha256"], previous["source_url"]) != (digest, source_url):
@@ -54,9 +55,8 @@ def prepare_archive(database, reservation_id, source_url, archive):
             return digest
         if row["state"] != "reserved":
             raise Conflict("algorithm archive must be saved before precommit submission")
-        cursor.execute("INSERT INTO algorithm_archives(sha256,archive) VALUES (%s,%s) ON CONFLICT DO NOTHING", (digest, archive))
-        cursor.execute("INSERT INTO reservation_archives(reservation_id,sha256,source_url) VALUES (%s,%s,%s)",
-                       (reservation_id, digest, source_url))
+        cursor.execute("INSERT INTO reservation_binaries(reservation_id,sha256,source_url,size_bytes) VALUES (%s,%s,%s,%s)",
+                       (reservation_id, digest, source_url, len(archive)))
     return digest
 
 
@@ -83,9 +83,9 @@ def begin(database, identity, *, preflight=None):
                     raise ProtocolDataError("duplicate preflight identities")
                 for value in preflight["seen_benchmarks"]:
                     _identity(value)
-                cursor.execute("SELECT 1 FROM reservation_archives WHERE reservation_id=%s", (row["id"],))
+                cursor.execute("SELECT 1 FROM reservation_binaries WHERE reservation_id=%s UNION ALL SELECT 1 FROM reservation_archives WHERE reservation_id=%s", (row["id"], row["id"]))
                 if not cursor.fetchone():
-                    raise Conflict("algorithm archive is not durable")
+                    raise Conflict("checked algorithm metadata is not durable")
                 # TIG exposes only the randomly chosen track. Different full
                 # track proposals can still become indistinguishable later.
                 match_key = ledger.fingerprint({"settings": payload["settings"], "compute_type": payload["compute_type"]})
@@ -264,14 +264,14 @@ def publish_assignment(database, reservation_id, precommit, *, evidence, artifac
         receipt = cursor.fetchone()
         if not receipt or receipt["benchmark_id"] != benchmark_id:
             raise Conflict("confirmed metadata has no matching durable acceptance receipt")
-        cursor.execute("SELECT * FROM reservation_archives WHERE reservation_id=%s", (reservation_id,))
+        cursor.execute("SELECT sha256,source_url,true AS direct FROM reservation_binaries WHERE reservation_id=%s UNION ALL SELECT sha256,source_url,false AS direct FROM reservation_archives WHERE reservation_id=%s", (reservation_id, reservation_id))
         archive = cursor.fetchone()
         if not archive:
             raise Conflict("reserved binary archive is missing")
         assignment = {"api_version": "2.0", "benchmark_id": benchmark_id, "settings": precommit["settings"],
             "algorithm_name": snapshot.algorithms[payload["settings"]["algorithm_id"]]["details"]["name"],
             **{key: details[key] for key in ("rand_hash", "num_nonces", "num_bundles", "fuel_budget", "hyperparameters", "compute_type")},
-            "binary_url": artifact_origin.rstrip('/')+'/api/v2/artifacts/'+archive["sha256"] if artifact_origin else archive["source_url"],
+            "binary_url": archive["source_url"] if archive["direct"] or not artifact_origin else artifact_origin.rstrip('/')+'/api/v2/artifacts/'+archive["sha256"],
             "binary_sha256": archive["sha256"]}
         return benchmarks.accept(database, reservation_id, benchmark_id, assignment, actual_fee=fee,
                                  evidence=evidence, _cursor=cursor)

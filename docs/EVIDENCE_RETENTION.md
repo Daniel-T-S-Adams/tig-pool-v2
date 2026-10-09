@@ -1,5 +1,11 @@
 # Evidence retention
 
+The 9 October storage cleanup adds compact pool captures, direct binary downloads,
+final report fetching and guarded legacy conversion. It is **not deployed**.
+[Lean storage](LEAN_STORAGE.md) specifies migrations 020/021 and the cleanup
+sequence. The policy below describes running full captures; the same bounded
+floors apply to compact evidence after activation.
+
 Decided by the operator on 8 October 2026. The pool reads the whole TIG network
 every block, but it only has to **keep** what an open obligation can still need.
 Ledger, credit, benchmark, collateral and settlement records are permanent.

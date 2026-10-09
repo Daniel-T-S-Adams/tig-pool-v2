@@ -7,6 +7,11 @@ The foundation and increment records below are historical validation records.
 
 ## Current summary
 
+The 9 October [lean storage implementation](docs/LEAN_STORAGE.md) is prepared
+on cleanup branches. It has not been deployed or run against production data.
+It requires a paired worker update and additive migrations 020/021. Syntax and
+whitespace were inspected; no runtime tests were run for this change.
+
 - **Application:** `8477509`, tag `mainnet-abandoned-benchmark-expiry-20261009`, runs
   on all six primary services; migration history is verified through 019.
   The same application is staged on recovery and its collector units point to

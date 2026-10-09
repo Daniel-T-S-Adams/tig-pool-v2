@@ -20,6 +20,7 @@ from .block_observer import BlockStore, manifest_references
 from .database import lock
 from .observation import canonical_json, read_archive
 from .protocol import ProtocolDataError
+from .spool import Spool, spool_lock, pruning_lock, _sync
 
 POLICY = {"version": "evidence-retention-v2", "raw_block_rounds": 4, "report_rounds": 4,
           "capture_days": 30, "settled_margin_rounds": 3}
@@ -129,13 +130,20 @@ def _spool_references(directory, manifest):
     refs.update(pages)
     for page in pages:
         path = directory / "chunks" / page[:2] / (page + ".gz")
-        if path.exists():
-            raw = gzip.decompress(path.read_bytes())
-            refs.update(raw[index:index + 32].hex() for index in range(0, len(raw), 32))
+        raw = gzip.decompress(path.read_bytes())
+        if hashlib.sha256(raw).hexdigest() != page or not raw or len(raw) % 32:
+            raise ProtocolDataError('cannot prune a spool with corrupt digest pages')
+        refs.update(raw[index:index + 32].hex() for index in range(0, len(raw), 32))
     return refs
 
 
 def prune_spool(directory, *, block_floor, capture_cutoff, covered_until, removed_digests):
+    with pruning_lock(directory):
+        return _prune_spool(directory, block_floor=block_floor, capture_cutoff=capture_cutoff,
+            covered_until=covered_until, removed_digests=removed_digests)
+
+
+def _prune_spool(directory, *, block_floor, capture_cutoff, covered_until, removed_digests):
     """Remove recorded archives under the floor and chunk files the database removed.
 
     Chunks still referenced by a pending (unrecorded) archive are kept so the
@@ -152,21 +160,153 @@ def prune_spool(directory, *, block_floor, capture_cutoff, covered_until, remove
         captured_at = parse_time(captured) if isinstance(captured, str) else None
         if captured_at is not None and captured_at > covered_until:
             continue
-        height = _height(saved["manifest"])
+        height = saved.get('metadata', {}).get('block_height', _height(saved["manifest"]))
         expired = (height is not None and height <= block_floor) or (
             height is None and captured_at is not None and captured_at <= capture_cutoff)
         if expired:
             path.unlink()
             counts["archives"] += 1
-    for digest in removed_digests:
-        if digest in pending:
-            counts["kept_for_pending"] += 1
-            continue
-        path = directory / "chunks" / digest[:2] / (digest + ".gz")
-        if path.exists():
-            path.unlink()
-            counts["chunks"] += 1
+    counts['kept_for_pending'] = len(set(removed_digests) & pending)
+    counts['chunks'] = _prune_file_chunks(directory, covered_until, candidates=set(removed_digests))
     return counts
+
+
+def _prune_file_chunks(directory, covered_until, *, candidates=None):
+    """Caller holds pruning_lock. Capture pins protect writes during the scan."""
+    live = set()
+    marker, journal = directory / '.gc-active', directory / '.gc-pins'
+    with spool_lock(directory):
+        journal.write_text('')
+        marker.touch()
+        for path in (directory / 'writing').glob('*.json.gz'):
+            live.update(read_archive(path)['digests'])
+    removed, offset = 0, 0
+    try:
+        for area in ('pending', 'recorded'):
+            for path in (directory / area).glob('*.json.gz'):
+                try:
+                    saved = read_archive(path)
+                except FileNotFoundError:
+                    # A recorder may move pending -> recorded during this scan.
+                    moved = directory / 'recorded' / path.name
+                    if not moved.exists():
+                        continue
+                    saved = read_archive(moved)
+                live.update(_spool_references(directory, saved['manifest']))
+
+        def remove_batch(paths):
+            nonlocal offset, removed
+            with spool_lock(directory):
+                with journal.open() as stream:
+                    stream.seek(offset)
+                    for line in stream.read().splitlines():
+                        live.update(json.loads(line))
+                    offset = stream.tell()
+                for path in paths:
+                    if path.stem not in live and path.stat().st_mtime <= covered_until.timestamp():
+                        path.unlink()
+                        removed += 1
+
+        batch = []
+        paths = ((directory / 'chunks' / digest[:2] / (digest + '.gz')) for digest in candidates) if candidates is not None else (directory / 'chunks').glob('*/*.gz')
+        for path in paths:
+            if not path.exists():
+                continue
+            if path.stem in live:
+                continue
+            batch.append(path)
+            if len(batch) >= 128:
+                remove_batch(batch)
+                batch = []
+        if batch:
+            remove_batch(batch)
+    finally:
+        with spool_lock(directory):
+            marker.unlink()
+            journal.unlink()
+    _sync(directory / 'recorded')
+    for folder in (directory / 'chunks').iterdir():
+        if folder.is_dir():
+            _sync(folder)
+    return removed
+
+
+def prune_compacted_spool(database, directory, *, proof, limit=200, collect_chunks=False):
+    """Drop recorded full copies only after their backed DB replacement is live."""
+    covered = parse_time(proof['covered_until'])
+    directory = Path(directory)
+    if not directory.exists():
+        return {'archives': 0, 'chunks': 0}
+    with database.transaction() as cursor:
+        cursor.execute('''SELECT b.id,b.height,b.semantic_digest FROM observed_blocks b
+            JOIN compact_block_copies c ON c.block_id=b.id
+            JOIN capture_attempts a ON a.id=b.attempt_id
+            WHERE a.manifest ? 'expired' AND c.expired_at IS NULL
+              AND c.created_at<=%s AND a.created_at<=%s
+              AND NOT EXISTS (SELECT 1 FROM observation_alerts x WHERE x.height=b.height AND x.kind='conflicting-block')''', (covered, covered))
+        eligible = {row['height']: row for row in cursor.fetchall()}
+    removed = 0
+    spool = Spool(directory)
+    with pruning_lock(directory):
+        for path in (directory / 'recorded').glob('*.json.gz'):
+            saved = read_archive(path)
+            captured = saved.get('metadata', {}).get('captured_at')
+            if not captured or parse_time(captured) > covered or saved.get('error'):
+                continue
+            height = _height(saved['manifest'])
+            if height not in eligible:
+                continue
+            # Verify the actual saved block identity, not height alone.
+            observation, _, _ = spool.read(path)
+            if observation.get('start', {}).get('block', {}).get('id') != eligible[height]['id']:
+                continue
+            from .block_observer import _semantic
+            from .protocol import validate_snapshot
+            if _semantic(validate_snapshot(observation), observation) != eligible[height]['semantic_digest']:
+                continue
+            path.unlink()
+            removed += 1
+            if removed >= limit:
+                break
+        chunks = _prune_file_chunks(directory, covered) if collect_chunks else 0
+    return {'archives': removed, 'chunks': chunks}
+
+
+def prune_report_spool(database, directory, *, proof, limit=200, collect_chunks=False):
+    """Imported report files are redundant once the DB capture is backed up."""
+    covered = parse_time(proof['covered_until'])
+    directory = Path(directory)
+    if not directory.exists():
+        return {'archives': 0, 'chunks': 0}
+    spool = Spool(directory)
+    removed = 0
+    with pruning_lock(directory):
+        for path in (directory / 'recorded').glob('*.json.gz'):
+            saved = read_archive(path)
+            captured = saved.get('metadata', {}).get('captured_at')
+            if not captured or parse_time(captured) > covered:
+                continue
+            capture, _, _ = spool.read(path)
+            kind = capture.get('kind')
+            if kind not in ('reports', 'index') or 'start' not in capture:
+                continue
+            table = 'report_captures' if kind == 'reports' else 'report_index_captures'
+            digest = hashlib.sha256(canonical_json(capture.get('payload', {}))).hexdigest()
+            with database.transaction() as cursor:
+                extra = ' AND player_id=%s AND challenge_id=%s' if kind == 'index' else ''
+                args = (capture['start']['block']['id'], capture['reporting_round'], digest, covered)
+                if kind == 'index':
+                    args += (capture['player_id'], capture['challenge_id'])
+                cursor.execute(f'SELECT 1 FROM {table} WHERE block_id=%s AND reporting_round=%s AND payload_sha256=%s AND created_at<=%s' + extra,
+                               args)
+                backed = cursor.fetchone()
+            if backed:
+                path.unlink()
+                removed += 1
+                if removed >= limit:
+                    break
+        chunks = _prune_file_chunks(directory, covered) if collect_chunks else 0
+    return {'archives': removed, 'chunks': chunks}
 
 
 def initialize_chunk_index(database):
@@ -217,8 +357,11 @@ def run(database, *, proof, policy=POLICY, now=None, spools=(), dry_run=False, b
             _session(cursor)
             cursor.execute("""SELECT id,height,manifest FROM capture_attempts WHERE NOT (manifest ? 'expired')
                 AND ((height IS NOT NULL AND height<=%s) OR (height IS NULL AND created_at<=%s))
+                AND created_at<=%s
+                AND NOT EXISTS (SELECT 1 FROM reservations r WHERE r.selection->>'block_id'=capture_attempts.block_id
+                    AND r.collateral_outcome IS NULL)
                 ORDER BY height NULLS LAST, created_at LIMIT %s""",
-                (target["block_height"], target["capture_cutoff"], min(batch, max_blocks - expired_blocks)))
+                (target["block_height"], target["capture_cutoff"], covered_until, min(batch, max_blocks - expired_blocks)))
             rows = cursor.fetchall()
             if not rows:
                 break
@@ -238,7 +381,12 @@ def run(database, *, proof, policy=POLICY, now=None, spools=(), dry_run=False, b
     while True:
         with database.transaction() as cursor:
             _session(cursor)
-            cursor.execute("SELECT digest FROM chunk_last_ref WHERE height<=%s ORDER BY digest LIMIT 5000", (target["block_height"],))
+            lock(cursor, 'observation-stream')
+            cursor.execute("SELECT manifest FROM capture_attempts WHERE height<=%s AND NOT (manifest ? 'expired')", (target['block_height'],))
+            protected = set()
+            for row in cursor.fetchall():
+                protected.update(manifest_references(cursor, row['manifest']))
+            cursor.execute("SELECT digest FROM chunk_last_ref WHERE height<=%s AND NOT (digest=ANY(%s)) ORDER BY digest LIMIT 5000", (target["block_height"], sorted(protected)))
             digests = [row["digest"] for row in cursor.fetchall()]
             if not digests:
                 break
@@ -246,6 +394,14 @@ def run(database, *, proof, policy=POLICY, now=None, spools=(), dry_run=False, b
             cursor.execute("DELETE FROM chunk_last_ref WHERE digest=ANY(%s)", (digests,))
             removed.extend(digests)
     counts["removed_chunks"] = len(removed)
+    with database.transaction() as cursor:
+        _session(cursor)
+        cursor.execute('''UPDATE compact_block_copies c SET compressed_payload=''::bytea,expired_at=%s
+            FROM observed_blocks b WHERE b.id=c.block_id AND b.height<=%s AND c.created_at<=%s
+            AND c.expired_at IS NULL AND NOT EXISTS (SELECT 1 FROM reservations r
+                WHERE r.selection->>'block_id'=c.block_id AND r.collateral_outcome IS NULL)''',
+            (now, target['block_height'], covered_until))
+        counts['expired_compact_copies'] = cursor.rowcount
 
     tombstone = Json({"expired": {"run": str(run_id), "at": now.isoformat(), "policy": policy["version"]}})
 

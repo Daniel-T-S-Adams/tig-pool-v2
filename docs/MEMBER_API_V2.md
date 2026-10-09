@@ -118,9 +118,13 @@ TIG responses in that test are simulated. Separate worker tests check durable
 restart recovery and reproduce a recorded public TIG Merkle root.
 
 `GET /api/v2/artifacts/{sha256}` serves the exact saved public algorithm
-archive. The worker verifies it against the assignment's checksum before
+archive for legacy assignments. The storage cleanup gives new assignments
+a direct TIG/GitHub URL and saves only checked binary metadata. The worker
+verifies either source against the assignment's checksum before
 extracting the expected named library. It does not require a token: these are
 already-public TIG algorithm binaries, and no member files are served.
+See [lean storage](LEAN_STORAGE.md); direct downloads require the paired worker
+update and are not active on the running mainnet release.
 
 CI and the served mainnet worker pin are
 `fd29279ce816c9f4e6e1416715971201c92775e0`, tag

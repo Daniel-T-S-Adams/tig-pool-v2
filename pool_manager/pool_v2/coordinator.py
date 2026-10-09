@@ -18,7 +18,9 @@ from .reconciliation import reconcile_block,reconcile_pending
 
 def download_archive(url, *, allowed_hosts):
     parsed=urlsplit(url)
-    if parsed.scheme != "https" or parsed.hostname not in allowed_hosts or parsed.username or parsed.password or parsed.fragment:
+    if (parsed.scheme != "https" or parsed.hostname not in allowed_hosts or parsed.username or parsed.password or parsed.fragment
+            or parsed.port not in (None,443) or (parsed.hostname=='media.githubusercontent.com'
+                and not parsed.path.startswith('/media/tig-foundation/tig-monorepo/'))):
         raise FundsError("selected binary URL is not an allowed HTTPS artifact source")
     with build_opener(ArtifactRedirect(allowed_hosts)).open(Request(url,headers={"User-Agent":"innopool-v2-artifact/2.0"}),timeout=30) as response:
         archive=response.read(64*1024*1024+1)
@@ -97,7 +99,7 @@ class Coordinator:
                     continue
                 if not self.writer.enabled:continue
                 with self.database.transaction() as cursor:
-                    cursor.execute("SELECT 1 FROM reservation_archives WHERE reservation_id=%s",(intent["reservation_id"],))
+                    cursor.execute("SELECT 1 FROM reservation_binaries WHERE reservation_id=%s UNION ALL SELECT 1 FROM reservation_archives WHERE reservation_id=%s",(intent["reservation_id"],intent["reservation_id"]))
                     archived=cursor.fetchone()
                 if not archived:
                     url=intent["selection"]["binary"]["details"]["download_url"]
