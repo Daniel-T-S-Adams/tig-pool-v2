@@ -31,9 +31,13 @@ activate the recovery pool or send tokens. Secrets remain outside Git.
 
 Normal runtime and migration-owner database commits require acknowledgment from
 the WAL receiver in Germany. The receiver uses `--synchronous`, flushing WAL to
-disk before acknowledging it. The observer role commits locally so collection
-can continue when the receiver is unavailable. Financial commits wait during
-that outage. This protects commit acknowledgment; it is **not automatic
+disk before acknowledging it. A 9 October read of the actual service DSNs and
+connection settings confirmed that API, coordinator, blocks, reports, custody
+and funding all use `innopool_runtime` with `synchronous_commit=on`.
+The separate observer role is configured for local commits but is not used by
+those live services. Database imports therefore also wait for the receiver;
+the collectors' separate capture threads can continue saving local spool files.
+This protects commit acknowledgment; it is **not automatic
 failover** or proof that an in-flight request cannot be visible before its
 original caller receives acknowledgment. A funded takeover must still test
 concurrent/retried requests and reconcile potentially sent payments before work
@@ -75,6 +79,9 @@ Small membership and paused work do not reduce network-wide observation.
 The approved database/block-spool retention is described in
 [evidence retention](EVIDENCE_RETENTION.md). No new deletion or storage-policy
 change was made in the 9 October cleanup.
+The later 14:55 read-only [storage map](STORAGE_MAP.md) records the current sizes
+and explains the complete data path. All four pending import queues were empty
+in that sample; the configured recovery raw-copy destination was absent.
 
 ## Inspect without moving funds
 

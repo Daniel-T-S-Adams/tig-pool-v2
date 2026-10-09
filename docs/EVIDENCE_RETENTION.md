@@ -89,6 +89,8 @@ chunks expire only once every block up to it has.
   spool files. No new file deletion or database table rewrite was performed
   during the 9 October cleanup.
 - Recovery collectors are inactive and the full primary-evidence copy is
-  disabled after a disk-reserve failure. Its old local spool is left intact.
+  disabled after a disk-reserve failure. At 14:55 UTC on 9 October, the configured
+  recovery raw-copy directory was absent and its local spool measured only
+  36 KiB; do not assume that a separate raw archive exists there.
   See [operations status](OPERATIONS_STATUS.md) for the measured footprint and
   the proposed pending-file recovery policy.
