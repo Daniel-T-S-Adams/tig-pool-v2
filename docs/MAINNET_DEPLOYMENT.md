@@ -4,8 +4,11 @@ The templates in [deploy/v2-mainnet](../deploy/v2-mainnet) are a staging bundle,
 not an enabled installation. They contain placeholders, no credentials, and
 default to funds, work, settlement and TIG submissions being disabled. The
 coordinator receives no TIG API key in this configuration.
-Current setup progress is recorded in [Cloudflare setup](CLOUDFLARE_SETUP.md);
-this document describes the full deployment and launch procedure.
+The templates describe safe starting defaults. Current live controls differ:
+funds and existing submission recovery are enabled, new work is paused and
+settlement is disabled. See [operations status](OPERATIONS_STATUS.md).
+This document describes the procedure; the funding/opening notes below record
+the historical 6 October preparation before initialization.
 
 ## Inputs and roles
 
@@ -72,6 +75,17 @@ and transaction fees. Stop pool spending manually at the authorized budget.
 below once those deployment details are known. The member browser runs on
 Daniel's local computer. Worker execution belongs to the member role.
 
+## Current initialization status — 9 October
+
+The named prelaunch custody baseline and confirmed protocol-fee credit have
+been initialized. The custody and funding observers are running, and member
+registrations plus benchmark reservations exist. Do not rerun the prelaunch
+baseline or assume that no pool activity has occurred. The recent CPU attempt
+expired; custody cannot catch up using the current public RPC. Recovery is
+currently a backup host with inactive independent collectors and a disabled
+full raw-file copy, so that protection step below remains open. Monetary
+budgets remain operator-monitored, and new work stays paused.
+
 ## Prepare the release and storage
 
 1. Select pool/worker commits that passed local PostgreSQL/browser tests and
@@ -89,9 +103,10 @@ Daniel's local computer. Worker execution belongs to the member role.
    a 384 MiB / 20%-of-one-CPU cap. The three compressed archives occupied about
    4.9 MiB: roughly 2.3 GiB/day per collector at one block/minute, before database
    expansion, reports, custody archives and backups. This short sample is an
-   estimate, not a sustained capacity guarantee. Measure a longer run and size
-   retention accordingly; the current server's approximately 26 GiB free is
-   insufficient for a comfortable multi-round production archive.
+   estimate, not a sustained capacity guarantee. The longer-run 9 October
+   measurement is in [operations status](OPERATIONS_STATUS.md#measured-footprint):
+   primary database about 26.4 GiB, blocks 21.2 GiB, and recovery bases plus WAL
+   about 88.2 GiB. Size retention and copy staging from measured growth.
 4. Keep immutable raw evidence until all related collateral, disputes and
    settlement obligations are resolved and backed up. Do not delete old
    evidence merely to keep a service running. A second directory on the same

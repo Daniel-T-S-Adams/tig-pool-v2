@@ -98,7 +98,15 @@ browser test completes member payment, fee funding and operator payment in one
 flow using simulated chain evidence and exact integer amounts. These tests send
 no real funds and do not establish a completed mainnet reward cycle.
 
-## Paused mainnet deployment — 4 October 2026
+## Current deployment — 9 October 2026
+
+The payout implementation is in the current cleanup release `c954172`, schema
+through 019. Member funds are enabled, new work paused and settlement disabled.
+The operator reserve is still unset, so operator payout configuration remains
+disabled. Custody RPC access currently prevents a fresh wallet check. See
+[operations status](OPERATIONS_STATUS.md).
+
+## Historical deployment verification — 4 October 2026
 
 Release `994739d` and migration 015 are installed on the primary and German
 recovery servers. The matching website assets are deployed; previous asset

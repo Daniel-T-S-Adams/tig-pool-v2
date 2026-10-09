@@ -2,18 +2,20 @@
 
 **Most routine owner actions belong on the pool website. MetaMask signs money
 movements. Hetzner hosts the services and their configuration. Software changes
-are developed and tested before a fixed release is deployed to Hetzner.**
+are reviewed and tested before a fixed release is deployed.**
 
-Prepared 29 September 2026 against pool commit `994739d`; revised 8 October 2026
-against `main` after PR #28. This guide describes the current v2 implementation,
-including operator income withdrawals. A feature must also be deployed and
-enabled before you can use it on your site. The latest deployment record is
-dated 8 October: release tag `mainnet-reference-hyperparameters-20261008` runs on
-the primary server with public HTTPS active and worker API access verified; member
-funds are enabled while new work and settlement remain disabled; the recovery
-server still runs the 4 October release. Preparing this guide did not recheck or
-change the running servers. See [Cloudflare setup](CLOUDFLARE_SETUP.md) and
-[mainnet deployment](MAINNET_DEPLOYMENT.md) for the outstanding launch work.
+Revised **9 October 2026**, checked against release
+`mainnet-operational-cleanup-20261009` (`c954172`, schema through 019).
+Member funds are enabled; new work is paused and settlement is disabled.
+The API serves pinned worker `fd29279`. Recovery preserves base backups, WAL
+and encrypted settings; its API and collectors are inactive and the full raw
+file-copy job is disabled. A usable Base RPC, unresolved round-137 block gaps
+and storage protection remain cleanup items. See [operations status](OPERATIONS_STATUS.md)
+for the current findings, what the evidence means and the storage discussion.
+
+This guide describes implemented controls. A control still depends on its
+deployed capability, custody checks and complete evidence; its presence on the
+website does not establish that a full mainnet reward cycle has passed.
 
 The website address is `https://pool.tig.foundation`. Open `/operator` for owner controls, `/` for a member account, and
 `/join` for worker installation instructions. The separate

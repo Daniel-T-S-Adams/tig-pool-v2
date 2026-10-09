@@ -1,10 +1,11 @@
 # Member funds foundation
 
-This increment implements the internal v2 funds services and their first API
-routes. It does not run a live pool, accept work, send transactions, or finish
-round settlement. Existing deployment entrypoints do not import it. The
-remaining live protocol checks in [PROTOCOL_VALIDATION.md](PROTOCOL_VALIDATION.md)
-still gate dependent monetary integration.
+These services implement v2 funds accounting and are used by the deployed
+mainnet API. The initial foundation tests used isolated generated evidence;
+later custody, submission and withdrawal integrations are linked below.
+The API holds no signing key and does not send tokens. New work is paused and
+settlement is disabled; see [operations status](OPERATIONS_STATUS.md) for the
+current release, enabled controls and remaining evidence checks.
 
 ## Storage and accounting
 
@@ -32,7 +33,8 @@ The application database role must not own the schema or have DDL/TRUNCATE
 permissions. Administrative access can change database enforcement; these
 triggers do not attempt to defeat a database administrator. Deployment role
 provisioning, continuously observed wallet reconciliation, and the live
-protocol-fee top-up adapter remain to be wired into the isolated deployment.
+protocol-fee top-up adapter are installed on mainnet. Custody freshness currently
+fails because its public Base RPC cannot serve the required historical reads.
 
 ## Identity, deposits and API
 
@@ -64,16 +66,17 @@ separate work pending the live emissions-to-receipt mapping.
 
 | Route | Authority / behavior |
 |---|---|
-| `GET /api/v2/capabilities` | Public; advertises v2, whole benchmarks, and work disabled. |
+| `GET /api/v2/capabilities` | Public; advertises v2 and actual deployment/work-pause flags. |
 | `POST /api/v2/auth/challenges`, `/sessions` | Wallet challenge and one-use signature verification. |
 | `POST /api/v2/auth/execution-tokens`, `/revoke` | Wallet session only. |
 | `GET /api/v2/member/balance`, `/journal` | Member token; exact amounts encoded as decimal strings. |
 | `POST /api/v2/operator/members/{id}/multiplier` | Separate operator credential; actor, reason and immutable revision recorded. |
 | `POST /api/v2/withdrawals` | Wallet session, available funds, one pending request, seven days since previous payment; funds actions disabled by default. |
 
-The HTTP deployment still needs TLS, ingress rate limits (especially sign-in),
-operator access controls, secret configuration, and the remaining lifecycle
-routes. Do not expose this factory as a finished production application.
+The mainnet service runs behind Cloudflare and origin HTTPS, with operator
+access controls, protected credentials and lifecycle routes. Use the configured
+service entrypoint and deployment procedure; low-level factory defaults are
+for isolated development and do not establish deployment readiness.
 
 ## Reservations and handover
 
@@ -103,7 +106,9 @@ Withdrawal requests reserve their full amount and freeze the destination;
 execution tokens cannot create them. The [withdrawal increment](WITHDRAWALS_V2.md)
 implements operator review, potentially-sent attempts, outgoing verification,
 payment/cancellation and signed destination changes. Continuous chain indexing
-and product screens remain unfinished. No application signer is used.
+and [member/operator screens](DASHBOARD_V2.md) are implemented. Current custody
+access and final reward/expense integrations remain open. No application signer
+is used.
 
 ## Validation
 

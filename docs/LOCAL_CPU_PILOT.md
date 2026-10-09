@@ -7,8 +7,10 @@ to the final test.
 
 The worker now supplies a local pilot launcher and systemd slice. Follow the
 [recorded worker procedure](https://github.com/Daniel-T-S-Adams/innopool-slave-v2/blob/ded5f4b4fe07de0cfeb1845cb50f9ef97ae65c36/docs/LOCAL_CPU_PILOT.md).
-CI pins that same worker revision for the paired API tests; this is an
-integration pair, not a published production release.
+That was the original September testnet pin. Current CI and mainnet serve
+worker `fd29279`; the mainnet CPU attempt expired before TIG accepted its
+results. See [operations status](OPERATIONS_STATUS.md). The resource procedure
+below describes the bounded shared-machine pilot, not a performance guarantee.
 
 All new pilot services must share `innopoolv2pilot.slice`: one CPU's worth of
 processing, 2 GiB total memory, no swap and at most 256 processes/threads. Native
@@ -25,12 +27,12 @@ Drained updates retain the configuration. An offline Docker test demonstrated
 CPU throttling and a container-local out-of-memory termination under these controls.
 It did not submit TIG work or exercise a member's collateral.
 
-Before funded execution, finish the isolated service deployment and monitoring,
-and install the financial ceilings and benchmark-count cap below. Daniel expects
-the selected resources to fit a real benchmark; the first bounded live attempt
-will confirm its memory use and completion time. Separate unpaid sizing is
-optional for this pilot. A single
-worker can otherwise continue requesting benchmarks. Hitting a resource limit
+Before another paid mainnet attempt, measure running time on the intended
+hardware and verify that the entire minimum benchmark fits TIG's lifetime,
+including result/proof exchange. The 7–9 October attempt did not fit. The
+financial ceilings below belong to the historical testnet pilot, not the
+operator-monitored mainnet budget. A single worker can otherwise continue
+requesting benchmarks. Hitting a resource limit
 can fail an acknowledged assignment and forfeit its collateral under the agreed
 rules; do not silently raise the host resource ceiling to avoid that failure.
 

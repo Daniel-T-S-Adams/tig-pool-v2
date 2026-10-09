@@ -112,5 +112,8 @@ archive. The worker verifies it against the assignment's checksum before
 extracting the expected named library. It does not require a token: these are
 already-public TIG algorithm binaries, and no member files are served.
 
-Current worker pin: `4ff2cceed89b98ec65bc0a062ebcf391a8d23778`. This is an
-integration-test pairing, not a production release manifest.
+CI and the served mainnet worker pin are
+`fd29279ce816c9f4e6e1416715971201c92775e0`, tag
+`mainnet-cpu-pilot-20261007`. The deployed pool application is recorded in
+[operations status](OPERATIONS_STATUS.md). Simulated pairing tests do not prove
+timely CPU/GPU execution or successful mainnet activation.

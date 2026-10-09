@@ -1,9 +1,11 @@
 # TIG submission and recovery service
 
 The v2 coordinator links the member queue to TIG using durable submission
-intents. It runs independently of the API and block collector. This increment
-has been tested with simulated writes and real public reads; no TIG key was
-configured and no live benchmark or token transfer was submitted.
+intents. It runs independently of the API and block collector. The initial
+increment used simulated writes. Live CPU testnet activation was checked in
+September; the 7 October mainnet CPU attempt later expired. The installed
+mainnet coordinator can reconcile existing submissions while new work is
+paused. See [operations status](OPERATIONS_STATUS.md).
 
 ## Durable submission sequence
 
@@ -51,8 +53,14 @@ Activations and confirmed verification failures free slots while keeping all
 collateral held for X+2 finalization. Disappearing records, elapsed wall time,
 ambiguous HTTP failures and missing reports do not release funds. Explicit
 definitive-rejection handling exists for a trusted protocol adapter; generic
-HTTP 4xx responses are deliberately insufficient evidence. The live rejection
-classification and definitive-expiry rule remain Stage 0 integration checks.
+HTTP 4xx responses are deliberately insufficient evidence. The October
+cleanup adds a narrow late-results rule: the exact archived HTTP-400 missing-
+precommit response must match the configured TIG origin, benchmark ID and raw
+hash; a complete later pool feed must contain no record for it; the original
+challenge lifetime must have elapsed. Any successful prior result response or
+proof intent prevents this rule. It atomically marks the reservation expired
+and result intent rejected, freeing the slot while preserving collateral.
+Other rejection/expiry paths still require their own definitive evidence.
 
 Pausing new work cancels unsent precommits and permits existing payload recovery.
 An uncertain operation is retained. Unused, unsent result/proof intents can be
