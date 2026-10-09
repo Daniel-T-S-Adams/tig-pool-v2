@@ -75,7 +75,11 @@ The old importer replayed an entire network block for each report just to find
 its height. PR #38 uses the validated immutable block header for that lookup;
 conflicting or missing anchors remain errors. Full block replay is still used
 where qualifier calculations or protocol deadlines require it. The archived
-report backlog is being drained with the bounded, paused maintenance tool.
+report backlog was cleared by 13:46 UTC on 9 October using two bounded passes
+alongside the normal recorder. The pending queue reached zero; neither pass
+had import errors. Incomplete upstream responses were preserved as incomplete
+captures, not accepted as full report evidence. A few fresh captures can still
+be pending briefly while the regular recorder imports them.
 
 ## Wallet observation
 
@@ -148,6 +152,11 @@ base backup completed at 03:42 UTC with archive checksums and required WAL
 verified. Three verified daily bases are retained with WAL back to the oldest
 base. The actual point-in-time restore rehearsal passed on 4 October; today's
 checksum verification is not a new restore rehearsal.
+
+The exact cleanup application and encrypted configuration arrived on Germany
+at 13:24 UTC and all exported-file checksums matched. This configuration copy
+does not advance the database recovery point. The primary ledger audit passed
+after the update and catch-up; new work remained paused throughout.
 
 The former **full raw-evidence copy is disabled**, following its 8 October
 disk-reserve failure. Germany's independent block/report collectors have been

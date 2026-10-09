@@ -20,8 +20,8 @@ The foundation and increment records below are historical validation records.
   financial journal for later finalization. Timely CPU completion is unproved.
 - **Evidence:** round 137 has unresolved gaps at `1375817` and `1376650`, in
   addition to the recorded prelaunch waiver at `1372249`. Exact settlement is
-  held. Report import now uses validated block headers for height lookup, and
-  the saved backlog is being drained.
+  held. Report import now uses validated block headers for height lookup. The
+  saved backlog reached zero pending files at 13:46 UTC, with no import errors.
 - **Custody:** public Base RPC access is failing on historical queries. Calls
   are paced and failure details are recorded; a usable endpoint is still needed.
 - **Protection:** daily verified off-host base backups, continuous WAL and
