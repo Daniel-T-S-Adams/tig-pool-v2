@@ -130,10 +130,16 @@ See [PostgreSQL's WAL introduction](https://www.postgresql.org/docs/18/wal-intro
 and [receiver documentation](https://www.postgresql.org/docs/18/app-pgreceivewal.html).
 
 Normal runtime and migration-owner commits require the German receiver's disk
-acknowledgment. Observer commits remain local so collection can continue during
-a receiver outage. Database WAL does **not** contain spool files that have not
+acknowledgment. The 14:55 storage trace confirmed that all six running primary
+services, including the four collectors, use `innopool_runtime` with
+`synchronous_commit=on`. The separately configured `innopool_observer` role uses
+local commits, but these services do not currently use it. Collector files can
+still be saved locally while database import waits for the receiver.
+Database WAL does **not** contain spool files that have not
 yet entered the database, or worker files on another machine. A backup is not
 an independent TIG collector: it cannot reconstruct an observation never made.
+See [the storage map](STORAGE_MAP.md) for data sources, paths, transfer schedules
+and the measured database breakdown.
 
 The approved evidence policy keeps raw blocks and reports for four rounds and
 wallet/fee captures for thirty days, with obligation, credit-coverage and backup
