@@ -99,6 +99,13 @@ member's acknowledgement is durable and idempotent. Publication alone does not
 establish handover. Activation/failure/definitive expiry frees the slot while
 retaining collateral. A first acknowledgement after expiry is rejected; a retry
 of a previously committed acknowledgement returns the original timestamp.
+After confirmed handover, a member who never returns results follows the same
+expiry and collateral rules as an explicitly rejected late result. Validated
+elapsed-lifetime evidence and durable proof that no result was sent free the
+slot; they leave the original hold intact for X+2 finalization. A never-active
+handed-over benchmark forfeits that hold once to its creation round's pot.
+Possibly sent results remain pending for reconciliation; submission fees still
+belong to the operator. See [submission recovery](SUBMISSION_RECOVERY.md).
 The [settlement increment](ROUND_SETTLEMENT.md) implements X+2 collateral
 finalization and funded round allocation behind verified protocol adapters.
 

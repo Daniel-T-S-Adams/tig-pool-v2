@@ -62,6 +62,34 @@ proof intent prevents this rule. It atomically marks the reservation expired
 and result intent rejected, freeing the slot while preserving collateral.
 Other rejection/expiry paths still require their own definitive evidence.
 
+### A member never returns results
+
+Handed-over work also expires when its original challenge lifetime has strictly
+elapsed in a validated later block, the challenge lifetime is unchanged, and a
+complete pool feed contains no precommit, benchmark, proof or fraud record for
+it. The original block must still replay and match the assignment's creation
+height and block ID. An active benchmark prevents expiry.
+
+Under the same reservation lock used by uploads and first sends, reconciliation
+checks that no results could have been submitted: there is either no result
+intent, or a `ready` intent with no send timestamp or response. Any proof intent,
+authoritative sampled-nonce record, or possibly sent/accepted result prevents
+this rule. Thus an HTTP timeout cannot be converted into an abandoned benchmark.
+
+The transaction records `tig-unsent-results-expiry-v1`, marks the reservation
+`expired`, frees its slot, and cancels any queued unsent result intent. Stored
+payloads remain immutable. A first upload after expiry is rejected; a retry of
+an identical already-stored upload remains idempotent and cannot restart its
+cancelled intent. The coordinator checks the latest complete block before
+dispatching payloads, including while new work is paused.
+
+The financial consequences match the explicit rejected-late-result path:
+collateral stays held until normal finalization after the end of X+2. Because
+the handed-over benchmark never activated, finalization forfeits its original
+held amount once into its creation round's pot. No qualifying credit is earned
+and submission fees remain the operator's expense. This rule does not expire
+an assignment that was never acknowledged or release funds early.
+
 Pausing new work cancels unsent precommits and permits existing payload recovery.
 An uncertain operation is retained. Unused, unsent result/proof intents can be
 retired only after a definitive benchmark outcome. A service lease never

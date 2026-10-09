@@ -10,6 +10,14 @@ at `1375817` and `1376650`, after the one-time prelaunch waiver for `1372249`.
 The expired CPU attempt's slot is free, with collateral still held for its
 existing X+2 rules. See [operations status](OPERATIONS_STATUS.md).
 
+An acknowledged benchmark that expires without ever sending results uses the
+same finalization path as an explicitly rejected late result: release its work
+slot on evidenced expiry, keep collateral held until normal finalization after
+the end of X+2, and forfeit the original hold once to its creation round's pot
+because it never activated. Submission fees remain operator costs. This does
+not change reporting evidence, finalization gates or settlement controls. See
+[the unsent-results expiry evidence](SUBMISSION_RECOVERY.md#a-member-never-returns-results).
+
 ## Evidence collected before financial decisions
 
 `tools/observe_reports_v2.py` independently polls public reports/arbitrations.

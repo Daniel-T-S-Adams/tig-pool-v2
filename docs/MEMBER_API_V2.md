@@ -86,6 +86,16 @@ round's X+2 rule. Missing or ambiguous external evidence leaves the operation
 pending. Pausing new work keeps authenticated handover/recovery/upload routes
 available for existing work.
 
+After handover, never returning results has the same financial outcome as TIG
+rejecting a late result. Once the recorded protocol lifetime has elapsed, a
+complete later pool feed has no record for the benchmark, and durable submission
+records prove no result was sent, the pool marks it `expired` and frees the
+slot. Queued unsent results are cancelled; possibly sent results remain pending
+for reconciliation. A first upload after expiry returns 409. Collateral remains
+held for normal X+2 finalization, when the original hold is forfeited once to the
+creation round because the benchmark never activated. No member submission-fee
+charge is added. See [submission recovery](SUBMISSION_RECOVERY.md).
+
 ## Implementation boundary and tests
 
 The API, transactional queue, handover and upload storage are implemented.
