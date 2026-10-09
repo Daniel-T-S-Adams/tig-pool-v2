@@ -3,6 +3,8 @@ import gzip
 import io
 import json
 from pathlib import Path
+from datetime import datetime, timezone
+import hashlib
 import tarfile
 import time
 from unittest.mock import Mock
@@ -31,6 +33,8 @@ class SubmissionTests(DatabaseCase):
         self.fund(amount=200*TIG)
         self.fees()
         self.obs = observation(8)
+        for anchor in ('start', 'end'):
+            self.obs[anchor]['block']['config']['challenges'] = {'c1': {'lifespan_period': 120}}
         # Keep one compatible CPU challenge so submission-recovery tests don't
         # depend on the selector's intentional random tie-breaking.
         next(value for value in self.obs["challenges"]["challenges"] if value["id"]=="c2")["config"]["type"]="gpu"
@@ -396,3 +400,57 @@ class SubmissionTests(DatabaseCase):
         reconcile_block(self.db,block_id,self.player)
         self.assertEqual(self.balance()["slots"],1)
         self.assertEqual(self.balance()["collateral"],40*TIG)
+
+    def late_result_fixture(self, *, height=200, status=400, origin='https://tig.example', body=None,
+                            raw_hash=None, still_present=False):
+        row, intent = self.queued()
+        submissions.begin(self.db, intent['id'], preflight=self.preflight())
+        submissions.record_response(self.db, intent['id'], {'status': 200, 'body': {'benchmark_id': 'b'*32}})
+        precommit = self.precommit(row)
+        accepted = submissions.publish_assignment(self.db, row['id'], precommit, evidence={'block': 9})
+        benchmarks.acknowledge(self.db, row['id'], self.member, accepted['assignment_digest'])
+        member_protocol.results(self.db, accepted['benchmark_id'], self.member,
+                                {'merkle_root': 'a'*64, 'solution_quality': [9]*accepted['assignment']['num_nonces']})
+        result = self.row("SELECT id FROM protocol_outbox WHERE reservation_id=%s AND kind='results'", (row['id'],))
+        submissions.begin(self.db, result['id'])
+        text = body if body is not None else 'Precommit does not exist: ' + accepted['benchmark_id']
+        submissions.record_response(self.db, result['id'], {'status': status, 'body': text,
+            'path': '/submit-benchmark', 'origin': origin,
+            'raw_sha256': raw_hash or hashlib.sha256(text.encode()).hexdigest(),
+            'received_at': datetime.now(timezone.utc).isoformat()})
+        data = observation(height)
+        for anchor in ('start', 'end'):
+            data[anchor]['block']['config']['challenges'] = {'c1': {'lifespan_period': 120}}
+        data['pool_player_id'] = self.player
+        data['pool_pending'] = {'precommits': [precommit] if still_present else [],
+                                'benchmarks': [], 'proofs': [], 'frauds': []}
+        outcome = BlockStore(self.db).record(data, collector='late-result-fixture')
+        return row, result, outcome['block_id']
+
+    def test_exact_late_result_rejection_releases_slot_and_preserves_collateral(self):
+        row, result, block_id = self.late_result_fixture()
+        before = self.balance()
+        reconcile_block(self.db, block_id, self.player, submission_origin='https://tig.example')
+        reconcile_block(self.db, block_id, self.player, submission_origin='https://tig.example')
+        saved = self.row('SELECT state,slot_held,collateral_outcome FROM reservations WHERE id=%s', (row['id'],))
+        self.assertEqual((saved['state'], saved['slot_held'], saved['collateral_outcome']), ('expired', False, None))
+        self.assertEqual(self.balance()['collateral'], before['collateral'])
+        self.assertEqual(self.balance()['available'], before['available'])
+        self.assertEqual(self.row('SELECT state FROM protocol_outbox WHERE id=%s', (result['id'],))['state'], 'rejected')
+        self.assertEqual(self.row("SELECT count(*) AS n FROM reservation_events WHERE reservation_id=%s AND kind='expired'",
+                                  (row['id'],))['n'], 1)
+
+    def test_result_rejection_needs_lifetime_correct_identity_origin_and_digest(self):
+        cases = ({'height': 128}, {'status': 500}, {'body': 'Precommit does not exist: ' + 'c'*32},
+                 {'origin': 'https://different.example'}, {'raw_hash': '0'*64}, {'still_present': True})
+        for index, options in enumerate(cases):
+            with self.subTest(options=options):
+                # Each case has an independent immutable assignment and archive.
+                if index:
+                    self.tearDown()
+                    self.setUp()
+                row, result, block_id = self.late_result_fixture(**options)
+                reconcile_block(self.db, block_id, self.player, submission_origin='https://tig.example')
+                self.assertEqual(self.row('SELECT state FROM reservations WHERE id=%s', (row['id'],))['state'], 'accepted')
+                self.assertEqual(self.row('SELECT state FROM protocol_outbox WHERE id=%s', (result['id'],))['state'], 'uncertain')
+                self.assertEqual(self.balance()['slots'], 1)

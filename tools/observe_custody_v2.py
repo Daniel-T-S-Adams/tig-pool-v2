@@ -31,15 +31,18 @@ def main(argv=None):
     parser.add_argument('--batch-size',type=int,default=1000)
     parser.add_argument('--spool',required=True)
     parser.add_argument('--poll-seconds',type=float,default=10)
+    parser.add_argument('--rpc-interval-seconds',type=float,default=1,
+                        help='minimum spacing between read-only RPC requests; zero disables pacing')
     parser.add_argument('--once',action='store_true')
     parser.add_argument('--replay-only',action='store_true')
     args=parser.parse_args(argv)
-    if not 1<=args.batch_size<=1000 or not 0<args.poll_seconds<=60 or (args.start_height is not None and args.start_height<1):
+    if not 1<=args.batch_size<=1000 or not 0<args.poll_seconds<=60 or not 0<=args.rpc_interval_seconds<=5 or (args.start_height is not None and args.start_height<1):
         parser.error('invalid batch size, starting height or polling interval')
     url=os.environ.get('POOL_V2_CUSTODY_RPC_URL')
     if not url and not args.replay_only:parser.error('POOL_V2_CUSTODY_RPC_URL is required for capture')
     network=Network(args.chain_id,args.token,args.custody,args.confirmations)
     database=Database(os.environ.get('POOL_V2_DATABASE_DSN'))
+    rpc = Rpc(url, interval_seconds=args.rpc_interval_seconds) if not args.replay_only else None
     spool=Spool(args.spool)
     stop=threading.Event()
     for name in (signal.SIGINT,signal.SIGTERM):signal.signal(name,lambda *_:stop.set())
@@ -76,7 +79,7 @@ def main(argv=None):
                 first=state['stream']['last_height']+1
             elif args.start_height is not None:first=args.start_height
             else:raise ValueError('initial custody capture needs --start-height before first wallet funding')
-            data=chain_observer.capture(network,Rpc(url),first,count=args.batch_size,
+            data=chain_observer.capture(network,rpc,first,count=args.batch_size,
                 source='rpc:'+hashlib.sha256(url.encode()).hexdigest()[:16])
             spool.save(data,{'purpose':'finalized-custody-capture'},data['error'])
             drain()

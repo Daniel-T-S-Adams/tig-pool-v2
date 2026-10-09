@@ -54,6 +54,21 @@ def require_block(cursor,block_id):
     if cursor.fetchone():raise Conflict('settlement evidence has a conflicting observed block')
 
 
+def _anchor_height(database, block_id):
+    """Use the immutable validated block header for independent report facts.
+
+    Report import does not need to decompress every other player's benchmark.
+    Full block replay and complete credit remain required for round settlement.
+    """
+    with database.transaction() as cursor:
+        require_block(cursor, block_id)
+        cursor.execute('SELECT height FROM observed_blocks WHERE id=%s', (block_id,))
+        row = cursor.fetchone()
+    if not row:
+        raise ProtocolDataError('report evidence needs a complete observed block anchor')
+    return row['height']
+
+
 def _facts(payload,reporting_round,height):
     validated=validate_reports(payload)
     report_rows=_index(payload['reports'],'id','reports')
@@ -78,12 +93,12 @@ def _facts(payload,reporting_round,height):
 def record(database,reporting_round,block_id,payload,*,metadata=None,error=None):
     """Preserve malformed or incomplete responses without treating them as empty."""
     units(reporting_round,positive=True)
-    _,snapshot=BlockStore(database).read(block_id)
+    height = _anchor_height(database, block_id)
     encoded=canonical(payload).encode();digest=hashlib.sha256(encoded).hexdigest()
     input_digest=fingerprint({'sha256':digest,'metadata':metadata or {},'error':error})
     identity=uuid.uuid4()
     try:
-        _,facts,arbitrations=_facts(payload,reporting_round,snapshot.height)
+        _,facts,arbitrations=_facts(payload,reporting_round,height)
     except (ProtocolDataError,KeyError,TypeError) as failure:
         facts,arbitrations={},{}
         error=str(failure)
@@ -94,7 +109,7 @@ def record(database,reporting_round,block_id,payload,*,metadata=None,error=None)
         previous=cursor.fetchone()
         if previous:return dict(previous)
         cursor.execute('''SELECT * FROM confirmed_reports WHERE (reporting_round=%s AND confirmed_height<=%s)
-            OR report_id=ANY(%s)''',(reporting_round,snapshot.height,list(facts)))
+            OR report_id=ANY(%s)''',(reporting_round,height,list(facts)))
         known=cursor.fetchall()
         for report in known:
             expected=(report['reporting_round'],report['benchmark_id'],report['benchmarker'],int(report['nonce']),report['confirmed_height'])
@@ -102,7 +117,7 @@ def record(database,reporting_round,block_id,payload,*,metadata=None,error=None)
                 error='capture omits or contradicts a previously confirmed report'
         cursor.execute('''SELECT a.* FROM confirmed_arbitrations a JOIN confirmed_reports r ON r.report_id=a.report_id
             WHERE (r.reporting_round=%s AND a.confirmed_height<=%s) OR a.report_id=ANY(%s)''',
-            (reporting_round,snapshot.height,list(arbitrations)))
+            (reporting_round,height,list(arbitrations)))
         for arbitration in cursor.fetchall():
             if arbitrations.get(arbitration['report_id'])!=(arbitration['result'],arbitration['confirmed_height']):
                 error='capture omits or contradicts a previously confirmed arbitration'
@@ -199,7 +214,7 @@ def record_index(database,reporting_round,block_id,player_id,challenge_id,payloa
     or not-yet-reportable benchmarks. scope() still requires a verified adapter.
     """
     units(reporting_round,positive=True)
-    BlockStore(database).read(block_id)
+    _anchor_height(database, block_id)
     encoded=canonical(payload).encode();digest=hashlib.sha256(encoded).hexdigest()
     input_digest=fingerprint({'sha256':digest,'metadata':metadata or {},'error':error})
     identity=uuid.uuid4();identities=[]

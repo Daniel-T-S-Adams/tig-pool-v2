@@ -8,6 +8,8 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 import json
 import re
+import time
+from urllib.error import HTTPError
 from urllib.parse import urlsplit
 from urllib.request import Request, urlopen
 
@@ -133,28 +135,56 @@ def transaction_fee(receipt, model):
     return fee
 
 
+class RpcFailure(FundsError):
+    """Safe provider diagnostics without its URL, credentials or response text."""
+    def __init__(self, method, *, http_status=None, rpc_code=None):
+        self.method, self.http_status, self.rpc_code = method, http_status, rpc_code
+        details = ('HTTP ' + str(http_status)) if http_status is not None else ('RPC code ' + str(rpc_code))
+        super().__init__('RPC ' + method + ' failed (' + details + ')')
+
+
 class Rpc:
     METHODS = {"eth_chainId", "eth_call", "eth_getTransactionReceipt", "eth_getBlockByNumber", "eth_getLogs",
                "eth_getTransactionByHash", "eth_getTransactionCount", "eth_getBalance", "eth_getCode",
                "trace_transaction"}
 
-    def __init__(self, url, timeout=20):
+    def __init__(self, url, timeout=20, *, interval_seconds=0):
         parsed = urlsplit(url)
         if parsed.scheme not in ("http", "https") or not parsed.netloc or parsed.username or parsed.password or parsed.fragment:
             raise ValueError("invalid RPC URL")
         self.url, self.timeout = url, timeout
+        if not 0 <= interval_seconds <= 5:
+            raise ValueError('RPC request interval must be between zero and five seconds')
+        self.interval_seconds, self._last_request = interval_seconds, 0.0
 
     def __call__(self, method, params):
         if method not in self.METHODS:
             raise FundsError("RPC method is not read-only/allowed")
         body = json.dumps({"jsonrpc": "2.0", "id": 1, "method": method, "params": params}).encode()
         request = Request(self.url, data=body, headers={"Content-Type": "application/json", "User-Agent": "innopool-v2-readonly-probe/0.1"})
-        with urlopen(request, timeout=self.timeout) as response:
-            raw = response.read(16 * 1024 * 1024 + 1)
+        delay = self.interval_seconds - (time.monotonic() - self._last_request)
+        if delay > 0:
+            time.sleep(delay)
+        self._last_request = time.monotonic()
+        try:
+            with urlopen(request, timeout=self.timeout) as response:
+                raw = response.read(16 * 1024 * 1024 + 1)
+        except HTTPError as error:
+            with error:
+                raw = error.read(65536)
+            try:
+                code = json.loads(raw).get('error', {}).get('code')
+            except (ValueError, AttributeError):
+                code = None
+            raise RpcFailure(method, http_status=error.code,
+                             rpc_code=code if type(code) is int else None) from error
         if len(raw) > 16 * 1024 * 1024:
             raise FundsError("RPC response too large")
         result = json.loads(raw)
-        if result.get("error") or result.get("id") != 1 or "result" not in result:
+        if result.get('error'):
+            code = result['error'].get('code') if isinstance(result['error'], dict) else None
+            raise RpcFailure(method, rpc_code=code if type(code) is int else None)
+        if result.get("id") != 1 or "result" not in result:
             raise FundsError("RPC request failed")
         return result["result"]
 

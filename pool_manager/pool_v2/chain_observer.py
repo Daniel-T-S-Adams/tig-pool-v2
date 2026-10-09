@@ -14,7 +14,7 @@ import json
 from psycopg2.extras import Json
 
 from . import custody,deposits,ledger
-from .chain import Chain,Network,TRANSFER_TOPIC,hex_bytes,quantity
+from .chain import Chain,Network,TRANSFER_TOPIC,hex_bytes,quantity,Rpc,RpcFailure
 from .database import lock
 from .money import Conflict,FundsError,units
 
@@ -106,7 +106,11 @@ def capture(network,rpc,first,*,count=1000,source='configured-rpc'):
     data={'version':2,'network':asdict(network),'first':first,'count':count,
         'checked_at':checked.isoformat(),'source':source,'calls':calls,'error':None}
     try:_read(network,recorded,first,count,checked,version=2)
-    except Exception as failure:data['error']=type(failure).__name__
+    except Exception as failure:
+        data['error']=type(failure).__name__
+        if isinstance(failure, RpcFailure):
+            data['error_details'] = {'method': failure.method, 'http_status': failure.http_status,
+                                     'rpc_code': failure.rpc_code}
     return data
 
 
@@ -157,7 +161,16 @@ def record(database,data,*,initialize=False,baseline_actor=None,baseline_reason=
     identity=save(database,data)
     try:value=verify(data)
     except Exception as failure:
-        _failure(database,identity,type(failure).__name__)
+        details = data.get('error_details')
+        # Provider response messages and URLs are never exposed in status.
+        reason = type(failure).__name__
+        if data.get('error') == 'RpcFailure' and isinstance(details, dict):
+            method = details.get('method')
+            if method in Rpc.METHODS:
+                code = details.get('http_status')
+                reason = 'RPC ' + method + ' failed'
+                if type(code) is int: reason += ' (HTTP ' + str(code) + ')'
+        _failure(database,identity,reason)
         raise
     network=value['network']
     try:
