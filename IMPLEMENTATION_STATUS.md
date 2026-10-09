@@ -7,7 +7,7 @@ The foundation and increment records below are historical validation records.
 
 ## Current summary
 
-- **Application:** `c954172`, tag `mainnet-operational-cleanup-20261009`, runs
+- **Application:** `8477509`, tag `mainnet-abandoned-benchmark-expiry-20261009`, runs
   on all six primary services; migration history is verified through 019.
   The same application is staged on recovery and its collector units point to
   it, with recovery API/collectors inactive.
@@ -18,6 +18,11 @@ The foundation and increment records below are historical validation records.
   lifetime and TIG rejected it. The evidenced rejection now resolves its slot
   as expired and its result intent as rejected, preserving collateral and the
   financial journal for later finalization. Timely CPU completion is unproved.
+- **Abandoned results:** acknowledged work with no possibly sent result now
+  expires automatically using archived lifetime and complete later absence
+  evidence. It frees the slot, cancels queued unsent results, and preserves
+  collateral for the same X+2 forfeiture as rejected late results. Uncertain
+  writes remain held. See [submission recovery](docs/SUBMISSION_RECOVERY.md).
 - **Evidence:** round 137 has unresolved gaps at `1375817` and `1376650`, in
   addition to the recorded prelaunch waiver at `1372249`. Exact settlement is
   held. Report import now uses validated block headers for height lookup. The
@@ -30,7 +35,8 @@ The foundation and increment records below are historical validation records.
   collectors are inactive. Pending-file protection and the recovery health
   profile need an agreed storage setup. The 4 October PITR rehearsal passed.
 - **Validation:** all 299 pool tests and hosted CI passed for PR #38, including
-  paired worker/browser checks. The API still serves worker `fd29279`, tag
+  paired worker/browser checks. The current expiry fix passed the existing
+  required CI for PR #40. The API still serves worker `fd29279`, tag
   `mainnet-cpu-pilot-20261007`; worker development is tracked separately.
 - **Workflow:** protected `main` integrates PRs; `release/v2` follows the deployed
   application tag. `redesign/v2` was retired on 8 October.

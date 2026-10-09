@@ -10,7 +10,7 @@ of their checks; they do not override this record.
 |---|---|
 | Primary | Helsinki, `46.62.249.188`; website, API, coordinator and four observers |
 | Recovery | Nuremberg, `2.28.230.81`; database backups, WAL receiver and configuration copies |
-| Pool application | `c95417205139b4ff2b7117723029e8ab1f7f4f13`, tag `mainnet-operational-cleanup-20261009` |
+| Pool application | `8477509afafe80b59f8fa7752b5faa0f537fedb2`, tag `mainnet-abandoned-benchmark-expiry-20261009` |
 | Worker served by the API | `fd29279ce816c9f4e6e1416715971201c92775e0`, tag `mainnet-cpu-pilot-20261007` |
 | Schema | 19 verified migrations; no migration required for this cleanup |
 | Member funds | Enabled, with custody freshness checks still applying |
@@ -24,9 +24,14 @@ application tag. Documentation commits can advance `main` without changing the
 running application or the worker served by the API. The worker's development
 head may also differ from the pinned worker above.
 
-The cleanup passed all **299 pool tests**, including the paired worker and
-Chromium flows, and the hosted `pool-baseline` check. See
-[PR #38](https://github.com/Daniel-T-S-Adams/tig-pool-v2/pull/38).
+The preceding operational cleanup passed all **299 pool tests**, including the
+paired worker and Chromium flows, and the hosted `pool-baseline` check. See
+[PR #38](https://github.com/Daniel-T-S-Adams/tig-pool-v2/pull/38). The current
+abandoned-results expiry change passed the existing required hosted checks in
+[PR #40](https://github.com/Daniel-T-S-Adams/tig-pool-v2/pull/40). It requires no
+migration, dependency or worker change. Activated at 14:28 UTC on 9 October,
+it preserved all ledger balances and journals with all nineteen stored
+migration checksums verified; recovery staging completed at 14:27 UTC.
 
 ## CPU benchmark and protocol evidence
 
@@ -45,6 +50,19 @@ challenge lifetime has elapsed. The reservation slot is freed and the result
 intent becomes `rejected`. The result POST is not retried. Collateral and
 financial history remain intact for the existing end-of-X+2 finalization rules;
 an expired work slot does not make collateral spendable immediately.
+
+An acknowledged benchmark whose member never returns results now reaches the
+same expiry and financial outcome automatically. Reconciliation requires the
+archived creation block, a complete later pool feed with no records for the
+benchmark, a strictly elapsed and unchanged challenge lifetime, and durable
+proof that no results could have been sent. It frees the slot and cancels any
+queued unsent result. Possibly sent or accepted results, proof intents and
+authoritative sampling remain pending for their own reconciliation.
+
+Both cases retain the original collateral until normal finalization after the
+end of X+2. A handed-over benchmark that never activated forfeits that hold once
+to its creation round's pot; it earns no qualifying credit and adds no member
+submission-fee charge. See [the recovery rule](SUBMISSION_RECOVERY.md#a-member-never-returns-results).
 
 Before another paid attempt, measure actual nonce running time on the intended
 hardware and resource limits, and check that the whole protocol minimum fits
@@ -153,8 +171,9 @@ verified. Three verified daily bases are retained with WAL back to the oldest
 base. The actual point-in-time restore rehearsal passed on 4 October; today's
 checksum verification is not a new restore rehearsal.
 
-The exact cleanup application and encrypted configuration arrived on Germany
-at 13:24 UTC and all exported-file checksums matched. This configuration copy
+The earlier cleanup application and encrypted configuration arrived on Germany
+at 13:24 UTC. The current expiry release and encrypted settings were exported
+at 14:29 UTC and copied there, with all exported-file checksums verified. This configuration copy
 does not advance the database recovery point. The primary ledger audit passed
 after the update and catch-up; new work remained paused throughout.
 

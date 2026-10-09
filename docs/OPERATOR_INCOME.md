@@ -100,7 +100,7 @@ no real funds and do not establish a completed mainnet reward cycle.
 
 ## Current deployment — 9 October 2026
 
-The payout implementation is in the current cleanup release `c954172`, schema
+The payout implementation is in the current cleanup release `8477509`, schema
 through 019. Member funds are enabled, new work paused and settlement disabled.
 The operator reserve is still unset, so operator payout configuration remains
 disabled. Custody RPC access currently prevents a fresh wallet check. See

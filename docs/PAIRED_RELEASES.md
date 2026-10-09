@@ -2,7 +2,7 @@
 
 The API publishes a paired release and its checked worker installer. A private
 CPU testnet pair was validated in September. Mainnet now serves pool
-`c954172` with worker `fd29279` (`mainnet-cpu-pilot-20261007`). The later mainnet
+`8477509` with worker `fd29279` (`mainnet-cpu-pilot-20261007`). The later mainnet
 CPU attempt expired before TIG accepted its results; a served release is not
 proof of timely execution or a completed reward cycle. New work remains paused.
 See [operations status](OPERATIONS_STATUS.md) and the

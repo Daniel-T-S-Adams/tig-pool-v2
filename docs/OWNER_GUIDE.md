@@ -5,7 +5,7 @@ movements. Hetzner hosts the services and their configuration. Software changes
 are reviewed and tested before a fixed release is deployed.**
 
 Revised **9 October 2026**, checked against release
-`mainnet-operational-cleanup-20261009` (`c954172`, schema through 019).
+`mainnet-abandoned-benchmark-expiry-20261009` (`8477509`, schema through 019).
 Member funds are enabled; new work is paused and settlement is disabled.
 The API serves pinned worker `fd29279`. Recovery preserves base backups, WAL
 and encrypted settings; its API and collectors are inactive and the full raw
