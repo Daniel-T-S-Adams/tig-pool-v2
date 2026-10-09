@@ -214,6 +214,8 @@ No other member may receive that benchmark, including after disconnects or local
 
 A successful proof POST does not mean the benchmark is active. A missing API record or stale cache does not prove expiry or successful arbitration. The observer must retain the evidence that caused every terminal transition.
 
+After confirmed handover, TIG rejecting a late result and the member never returning results have the same consequences. For work with no possibly sent results, establish expiry from the archived creation block and challenge lifetime, a complete later block beyond that lifetime with no benchmark records, unchanged lifetime configuration, and the durable submission fences. Free the slot, cancel queued unsent results, and keep collateral held for normal finalization. A never-active benchmark forfeits its original held amount once into its creation round's pot after X+2; submission fees remain the operator's expense. Uncertain or accepted result submissions still require their own protocol reconciliation.
+
 These states also apply when the multiplier is zero. Record the reservation and its final disposition normally, with no monetary journal movement for a zero amount. Failure or an upheld report then forfeits zero TIG; it does not create a charge for the unreserved base amount.
 
 ### Member protocol and reference client
@@ -558,6 +560,8 @@ Use ordinary unit tests for selection and allocation mathematics, real PostgreSQ
 | Member acknowledgement commits but its HTTP response is lost | Retry or query status to recover the same confirmation; preserve ownership, collateral, and member responsibility without a second handover. |
 | Acknowledgement has the wrong member or payload, or first arrives after definitive expiry | Reject it without establishing handover; results cannot bypass the acknowledgement step. |
 | Pool or member fails after confirmed handover | Member responsibility applies; no takeover. Expiry frees the slot, and the recorded collateral is forfeited at finalization if the benchmark never became active. |
+| Member never uploads results, or uploads results too late for a first TIG submission | Establish elapsed protocol lifetime and complete later absence, prove no result was sent, expire the benchmark and cancel queued unsent results atomically. Free the slot and forfeit the original hold once at normal X+2 finalization. |
+| TIG explicitly rejects a late result after handover | Use definitive archived rejection and lifetime evidence; apply the same slot release and X+2 collateral outcome as missing results. Never retry an uncertain result POST. |
 | Proof submission succeeds but activation is delayed | Slot remains occupied until the authoritative activation event. |
 | Benchmark becomes active | Slot is available again; collateral remains held. |
 | Two upheld nonce reports on one benchmark | Forfeit the recorded reservation once without applying its multiplier again; no retroactive historical credit removal. |

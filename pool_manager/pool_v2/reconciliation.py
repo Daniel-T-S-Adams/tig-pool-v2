@@ -42,6 +42,78 @@ def confirmed(record, height):
     return True
 
 
+def _expired_lifetime(database, row, observation, snapshot):
+    """Retain both validated block anchors for a strictly elapsed lifetime."""
+    if row['benchmark_id'] in snapshot.precommits:
+        return None
+    try:
+        original, original_snapshot = BlockStore(database).read(row['selection']['block_id'])
+        settings = row['assignment']['settings']
+        challenge = settings['challenge_id']
+        lifetime = _integer(original['start']['block']['config']['challenges'][challenge]['lifespan_period'],
+                            'challenge lifetime', 1)
+        current_lifetime = _integer(observation['start']['block']['config']['challenges'][challenge]['lifespan_period'],
+                                    'current challenge lifetime', 1)
+        started = _integer(row['selection']['height'], 'precommit start height')
+        if settings['block_id'] != original_snapshot.block_id or started != original_snapshot.height:
+            return None
+    except (KeyError, TypeError, ValueError):
+        return None
+    if current_lifetime != lifetime or snapshot.height <= started + lifetime:
+        return None
+    return {'original_block_id': original_snapshot.block_id, 'block_started': started,
+            'lifespan_period': lifetime, 'block_id': snapshot.block_id, 'height': snapshot.height}
+
+
+def _expire_unsent_results(database, row, observation, snapshot):
+    """End handed-over work whose results could never have reached TIG.
+
+    The caller supplies a complete feed containing no record for this benchmark.
+    The elapsed protocol lifetime and durable send fences establish expiry even
+    when the member never uploads anything. A possibly sent payload stays held.
+    """
+    if row['handed_over_at'] is None:
+        return False
+    # Avoid replaying the creation block for every unresolved external write.
+    # This is only a read optimization; all send fences are checked again below.
+    with database.transaction() as cursor:
+        cursor.execute("""SELECT 1 FROM protocol_outbox WHERE reservation_id=%s
+            AND kind IN ('results','proofs')
+            AND (kind='proofs' OR state<>'ready' OR sent_at IS NOT NULL) LIMIT 1""", (row['id'],))
+        if cursor.fetchone():
+            return False
+    lifetime = _expired_lifetime(database, row, observation, snapshot)
+    if lifetime is None:
+        return False
+    with database.transaction() as cursor:
+        # Serialize against uploads, first sends and other outcome transitions.
+        locked = benchmarks._locked(cursor, row['id'], budget=True)
+        if locked['state'] != 'accepted' or locked['handed_over_at'] is None:
+            return False
+        cursor.execute("""SELECT * FROM protocol_outbox WHERE reservation_id=%s
+            AND kind IN ('results','proofs') ORDER BY kind FOR UPDATE""", (row['id'],))
+        intents = cursor.fetchall()
+        if any(intent['kind'] == 'proofs' or intent['state'] != 'ready' or intent['sent_at'] is not None
+               for intent in intents):
+            return False
+        cursor.execute("""SELECT 1 FROM submission_responses s JOIN protocol_outbox o ON o.id=s.outbox_id
+            WHERE o.reservation_id=%s AND o.kind IN ('results','proofs') LIMIT 1""", (row['id'],))
+        if cursor.fetchone():
+            return False
+        cursor.execute("SELECT 1 FROM benchmark_progress WHERE benchmark_id=%s", (row['benchmark_id'],))
+        if cursor.fetchone():
+            return False
+        evidence = {**lifetime, 'source': 'tig-unsent-results-expiry-v1', 'results_sent': False,
+                    'result_intent_id': str(intents[0]['id']) if intents else None}
+        benchmarks.record_outcome(database, row['id'], 'expired', height=snapshot.height,
+                                  evidence=evidence, _cursor=cursor)
+        # Preserve immutable member payloads, but prevent a queued late first POST.
+        for intent in intents:
+            cursor.execute("UPDATE protocol_outbox SET state='cancelled',evidence=%s WHERE id=%s",
+                           (Json(evidence), intent['id']))
+    return True
+
+
 def _expire_rejected_results(database, row, observation, snapshot, submission_origin):
     """A pinned, explicit late-result rejection can end work without releasing funds.
 
@@ -70,20 +142,13 @@ def _expire_rejected_results(database, row, observation, snapshot, submission_or
         received = datetime.fromisoformat(response['received_at'])
         if received.utcoffset() is None or snapshot.timestamp < received.timestamp():
             return False
-        original, _ = BlockStore(database).read(row['selection']['block_id'])
-        challenge = row['assignment']['settings']['challenge_id']
-        lifetime = _integer(original['start']['block']['config']['challenges'][challenge]['lifespan_period'],
-                            'challenge lifetime', 1)
-        current_lifetime = observation['start']['block']['config']['challenges'][challenge]['lifespan_period']
-        started = _integer(row['selection']['height'], 'precommit start height')
     except (KeyError, TypeError, ValueError):
         return False
-    if current_lifetime != lifetime or snapshot.height <= started + lifetime:
+    lifetime = _expired_lifetime(database, row, observation, snapshot)
+    if lifetime is None:
         return False
-    evidence = {'source': 'tig-late-results-rejection-v1', 'response_id': str(receipt['id']),
-                'response_sha256': response['raw_sha256'], 'origin': submission_origin,
-                'original_block_id': row['selection']['block_id'], 'block_started': started,
-                'lifespan_period': lifetime, 'block_id': snapshot.block_id, 'height': snapshot.height}
+    evidence = {**lifetime, 'source': 'tig-late-results-rejection-v1', 'response_id': str(receipt['id']),
+                'response_sha256': response['raw_sha256'], 'origin': submission_origin}
     with database.transaction() as cursor:
         locked = benchmarks._locked(cursor, row['id'], budget=True)
         if locked['state'] != 'accepted':
@@ -149,7 +214,8 @@ def reconcile_block(database, block_id, player_id, *, artifact_origin=None, subm
             if identity in snapshot.precommits:
                 benchmarks.record_outcome(database,row["id"],"active",height=proof["details"]["block_active"],evidence=evidence)
         elif not any(identity in records for records in feed.values()):
-            _expire_rejected_results(database, row, observation, snapshot, submission_origin)
+            if not _expire_unsent_results(database, row, observation, snapshot):
+                _expire_rejected_results(database, row, observation, snapshot, submission_origin)
     return evidence
 
 

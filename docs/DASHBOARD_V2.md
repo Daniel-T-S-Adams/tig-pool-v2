@@ -96,7 +96,7 @@ definitive benchmark expiry. [Custody observation](CUSTODY_OBSERVER.md) adds
 continuous finalized-deposit indexing, wallet checks and incoming funding
 review. The remaining live finalization and expense adapters, unconfirmed
 deposit views, timely CPU/GPU execution and funded takeover remain rollout work.
-The current deployment and narrow evidenced late-result expiry rule are
+The current deployment and evidenced benchmark expiry rules are
 recorded in [operations status](OPERATIONS_STATUS.md); the screen does not
 override the work pause, custody readiness or settlement evidence gates.
 The worker connection page now supports the
