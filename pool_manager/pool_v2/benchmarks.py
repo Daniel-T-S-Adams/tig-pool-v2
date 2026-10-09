@@ -254,11 +254,11 @@ def acknowledge(database, identity, member_id, digest):
         return _row(cursor, identity)
 
 
-def record_outcome(database, identity, state, *, height, evidence):
+def record_outcome(database, identity, state, *, height, evidence, _cursor=None):
     if state not in ("active", "verification_failed", "expired") or not evidence:
         raise FundsError("a definitive protocol outcome and evidence are required")
     units(height, positive=True)
-    with database.transaction() as cursor:
+    with (nullcontext(_cursor) if _cursor is not None else database.transaction()) as cursor:
         row = _locked(cursor, identity)
         if row["state"] == state:
             return row

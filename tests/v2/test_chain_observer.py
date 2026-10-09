@@ -9,9 +9,12 @@ import tempfile
 import unittest
 from unittest.mock import patch
 import uuid
+import io
+from urllib.error import HTTPError
+from unittest.mock import MagicMock
 
 from pool_manager.pool_v2 import chain_observer,controls,deposits,ledger
-from pool_manager.pool_v2.chain import TRANSFER_TOPIC
+from pool_manager.pool_v2.chain import TRANSFER_TOPIC,Rpc,RpcFailure
 from pool_manager.pool_v2.database import Database
 from pool_manager.pool_v2.money import Conflict,FundsError,TIG
 from pool_manager.pool_v2.spool import Spool
@@ -77,6 +80,29 @@ class CustodyRpc:
 
 
 class RecordedCustodyTests(unittest.TestCase):
+    def test_provider_failure_exposes_only_method_and_numeric_codes(self):
+        failure = HTTPError('https://rpc.example/private-secret', 429, 'limited', {},
+                            io.BytesIO(b'{"error":{"code":-32011,"message":"private-secret"}}'))
+        with patch('pool_manager.pool_v2.chain.urlopen', side_effect=failure):
+            with self.assertRaises(RpcFailure) as raised:
+                Rpc('https://rpc.example/private-secret')('eth_getLogs', [{}])
+        self.assertEqual((raised.exception.method, raised.exception.http_status, raised.exception.rpc_code),
+                         ('eth_getLogs', 429, -32011))
+        self.assertNotIn('private-secret', str(raised.exception))
+
+    def test_custody_rpc_pacing_spaces_requests_without_changing_their_payload(self):
+        response = MagicMock()
+        response.__enter__.return_value = response
+        response.read.return_value = b'{"jsonrpc":"2.0","id":1,"result":"0x2105"}'
+        with patch('pool_manager.pool_v2.chain.urlopen', return_value=response) as opened, \
+             patch('pool_manager.pool_v2.chain.time.monotonic', side_effect=[10,10,10.25,11]), \
+             patch('pool_manager.pool_v2.chain.time.sleep') as slept:
+            rpc = Rpc('https://rpc.example', interval_seconds=1)
+            self.assertEqual(rpc('eth_chainId', []), '0x2105')
+            self.assertEqual(rpc('eth_chainId', []), '0x2105')
+        slept.assert_called_once_with(0.75)
+        self.assertEqual(json.loads(opened.call_args.args[0].data)['method'], 'eth_chainId')
+
     def test_public_finalized_tig_transfer_replays_without_an_rpc(self):
         data=json.loads(gzip.decompress((Path(__file__).with_name('fixtures')/'custody-block-51572936.json.gz').read_bytes()))
         value=chain_observer.verify(data)
@@ -99,6 +125,19 @@ class ChainObserverTests(DatabaseCase):
 
     def capture(self,first=100,count=1000):
         return chain_observer.capture(NETWORK,self.source.rpc,first,count=count,source='fixture')
+
+    def test_failed_rpc_method_and_status_survive_archive_and_health_recording(self):
+        def limited(method, params):
+            if method == 'eth_getLogs':
+                raise RpcFailure(method, http_status=429, rpc_code=-32011)
+            return self.source.rpc(method, params)
+        data = chain_observer.capture(NETWORK, limited, 100)
+        self.assertEqual(data['error_details'], {'method': 'eth_getLogs', 'http_status': 429, 'rpc_code': -32011})
+        with self.assertRaises(FundsError):
+            chain_observer.record(self.db, data, initialize=True)
+        row = self.row('SELECT healthy,reason FROM custody_checks ORDER BY id DESC LIMIT 1')
+        self.assertFalse(row['healthy'])
+        self.assertEqual(row['reason'], 'RPC eth_getLogs failed (HTTP 429)')
 
     def test_unknown_delegation_is_observed_but_cannot_make_custody_ready(self):
         self.source.add()

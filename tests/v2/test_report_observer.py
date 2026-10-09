@@ -12,6 +12,23 @@ from observer_helpers import observation
 
 
 class ReportObserverTests(DatabaseCase):
+    def test_report_import_uses_validated_header_without_replaying_global_benchmarks(self):
+        data = observation(20)
+        BlockStore(self.db).initialize(20)
+        BlockStore(self.db).record(data, collector='anchor-fixture')
+        saved = {'start': data['start'], 'end': data['end'], 'reporting_round': 3,
+                 'kind': 'reports', 'payload': {'reports': [], 'arbitrations': []}}
+        with patch.object(BlockStore, 'read', side_effect=AssertionError('global replay is unnecessary')):
+            result = report_observer.record(self.db, saved, {})
+        self.assertTrue(result['complete'])
+        with self.db.transaction() as cursor:
+            from psycopg2.extras import Json
+            cursor.execute("INSERT INTO observation_alerts(kind,height,details) VALUES ('conflicting-block',20,%s)",
+                           (Json({'fixture': True}),))
+        from pool_manager.pool_v2.money import Conflict
+        with self.assertRaises(Conflict):
+            report_observer.record(self.db, saved, {})
+
     def test_recorded_public_arbitrations_replay_into_immutable_facts(self):
         fixtures = Path(__file__).parent / "fixtures"
         block = read_archive(next(fixtures.glob("block-1351111*")))["observation"]

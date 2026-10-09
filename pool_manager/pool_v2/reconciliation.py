@@ -8,6 +8,9 @@ from . import benchmarks, member_protocol, submissions, qualifiers
 from .block_observer import BlockStore
 from .money import Conflict
 from .protocol import ProtocolDataError, _index, _integer
+from datetime import datetime
+import hashlib
+from psycopg2.extras import Json
 
 
 def player_feed(observation, player_id):
@@ -39,7 +42,72 @@ def confirmed(record, height):
     return True
 
 
-def reconcile_block(database, block_id, player_id, *, artifact_origin=None):
+def _expire_rejected_results(database, row, observation, snapshot, submission_origin):
+    """A pinned, explicit late-result rejection can end work without releasing funds.
+
+    Absence, elapsed time and generic HTTP failures remain insufficient. Require
+    the original challenge lifetime, a complete later feed, and the exact TIG
+    response to this benchmark's first result submission. No POST is retried.
+    """
+    if not submission_origin:
+        return False
+    with database.transaction() as cursor:
+        cursor.execute("""SELECT s.id,s.response FROM submission_responses s
+            JOIN protocol_outbox o ON o.id=s.outbox_id
+            WHERE o.reservation_id=%s AND o.kind='results' AND o.state='uncertain'
+            ORDER BY s.created_at DESC LIMIT 1""", (row['id'],))
+        receipt = cursor.fetchone()
+    if not receipt:
+        return False
+    response = receipt['response']
+    body = 'Precommit does not exist: ' + row['benchmark_id']
+    if (response.get('status'), response.get('path'), response.get('origin'), response.get('body')) != (
+            400, '/submit-benchmark', submission_origin, body):
+        return False
+    if response.get('raw_sha256') != hashlib.sha256(body.encode()).hexdigest():
+        return False
+    try:
+        received = datetime.fromisoformat(response['received_at'])
+        if received.utcoffset() is None or snapshot.timestamp < received.timestamp():
+            return False
+        original, _ = BlockStore(database).read(row['selection']['block_id'])
+        challenge = row['assignment']['settings']['challenge_id']
+        lifetime = _integer(original['start']['block']['config']['challenges'][challenge]['lifespan_period'],
+                            'challenge lifetime', 1)
+        current_lifetime = observation['start']['block']['config']['challenges'][challenge]['lifespan_period']
+        started = _integer(row['selection']['height'], 'precommit start height')
+    except (KeyError, TypeError, ValueError):
+        return False
+    if current_lifetime != lifetime or snapshot.height <= started + lifetime:
+        return False
+    evidence = {'source': 'tig-late-results-rejection-v1', 'response_id': str(receipt['id']),
+                'response_sha256': response['raw_sha256'], 'origin': submission_origin,
+                'original_block_id': row['selection']['block_id'], 'block_started': started,
+                'lifespan_period': lifetime, 'block_id': snapshot.block_id, 'height': snapshot.height}
+    with database.transaction() as cursor:
+        locked = benchmarks._locked(cursor, row['id'], budget=True)
+        if locked['state'] != 'accepted':
+            return False
+        cursor.execute("SELECT * FROM protocol_outbox WHERE reservation_id=%s AND kind='results' FOR UPDATE",
+                       (row['id'],))
+        intent = cursor.fetchone()
+        if not intent or intent['state'] != 'uncertain':
+            return False
+        cursor.execute("SELECT 1 FROM protocol_outbox WHERE reservation_id=%s AND kind='proofs' LIMIT 1", (row['id'],))
+        if cursor.fetchone():
+            return False
+        cursor.execute("""SELECT 1 FROM submission_responses WHERE outbox_id=%s
+            AND response->>'status'='200' LIMIT 1""", (intent['id'],))
+        if cursor.fetchone():
+            return False
+        benchmarks.record_outcome(database, row['id'], 'expired', height=snapshot.height,
+                                  evidence=evidence, _cursor=cursor)
+        cursor.execute("UPDATE protocol_outbox SET state='rejected',evidence=%s WHERE id=%s",
+                       (Json(evidence), intent['id']))
+    return True
+
+
+def reconcile_block(database, block_id, player_id, *, artifact_origin=None, submission_origin=None):
     observation,snapshot = BlockStore(database).read(block_id)
     feed = player_feed(observation,player_id)
     evidence = {"block_id":snapshot.block_id,"height":snapshot.height,"source":"archived-pool-feed"}
@@ -80,10 +148,12 @@ def reconcile_block(database, block_id, player_id, *, artifact_origin=None):
             submissions.confirm_payload(database,row["id"],"proofs",evidence=evidence)
             if identity in snapshot.precommits:
                 benchmarks.record_outcome(database,row["id"],"active",height=proof["details"]["block_active"],evidence=evidence)
+        elif not any(identity in records for records in feed.values()):
+            _expire_rejected_results(database, row, observation, snapshot, submission_origin)
     return evidence
 
 
-def reconcile_pending(database, player_id, *, limit=100, artifact_origin=None):
+def reconcile_pending(database, player_id, *, limit=100, artifact_origin=None, submission_origin=None):
     """Replay missed blocks in height order, without letting one hold stop others."""
     with database.transaction() as cursor:
         cursor.execute("""SELECT b.id,b.height FROM observed_blocks b LEFT JOIN reconciled_blocks r ON r.block_id=b.id
@@ -93,7 +163,8 @@ def reconcile_pending(database, player_id, *, limit=100, artifact_origin=None):
     completed,held=[],[]
     for block in blocks:
         try:
-            reconcile_block(database,block["id"],player_id,artifact_origin=artifact_origin)
+            reconcile_block(database,block["id"],player_id,artifact_origin=artifact_origin,
+                            submission_origin=submission_origin)
             qualifiers.credit_block(database,block["id"],player_id)
         except (ProtocolDataError,Conflict) as error:
             held.append({"block_id":block["id"],"height":block["height"],"reason":str(error)})
