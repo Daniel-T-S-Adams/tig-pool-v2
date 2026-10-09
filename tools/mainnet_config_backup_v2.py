@@ -26,7 +26,9 @@ def main():
         if shutil.disk_usage(exports).free < 25 * 1024**3:
             raise RuntimeError('disk reserve too low')
         deployment = json.loads((config / 'deployment.json').read_text())
-        application = json.loads((config / 'web-api-release.json').read_text())
+        # Each deployment points deployment.json at its own release record.
+        record = deployment.get('application_release_record') or 'web-api-release.json'
+        application = json.loads((config / record).read_text())
         if application['pool_commit'] != deployment['pool_commit']:
             raise ValueError('application and deployment disagree')
         archive = root / 'artifacts' / (application['pool_commit'] + '.tar.gz')
@@ -50,7 +52,7 @@ def main():
                 '-outform', 'DER', '-in', str(settings), '-out', str(pending / 'settings.tar.cms'),
                 str(config / 'backup-recipient.crt')], check=True, capture_output=True, timeout=60)
         shutil.copyfile(archive, pending / 'application-source.tar.gz')
-        shutil.copyfile(config / 'web-api-release.json', pending / 'application-release.json')
+        shutil.copyfile(config / record, pending / 'application-release.json')
         with tarfile.open(pending / 'public-web-assets.tar.gz', 'w:gz') as saved:
             for path in sorted((root / 'web/assets').glob('*/*')):
                 if not path.is_file() or path.is_symlink() or digest(path) != path.parent.name:
