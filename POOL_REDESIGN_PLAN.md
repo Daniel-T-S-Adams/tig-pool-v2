@@ -1,6 +1,6 @@
 # InnoPool redesign and implementation plan
 
-Prepared 20 September 2026. Scope: a fresh deployment of the pool and its member interface, developed in separate forks of `tig-pool` and `innopool-slave`. This document specifies the implementation; current progress is recorded in [IMPLEMENTATION_STATUS.md](IMPLEMENTATION_STATUS.md). The new system is not enabled and no funds have been moved.
+Prepared 20 September 2026. Scope: a fresh deployment of the pool and its member interface, developed in separate forks of `tig-pool` and `innopool-slave`. This document specifies the implementation; current progress is recorded in [IMPLEMENTATION_STATUS.md](IMPLEMENTATION_STATUS.md). The initial 20 September preparation was unfunded. The current mainnet deployment and controls are recorded in the implementation status; this plan specifies behavior rather than live status.
 
 ## 1. Intended result
 

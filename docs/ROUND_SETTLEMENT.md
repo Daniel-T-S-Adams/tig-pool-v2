@@ -5,6 +5,11 @@ against PostgreSQL. It does not start a payment process or automatically turn
 on live settlement. Migration `005_settlement.sql` adds append-only reporting
 evidence, reporting-round associations, finalization records and round accounts.
 
+Checked 9 October: settlement is disabled. Round 137 has unresolved block gaps
+at `1375817` and `1376650`, after the one-time prelaunch waiver for `1372249`.
+The expired CPU attempt's slot is free, with collateral still held for its
+existing X+2 rules. See [operations status](OPERATIONS_STATUS.md).
+
 ## Evidence collected before financial decisions
 
 `tools/observe_reports_v2.py` independently polls public reports/arbitrations.

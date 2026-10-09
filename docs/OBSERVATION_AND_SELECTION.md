@@ -2,7 +2,9 @@
 
 The Stage 2 increment adds independent collection, durable replay, exact member
 credit attribution and a pure selector. It does not enable benchmark submission
-or settle rewards. The coordinator and worker integration are still required.
+or settle rewards. The coordinator and worker integrations are implemented
+separately. See [operations status](OPERATIONS_STATUS.md) for current collector
+coverage, unresolved gaps and deployment controls.
 
 ## Collection and recovery
 
@@ -125,7 +127,9 @@ start height 1,351,169 had advanced before the first complete capture; the
 collector correctly retained that missing height and did not advance its
 contiguous cursor past it. This was a read-only test, with no member liabilities.
 
-Production deployment still needs external alert delivery, redundant hosts,
-backup/restore rehearsal, storage monitoring, and the coordinator's current-head
-checks immediately before precommit submission. The collector is not deployed
-as an ongoing service by this change.
+The primary collector now runs continuously and the coordinator performs
+current-head checks before precommit submission. Database backup/restore
+preparation is installed. The operator chose manual health inspection rather
+than external alerts. Redundant collection and pending-file recovery protection
+are currently inactive; gaps and storage remain the open cleanup described in
+[operations status](OPERATIONS_STATUS.md).

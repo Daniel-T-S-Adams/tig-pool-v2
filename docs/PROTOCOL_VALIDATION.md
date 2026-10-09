@@ -2,11 +2,16 @@
 
 Status: live block capture, qualifying-credit inputs, and public report
 parsing are implemented and tested. Both intended-account CPU benchmarks have
-also completed; [the 23 September follow-up](LIVE_VALIDATION_20260923.md)
+also completed on **testnet**; [the 23 September follow-up](LIVE_VALIDATION_20260923.md)
 records cache handling, completed-state recovery and reporting/receipt findings.
 The remaining Stage 0 checks below still need their own evidence.
 This probe does not submit benchmarks, change a reward
 destination, authenticate a member, or make any ledger or token movement.
+
+For 9 October mainnet findings, use [operations status](OPERATIONS_STATUS.md).
+The later mainnet CPU attempt expired. A narrow explicit late-result rejection
+rule is now deployed; disappearance alone remains insufficient evidence of
+expiry. The older probes below are historical inputs, not current health checks.
 
 ## Run and replay
 

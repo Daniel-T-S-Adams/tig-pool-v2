@@ -15,8 +15,9 @@ Raw captures are bounded-life evidence and expire under this policy.
 What never expires, whatever the cap:
 
 - A round whose blocks are not all captured and credited. The run stops at
-  that round and says so; the operator resolves the gap (credit it or waive
-  it) rather than losing uncredited evidence.
+  that round and says so. Recover and validate the actual missing capture
+  before crediting it. The one-time prelaunch waiver requires a recorded pause
+  and no existing reservations; it is not a general way to fill later gaps.
 - Anything captured after the most recent verified base backup started.
 - A capture cited by a confirmed report, arbitration, round seal, benchmark
   reporting round, fee top-up, funding alert, opening credit or custody
@@ -83,5 +84,11 @@ chunks expire only once every block up to it has.
 - Report index captures still record one row per block per player and
   challenge; expiry bounds them, but deduplicating unchanged indices is a
   separate improvement.
-- The recovery host's own spool is pruned the same way against its local
-  database copy, or left alone while its collectors stay off.
+- Only the primary local block spool currently has file pruning. Report,
+  custody and funding database expiry does not prune their corresponding
+  spool files. No new file deletion or database table rewrite was performed
+  during the 9 October cleanup.
+- Recovery collectors are inactive and the full primary-evidence copy is
+  disabled after a disk-reserve failure. Its old local spool is left intact.
+  See [operations status](OPERATIONS_STATUS.md) for the measured footprint and
+  the proposed pending-file recovery policy.

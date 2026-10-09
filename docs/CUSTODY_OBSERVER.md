@@ -61,7 +61,14 @@ inferred from TIG's advertised network metadata. The recorded stream freezes
 its network and finality policy. The RPC must provide the required historical
 logs, receipts and balance state. On restart the collector resumes after the
 last completely recorded batch. `--batch-size` bounds a query to 1–1000 blocks;
-reduce it for a provider with tighter limits. `--once` returns success only when
+reduce it for a provider with tighter limits. `--rpc-interval-seconds`
+spaces calls using a shared monotonic clock (default one second; 0–5 allowed).
+The live cleanup uses two seconds and a sixty-second collection poll. Failure
+captures record a safe RPC method and numeric HTTP/RPC code, without storing
+credentials or provider error messages. Pacing does not grant historical-data
+access: a usable Base RPC is still required. See
+[current custody status](OPERATIONS_STATUS.md#wallet-observation).
+`--once` returns success only when
 collection is current and custody reconciles. `--replay-only` imports pending
 local captures without making network calls.
 
@@ -72,8 +79,10 @@ cursor advances only after the whole batch has been processed. Incomplete data
 does not mean there were no deposits. Invalid attempts are also recorded; they
 do not prevent the collector from obtaining fresh data. An RPC/database failure
 can be retried, while a canonical conflict keeps financial operations held.
-Keep the entire spool, including recorded
-manifests and chunks, in the backup policy. The RPC URL is represented by an
+Preserve the spool, including its manifests and chunks, under the approved
+retention and recovery policy. Pending files are outside database WAL protection;
+the currently disabled full file copy is described in
+[operations status](OPERATIONS_STATUS.md#recovery-protection-and-remaining-cleanup). The RPC URL is represented by an
 opaque source identifier in captures, rather than persisting provider secrets.
 
 ## Funds and work controls

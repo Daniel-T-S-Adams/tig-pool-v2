@@ -6,7 +6,17 @@ proxies both addresses to the primary Hetzner server, **46.62.249.188**.
 The German recovery server is **2.28.230.81**.
 [Structure diagram](POOL_STRUCTURE.md).
 
-## Current position — 2 October 2026
+## Current deployment — 9 October 2026
+
+The HTTPS and scoped API rule below remain the recorded configuration. Member
+sign-in and the mainnet CPU assignment/result upload occurred after these
+transport checks. New work is now paused; custody RPC access, protocol gaps and
+storage protection remain open. External alerts were deferred by the operator
+on 6 October in favour of manual inspection. See
+[operations status](OPERATIONS_STATUS.md). The 2 October checks below are
+historical transport/TLS evidence, not the current release or fund flags.
+
+## Transport and TLS validation — 2 October 2026
 
 **21:07 UTC update: worker connectivity now passes.** After Daniel reported
 saving the scoped rule, the unchanged worker client received capabilities

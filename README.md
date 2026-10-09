@@ -7,7 +7,8 @@ for reference only. The v2 system uses whole-benchmark
 member work, custodial balances and collateral, equal qualifying-bundle credit,
 round settlement and operator-reviewed withdrawals. See the
 [redesign plan](POOL_REDESIGN_PLAN.md) and
-[implementation status](IMPLEMENTATION_STATUS.md) before using this repository.
+[implementation status](IMPLEMENTATION_STATUS.md) and
+[checked operations status](docs/OPERATIONS_STATUS.md) before using this repository.
 The new API serves its own member/operator screens and
 [paired worker installer](docs/PAIRED_RELEASES.md). Releases are deployed as
 fixed tags; `release/v2` points at the currently deployed one and `main` is the

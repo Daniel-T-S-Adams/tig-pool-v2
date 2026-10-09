@@ -1,9 +1,12 @@
 # Serving the recorded pool and worker release
 
 The API publishes a paired release and its checked worker installer. A private
-CPU testnet pair is deployed; a production pair has not been released.
-The [mainnet staging procedure](MAINNET_DEPLOYMENT.md) keeps production
-configuration separate and disabled until its inputs and checks are complete.
+CPU testnet pair was validated in September. Mainnet now serves pool
+`c954172` with worker `fd29279` (`mainnet-cpu-pilot-20261007`). The later mainnet
+CPU attempt expired before TIG accepted its results; a served release is not
+proof of timely execution or a completed reward cycle. New work remains paused.
+See [operations status](OPERATIONS_STATUS.md) and the
+[deployment procedure](MAINNET_DEPLOYMENT.md).
 
 Supply the API factory with `release_manifest`, the actual running
 `build_commit`, and the paired `worker_installer` bytes. Defaults leave these
@@ -84,8 +87,8 @@ member balances, withdrawals and operator top-ups. Worker installer tests use
 real temporary Git repositories, tags, Python environments and subprocesses,
 including lost activation, changed checkouts and unfinished evidence.
 
-These tests simulate the release records and runtime execution. They do not
-publish release tags, start Docker services or establish actual CPU/GPU
-performance. Isolated production configuration, restricted database roles,
-backup/restore rehearsal, live protocol completion and a monitored launch
-remain required before publishing and deploying a production pair.
+Automated tests simulate runtime execution and do not establish CPU/GPU
+performance. Fixed tags, the mainnet manifest, restricted database roles and
+backup/restore preparation are installed. The 7–9 October CPU attempt did not
+complete within TIG's lifetime. Timely protocol completion, GPU execution and
+a complete funded recovery/reward cycle remain required before wider use.

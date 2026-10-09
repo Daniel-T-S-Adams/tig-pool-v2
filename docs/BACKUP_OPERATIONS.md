@@ -1,8 +1,10 @@
 # Mainnet backup and recovery operations
 
 The primary is **46.62.249.188** in Helsinki; the independent recovery host is
-**2.28.230.81** in Nuremberg. Both retain their own protocol collectors. The
-recovery API and all mainnet work/payment services remain disabled.
+**2.28.230.81** in Nuremberg. Checked **9 October 2026**: recovery is currently
+a backup host, with its API and independent block/report collectors inactive.
+The primary has member funds enabled, new work paused and settlement disabled.
+See [operations status](OPERATIONS_STATUS.md) for the exact release and controls.
 
 ## Installed protection
 
@@ -12,13 +14,15 @@ recovery API and all mainnet work/payment services remain disabled.
 | Compressed database backup | Germany, daily around 03:10 UTC | Entire primary PostgreSQL cluster; data checksums and required WAL are checked before publication. |
 | Encrypted configuration export | Primary, daily around 02:30 UTC | Credentials, TLS key/certificate, service configuration, operational helpers, exact application and retained website assets. |
 | Configuration/archive pull | Germany, every five minutes | Published primary exports over restricted read-only SSH. |
-| Raw evidence copy | Germany, five minutes after each completed copy | Primary block/report manifests and their immutable content; existing evidence is retained. |
-| Health checks | Both hosts, every five minutes | Receiver status/lag, backup age, failed jobs, disk reserve, collector history, ledger and TLS expiry. |
+| Raw evidence copy | **Disabled** following the 8 October disk-reserve failure | The installed job would copy the full primary block/report spool; current pending files have no separate file-copy protection. |
+| Health checks | Installed helpers and timers | Primary checks and individual backup-job records remain useful; the old recovery overall check expects inactive collectors/full evidence copy and needs a corrected profile. |
 
-The evidence copy interval is measured **after completion**, not a guarantee of
-five-minute recovery freshness. Large initial copies and verification runs take
-longer. Inspect their actual timestamps. Germany's independent collector runs
-throughout. The database transaction stream is separate from these file copies.
+The full evidence copy is not running. Its former interval was measured after
+completion, with no guarantee of five-minute freshness. Germany's collectors
+have been inactive since 7 October. Database WAL is a separate stream and
+cannot protect protocol files that have not entered the database, or supply a
+TIG block never observed. Pending-file protection and whether to run an
+independent collector are storage decisions still under discussion.
 
 The backup connection uses a dedicated replication-only PostgreSQL role and an
 SSH account restricted to forwarding the primary's loopback database port.
@@ -33,7 +37,8 @@ that outage. This protects commit acknowledgment; it is **not automatic
 failover** or proof that an in-flight request cannot be visible before its
 original caller receives acknowledgment. A funded takeover must still test
 concurrent/retried requests and reconcile potentially sent payments before work
-resumes. Keep financial actions disabled until those launch checks are complete.
+resumes. New work remains paused; the enabled member-funds capability does not
+complete a funded takeover rehearsal.
 
 The replication slot may retain at most 4 GiB on the primary. A sufficiently
 long interruption can invalidate it: investigate and establish a new verified
@@ -62,13 +67,14 @@ retains its separate two-CPU/two-GiB ceiling.
 Backup/export jobs refuse new copies below their configured disk reserve;
 the preparation health guard also stops collectors below 25 GiB. This is an
 unfunded preparation guard, not a substitute for a funded-pool shutdown policy.
-Storage still needs expansion before sustained mainnet operation: on 4 October
-the primary database was approximately 16.7 GiB and its spool 14.0 GiB, after
-about ten days of collection. A compressed base backup occupied 8.1 GiB.
-Three bases alone therefore need about 24.4 GiB at this size, in addition to
-Germany's database, its own evidence, the primary evidence copy and WAL.
-Small membership does not reduce protocol-wide collection. Keep the existing
-archive until retention decisions can be tied to resolved obligations.
+The measured 9 October footprint is approximately 26.4 GiB for the primary
+database, 21.2 GiB for its block spool and 4.2 GiB for other spools. Recovery has
+38.6 GiB of retained bases, 49.6 GiB of WAL and 46.6 GiB free. Adding the full
+24 GiB block/report copy would consume space needed to stage the next base.
+Small membership and paused work do not reduce network-wide observation.
+The approved database/block-spool retention is described in
+[evidence retention](EVIDENCE_RETENTION.md). No new deletion or storage-policy
+change was made in the 9 October cleanup.
 
 ## Inspect without moving funds
 
@@ -84,11 +90,15 @@ cat /var/lib/innopool-v2-mainnet/primary-continuous/restore-rehearsal.json
 cat /var/lib/innopool-v2-mainnet/health/status.json
 ```
 
+Check each job's `Result`, receiver status and the manifest's verified timestamp.
+The old recovery overall health record is not proof that full raw-file coverage
+exists. Configuration copy timestamps do not advance the database recovery point.
+
 On either VM, inspect the protected journal for a failed named service with
 `journalctl -u SERVICE_NAME --since today`. Do not print credential, environment
-or DSN files. The health JSON contains no credentials. External alert delivery
-still needs an operator-selected destination; local checks alone are not an
-external notification system.
+or DSN files. The health JSON contains no credentials. External alerts were intentionally
+deferred by the operator on 6 October; manual inspection is the chosen process.
+No external destination is configured.
 
 To request a new off-host base backup, run on Germany:
 
@@ -112,8 +122,11 @@ in `POOL_V2_DATABASE_DSN`, an explicit spool path and its default one-hour/
 10,000-record bounds. It refuses to run unless work is paused. The regular
 drainer can remain active: duplicate recording is idempotent. Missing chunks
 remain pending and cause failure; they are not treated as successfully recorded.
-The 4 October catch-up job has its own one-CPU/one-GiB limit on the primary and
-cannot submit work, settle rewards or send tokens.
+The 9 October catch-up uses a one-CPU/one-GiB transient service on the primary
+and cannot submit work, settle rewards or send tokens. The current importer
+uses validated immutable block headers for report height lookup, avoiding a
+full network-block replay per capture. Incomplete upstream captures are
+recorded as incomplete; missing/conflicting anchors remain failures.
 
 ## Restore rehearsal
 
@@ -146,16 +159,21 @@ These are distinct tests. No funded mainnet takeover or token transfer occurred.
 
 ## Remaining launch checks
 
-- [ ] External alert delivery and acknowledgment by the operator.
+- [x] Operator chose manual inspection on 6 October; external alerts remain
+  disabled. No external destination has been configured.
+- [ ] Restore pending-file protection and correct recovery health to the
+  agreed backup/collector profile; rehearse the database-plus-file restore.
 - [ ] Sufficient archive storage and a measured, obligation-aware retention plan.
 - [ ] Funded takeover, uncertain-send recovery and concurrent/retried-request tests.
-- [ ] Signed-in real member sessions and execution tokens through Cloudflare.
-- [ ] Separate CPU/GPU execution and interruption/restart validation.
+- [x] Real member sign-in through Cloudflare on 6 October and the later mainnet
+  CPU assignment/result upload. This does not prove timely TIG completion.
+- [ ] Timely mainnet CPU/GPU execution and live interruption/restart validation.
 - [ ] Reward claim/unlock/withdraw integration, final round attribution and
   expense/correction operations; backup completion does not complete these.
 - [x] Operator-approved mainnet budgets: 10 TIG for protocol-fee top-ups and
   0.0005 Base ETH for pool-wallet transaction fees, monitored manually.
-- [ ] Mainnet custody reconciliation and deliberate activation.
+- [ ] Restore current mainnet custody reconciliation with a usable historical
+  Base RPC. Custody baseline and fee funding were initialized before the pilot.
 
 The backup mechanisms follow the PostgreSQL 18 documentation for
 [base backups](https://www.postgresql.org/docs/18/app-pgbasebackup.html),

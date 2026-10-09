@@ -1,45 +1,45 @@
 # InnoPool v2 implementation status
 
-Updated 8 October 2026. The agreed plan is
-[POOL_REDESIGN_PLAN.md](POOL_REDESIGN_PLAN.md). The operator keeps the detailed,
-dated deployment log and its evidence files outside this repository; this file
-records the repository-level status and the preserved foundation record.
+Updated **9 October 2026** against the live deployment. The agreed design is
+[POOL_REDESIGN_PLAN.md](POOL_REDESIGN_PLAN.md). The detailed current state and
+storage explanation are in [operations status](docs/OPERATIONS_STATUS.md).
+The foundation and increment records below are historical validation records.
 
-## Status summary — 8 October 2026
+## Current summary
 
-- **Deployed.** Release tag `mainnet-retention-batches-20261008` (commit
-  `f983faf`, schema migrations through 018) runs on the primary mainnet server
-  since 8 October 15:01 UTC, after `mainnet-evidence-retention-20261008`
-  (`99a6688`, 14:42 UTC) applied migration 018 and initialized the chunk index.
-  Block manifests are stored in the paged format since height 1,375,464. The
-  retention timer runs daily at 05:30 UTC; its first run blanked 28,241 report
-  captures and 225,822 report-index captures under reporting round 134 and
-  found no block round eligible before round 139. The same releases are staged
-  on the recovery server, whose service units still point at `994739d`. Member funds are enabled; new work and settlement
-  are disabled. The block observer has run from launch height 1356536 with one
-  waived pre-launch gap.
-- **Public access.** `pool.tig.foundation` and `pool-api.tig.foundation` are
-  served through Cloudflare with an Origin CA certificate; browser and worker
-  API access were verified on 2 October.
-- **Protection.** Daily off-host database and encrypted configuration backups,
-  continuous WAL copying and a rehearsed point-in-time restore are in place
-  (4 October).
-- **Code.** `main` at `f983faf` is the deployed code. CI runs the 293
-  `tests/v2` checks plus the inherited accounting checks.
-- **Branches.** `main` is the protected integration branch, `release/v2` is
-  fast-forwarded to each deployed tag, and `redesign/v2` was retired on
-  8 October; see plan section 10.
-- **Open.** Reward claim/unlock/receipt integration and expense accounting, a
-  full takeover rehearsal, real member CPU/GPU validation, pointing the recovery
-  server's units at the current tag, and the evidence retention work approved
-  on 8 October is deployed: compact per-block manifests and the retention
-  job that expires bounded-life captures under recorded floors (raw blocks
-  four rounds, report captures five rounds, wallet and fee captures thirty
-  days) while ledger, credit and settlement records are kept permanently; see
-  [evidence retention](docs/EVIDENCE_RETENTION.md). Still open there:
-  returning blanked space to the operating system (`VACUUM FULL` or
-  `pg_repack` of the capture tables in a maintenance window) and
-  deduplicating unchanged report indices.
+- **Application:** `c954172`, tag `mainnet-operational-cleanup-20261009`, runs
+  on all six primary services; migration history is verified through 019.
+  The same application is staged on recovery and its collector units point to
+  it, with recovery API/collectors inactive.
+- **Controls:** member funds are enabled; configured work remains enabled but
+  the operator pause makes effective work disabled. Settlement is disabled.
+  Existing results/proof reconciliation remains available.
+- **CPU attempt:** the 7 October benchmark completed after its 120-block
+  lifetime and TIG rejected it. The evidenced rejection now resolves its slot
+  as expired and its result intent as rejected, preserving collateral and the
+  financial journal for later finalization. Timely CPU completion is unproved.
+- **Evidence:** round 137 has unresolved gaps at `1375817` and `1376650`, in
+  addition to the recorded prelaunch waiver at `1372249`. Exact settlement is
+  held. Report import now uses validated block headers for height lookup, and
+  the saved backlog is being drained.
+- **Custody:** public Base RPC access is failing on historical queries. Calls
+  are paced and failure details are recorded; a usable endpoint is still needed.
+- **Protection:** daily verified off-host base backups, continuous WAL and
+  encrypted configuration/release copies are active. The full raw-evidence
+  copy is disabled after its disk-reserve failure; independent recovery
+  collectors are inactive. Pending-file protection and the recovery health
+  profile need an agreed storage setup. The 4 October PITR rehearsal passed.
+- **Validation:** all 299 pool tests and hosted CI passed for PR #38, including
+  paired worker/browser checks. The API still serves worker `fd29279`, tag
+  `mainnet-cpu-pilot-20261007`; worker development is tracked separately.
+- **Workflow:** protected `main` integrates PRs; `release/v2` follows the deployed
+  application tag. `redesign/v2` was retired on 8 October.
+- **Remaining:** RPC access, gap recovery, storage protection, timely CPU/GPU
+  validation, funded takeover and reward claim/unlock/receipt plus expense
+  integration. Raw blocks/reports keep four rounds and wallet/fee captures
+  thirty days under obligation/backup guards; financial records are permanent.
+  Returning database space to the OS and pruning non-block spool files are
+  separate maintenance work, not completed cleanup.
 
 ## Foundation record — 20 September 2026
 
