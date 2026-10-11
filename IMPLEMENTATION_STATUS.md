@@ -1,6 +1,7 @@
 # InnoPool v2 implementation status
 
-Updated **9 October 2026** against the live deployment. The agreed design is
+Documentation updated **11 October 2026**; live deployment details were last
+checked on **9 October 2026**. The agreed design is
 [POOL_REDESIGN_PLAN.md](POOL_REDESIGN_PLAN.md). The detailed current state and
 storage explanation are in [operations status](docs/OPERATIONS_STATUS.md).
 The foundation and increment records below are historical validation records.
@@ -11,6 +12,14 @@ The 9 October [lean storage implementation](docs/LEAN_STORAGE.md) is prepared
 on cleanup branches. It has not been deployed or run against production data.
 It requires a paired worker update and additive migrations 020/021. Syntax and
 whitespace were inspected; no runtime tests were run for this change.
+
+The 11 October [member master contract](docs/MEMBER_MASTER_V2.md) documents
+member-managed nonce distribution across compatible machines using the existing
+whole-benchmark API. API schema/route descriptions now explain aggregate
+capacity and master responsibilities. The pool still binds work to a member,
+with one combined result and shared slots. The reference worker remains local;
+no distributed scheduler, wire-format change or migration was added. This
+increment is prepared locally and has not been functionally tested or deployed.
 
 - **Application:** `8477509`, tag `mainnet-abandoned-benchmark-expiry-20261009`, runs
   on all six primary services; migration history is verified through 019.

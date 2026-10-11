@@ -26,7 +26,7 @@ This document incorporates the conversation's later clarifications. They superse
 | Member identity | Benchmarks, funds, credit, and limits belong to a member, independently of how many machines they operate. |
 | Work request | Each request offers exactly one compute family: CPU or GPU. It also declares the supported AWS verification compute type and available resources. |
 | Ownership | Assign a whole benchmark to one member. No other member takes it over. |
-| Member execution | Members organize their own machines. Pool-managed fleet distribution is outside this redesign. |
+| Member execution | A member's master may distribute nonces among machines compatible with the assignment's compute type, architecture, binary and runtime. Members manage internal communication, scheduling and recovery, then return one complete result and its proofs. |
 | Concurrency | At most two reserved or unfinished assignments per member, shared across CPU and GPU. |
 | Slot release | Release a slot when the benchmark becomes active, fails TIG solution verification, or definitively expires before verification. A rejected precommit also releases its reservation. |
 | Challenge selection | Among compatible active challenges in the offered CPU/GPU family, choose the one where the pool currently has the fewest qualifying bundles. Break equal counts uniformly at random. |
@@ -82,6 +82,16 @@ applicable reporting window close. Preserve ownership, exact per-block credit,
 financial records and final decisions. Existing full snapshots may retire only
 after backed compact replacement and completed reconciliation/credit. Missing
 blocks remain settlement holds. See [lean storage](docs/LEAN_STORAGE.md).
+
+**D8 — clarified on 11 October: member-managed master coordination.** The pool
+communicates with a member's master through the existing whole-benchmark API.
+Members arrange communication and work distribution among their own compatible
+machines. Treat `capacity.workers` as available concurrent nonce computations
+for that offer, including member-managed remote capacity. Keep one immutable
+result, one member owner and one slot per unfinished benchmark. The master saves
+the required evidence and supplies authoritative sampled proofs. No pool fleet
+registry or helper transport is required. The official reference worker remains
+a single-machine implementation. See [master integration](docs/MEMBER_MASTER_V2.md).
 
 Implementation defaults proposed for the plan, rather than additional economic rules:
 
@@ -235,23 +245,31 @@ These states also apply when the multiplier is zero. Record the reservation and 
 
 ### Member protocol and reference client
 
-Expose a versioned member API, for example:
+Use the implemented [member API 2.0](docs/MEMBER_API_V2.md):
 
 | Endpoint | Purpose |
 |---|---|
+| `GET /api/v2/capabilities` | Read API version, assignment unit and work availability. |
 | `POST /api/v2/work-requests` | Offer CPU or GPU resources and request a whole benchmark. |
 | `GET /api/v2/work-requests/{id}` | Recover a pending request and its eventual assignment. |
-| `GET /api/v2/benchmarks/{id}` | Get complete settings, state, deadlines, and later sampled nonces. |
+| `POST /api/v2/work-requests/{id}/refresh` | Refresh an unexpired queued offer while its capacity remains available. |
+| `GET /api/v2/benchmarks/{id}` | Get the exact assignment, digest, state, handover confirmation and later sampled nonces. |
 | `POST /api/v2/benchmarks/{id}/acknowledge` | Confirm receipt of the complete assignment; record handover once and return its durable status. |
-| `POST /api/v2/benchmarks/{id}/result` | Submit the whole benchmark root and required quality data. |
+| `POST /api/v2/benchmarks/{id}/results` | Submit the whole benchmark root and required quality data. |
 | `POST /api/v2/benchmarks/{id}/proofs` | Submit proofs for TIG's sampled nonces. |
-| `POST /api/v2/benchmarks/{id}/audit-response` | Supply requested original evidence and commitment proofs. |
 
 Validate ownership for every endpoint. Validate payload size and expected nonce counts against the assigned benchmark. Identical resubmissions are harmless; conflicting submissions after a commitment are rejected. Persist uploads before acknowledging them, and submit to TIG from the durable queue.
 
 The client first saves the complete assignment locally, then acknowledges its benchmark ID and immutable payload digest using the member's execution credentials. The pool checks ownership, payload identity, and that the benchmark remains eligible to start, then commits the acknowledgement and handover timestamp atomically before responding. Reject a first acknowledgement after definitive expiry; a retry of an already committed acknowledgement returns the original confirmation. The client starts execution only after receiving or recovering that confirmation. Lost delivery responses do not establish handover; lost acknowledgement responses require retry or status reconciliation. Never infer non-delivery solely from an HTTP error. Accept results and proofs only for a benchmark with recorded handover, so execution cannot bypass this boundary.
 
 Publish the API contract and a single-machine reference runner by adapting useful parts of `innopool-slave`. It must demonstrate the full benchmark/root/proof lifecycle and recovery after restart. Members can replace it or distribute the work internally. Building a multi-machine scheduler for them is not part of the plan.
+
+Document the [member master contract](docs/MEMBER_MASTER_V2.md), including
+aggregate compatible capacity, confirmed handover, full nonce aggregation,
+immutable uploads, retained proof evidence and member responsibility for helper
+failures. The pool authenticates the master as the member and applies the shared
+two-slot limit across all of that member's pool-facing clients. Machine count
+and internal job assignment do not alter collateral or reward accounting.
 
 Members must retain required solution artifacts through final collateral settlement and pending evidence requests. The current fixed 14-day archive policy cannot be the new default for unresolved benchmarks.
 

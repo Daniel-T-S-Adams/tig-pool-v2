@@ -1,4 +1,8 @@
-"""Authenticated whole-benchmark handover, immutable results and proof upload."""
+"""Member-owned benchmark handover and uploads, independent of machine topology.
+
+A member's master may aggregate computation from compatible helper machines.
+Ownership and uploads are scoped to the member and the complete benchmark.
+"""
 
 import json
 

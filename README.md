@@ -22,6 +22,11 @@ For day-to-day operation, use the [v2 owner's guide](docs/OWNER_GUIDE.md).
 It explains the website and MetaMask steps, server configuration, software
 updates, and the remaining deployment requirements.
 
+Members building a master to use several compatible machines should follow the
+[member master contract](docs/MEMBER_MASTER_V2.md). The pool assigns a complete
+benchmark; members coordinate their own machines and return its combined result
+and proofs through the existing API.
+
 ## Legacy implementation reference
 
 A self-hosted, open-source mining pool for [The Innovation Game (TIG)](https://tig.foundation), built on the official `tig-benchmarker` master/slave architecture.

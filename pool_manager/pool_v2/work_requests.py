@@ -15,6 +15,8 @@ from .selection import COMPUTE_FAMILIES, NoCompatibleWork, choose, references
 
 
 def _offer(resource, compute_type, capacity):
+    """Validate one compute offer; capacity may span member-managed machines."""
+
     if resource not in ("CPU", "GPU") or COMPUTE_FAMILIES.get(compute_type) != resource:
         raise FundsError("offer must specify one compatible CPU or GPU verification compute type")
     if not isinstance(capacity, dict) or set(capacity) != {"workers"} or type(capacity["workers"]) is not int or not 1 <= capacity["workers"] <= 4096:
