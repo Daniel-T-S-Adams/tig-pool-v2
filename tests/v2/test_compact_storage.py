@@ -280,6 +280,15 @@ class CompactStorageTests(DatabaseCase):
         last = compaction.collect_unused_chunks(self.db, proof=self.proof(), limit=5)
         self.assertEqual(last['removed_chunks'], 2)
         self.assertFalse(last['more_chunks'])
+        self.assertFalse(last['more_reference_rows'])
+        with self.db.transaction() as cursor:
+            for index in range(12):
+                cursor.execute('INSERT INTO chunk_last_ref(digest,height) VALUES (%s,%s)',
+                    (hashlib.sha256(('orphan-reference-' + str(index)).encode()).hexdigest(), 1))
+        reference_runs = [compaction.collect_unused_chunks(self.db, proof=self.proof(), limit=5) for _ in range(3)]
+        self.assertEqual([item['removed_reference_rows'] for item in reference_runs], [5, 5, 2])
+        self.assertEqual([item['more_reference_rows'] for item in reference_runs], [True, True, False])
+        self.assertEqual([item['removed_chunks'] for item in reference_runs], [0, 0, 0])
         self.assertEqual(self.store.read('block-8')[0]['format'], FORMAT)
 
     def test_gap_is_not_waived_by_per_block_conversion_or_pruning(self):

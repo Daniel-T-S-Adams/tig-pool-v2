@@ -130,9 +130,13 @@ def collect_unused_chunks(database, *, proof, limit=5000):
         cursor.execute('''SELECT EXISTS (SELECT 1 FROM observation_chunks c WHERE NOT EXISTS
             (SELECT 1 FROM live_compaction_chunks live WHERE live.digest=c.digest)) AS more''')
         more = cursor.fetchone()['more']
+        cursor.execute('''SELECT EXISTS (SELECT 1 FROM chunk_last_ref r WHERE NOT EXISTS
+            (SELECT 1 FROM observation_chunks c WHERE c.digest=r.digest)) AS more''')
+        more_refs = cursor.fetchone()['more']
         cursor.execute('''INSERT INTO retention_runs(id,policy,backup_proof,floors,counts,notes)
             VALUES (%s,%s,%s,%s,%s,%s)''', (run_id, Json({'version': 'compact-network-chunk-gc-v1', 'limit': limit}),
             Json(proof), Json({'covered_until': covered.isoformat()}),
             Json({'removed_chunks': removed, 'removed_reference_rows': len(orphan_refs)}),
             Json(['Bounded deletion after a complete scan of surviving capture references.'])))
-    return {'run': run_id, 'removed_chunks': removed, 'removed_reference_rows': len(orphan_refs), 'more_chunks': more}
+    return {'run': run_id, 'removed_chunks': removed, 'removed_reference_rows': len(orphan_refs),
+            'more_chunks': more, 'more_reference_rows': more_refs}

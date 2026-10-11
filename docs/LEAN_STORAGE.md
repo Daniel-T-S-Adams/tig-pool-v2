@@ -95,7 +95,8 @@ compact format; rollback must retain a reader that understands it.
    Pending files remain. After backfill/pruning, `--collect-unused-chunks`
    removes chunks that surviving captures no longer reference. Database deletion
    is limited by `--chunk-limit` (default 5,000, maximum 50,000) and recorded in
-   `retention_runs`. Repeat while the result reports `more_chunks: true`.
+   `retention_runs`. Repeat while the result reports `more_chunks: true` or
+   `more_reference_rows: true`.
 
 File maintenance pins in-progress writes and briefly locks deletion batches,
 without holding capture behind the full directory scan. DB chunk cleanup uses
