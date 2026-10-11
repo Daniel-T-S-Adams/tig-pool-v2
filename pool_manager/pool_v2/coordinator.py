@@ -6,22 +6,17 @@ import json
 import re
 import tarfile
 import time
-from urllib.parse import urlsplit
 from urllib.request import Request,build_opener
 
 from . import controls,submissions,work_requests
-from .artifacts import ArtifactRedirect,DEFAULT_HOSTS
+from .artifacts import ArtifactRedirect,DEFAULT_HOSTS,check_url
 from .money import Conflict,FundsError
 from .protocol import ProtocolDataError,_index
 from .reconciliation import reconcile_block,reconcile_pending
 
 
 def download_archive(url, *, allowed_hosts):
-    parsed=urlsplit(url)
-    if (parsed.scheme != "https" or parsed.hostname not in allowed_hosts or parsed.username or parsed.password or parsed.fragment
-            or parsed.port not in (None,443) or (parsed.hostname=='media.githubusercontent.com'
-                and not parsed.path.startswith('/media/tig-foundation/tig-monorepo/'))):
-        raise FundsError("selected binary URL is not an allowed HTTPS artifact source")
+    check_url(url,allowed_hosts)
     with build_opener(ArtifactRedirect(allowed_hosts)).open(Request(url,headers={"User-Agent":"innopool-v2-artifact/2.0"}),timeout=30) as response:
         archive=response.read(64*1024*1024+1)
     if not archive or len(archive)>64*1024*1024:

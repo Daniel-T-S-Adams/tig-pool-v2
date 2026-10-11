@@ -138,7 +138,8 @@ already-public TIG algorithm binaries, and no member files are served.
 See [lean storage](LEAN_STORAGE.md); direct downloads require the paired worker
 update and are not active on the running mainnet release.
 
-CI and the served mainnet worker pin are
+CI pins worker `4bba91962db48903326d18d6e00f6ed2a4d4ff84` for direct-download
+and member-master regression checks. The served mainnet worker remains
 `fd29279ce816c9f4e6e1416715971201c92775e0`, tag
 `mainnet-cpu-pilot-20261007`. The deployed pool application is recorded in
 [operations status](OPERATIONS_STATUS.md). Simulated pairing tests do not prove

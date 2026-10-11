@@ -16,7 +16,7 @@ from .block_observer import BlockStore, _semantic, manifest_references
 from .compact import compact_observation
 from .database import lock
 from .observation import canonical_json
-from .protocol import ProtocolDataError, validate_snapshot
+from .protocol import ProtocolDataError, _integer, validate_snapshot
 from .retention import parse_time
 
 
@@ -88,12 +88,15 @@ def prune(database, *, proof, limit=200):
     return {'run': run_id, 'expired_raw_blocks': len(rows)}
 
 
-def collect_unused_chunks(database):
+def collect_unused_chunks(database, *, proof, limit=5000):
     """Remove only chunks no surviving capture references, under the writer lock.
 
     Run after backfill/pruning. Large remaining legacy captures make this
     operation deliberately defer rather than interrupt live observation.
     """
+    _integer(limit, 'chunk cleanup limit', 1)
+    covered = parse_time(proof['covered_until'])
+    run_id = str(uuid.uuid4())
     with database.transaction() as cursor:
         lock(cursor, 'evidence-retention')
         lock(cursor, 'observation-stream')
@@ -111,8 +114,25 @@ def collect_unused_chunks(database):
         if refs:
             execute_values(cursor, 'INSERT INTO live_compaction_chunks(digest) VALUES %s',
                            [(digest,) for digest in sorted(refs)], page_size=2000)
-        cursor.execute('''DELETE FROM observation_chunks c WHERE NOT EXISTS
-            (SELECT 1 FROM live_compaction_chunks live WHERE live.digest=c.digest)''')
-        removed = cursor.rowcount
-        cursor.execute('DELETE FROM chunk_last_ref r WHERE NOT EXISTS (SELECT 1 FROM observation_chunks c WHERE c.digest=r.digest)')
-    return {'removed_chunks': removed}
+        cursor.execute('''SELECT c.digest FROM observation_chunks c WHERE NOT EXISTS
+            (SELECT 1 FROM live_compaction_chunks live WHERE live.digest=c.digest)
+            ORDER BY c.digest LIMIT %s''', (limit,))
+        digests = [row['digest'] for row in cursor.fetchall()]
+        if digests:
+            cursor.execute('DELETE FROM observation_chunks WHERE digest=ANY(%s)', (digests,))
+        removed = len(digests)
+        cursor.execute('''SELECT r.digest FROM chunk_last_ref r WHERE NOT EXISTS
+            (SELECT 1 FROM observation_chunks c WHERE c.digest=r.digest)
+            ORDER BY r.digest LIMIT %s''', (limit,))
+        orphan_refs = [row['digest'] for row in cursor.fetchall()]
+        if orphan_refs:
+            cursor.execute('DELETE FROM chunk_last_ref WHERE digest=ANY(%s)', (orphan_refs,))
+        cursor.execute('''SELECT EXISTS (SELECT 1 FROM observation_chunks c WHERE NOT EXISTS
+            (SELECT 1 FROM live_compaction_chunks live WHERE live.digest=c.digest)) AS more''')
+        more = cursor.fetchone()['more']
+        cursor.execute('''INSERT INTO retention_runs(id,policy,backup_proof,floors,counts,notes)
+            VALUES (%s,%s,%s,%s,%s,%s)''', (run_id, Json({'version': 'compact-network-chunk-gc-v1', 'limit': limit}),
+            Json(proof), Json({'covered_until': covered.isoformat()}),
+            Json({'removed_chunks': removed, 'removed_reference_rows': len(orphan_refs)}),
+            Json(['Bounded deletion after a complete scan of surviving capture references.'])))
+    return {'run': run_id, 'removed_chunks': removed, 'removed_reference_rows': len(orphan_refs), 'more_chunks': more}

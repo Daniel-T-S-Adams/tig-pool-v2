@@ -258,13 +258,13 @@ class SettlementTests(DatabaseCase):
 
     def test_incomplete_scope_and_report_nonce_mismatch_hold_collateral(self):
         row = self.benchmark("b")
-        self.block(20)
+        self.block(24)  # Round 7: reporting round 4's two-round window has closed.
         reports.scope(self.db, 3, [3, 4], adapter_version="boundary-fixture", evidence={"boundary": True})
-        one = reports.record(self.db, 3, "block-20", report_payload(("r", "b", 10, "nonreproducible")))
-        two = reports.record(self.db, 4, "block-20", report_payload())
+        one = reports.record(self.db, 3, "block-24", report_payload(("r", "b", 10, "nonreproducible")))
+        two = reports.record(self.db, 4, "block-24", report_payload())
         with self.assertRaisesRegex(Conflict, "every required"):
-            reports.seal(self.db, 3, [one["id"]], "block-20")
-        seal = reports.seal(self.db, 3, [one["id"], two["id"]], "block-20")
+            reports.seal(self.db, 3, [one["id"]], "block-24")
+        seal = reports.seal(self.db, 3, [one["id"], two["id"]], "block-24")
         with self.assertRaisesRegex(Conflict, "nonce"):
             settlement.finalize_collateral(self.db, row["id"], seal["id"])
 

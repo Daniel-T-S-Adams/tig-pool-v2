@@ -16,7 +16,7 @@ import uuid
 
 from psycopg2.extras import Json
 
-from .block_observer import BlockStore, manifest_references
+from .block_observer import BlockStore, _is_digest, manifest_references
 from .database import lock
 from .observation import canonical_json, read_archive
 from .protocol import ProtocolDataError
@@ -175,13 +175,19 @@ def _prune_file_chunks(directory, covered_until, *, candidates=None):
     """Caller holds pruning_lock. Capture pins protect writes during the scan."""
     live = set()
     marker, journal = directory / '.gc-active', directory / '.gc-pins'
-    with spool_lock(directory):
-        journal.write_text('')
-        marker.touch()
-        for path in (directory / 'writing').glob('*.json.gz'):
-            live.update(read_archive(path)['digests'])
     removed, offset = 0, 0
+
+    def pin(values):
+        if not isinstance(values, list) or not all(_is_digest(value) for value in values):
+            raise ProtocolDataError('cannot prune a spool with corrupt writing pins')
+        live.update(values)
+
     try:
+        with spool_lock(directory):
+            journal.write_text('')
+            marker.touch()
+            for path in (directory / 'writing').glob('*.json.gz'):
+                pin(read_archive(path).get('digests'))
         for area in ('pending', 'recorded'):
             for path in (directory / area).glob('*.json.gz'):
                 try:
@@ -200,7 +206,7 @@ def _prune_file_chunks(directory, covered_until, *, candidates=None):
                 with journal.open() as stream:
                     stream.seek(offset)
                     for line in stream.read().splitlines():
-                        live.update(json.loads(line))
+                        pin(json.loads(line))
                     offset = stream.tell()
                 for path in paths:
                     if path.stem not in live and path.stat().st_mtime <= covered_until.timestamp():
@@ -222,8 +228,8 @@ def _prune_file_chunks(directory, covered_until, *, candidates=None):
             remove_batch(batch)
     finally:
         with spool_lock(directory):
-            marker.unlink()
-            journal.unlink()
+            marker.unlink(missing_ok=True)
+            journal.unlink(missing_ok=True)
     _sync(directory / 'recorded')
     for folder in (directory / 'chunks').iterdir():
         if folder.is_dir():

@@ -12,13 +12,19 @@ compact pool evidence, selective final report fetching and guarded legacy
 conversion. Production migrations remain through 019; no existing evidence
 was pruned by this implementation.
 
+On 11 October, local verification passed all 336 pool tests (paired worker and
+Chromium enabled), 33 worker v2 tests, 17 inherited worker tests and both pool
+accounting checks. A disposable upgrade, physical backup/restore and guarded
+cleanup rehearsal also passed. See [verification details](LEAN_STORAGE_VERIFICATION.md).
+These results do not change the last measured production state below.
+
 | Item | Current state |
 |---|---|
 | Primary | Helsinki, `46.62.249.188`; website, API, coordinator and four observers |
 | Recovery | Nuremberg, `2.28.230.81`; database backups, WAL receiver and configuration copies |
 | Pool application | `8477509afafe80b59f8fa7752b5faa0f537fedb2`, tag `mainnet-abandoned-benchmark-expiry-20261009` |
 | Worker served by the API | `fd29279ce816c9f4e6e1416715971201c92775e0`, tag `mainnet-cpu-pilot-20261007` |
-| Schema | 19 verified migrations; no migration required for this cleanup |
+| Schema | 19 verified migrations deployed; lean storage requires additive migrations 020/021 |
 | Member funds | Enabled, with custody freshness checks still applying |
 | New work | Operator pause is recorded; effective `work_enabled=false`, configured `work_enabled=true` |
 | TIG submission adapter | Configured for existing work; this does not bypass the pause on new precommits |

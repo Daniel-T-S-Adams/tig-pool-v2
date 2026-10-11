@@ -43,11 +43,20 @@ class SubmissionTests(DatabaseCase):
         store = BlockStore(self.db)
         store.initialize(8); store.record(self.obs, collector="fixture")
 
-    def queued(self, key="first", member=None, ttl_seconds=60):
+    def queued(self, key="first", member=None, ttl_seconds=60, legacy=False):
         work_requests.create(self.db, member or self.member, key, resource="CPU", compute_type="aws_c7a",
                              capacity={"workers":1}, ttl_seconds=ttl_seconds)
         row = work_requests.reserve_next(self.db, self.player, now=self.obs["start"]["block"]["details"]["timestamp"])
-        submissions.prepare_archive(self.db, row["id"], row["selection"]["binary"]["details"]["download_url"], b"recorded-archive-fixture")
+        source_url = row["selection"]["binary"]["details"]["download_url"]
+        archive = b"recorded-archive-fixture"
+        if legacy:
+            digest = hashlib.sha256(archive).hexdigest()
+            with self.db.transaction() as cursor:
+                cursor.execute('INSERT INTO algorithm_archives(sha256,archive) VALUES (%s,%s)', (digest,archive))
+                cursor.execute('INSERT INTO reservation_archives(reservation_id,sha256,source_url) VALUES (%s,%s,%s)',
+                               (row['id'],digest,source_url))
+        else:
+            submissions.prepare_archive(self.db, row["id"], source_url, archive)
         intent = self.row("SELECT * FROM protocol_outbox WHERE reservation_id=%s", (row["id"],))
         return row, intent
 
@@ -313,7 +322,7 @@ class SubmissionTests(DatabaseCase):
             with self.assertRaises(FundsError):handler.redirect_request(request,None,307,'redirect',{},url)
 
     def test_pool_serves_exact_saved_archive_and_assignment_uses_its_checksum_url(self):
-        row,intent=self.queued()
+        row,intent=self.queued(legacy=True)
         submissions.begin(self.db,intent["id"],preflight=self.preflight())
         submissions.record_response(self.db,intent["id"],{"status":200,"body":{"benchmark_id":"b"*32}})
         published=submissions.publish_assignment(self.db,row["id"],self.precommit(row),evidence={"block":9},artifact_origin='https://pool.example')

@@ -1,6 +1,8 @@
 # Lean pool storage
 
-Implemented on the 9 October 2026 storage cleanup branches. **Not deployed.**
+Implemented on the 9 October 2026 storage cleanup branches; local verification
+and a disposable physical backup/restore rehearsal passed on 11 October.
+**Not deployed.** See [verification details](LEAN_STORAGE_VERIFICATION.md).
 The primary remains pool `8477509` with worker `fd29279` and migrations through
 019. No production archives were deleted by this change. See
 [operations status](OPERATIONS_STATUS.md) for live measurements and controls.
@@ -91,15 +93,20 @@ compact format; rollback must retain a reader that understands it.
 4. Add `--block-spool` or `--report-spool` to remove redundant recorded files
    in bounded batches. Report files require matching backed DB payload hashes.
    Pending files remain. After backfill/pruning, `--collect-unused-chunks`
-   removes chunks that surviving captures no longer reference.
+   removes chunks that surviving captures no longer reference. Database deletion
+   is limited by `--chunk-limit` (default 5,000, maximum 50,000) and recorded in
+   `retention_runs`. Repeat while the result reports `more_chunks: true`.
 
 File maintenance pins in-progress writes and briefly locks deletion batches,
 without holding capture behind the full directory scan. DB chunk cleanup uses
 the observation writer lock and defers with more than 100 legacy captures.
+Corrupt writing pins or digest pages stop cleanup; the temporary cleanup marker
+is cleared even on failure.
 Missing heights remain visible and continue to hold exact settlement.
 
 WAL, bases and configuration transfers keep their current transport and
 retention. Smaller writes reduce future backup volume. Expiry makes PostgreSQL
 space reusable; it does not shrink database files or purge retained backups.
-No runtime tests, production migration, release activation, archive deletion,
-table rewrite or backup purge was performed while implementing this change.
+Local API, worker, browser and database checks and fixture-only pruning have
+been performed. Production migration, release activation, production archive
+deletion, table rewrite and backup purge remain separate release operations.

@@ -77,6 +77,91 @@ class MemberProtocolTests(DatabaseCase):
         self.assertEqual(self.row("SELECT count(*) AS n FROM work_requests")["n"], 0)
         self.assertEqual(self.balance()["collateral"], 0)
 
+    @unittest.skipUnless(WORKER, 'set POOL_V2_WORKER_CHECKOUT to exercise the member master contract')
+    def test_member_master_combines_helper_outputs_and_recovers_missing_work_after_restart(self):
+        import tempfile
+        from worker_v2.proofs import BenchmarkTree
+        from worker_v2.state import StateError
+
+        for resource in ('CPU', 'GPU'):
+            with self.subTest(resource=resource), tempfile.TemporaryDirectory() as directory:
+                offer = self.offer(resource, key='master-' + resource)
+                offer['capacity'] = {'workers': 12}
+                request = self.api.post('/api/v2/work-requests', json=offer, headers=self.headers)
+                self.assertEqual(request.status_code, 200, request.text)
+                row = self.coordinate()
+                identity = row['benchmark_id']
+                path = '/api/v2/benchmarks/' + identity
+                remote = self.api.get(path, headers=self.headers).json()
+                store = Store(directory)
+                try:
+                    store.bind('https://pool.example', str(self.member))
+                    value = store.save_assignment(identity, remote['assignment_payload'], remote['assignment_digest'])
+                    self.assertEqual(self.balance()['slots'], 1)
+                    self.assertEqual(self.api.post(path + '/acknowledge', json={
+                        'assignment_digest': remote['assignment_digest']}, headers=self.headers).status_code, 200)
+                    # Simulate losing that response: recover the committed handover by GET.
+                    recovered = self.api.get(path, headers=self.headers).json()
+                    store.acknowledge(identity, recovered['handed_over_at'])
+
+                    def output(nonce):
+                        return {'nonce': nonce, 'runtime_signature': 123, 'fuel_consumed': 42,
+                                'solution': 'helper-output-' + str(nonce), 'cpu_arch': 'amd64'}
+
+                    # Two simulated helpers finish their partitions. The third disappears.
+                    for helper in (0, 1):
+                        for nonce in range(helper, value['num_nonces'], 3):
+                            store.save_nonce(identity, nonce, output(nonce), nonce - 2)
+                    completed = set(store.nonces(identity))
+                    self.assertLess(len(completed), value['num_nonces'])
+                    with self.assertRaises(StateError):
+                        BenchmarkTree(store.nonces(identity), value['num_nonces'])
+                    partial = {'merkle_root': 'a' * 64, 'solution_quality': [1] * len(completed)}
+                    self.assertEqual(self.api.post(path + '/results', json=partial, headers=self.headers).status_code, 400)
+                    self.assertEqual(self.row('SELECT count(*) AS n FROM benchmark_payloads WHERE benchmark_id=%s',
+                                              (identity,))['n'], 0)
+
+                    # A master restart keeps all completed outputs; only missing nonces are reassigned.
+                    store.close()
+                    store = Store(directory)
+                    store.bind('https://pool.example', str(self.member))
+                    self.assertEqual(set(store.nonces(identity)), completed)
+                    missing = set(range(value['num_nonces'])) - completed
+                    for nonce in sorted(missing):
+                        store.save_nonce(identity, nonce, output(nonce), nonce - 2)
+                    first = min(completed)
+                    store.save_nonce(identity, first, output(first), first - 2)  # Identical duplicate is harmless.
+                    with self.assertRaises(StateError):
+                        store.save_nonce(identity, first, output(first), first + 1)
+
+                    tree = BenchmarkTree(store.nonces(identity), value['num_nonces'])
+                    self.assertEqual(tree.result()['solution_quality'], list(range(-2, value['num_nonces'] - 2)))
+                    self.assertEqual(self.api.post(path + '/results', json=tree.result(),
+                        headers={'X-InnoPool-Version': '2.0'}).status_code, 401)
+                    first_upload = self.api.post(path + '/results', json=tree.result(), headers=self.headers)
+                    self.assertEqual(first_upload.status_code, 200, first_upload.text)
+                    retry = self.api.post(path + '/results', json=tree.result(), headers=self.headers)
+                    self.assertEqual(first_upload.json(), retry.json())
+                    changed = {**tree.result(), 'merkle_root': 'f' * 64}
+                    self.assertEqual(self.api.post(path + '/results', json=changed, headers=self.headers).status_code, 409)
+                    self.assertEqual(self.row("SELECT count(*) AS n FROM protocol_outbox WHERE reservation_id=%s AND kind='results'",
+                                              (row['id'],))['n'], 1)
+
+                    samples = [0, value['num_nonces'] - 1]
+                    member_protocol.sampled(self.db, identity, samples, evidence={'fixture': 'authoritative samples'})
+                    incomplete = tree.proofs(samples[:1])
+                    self.assertEqual(self.api.post(path + '/proofs', json=incomplete, headers=self.headers).status_code, 400)
+                    proof = self.api.post(path + '/proofs', json=tree.proofs(samples), headers=self.headers)
+                    self.assertEqual(proof.status_code, 200, proof.text)
+                    collateral = self.balance()['collateral']
+                    benchmarks.record_outcome(self.db, row['id'], 'active', height=10,
+                                              evidence={'fixture': 'TIG activation'})
+                    self.assertEqual(self.balance()['slots'], 0)
+                    self.assertEqual(self.balance()['collateral'], collateral)
+                    self.assertEqual(len(store.nonces(identity)), value['num_nonces'])
+                finally:
+                    store.close()
+
     def test_queue_links_slot_money_and_durable_submission_in_one_transaction(self):
         request = self.api.post("/api/v2/work-requests", json=self.offer(), headers=self.headers).json()
         same = self.api.post("/api/v2/work-requests", json=self.offer(), headers=self.headers).json()

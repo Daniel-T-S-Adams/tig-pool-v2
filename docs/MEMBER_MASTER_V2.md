@@ -131,6 +131,9 @@ This increment documents the contract and adds API schema/route descriptions;
 it introduces no new work fields, database migration or distributed worker.
 The installed reference worker still computes on one host, using `workers` for
 local nonce concurrency. A custom master must implement its own helper transport
-and aggregation. Multi-machine execution has not been functionally validated.
+and aggregation. Simulated CPU/GPU integration tests combine helper outputs,
+recover missing work after restart and submit one complete result and sampled
+proofs. Remote helper coordination and timely real-hardware execution remain
+unverified. See [verification details](LEAN_STORAGE_VERIFICATION.md).
 See [implementation status](../IMPLEMENTATION_STATUS.md) for deployment and
 verification state.
