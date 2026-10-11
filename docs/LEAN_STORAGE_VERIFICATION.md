@@ -35,7 +35,22 @@ Both inherited pool accounting checks (`test_revenue_split.py` and
 
 Runtime computations and TIG responses in the master test are simulated.
 There is no reference distributed scheduler or helper transport. Completion
-within TIG's lifetime on the intended CPU/GPU hardware remains a live check.
+on distinct member machines and GPU execution remain live checks.
+
+The subsequent [CPU hardware check](CPU_HARDWARE_VERIFICATION.md) on
+`poolminer1` ran the real pinned TIG runtime and verifier. All 200 knapsack
+nonces and three sampled Merkle branches passed. Cold-start wall time,
+including the pause before resuming, was 20 minutes 35 seconds against a
+nominal two-hour lifetime. The isolated pool API accepted these real results
+and proofs, accepted identical retries, rejected a changed root and preserved
+financial state. Actual public binary verification retained metadata only.
+All 33 worker v2 tests also passed on the host's Python 3.14.4.
+
+The original job-scheduling algorithm still failed a 480-second single-nonce
+probe. Its old installation used only one worker and one CPU, but historical
+timing does not support assuming that eight cores suffice for the full minimum.
+Timely execution is established only for the measured knapsack workload; real
+TIG acceptance and confirmation were not exercised.
 
 ## Physical upgrade and restore rehearsal
 

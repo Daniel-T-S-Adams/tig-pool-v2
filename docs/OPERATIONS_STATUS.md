@@ -81,6 +81,15 @@ hardware and resource limits, and check that the whole protocol minimum fits
 inside the lifetime with time for result/proof exchange. The completed pilot
 does not establish that this CPU/algorithm combination can meet that deadline.
 
+The isolated [11 October CPU hardware check](CPU_HARDWARE_VERIFICATION.md)
+found that `poolminer1` had configured only one worker and one CPU on its
+eight-CPU ARM64 host. With an independent six-worker budget, a real 200-nonce
+knapsack benchmark completed in 20 minutes 35 seconds including setup and the
+probe/resume pause. Its results and three proofs passed the isolated pool API.
+The original job-scheduling algorithm did not finish a single nonce in a
+480-second probe. Production controls and the existing worker installation
+were unchanged; no real TIG submission was made.
+
 A **block gap** means that no complete, validated snapshot exists for a required
 TIG height. The snapshot supplies network qualifiers and the pool's protocol
 feed used to assign exact member credit and reconcile outcomes. It does not
@@ -219,4 +228,6 @@ roughly 24 GiB of block/report files and consume space reserved for the next
 base backup. No raw evidence was deleted to make the job pass. Storage policy,
 RPC access and unresolved gaps remain open; keep new work paused while these
 are addressed. Reward claim/unlock/receipt and expense integration, a funded
-takeover, timely CPU completion and GPU execution also remain unvalidated.
+takeover, real TIG acceptance of timely CPU results and GPU execution also
+remain unvalidated. The isolated knapsack measurement above covers one CPU
+workload only.

@@ -23,8 +23,12 @@ capacity and master responsibilities. The pool still binds work to a member,
 with one combined result and shared slots. The reference worker remains local;
 no distributed scheduler, wire-format change or migration was added. This
 increment passed simulated CPU/GPU master aggregation and restart-recovery
-checks. Remote helper coordination and timely execution on intended hardware
-remain unverified. These changes have not been deployed.
+checks. A subsequent [real CPU check](docs/CPU_HARDWARE_VERIFICATION.md) verified
+all 200 knapsack nonces and three proofs in 20 minutes 35 seconds including
+setup and the probe/resume pause; the isolated pool API accepted both uploads.
+The original job-scheduling workload failed an eight-minute nonce probe.
+Remote helper coordination, GPU execution and real TIG acceptance remain
+unverified. These changes have not been deployed.
 
 - **Application:** `8477509`, tag `mainnet-abandoned-benchmark-expiry-20261009`, runs
   on all six primary services; migration history is verified through 019.
@@ -36,7 +40,9 @@ remain unverified. These changes have not been deployed.
 - **CPU attempt:** the 7 October benchmark completed after its 120-block
   lifetime and TIG rejected it. The evidenced rejection now resolves its slot
   as expired and its result intent as rejected, preserving collateral and the
-  financial journal for later finalization. Timely CPU completion is unproved.
+  financial journal for later finalization. The later isolated knapsack check
+  fits the nominal lifetime; the original job-scheduling workload remains
+  unvalidated for timely completion on this machine.
 - **Abandoned results:** acknowledged work with no possibly sent result now
   expires automatically using archived lifetime and complete later absence
   evidence. It frees the slot, cancels queued unsent results, and preserves
