@@ -59,7 +59,7 @@ isolated helper on `poolminer1` computed and verified eight real knapsack nonces
 over SSH, then recovered a saved output after reconnecting. Pre-handover
 assignment validation also passed on that real helper. This was a subset check;
 the intended second server still needs working SSH access. Pool CI now pins
-worker `4057d89f63f3af33df46d59b12b5e421db9bd442`.
+worker `a296a76c2773ed8a800a1978a83f53625d14f8fc`.
 
 ## Physical upgrade and restore rehearsal
 
