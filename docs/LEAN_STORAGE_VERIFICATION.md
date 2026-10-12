@@ -53,13 +53,13 @@ timing does not support assuming that eight cores suffice for the full minimum.
 Timely execution is established only for the measured knapsack workload; real
 TIG acceptance and confirmation were not exercised.
 
-On 12 October, the optional SSH master/helper implementation passed **45 worker
+On 12 October, the optional SSH master/helper implementation passed **46 worker
 v2 tests** and **17 inherited tests** locally. A workspace coordinator and an
 isolated helper on `poolminer1` computed and verified eight real knapsack nonces
 over SSH, then recovered a saved output after reconnecting. Pre-handover
 assignment validation also passed on that real helper. This was a subset check;
 the intended second server still needs working SSH access. Pool CI now pins
-worker `c09fcf79aee33108c7a7a2f9688fd53c953bd1cb`.
+worker `4057d89f63f3af33df46d59b12b5e421db9bd442`.
 
 ## Physical upgrade and restore rehearsal
 

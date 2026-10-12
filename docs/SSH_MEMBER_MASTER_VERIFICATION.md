@@ -30,7 +30,7 @@ The worker tests include real subprocess pipes for concurrent helper messages;
 their computation and SSH executable are simulated. The existing pool tests
 exercise complete results/proofs, member ownership, retries and financial rules.
 
-All **45 worker v2 tests** and **17 inherited tests** passed locally. A real
+All **46 worker v2 tests** and **17 inherited tests** passed locally. A real
 SSH/Docker check then used a workspace coordinator and an isolated two-worker
 helper on `poolminer1`. Eight nonces from the archived public knapsack assignment
 passed the actual TIG runtime/verifier in 129.45 seconds including preparation.
