@@ -137,8 +137,9 @@ transport and aggregation. The deployed installer remains the earlier local
 worker until a paired release is activated.
 
 Tests combine helper outputs, recover missing work after restart and submit one
-complete result and sampled proofs. Distinct-machine execution and real TIG
-acceptance remain unverified. See
+complete result and sampled proofs. A real two-server CPU rehearsal passed
+complete results/proofs, helper disconnection and master-crash recovery.
+Actual TIG acceptance remains unverified. See
 [SSH verification](SSH_MEMBER_MASTER_VERIFICATION.md) and
 [the wider verification details](LEAN_STORAGE_VERIFICATION.md).
 See [implementation status](../IMPLEMENTATION_STATUS.md) for deployment and

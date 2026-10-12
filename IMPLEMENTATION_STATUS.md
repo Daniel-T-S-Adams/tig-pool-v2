@@ -10,7 +10,7 @@ The foundation and increment records below are historical validation records.
 
 The 9 October [lean storage implementation](docs/LEAN_STORAGE.md) is prepared
 on cleanup branches. It has not been deployed or run against production data.
-It requires a paired worker update and additive migrations 020/021. On 11
+It requires a paired worker update and additive migrations 020 to 022. On 11
 October all 336 pool tests, 33 worker v2 tests, 17 inherited worker tests and both
 pool accounting checks passed locally. A disposable upgrade from deployed
 migrations 001–019, verified physical backup, restore and bounded cleanup also
@@ -26,15 +26,20 @@ checks. A subsequent [real CPU check](docs/CPU_HARDWARE_VERIFICATION.md) verifie
 all 200 knapsack nonces and three proofs in 20 minutes 35 seconds including
 setup and the probe/resume pause; the isolated pool API accepted both uploads.
 The original job-scheduling workload failed an eight-minute nonce probe.
-Remote helper coordination, GPU execution and real TIG acceptance remain
-unverified. These changes have not been deployed.
+GPU execution and real TIG acceptance remain unverified. The later SSH check
+below establishes real remote helper coordination. These changes have not
+been deployed to the production pool or served worker.
 
 The 12 October [SSH member master implementation](docs/SSH_MEMBER_MASTER_VERIFICATION.md)
 adds an optional helper mode to the worker, using the existing whole-benchmark
 pool API. It checks compatible capacity before new work and queued refresh,
 preserves outputs on both sides, and recovers unfinished work after a helper
-disconnects. Intended two-server execution is pending access to the second
-member machine; no paid TIG submission was made.
+disconnects. A full real rehearsal on `poolminer1` and its ARM64 helper passed
+all 200 knapsack nonces and three sampled proofs in 15 minutes 8 seconds,
+including deliberate disconnect/master-crash recovery. All 105 saved outputs
+survived unchanged; isolated API uploads/retries and financial preservation
+passed. Rehearsal units are stopped and isolated setup/evidence is retained.
+No paid TIG submission or production activation was made.
 
 - **Application:** `8477509`, tag `mainnet-abandoned-benchmark-expiry-20261009`, runs
   on all six primary services; migration history is verified through 019.

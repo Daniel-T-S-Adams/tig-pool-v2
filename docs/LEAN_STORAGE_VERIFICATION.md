@@ -35,8 +35,8 @@ Both inherited pool accounting checks (`test_revenue_split.py` and
 
 Runtime computations and TIG responses in the master test are simulated.
 The 12 October [SSH member implementation](SSH_MEMBER_MASTER_VERIFICATION.md)
-adds optional helper transport to the reference worker. Completion on distinct
-member machines and GPU execution remain live checks.
+adds optional helper transport to the reference worker. A subsequent complete
+real two-server CPU rehearsal passed; GPU execution remains unverified.
 
 The subsequent [CPU hardware check](CPU_HARDWARE_VERIFICATION.md) on
 `poolminer1` ran the real pinned TIG runtime and verifier. All 200 knapsack
@@ -57,9 +57,13 @@ On 12 October, the optional SSH master/helper implementation passed **46 worker
 v2 tests** and **17 inherited tests** locally. A workspace coordinator and an
 isolated helper on `poolminer1` computed and verified eight real knapsack nonces
 over SSH, then recovered a saved output after reconnecting. Pre-handover
-assignment validation also passed on that real helper. This was a subset check;
-the intended second server still needs working SSH access. Pool CI now pins
-worker `a296a76c2773ed8a800a1978a83f53625d14f8fc`.
+assignment validation also passed on that real helper. The later full two-server
+rehearsal resolved helper access: `poolminer1` used six local and six remote
+workers, verified all 200 knapsack nonces and three proofs, and recovered all
+105 crash-saved outputs unchanged. Wall time including the deliberate fault and
+restart pause was 15 minutes 8 seconds. Complete isolated API uploads, retries
+and financial preservation passed. See the SSH verification note for exact
+source revisions, resource limits, retained setup and remaining live checks.
 
 ## Physical upgrade and restore rehearsal
 
@@ -99,6 +103,6 @@ Development evidence is retained under
 3. Prepare a paired release and fresh off-host backup with a compatible rollback
    reader. Deploy the worker and all pool collectors before enabling direct
    assignments or pruning.
-4. Apply migrations 020/021 and grants, backfill bounded reviewed batches, then
+4. Apply migrations 020 to 022 and grants, backfill bounded reviewed batches, then
    obtain a verified backup containing their replacements before production
    pruning. Existing monetary controls and gap/settlement gates still apply.
