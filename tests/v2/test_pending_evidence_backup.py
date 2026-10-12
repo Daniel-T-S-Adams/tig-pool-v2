@@ -246,6 +246,16 @@ class PendingEvidenceTests(unittest.TestCase):
         self.assertEqual(calls[0][-1], 'export-pending-v1')
         self.assertEqual(list(archive.glob('.receiving-*')), [])
 
+    def test_filesystem_allocation_allowance_is_reserved_before_starting_ssh(self):
+        archive = self.root / 'archive'
+        config = {'directory': str(archive), 'minimum_free_gib': 35}
+        free = 35 * 1024**3 + pending.MAX_TOTAL + 1
+        with patch.object(pending.shutil, 'disk_usage', return_value=pending.shutil._ntuple_diskusage(free, 0, free)), \
+                patch.object(pending.subprocess, 'Popen') as ssh:
+            with self.assertRaisesRegex(RuntimeError, 'disk reserve'):
+                pending.receive(config)
+            ssh.assert_not_called()
+
     def test_sender_failure_preserves_published_snapshot_and_cleans_owned_staging(self):
         archive = self.root / 'archive'
         _, stream = self.export()

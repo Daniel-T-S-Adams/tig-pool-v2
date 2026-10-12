@@ -400,7 +400,10 @@ def receive(config):
     root = Path(config['directory'])
     root.mkdir(mode=0o700, parents=True, exist_ok=True)
     with lock(root / 'sync.lock', nonblocking=True):
-        if shutil.disk_usage(root).free < (config['minimum_free_gib'] * 1024**3 + MAX_TOTAL):
+        # Small compressed chunks still occupy whole filesystem blocks. Budget
+        # their allocation/metadata and the index as well as compressed content.
+        allocation = MAX_TOTAL + MAX_FILE + (2 * MAX_FILES + 4096) * os.statvfs(root).f_frsize
+        if shutil.disk_usage(root).free < (config['minimum_free_gib'] * 1024**3 + allocation):
             raise RuntimeError('disk reserve too low; existing pending snapshots retained')
         base = json.loads(Path(config['base_record']).read_text())
         if base.get('data_checksums_verified') is not True or base.get('wal_parse_verified') is not True:

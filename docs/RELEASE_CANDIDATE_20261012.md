@@ -17,7 +17,7 @@ settlement. Neither this candidate nor its pending-file protection is activated.
   cluster and durable recovery WAL acknowledgment are required for publication.
 - Added a recovery health profile for database/WAL/settings/pending-file
   protection with inactive pool services and independent collectors.
-- Passed **361 pool tests**, including both real HTTPS browser flows, paired
+- Passed **362 pool tests**, including both real HTTPS browser flows, paired
   worker/API checks, actual restored spool imports into PostgreSQL and all
   backup/health regressions, without skips. Both accounting scripts passed.
 - Rechecked the exact paired worker: **46 v2 tests and 17 inherited tests** passed.

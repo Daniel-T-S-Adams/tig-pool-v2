@@ -33,8 +33,10 @@ and fail the service/health check.
 - Keep the latest **two verified pending snapshots**. An older tool-owned
   snapshot is removed only after its replacement and durable WAL barrier pass.
   Primary evidence, database bases and WAL are never removed by this tool.
-- Retain at least 35 GiB free plus the maximum incoming content allowance before
-  starting a copy. A low reserve causes failure, not weaker protection.
+- Retain at least 35 GiB free plus the maximum incoming content, index and
+  filesystem allocation/metadata allowance before starting a copy. Small
+  compressed chunks occupy whole disk blocks. A low reserve causes failure,
+  not weaker protection.
 - Run every minute after the previous attempt finishes, with a four-minute
   service timeout. Health requires both the selected source files and the
   completed copy to be no more than five minutes old. It checks the published
