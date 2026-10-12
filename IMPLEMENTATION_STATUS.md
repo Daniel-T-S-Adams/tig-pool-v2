@@ -20,15 +20,21 @@ The 11 October [member master contract](docs/MEMBER_MASTER_V2.md) documents
 member-managed nonce distribution across compatible machines using the existing
 whole-benchmark API. API schema/route descriptions now explain aggregate
 capacity and master responsibilities. The pool still binds work to a member,
-with one combined result and shared slots. The reference worker remains local;
-no distributed scheduler, wire-format change or migration was added. This
-increment passed simulated CPU/GPU master aggregation and restart-recovery
+with one combined result and shared slots. The contract increment passed
+simulated CPU/GPU master aggregation and restart-recovery
 checks. A subsequent [real CPU check](docs/CPU_HARDWARE_VERIFICATION.md) verified
 all 200 knapsack nonces and three proofs in 20 minutes 35 seconds including
 setup and the probe/resume pause; the isolated pool API accepted both uploads.
 The original job-scheduling workload failed an eight-minute nonce probe.
 Remote helper coordination, GPU execution and real TIG acceptance remain
 unverified. These changes have not been deployed.
+
+The 12 October [SSH member master implementation](docs/SSH_MEMBER_MASTER_VERIFICATION.md)
+adds an optional helper mode to the worker, using the existing whole-benchmark
+pool API. It checks compatible capacity before new work and queued refresh,
+preserves outputs on both sides, and recovers unfinished work after a helper
+disconnects. Intended two-server execution is pending access to the second
+member machine; no paid TIG submission was made.
 
 - **Application:** `8477509`, tag `mainnet-abandoned-benchmark-expiry-20261009`, runs
   on all six primary services; migration history is verified through 019.

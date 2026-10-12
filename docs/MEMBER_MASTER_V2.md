@@ -3,13 +3,15 @@
 Agreed 11 October 2026. The pool assigns one complete benchmark to one member.
 The member's **master** is their pool-facing client. It may compute locally,
 distribute different nonces to compatible helper machines, or combine both.
-Members implement and operate communication and scheduling within their own
-machines. The pool coordinates the complete benchmark with the master.
+Members operate communication and scheduling within their own machines, using
+their own client or the optional SSH mode in the reference worker. The pool
+coordinates the complete benchmark with the master.
 
 This uses [member API 2.0](MEMBER_API_V2.md). Ownership is bound to the
 authenticated member, without a machine registration or machine ID. The
-single-machine reference worker demonstrates the same assignment/result/proof
-contract; it does not include a distributed scheduler.
+reference worker demonstrates the same assignment/result/proof contract. Its
+optional SSH helper mode is described in
+[the implementation and verification note](SSH_MEMBER_MASTER_VERIFICATION.md).
 
 ```mermaid
 flowchart LR
@@ -127,13 +129,17 @@ Freeing the execution slot does not by itself end the evidence obligation.
 ## Implementation status
 
 The existing API is compatible with this member-managed execution model.
-This increment documents the contract and adds API schema/route descriptions;
-it introduces no new work fields, database migration or distributed worker.
-The installed reference worker still computes on one host, using `workers` for
-local nonce concurrency. A custom master must implement its own helper transport
-and aggregation. Simulated CPU/GPU integration tests combine helper outputs,
-recover missing work after restart and submit one complete result and sampled
-proofs. Remote helper coordination and timely real-hardware execution remain
-unverified. See [verification details](LEAN_STORAGE_VERIFICATION.md).
+The 11 October contract increment added schema/route descriptions without new
+pool work fields or a migration. The 12 October worker implementation adds
+optional SSH helpers: `workers` controls local concurrency and helper entries
+add compatible remote capacity. Custom masters may still implement their own
+transport and aggregation. The deployed installer remains the earlier local
+worker until a paired release is activated.
+
+Tests combine helper outputs, recover missing work after restart and submit one
+complete result and sampled proofs. Distinct-machine execution and real TIG
+acceptance remain unverified. See
+[SSH verification](SSH_MEMBER_MASTER_VERIFICATION.md) and
+[the wider verification details](LEAN_STORAGE_VERIFICATION.md).
 See [implementation status](../IMPLEMENTATION_STATUS.md) for deployment and
 verification state.

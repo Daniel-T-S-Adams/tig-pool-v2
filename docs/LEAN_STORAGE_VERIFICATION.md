@@ -10,7 +10,7 @@ the rehearsal and no live transfer or TIG benchmark is submitted.
 All **336 pool tests** passed, with PostgreSQL, the paired worker and Chromium
 enabled and no skips. The worker passed **33 v2** and **17 inherited** tests.
 Both inherited pool accounting checks (`test_revenue_split.py` and
-`test_work_credits.py`) passed. Pool CI pins worker
+`test_work_credits.py`) passed. The 11 October pool CI used worker
 `4bba91962db48903326d18d6e00f6ed2a4d4ff84`.
 
 - Direct public archive downloads: matching hashes, AMD64/ARM extraction,
@@ -34,8 +34,9 @@ Both inherited pool accounting checks (`test_revenue_split.py` and
   returns one complete Merkle tree and the authoritative sampled proofs.
 
 Runtime computations and TIG responses in the master test are simulated.
-There is no reference distributed scheduler or helper transport. Completion
-on distinct member machines and GPU execution remain live checks.
+The 12 October [SSH member implementation](SSH_MEMBER_MASTER_VERIFICATION.md)
+adds optional helper transport to the reference worker. Completion on distinct
+member machines and GPU execution remain live checks.
 
 The subsequent [CPU hardware check](CPU_HARDWARE_VERIFICATION.md) on
 `poolminer1` ran the real pinned TIG runtime and verifier. All 200 knapsack
@@ -51,6 +52,14 @@ probe. Its old installation used only one worker and one CPU, but historical
 timing does not support assuming that eight cores suffice for the full minimum.
 Timely execution is established only for the measured knapsack workload; real
 TIG acceptance and confirmation were not exercised.
+
+On 12 October, the optional SSH master/helper implementation passed **45 worker
+v2 tests** and **17 inherited tests** locally. A workspace coordinator and an
+isolated helper on `poolminer1` computed and verified eight real knapsack nonces
+over SSH, then recovered a saved output after reconnecting. Pre-handover
+assignment validation also passed on that real helper. This was a subset check;
+the intended second server still needs working SSH access. Pool CI now pins
+worker `c09fcf79aee33108c7a7a2f9688fd53c953bd1cb`.
 
 ## Physical upgrade and restore rehearsal
 
