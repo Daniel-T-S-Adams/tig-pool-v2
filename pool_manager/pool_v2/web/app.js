@@ -73,6 +73,7 @@ async function sign(message, wallet) {
 }
 async function connect() {
   if (!window.ethereum) throw Error('Open this page with an Ethereum wallet extension to connect.');
+  if (!capabilities.origin) await loadCapabilities();
   if (capabilities.origin.replace(/\/$/,'') !== location.origin) throw Error('The pool’s configured address does not match this page. Contact the operator.');
   const wallets = await window.ethereum.request({method:'eth_requestAccounts'});
   const chain = await window.ethereum.request({method:'eth_chainId'});

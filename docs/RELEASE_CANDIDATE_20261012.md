@@ -26,6 +26,9 @@ settlement. Neither this candidate nor its pending-file protection is activated.
   directories and garbage-collection journals. Tests drop privileges to the
   collector UID; unsafe linked control files are refused. Primary lock access
   was also checked as the actual `innopoolmainnet` service user.
+- Fixed sign-in before the initial pool settings response arrives. The
+  onboarding browser regression deliberately holds that first response and
+  verifies successful sign-in, guide visibility and sign-out.
 
 The prior actual two-server computation and restart rehearsal remains recorded
 in [SSH member master verification](SSH_MEMBER_MASTER_VERIFICATION.md). Its

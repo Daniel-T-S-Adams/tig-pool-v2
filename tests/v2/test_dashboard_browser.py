@@ -121,6 +121,13 @@ class DashboardBrowserTests(DatabaseCase):
         context.expose_function('fixtureWallet', wallet_request)
         context.add_init_script('window.ethereum={request: request => window.fixtureWallet(request)};')
         page = context.new_page()
+        initial_capabilities = []
+        def delay_initial_settings(route):
+            if not initial_capabilities:
+                initial_capabilities.append(route)
+            else:
+                route.continue_()
+        page.route(self.api_origin + '/api/v2/capabilities', delay_initial_settings)
         errors = []
         page.on('pageerror', lambda error: errors.append(str(error)))
         page.goto(self.origin + '/join')
@@ -135,6 +142,8 @@ class DashboardBrowserTests(DatabaseCase):
         self.assertLessEqual(page.evaluate('document.documentElement.scrollWidth'), 390)
         page.get_by_role('button', name='Connect wallet', exact=True).click()
         expect(page.locator('#member-content')).to_be_visible()
+        self.assertEqual(len(initial_capabilities), 1)
+        initial_capabilities[0].continue_()
         expect(guide).to_be_visible()
         expect(page.get_by_role('heading', name='Single-machine reference installer')).to_be_visible()
         page.get_by_role('button', name='Sign out', exact=True).click()
