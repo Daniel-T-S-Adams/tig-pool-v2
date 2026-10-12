@@ -233,8 +233,8 @@ The proposed storage setup for discussion is:
 This proposal is not installed. Re-enabling the existing full copy would add
 roughly 24 GiB of block/report files and consume space reserved for the next
 base backup. No raw evidence was deleted to make the job pass. Storage policy,
-RPC access and unresolved gaps remain open; keep new work paused while these
-are addressed. Reward claim/unlock/receipt and expense integration, a funded
+unresolved gaps remain open; keep new work paused while these are addressed.
+The repaired public RPC remains subject to ordinary custody availability/freshness gates. Reward claim/unlock/receipt and expense integration, a funded
 takeover, real TIG acceptance of timely CPU results and GPU execution also
 remain unvalidated. The isolated knapsack measurement above covers one CPU
 workload only.
