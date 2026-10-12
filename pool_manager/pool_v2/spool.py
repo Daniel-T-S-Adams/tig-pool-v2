@@ -4,6 +4,7 @@ import gzip
 import hashlib
 import json
 import os
+import stat
 from pathlib import Path
 import tempfile
 import uuid
@@ -25,6 +26,15 @@ class Spool:
         (self.directory / "pending").mkdir(exist_ok=True)
         (self.directory / "recorded").mkdir(exist_ok=True)
         (self.directory / "writing").mkdir(exist_ok=True)
+        # Root maintenance may initialize a spool before its collector starts.
+        # Known child directories must remain writable by the spool's owner.
+        for name in ('chunks', 'pending', 'recorded', 'writing'):
+            path = self.directory / name
+            if path.is_symlink():
+                raise ProtocolDataError('unsafe spool directory')
+            if os.geteuid() == 0:
+                owner = self.directory.stat()
+                os.chown(path, owner.st_uid, owner.st_gid, follow_symlinks=False)
         _sync(self.directory)
         _sync(self.directory.parent)
 
@@ -137,23 +147,52 @@ def _sync(path):
         os.close(descriptor)
 
 
+def _owned_descriptor(directory, name):
+    directory = Path(directory)
+    descriptor = os.open(directory / name, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+    try:
+        info = os.fstat(descriptor)
+        if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+            raise ProtocolDataError('unsafe spool control file')
+        if os.geteuid() == 0:
+            owner = directory.stat()
+            os.fchown(descriptor, owner.st_uid, owner.st_gid)
+            os.fchmod(descriptor, 0o600)
+        return descriptor
+    except BaseException:
+        os.close(descriptor)
+        raise
+
+
+def _control_file(directory, name):
+    """Create/reset a maintenance marker or journal with the collector's owner."""
+    descriptor = _owned_descriptor(directory, name)
+    try:
+        os.ftruncate(descriptor, 0)
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
 @contextmanager
-def spool_lock(directory):
-    """Serialize chunk publication and pruning, including unpublished captures."""
-    with (Path(directory) / '.spool.lock').open('a') as stream:
+def _lock(directory, name):
+    with os.fdopen(_owned_descriptor(directory, name), 'a') as stream:
         fcntl.flock(stream, fcntl.LOCK_EX)
         try:
             yield
         finally:
             fcntl.flock(stream, fcntl.LOCK_UN)
+
+
+@contextmanager
+def spool_lock(directory):
+    """Serialize chunk publication and pruning, including unpublished captures."""
+    with _lock(directory, '.spool.lock'):
+        yield
 
 
 @contextmanager
 def pruning_lock(directory):
     """Serialize maintenance runs without preventing live captures."""
-    with (Path(directory) / '.pruning.lock').open('a') as stream:
-        fcntl.flock(stream, fcntl.LOCK_EX)
-        try:
-            yield
-        finally:
-            fcntl.flock(stream, fcntl.LOCK_UN)
+    with _lock(directory, '.pruning.lock'):
+        yield

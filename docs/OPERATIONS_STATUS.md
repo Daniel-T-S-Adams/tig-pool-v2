@@ -21,7 +21,7 @@ These results do not change the last measured production state below.
 
 The 12 October [release candidate](RELEASE_CANDIDATE_20261012.md) finishes member
 onboarding and adds pending-file recovery/health tools. Its local suite passed
-362 pool tests without skips, the exact paired worker's 46 v2/17 inherited tests,
+370 pool tests without skips, the exact paired worker's 46 v2/17 inherited tests,
 and both accounting checks. Recovery capacity, fresh backup/restore and paired
 activation remain open.
 

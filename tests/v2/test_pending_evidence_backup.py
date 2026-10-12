@@ -7,6 +7,8 @@ import json
 from pathlib import Path
 import sys
 import tarfile
+import subprocess
+import os
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -288,6 +290,39 @@ class PendingEvidenceTests(unittest.TestCase):
                 {'pages': ['a' * 64]}, {'items': ['a' * 64]}):
             with self.subTest(node=node), self.assertRaises(ValueError):
                 pending.references(node, lambda digest: b'bad')
+
+    def test_root_exporter_preserves_collector_lock_ownership(self):
+        directory = self.source / 'reports'
+        uid, gid = os.geteuid(), os.getegid()
+        if uid == 0:
+            uid, gid = 59999, 59999
+            self.root.chmod(0o755)
+            self.source.chmod(0o755)
+            os.chown(directory, uid, gid)
+        for name in ('.pruning.lock', '.spool.lock'):
+            with pending.lock(directory / name):
+                info = (directory / name).stat()
+                self.assertEqual((info.st_uid, info.st_gid, info.st_mode & 0o777), (uid, gid, 0o600))
+        code = ('import os,sys,fcntl;uid=int(sys.argv[1]);gid=int(sys.argv[2]);'
+            'os.setgroups([]) if os.geteuid()==0 else None;'
+            'os.setgid(gid) if os.geteuid()==0 else None;'
+            'os.setuid(uid) if os.geteuid()==0 else None;'
+            'files=[open(p,"a") for p in sys.argv[3:]];'
+            '[fcntl.flock(f,fcntl.LOCK_EX|fcntl.LOCK_NB) for f in files]')
+        subprocess.run(['/usr/bin/python3', '-c', code, str(uid), str(gid),
+            str(directory / '.pruning.lock'), str(directory / '.spool.lock')], check=True, timeout=10)
+
+    def test_export_locks_refuse_symlinks_and_hardlinks(self):
+        original = self.root / 'original'
+        original.write_text('leave unchanged')
+        for name, make_link in (('symlink', lambda p: p.symlink_to(original)),
+                ('hardlink', lambda p: os.link(original, p))):
+            path = self.root / name
+            make_link(path)
+            with self.assertRaises((OSError, ValueError)):
+                with pending.lock(path):
+                    self.fail('unsafe lock was accepted')
+            self.assertEqual(original.read_text(), 'leave unchanged')
 
 
 class RestoredPendingDatabaseTests(DatabaseCase):

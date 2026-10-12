@@ -13,7 +13,10 @@ from all four spools: **blocks, reports, custody and funding**. It includes only
 their referenced chunks, including digest pages and compact blobs. Recorded
 archives, unreferenced chunks and algorithm binaries are excluded.
 
-Publication locks make one bounded selection; maintenance locks then protect
+Lock files follow the spool directory's owner even when the exporter or
+maintenance runs as root, so the collector can reopen them. Symlinked or
+hardlinked lock files are refused. Publication locks make one bounded selection;
+maintenance locks then protect
 the selected chunks while copying. A manifest moved to `recorded` after selection
 still has its complete saved bytes in the snapshot. The updated collector and
 maintenance locking implementation must be installed before production pruning.

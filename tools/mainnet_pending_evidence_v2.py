@@ -18,6 +18,7 @@ import os
 from pathlib import Path
 import re
 import shutil
+import stat
 import subprocess
 import sys
 import tarfile
@@ -60,7 +61,16 @@ def barrier_valid(record):
 
 @contextmanager
 def lock(path, *, nonblocking=False):
-    with Path(path).open('a') as handle:
+    path = Path(path)
+    descriptor = os.open(path, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+    with os.fdopen(descriptor, 'a') as handle:
+        info = os.fstat(handle.fileno())
+        if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+            raise ValueError('unsafe evidence lock file')
+        if os.geteuid() == 0:
+            owner = path.parent.stat()
+            os.fchown(handle.fileno(), owner.st_uid, owner.st_gid)
+            os.fchmod(handle.fileno(), 0o600)
         fcntl.flock(handle, fcntl.LOCK_EX | (fcntl.LOCK_NB if nonblocking else 0))
         yield
 

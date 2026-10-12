@@ -20,7 +20,7 @@ from .block_observer import BlockStore, _is_digest, manifest_references
 from .database import lock
 from .observation import canonical_json, read_archive
 from .protocol import ProtocolDataError
-from .spool import Spool, spool_lock, pruning_lock, _sync
+from .spool import Spool, spool_lock, pruning_lock, _sync, _control_file
 
 POLICY = {"version": "evidence-retention-v2", "raw_block_rounds": 4, "report_rounds": 4,
           "capture_days": 30, "settled_margin_rounds": 3}
@@ -184,8 +184,8 @@ def _prune_file_chunks(directory, covered_until, *, candidates=None):
 
     try:
         with spool_lock(directory):
-            journal.write_text('')
-            marker.touch()
+            _control_file(directory, '.gc-pins')
+            _control_file(directory, '.gc-active')
             for path in (directory / 'writing').glob('*.json.gz'):
                 pin(read_archive(path).get('digests'))
         for area in ('pending', 'recorded'):
