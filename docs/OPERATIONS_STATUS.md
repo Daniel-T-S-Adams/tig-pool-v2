@@ -1,8 +1,8 @@
 # V2 operations and storage status
 
 Checked against the running services on **9 October 2026**. This is the current
-operations record. Older dated validation notes describe the state at the time
-of their checks; they do not override this record.
+operations record. Wallet RPC recovery was checked separately on **12 October**
+and is recorded below. Older dated validation notes describe their own check state.
 
 ## Deployment and controls
 
@@ -122,17 +122,24 @@ be pending briefly while the regular recorder imports them.
 
 ## Wallet observation
 
-Custody observation last caught up successfully on 8 October at 15:12 UTC,
-through Base height `52340909`. The public Base RPC rejects or rate-limits the
-historical log requests needed to advance. A quiet, spaced request also failed;
-other tested public endpoints rejected historical reads or returned service
-errors. This is an RPC access failure, not evidence of a ledger balance mismatch.
+Wallet observation was repaired on **12 October 2026**. The primary API and
+observer now use the verified public Pocket Base endpoint. At 13:11 UTC the
+observer was reconciled and ready at Base **52510065**, recovering **169,056
+blocks** from the previously stuck cursor. Account/journal fingerprints and the
+member's 0.9995 TIG available balance were unchanged; every sampled audit passed.
 
-The observer now spaces calls by two seconds, polls at sixty seconds and records
-the failed RPC method plus numeric HTTP/RPC status without exposing provider
-credentials. It still needs a usable Base endpoint for historical `eth_call`
-and `eth_getLogs`. New spending remains subject to custody reconciliation.
-No replacement provider or credential was configured during this cleanup.
+The previous `mainnet.base.org` connection had rejected historical reads since
+the earlier 9 October record. Candidate checks verified a known deposit/receipt,
+complete historical ranges and canonical anchors before the switch. Catch-up
+used 1,000-block batches with 0.25-second request spacing and one-second polls;
+steady polling is now 30 seconds. Older supplier targets and rate limits are
+still rejected under the existing freshness/reconciliation rules.
+
+Encrypted settings, the exact observer unit and protected rollback files were
+copied to Germany and verified. No new provider account, deposit, paid benchmark,
+application release or schema change was made. New work remains paused for the
+remaining paired-release and paid-test checks. See
+[the recovery record](RPC_RECOVERY_20261012.md).
 
 ## What is stored, and why
 
