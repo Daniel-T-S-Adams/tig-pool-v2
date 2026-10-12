@@ -5,6 +5,14 @@ It does not load the inherited dashboard, scheduler or payout processes.
 Deploy it behind HTTPS at the exact origin configured for wallet signatures.
 Assets are local; no third-party scripts or analytics are required.
 
+The updated `/join` page, prepared locally for deployment, is **Connect your
+master**. Its public guide covers account setup, the deployment's API address,
+execution tokens, work requests and confirmed assignment handover, plus result
+and proof submission and troubleshooting. Links are visible before and after
+sign-in. Members configure their own helper machines; website concurrency only
+configures the separately labelled single-machine reference installer. See the
+[member setup guide](MEMBER_SETUP_V2.md).
+
 ## Member account
 
 Members sign a one-time message with their wallet. The page shows available

@@ -1,8 +1,9 @@
 # V2 operations and storage status
 
 Checked against the running services on **9 October 2026**. This is the current
-operations record. Wallet RPC recovery was checked separately on **12 October**
-and is recorded below. Older dated validation notes describe their own check state.
+operations record. Wallet RPC recovery and backup capacity were checked
+separately on **12 October** and are recorded below. Older dated validation notes
+describe their own check state.
 
 ## Deployment and controls
 
@@ -17,6 +18,12 @@ Chromium enabled), 33 worker v2 tests, 17 inherited worker tests and both pool
 accounting checks. A disposable upgrade, physical backup/restore and guarded
 cleanup rehearsal also passed. See [verification details](LEAN_STORAGE_VERIFICATION.md).
 These results do not change the last measured production state below.
+
+The 12 October [release candidate](RELEASE_CANDIDATE_20261012.md) finishes member
+onboarding and adds pending-file recovery/health tools. Its local suite passed
+361 pool tests without skips, the exact paired worker's 46 v2/17 inherited tests,
+and both accounting checks. Recovery capacity, fresh backup/restore and paired
+activation remain open.
 
 | Item | Current state |
 |---|---|
@@ -199,11 +206,11 @@ import and subsequent backups can change the footprint during catch-up.
 
 ## Recovery protection and remaining cleanup
 
-The continuous WAL receiver and transfer jobs are active. The daily 9 October
-base backup completed at 03:42 UTC with archive checksums and required WAL
-verified. Three verified daily bases are retained with WAL back to the oldest
-base. The actual point-in-time restore rehearsal passed on 4 October; today's
-checksum verification is not a new restore rehearsal.
+The continuous WAL receiver and transfer jobs are active. The latest successful
+base completed on **10 October at 03:46 UTC**, with archive checksums and required
+WAL verified. Later daily attempts failed the disk reserve check. Three verified
+bases remain with WAL back to the oldest base. The actual point-in-time restore
+rehearsal passed on 4 October; these backup records are not a new restore check.
 
 The earlier cleanup application and encrypted configuration arrived on Germany
 at 13:24 UTC. The current expiry release and encrypted settings were exported
@@ -230,7 +237,22 @@ The proposed storage setup for discussion is:
    missed observations and needs its own storage; it is a separate decision
    from copying the primary's files.
 
-This proposal is not installed. Re-enabling the existing full copy would add
+On **12 October**, the pending-file copy and matching recovery health profile
+were implemented for the release candidate. They cover all four protocol spools,
+retain two verified snapshots, require a durable WAL boundary and enforce five
+minutes of freshness. They are **not activated**; see
+[pending evidence protection](PENDING_EVIDENCE_BACKUP.md).
+
+The refreshed recovery survey at **17:11 UTC on 12 October** found about
+**15.0 GiB free**, 44.0 GiB in the three retained bases and 75.7 GiB of required
+WAL. The newest successful base
+completed on **10 October at 03:46 UTC**. Later daily attempts failed the disk
+reserve check. The current retention plan selects no bases or WAL for deletion.
+Additional capacity, a fresh verified backup and a database-plus-files restore
+are required before this release. An additional 200 GB volume has been proposed
+to the owner; it is not provisioned by this update.
+
+Re-enabling the existing full copy would add
 roughly 24 GiB of block/report files and consume space reserved for the next
 base backup. No raw evidence was deleted to make the job pass. Storage policy,
 unresolved gaps remain open; keep new work paused while these are addressed.

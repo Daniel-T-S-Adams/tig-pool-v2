@@ -2,3 +2,9 @@
 
 #worker-install-options select { width:100%; padding:.65rem; border:1px solid var(--line); border-radius:.5rem; background:var(--paper); color:inherit; font:inherit; }
 #worker-install-command { white-space:pre-wrap; font-size:.8rem; line-height:1.6; }
+.setup-guide { line-height:1.65; }
+.setup-guide code { overflow-wrap:anywhere; font-size:.9em; }
+.setup-guide li { margin-bottom:.8rem; }
+.setup-guide details { border-top:1px solid var(--line); padding:1rem 0; }
+.setup-guide summary { cursor:pointer; font-weight:650; }
+.setup-guide pre { padding:1rem; background:var(--bg); border-radius:7px; white-space:pre-wrap; overflow-wrap:anywhere; font-size:.8rem; line-height:1.6; }

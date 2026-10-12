@@ -15,7 +15,22 @@ See [operations status](OPERATIONS_STATUS.md) for the exact release and controls
 | Encrypted configuration export | Primary, daily around 02:30 UTC | Credentials, TLS key/certificate, service configuration, operational helpers, exact application and retained website assets. |
 | Configuration/archive pull | Germany, every five minutes | Published primary exports over restricted read-only SSH. |
 | Raw evidence copy | **Disabled** following the 8 October disk-reserve failure | The installed job would copy the full primary block/report spool; current pending files have no separate file-copy protection. |
+| Pending evidence snapshot | **Prepared, not activated** on 12 October | Copies only pending block/report/custody/funding manifests and their referenced chunks, with a durable WAL boundary and two verified snapshots. |
 | Health checks | Installed helpers and timers | Primary checks and individual backup-job records remain useful; the old recovery overall check expects inactive collectors/full evidence copy and needs a corrected profile. |
+
+The refreshed **12 October, 17:11 UTC** survey found about **15.0 GiB free on Germany**:
+three retained bases use about 44.0 GiB and required WAL about 75.7 GiB. The last
+successful verified base completed on **10 October at 03:46 UTC**; subsequent
+daily attempts failed the disk reserve check. The WAL stream remains active,
+but the stale base and low reserve are release blockers. A read-only retention
+plan found **zero eligible bases and zero eligible WAL segments**. Do not delete
+required recovery data or reduce the three-base policy to make the job pass.
+
+An additional 200 GB volume is proposed for moving and verifying the recovery
+archive, staging a fresh backup and running the restore rehearsal. Purchase and
+attachment require the owner's input. The pending-file implementation and
+recovery health profile are described in
+[pending evidence protection](PENDING_EVIDENCE_BACKUP.md); they remain inactive.
 
 The full evidence copy is not running. Its former interval was measured after
 completion, with no guarantee of five-minute freshness. Germany's collectors

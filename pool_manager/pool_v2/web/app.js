@@ -47,7 +47,7 @@ async function loadCapabilities() {
   capabilities = await api('capabilities');
   $('work-status').textContent = capabilities.work_enabled ? 'Accepting work' : capabilities.new_work_paused ? 'New work paused' : capabilities.work_block_reason==='custody-reconciliation' ? 'Checking pool funds' : capabilities.work_block_reason==='protocol-fee-reconciliation' ? 'Checking submission funds' : 'Work not enabled';
   $('worker-install-options').hidden=!capabilities.release_digest;
-  $('worker-install-status').textContent=capabilities.release_digest?'Download the installer paired with this pool. It asks privately for your execution token.':'The paired v2 installer will be available with the verified release.';
+  $('worker-install-status').textContent=capabilities.release_digest?'Single-machine reference installer. It asks privately for your execution token and does not connect helper machines.':'The single-machine reference installer will be available with the verified release.';
   $('work-status').classList.toggle('active', capabilities.work_enabled);
 }
 function field(label, id, value = '', options = {}) {
@@ -249,5 +249,6 @@ $('refresh-operator').addEventListener('click',()=>run(loadOperator,$('refresh-o
 $('pause-work').addEventListener('click',()=>run(async()=>{await api('operator/controls/new-work',{paused:!capabilities.new_work_paused,reason:capabilities.new_work_paused?'Operator resumed new work':'Operator paused new work',event_key:key()});await loadOperator();notice('Work control updated. Existing benchmark recovery remains available.');},$('pause-work')));
 for(const [id,change] of [['operator-newer',-50],['operator-older',50]])$(id).addEventListener('click',()=>run(async()=>{operatorOffset=Math.max(0,operatorOffset+change);await loadOperator();}));
 $('member-page').hidden=operatorPage;$('operator-page').hidden=!operatorPage;
+$('master-setup-guide').hidden=location.pathname!=='/join';
 for(const link of document.querySelectorAll('nav a'))if(new URL(link.href).pathname===location.pathname)link.setAttribute('aria-current','page');
 await run(loadCapabilities);

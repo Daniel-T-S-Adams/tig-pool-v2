@@ -6,12 +6,17 @@ distribute different nonces to compatible helper machines, or combine both.
 Members operate communication and scheduling within their own machines, using
 their own client or the optional SSH mode in the reference worker. The pool
 coordinates the complete benchmark with the master.
+Shared execution across several machines is the expected member operating model;
+the member-managed master is the entry point for that arrangement.
 
 This uses [member API 2.0](MEMBER_API_V2.md). Ownership is bound to the
 authenticated member, without a machine registration or machine ID. The
 reference worker demonstrates the same assignment/result/proof contract. Its
 optional SSH helper mode is described in
 [the implementation and verification note](SSH_MEMBER_MASTER_VERIFICATION.md).
+
+Start with the [member setup guide](MEMBER_SETUP_V2.md) for website registration,
+the execution token, API connection settings and receiving your first assignment.
 
 ```mermaid
 flowchart LR
@@ -20,6 +25,84 @@ flowchart LR
     Master <-->|"Member-managed jobs and outputs"| Helpers["Compatible helper machines"]
     Master --> Local["Optional local computation"]
 ```
+
+## Member onboarding and a shared benchmark
+
+The pool-side scaffolding supports this model: authentication and benchmark
+ownership identify the member, offers can describe aggregate compatible nonce
+capacity, and the API accepts one combined result and the sampled proofs. Helper
+machines add neither a collateral reservation nor an execution slot. One shared
+benchmark uses one of the member's two slots.
+
+The following diagram shows the member's setup steps and subsequent computation.
+Orange nodes are member-supplied software and setup. The current Join-page
+installer supplies the single-machine reference worker; it does not install a
+distributed master, pair helpers or configure their communication. The helper
+jobs and output collection shown here are the member's implementation of the
+contract, not additional pool API routes. The reference worker also supplies an
+optional SSH helper mode; its default website installer remains single-machine.
+
+```mermaid
+flowchart TD
+    subgraph Setup["Member setup"]
+        S1["1. Open the pool website<br/>Connect wallet and sign in"]
+        S2["2. Ensure sufficient available balance<br/>for the configured collateral requirement"]
+        S3["3. Create an execution token<br/>Keep it with the member master"]
+        S4["4. Set up the member master<br/>Connect compatible helper machines"]
+        S1 --> S2 --> S3 --> S4
+    end
+
+    subgraph PoolSide["Pool infrastructure - implemented"]
+        API["Member API and coordinator<br/>Member ownership, collateral and slots"]
+        TIG["TIG protocol"]
+        API <-->|"Protocol submissions and observations"| TIG
+    end
+
+    subgraph Fleet["Member machines - member-managed"]
+        Master["Member master<br/>Save and acknowledge the whole assignment<br/>Schedule work and recover unfinished nonces"]
+        A["Machine A<br/>Compute one subset of nonces"]
+        B["Machine B<br/>Compute another subset of nonces"]
+        C["Machine C<br/>Compute the remaining nonces"]
+        Outputs["Master saves complete outputs<br/>Combine every nonce in order<br/>Build one Merkle root and sampled proofs"]
+        Master -->|"Nonce jobs"| A
+        Master -->|"Nonce jobs"| B
+        Master -->|"Nonce jobs"| C
+        A -->|"Outputs and qualities"| Outputs
+        B -->|"Outputs and qualities"| Outputs
+        C -->|"Outputs and qualities"| Outputs
+    end
+
+    S4 --> Master
+    Master -->|"Request one benchmark with aggregate capacity"| API
+    API -->|"Whole assignment and confirmed handover"| Master
+    Outputs -->|"One complete result, then sampled proofs"| API
+    API -->|"Authoritative sampled nonces and outcome"| Outputs
+
+    classDef memberProvided fill:#fff4df,stroke:#a66b00,color:#222;
+    class S4,Master,A,B,C,Outputs memberProvided;
+```
+
+Only the master uses the member execution token to talk to the pool. Each helper
+executes the same immutable benchmark assignment with a different nonce subset;
+the master must collect all required outputs before uploading the complete
+result. It constructs proofs after receiving TIG's authoritative sampled nonces.
+The master can also compute locally. All participating machines must meet the
+[compatibility contract](#capacity-and-compatibility).
+
+For example, three compatible machines with four concurrent nonce computations
+each can offer `capacity.workers: 12` for one benchmark. This uses one member slot
+and one collateral reservation. If a second benchmark is running, divide the
+available compute between the two rather than promising the same capacity twice.
+
+The pool contract and [member connection guide](MEMBER_SETUP_V2.md) are in place.
+The supplied installer remains single-machine. Members implement their own
+master/helper connections and scheduling, or configure the reference worker's
+optional SSH mode. They can integrate through the existing API without using
+that installer. Real two-server computation, restart recovery and combined API
+uploads passed on 12 October; see [the verification record](SSH_MEMBER_MASTER_VERIFICATION.md).
+Actual mainnet acceptance and finalization remain to be checked. Deployment and
+new-work availability are separate from this architecture; see
+[operations status](OPERATIONS_STATUS.md).
 
 ## Responsibilities
 

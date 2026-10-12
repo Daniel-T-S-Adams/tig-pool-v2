@@ -1,0 +1,16 @@
+[Unit]
+Description=Copy and verify pending protocol evidence from the primary
+After=network-online.target innopoolv2mainnet-wal.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 /opt/innopool-v2-mainnet/operations/mainnet_pending_evidence_v2.py receive --config=/etc/innopool-v2-mainnet/pending-evidence.json
+CPUQuota=50%
+MemoryMax=768M
+MemorySwapMax=0
+Nice=10
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+TimeoutStartSec=240

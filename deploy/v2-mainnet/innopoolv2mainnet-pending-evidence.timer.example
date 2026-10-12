@@ -1,0 +1,10 @@
+[Unit]
+Description=Protect pending protocol files every minute
+
+[Timer]
+OnBootSec=1min
+OnUnitInactiveSec=1min
+Unit=innopoolv2mainnet-pending-evidence.service
+
+[Install]
+WantedBy=timers.target

@@ -23,6 +23,7 @@ It explains the website and MetaMask steps, server configuration, software
 updates, and the remaining deployment requirements.
 
 Members building a master to use several compatible machines should follow the
+[member setup guide](docs/MEMBER_SETUP_V2.md) and
 [member master contract](docs/MEMBER_MASTER_V2.md). The pool assigns a complete
 benchmark; members coordinate their own machines and return its combined result
 and proofs through the existing API.
