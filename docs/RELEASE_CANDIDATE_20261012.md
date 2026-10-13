@@ -3,7 +3,9 @@
 The pool candidate pairs with worker
 `a715041901e865d136138cff0017f46b90b3d5ce`. The production pool remains `8477509`
 with served worker `fd29279`, migrations 001–019, paused new work and disabled
-settlement. Neither this candidate nor its pending-file protection is activated.
+settlement. The application candidate is not activated. Pending-file protection
+and recovery health were activated and verified on 13 October. See
+[the completed storage/recovery record](RECOVERY_VOLUME_20261013.md).
 
 ## Completed preparation
 
@@ -37,18 +39,21 @@ the original slow job-scheduling workload. Actual TIG acceptance is still open.
 
 ## Release gates still open
 
-1. **Recovery capacity and fresh backup.** At 17:11 UTC Germany had about 15.0 GiB
-   free. The last successful daily base is from 10 October; subsequent attempts
-   failed the reserve. Required WAL is still streaming. No bases/WAL qualify
-   for deletion under the existing policy. A new 200 GB volume is requested
-   from the owner for verified relocation and the full restore rehearsal.
-2. **Install and verify pending-file protection.** Run a real restricted SSH
-   export/copy, enable its timer only after verification, and switch recovery
-   health to the prepared profile. Back up the updated configuration/units.
-3. **Combined production restore and paired activation.** Restore a fresh base,
-   later WAL and pending evidence in isolation, then compare finance, ownership,
-   holds, gaps and idempotent replay. Prepare a compact-format-compatible
-   rollback reader before pool/worker activation or production pruning.
+**13 October:** capacity, fresh backup, restricted pending-file transfer/timer,
+recovery health and combined production-copy restoration are complete. Exact
+44-table fingerprints and actual block/report replay passed; the health extension
+passed all **371 hosted tests**. Items 1/2 and the restore part of item 3 below
+record the original 12 October gates. Paired activation, compatible rollback and
+the exact capped paid trial remain open.
+
+1. **Recovery capacity and fresh backup — complete 13 October.** Verified
+   relocation, a fresh base and normal three-base/WAL retention passed.
+2. **Pending-file protection — complete 13 October.** Restricted SSH, the timer,
+   corrected health profile and encrypted configuration copies are verified.
+3. **Combined restore complete; paired activation pending.** Finance, ownership,
+   holds, gaps and replay checks passed on the isolated production copy. Prepare
+   a compact-format-compatible rollback reader before pool/worker activation
+   or production pruning.
 4. **Exact workload and paid trial.** Verify timing for the selected live
    algorithm/track, install one-attempt/workload/fee/collateral bounds and obtain
    the owner's paid-test approval and required signing. Watch actual acceptance

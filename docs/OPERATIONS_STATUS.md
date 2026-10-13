@@ -2,7 +2,8 @@
 
 Checked against the running services on **9 October 2026**. This is the current
 operations record. Wallet RPC recovery and backup capacity were checked
-separately on **12 October** and are recorded below. Older dated validation notes
+separately on **12 October**; backup relocation and recovery verification passed
+on **13 October**, as recorded below. Older dated validation notes
 describe their own check state.
 
 ## Deployment and controls
@@ -22,8 +23,10 @@ These results do not change the last measured production state below.
 The 12 October [release candidate](RELEASE_CANDIDATE_20261012.md) finishes member
 onboarding and adds pending-file recovery/health tools. Its local suite passed
 370 pool tests without skips, the exact paired worker's 46 v2/17 inherited tests,
-and both accounting checks. Recovery capacity, fresh backup/restore and paired
-activation remain open.
+and both accounting checks. Recovery capacity and combined production-copy
+backup/restore passed on 13 October; paired application activation remains open.
+The backup health extension in `dfcfbf6` passed all 371 hosted tests.
+See [the recovery activation record](RECOVERY_VOLUME_20261013.md).
 
 | Item | Current state |
 |---|---|
@@ -240,17 +243,17 @@ The proposed storage setup for discussion is:
 On **12 October**, the pending-file copy and matching recovery health profile
 were implemented for the release candidate. They cover all four protocol spools,
 retain two verified snapshots, require a durable WAL boundary and enforce five
-minutes of freshness. They are **not activated**; see
+minutes of freshness. They were **activated and production-copy verified on
+13 October**; see
 [pending evidence protection](PENDING_EVIDENCE_BACKUP.md).
 
-The refreshed recovery survey at **17:11 UTC on 12 October** found about
-**15.0 GiB free**, 44.0 GiB in the three retained bases and 75.7 GiB of required
-WAL. The newest successful base
-completed on **10 October at 03:46 UTC**. Later daily attempts failed the disk
-reserve check. The current retention plan selects no bases or WAL for deletion.
-Additional capacity, a fresh verified backup and a database-plus-files restore
-are required before this release. An additional 200 GB volume has been proposed
-to the owner; it is not provisioned by this update.
+The historical 12 October survey found about 15 GiB free, with 44 GiB of bases
+and 76 GiB of required WAL; new daily backups could not start. On 13 October the
+owner attached a 200 GiB EXT4 volume. Relocation, a fresh base and combined
+production-copy restore passed, and normal backup retention resumed. The
+obsolete original copy was removed afterward. Root had about 135 GiB free and
+the volume about 82 GiB free. Recovery health was healthy at 12:18 UTC.
+Production still uses the old larger application storage design.
 
 Re-enabling the existing full copy would add
 roughly 24 GiB of block/report files and consume space reserved for the next

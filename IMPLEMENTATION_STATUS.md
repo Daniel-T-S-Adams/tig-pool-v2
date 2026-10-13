@@ -1,6 +1,6 @@
 # InnoPool v2 implementation status
 
-Documentation updated **12 October 2026**; live deployment details were last
+Documentation updated **13 October 2026**; live application details were last
 checked on **9 October 2026**. The agreed design is
 [POOL_REDESIGN_PLAN.md](POOL_REDESIGN_PLAN.md). The detailed current state and
 storage explanation are in [operations status](docs/OPERATIONS_STATUS.md).
@@ -9,12 +9,21 @@ The foundation and increment records below are historical validation records.
 ## Current summary
 
 The 9 October [lean storage implementation](docs/LEAN_STORAGE.md) is prepared
-on cleanup branches. It has not been deployed or run against production data.
-It requires a paired worker update and additive migrations 020 to 022. On 11
+on cleanup branches. It has not been activated on the live database. Its
+migrations and readers were checked on an isolated production-copy restore on
+13 October. It requires a paired worker update and additive migrations 020/021. On 11
 October all 336 pool tests, 33 worker v2 tests, 17 inherited worker tests and both
 pool accounting checks passed locally. A disposable upgrade from deployed
 migrations 001–019, verified physical backup, restore and bounded cleanup also
 passed. See [verification details](docs/LEAN_STORAGE_VERIFICATION.md).
+
+On 13 October recovery volume migration, a fresh physical backup and later-WAL
+restore passed. Forty-four table fingerprints matched; actual block/report files
+were replayed twice without financial changes. Pending protection and the
+matching health profile are active and healthy. Root has about 135 GiB free and
+the volume 82 GiB free. Candidate `dfcfbf6` passed all **371 hosted tests**;
+production remains `8477509`/worker `fd29279` and migration 019. See
+[the recovery update](docs/RECOVERY_VOLUME_20261013.md).
 
 The 11 October [member master contract](docs/MEMBER_MASTER_V2.md) documents
 member-managed nonce distribution across compatible machines using the existing

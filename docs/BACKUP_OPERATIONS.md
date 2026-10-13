@@ -14,11 +14,20 @@ See [operations status](OPERATIONS_STATUS.md) for the exact release and controls
 | Compressed database backup | Germany, daily around 03:10 UTC | Entire primary PostgreSQL cluster; data checksums and required WAL are checked before publication. |
 | Encrypted configuration export | Primary, daily around 02:30 UTC | Credentials, TLS key/certificate, service configuration, operational helpers, exact application and retained website assets. |
 | Configuration/archive pull | Germany, every five minutes | Published primary exports over restricted read-only SSH. |
-| Raw evidence copy | **Disabled** following the 8 October disk-reserve failure | The installed job would copy the full primary block/report spool; current pending files have no separate file-copy protection. |
-| Pending evidence snapshot | **Prepared, not activated** on 12 October | Copies only pending block/report/custody/funding manifests and their referenced chunks, with a durable WAL boundary and two verified snapshots. |
-| Health checks | Installed helpers and timers | Primary checks and individual backup-job records remain useful; the old recovery overall check expects inactive collectors/full evidence copy and needs a corrected profile. |
+| Raw evidence copy | **Disabled** following the 8 October disk-reserve failure | The installed job would copy the full primary block/report spool; bounded pending-file protection is now active. |
+| Pending evidence snapshot | **Active and verified** on 13 October | Copies only pending block/report/custody/funding manifests and their referenced chunks, with a durable WAL boundary and two verified snapshots. |
+| Health checks | Installed helpers and timers | Checks database/WAL/settings/pending-file protection, actual destination reserves and inactive recovery pool services. |
 
-The refreshed **12 October, 17:11 UTC** survey found about **15.0 GiB free on Germany**:
+## Recovery capacity — completed 13 October
+
+The new 200 GiB EXT4 volume is in use for database/WAL archives and pending-file
+snapshots. A fresh verified base and combined production-copy restore passed;
+the obsolete original copy was removed only afterward. Root had about 135 GiB
+free and the volume 82 GiB free. The pending-file timer and corrected recovery
+health profile are active; health at 12:18 UTC was healthy with no issues.
+See [the full verification record](RECOVERY_VOLUME_20261013.md).
+
+The historical **12 October, 17:11 UTC** survey found about **15.0 GiB free on Germany**:
 three retained bases use about 44.0 GiB and required WAL about 75.7 GiB. The last
 successful verified base completed on **10 October at 03:46 UTC**; subsequent
 daily attempts failed the disk reserve check. The WAL stream remains active,
@@ -26,18 +35,16 @@ but the stale base and low reserve are release blockers. A read-only retention
 plan found **zero eligible bases and zero eligible WAL segments**. Do not delete
 required recovery data or reduce the three-base policy to make the job pass.
 
-An additional 200 GB volume is proposed for moving and verifying the recovery
-archive, staging a fresh backup and running the restore rehearsal. Purchase and
-attachment require the owner's input. The pending-file implementation and
-recovery health profile are described in
-[pending evidence protection](PENDING_EVIDENCE_BACKUP.md); they remain inactive.
+The owner attached the proposed volume on 13 October. Migration, a fresh base,
+combined restore and pending-file/health activation are complete. The detailed
+protection is described in [pending evidence protection](PENDING_EVIDENCE_BACKUP.md).
 
 The full evidence copy is not running. Its former interval was measured after
 completion, with no guarantee of five-minute freshness. Germany's collectors
 have been inactive since 7 October. Database WAL is a separate stream and
 cannot protect protocol files that have not entered the database, or supply a
-TIG block never observed. Pending-file protection and whether to run an
-independent collector are storage decisions still under discussion.
+TIG block never observed. Pending-file protection is active; whether to run an
+independent collector remains a separate storage and coverage decision.
 
 The backup connection uses a dedicated replication-only PostgreSQL role and an
 SSH account restricted to forwarding the primary's loopback database port.
@@ -183,9 +190,10 @@ These are distinct tests. No funded mainnet takeover or token transfer occurred.
 
 - [x] Operator chose manual inspection on 6 October; external alerts remain
   disabled. No external destination has been configured.
-- [ ] Restore pending-file protection and correct recovery health to the
+- [x] Restore pending-file protection and correct recovery health to the
   agreed backup/collector profile; rehearse the database-plus-file restore.
-- [ ] Sufficient archive storage and a measured, obligation-aware retention plan.
+- [x] Recovery capacity, verified relocation and the three-base/WAL retention
+  plan checked on 13 October. Measure the lean footprint after activation.
 - [ ] Funded takeover, uncertain-send recovery and concurrent/retried-request tests.
 - [x] Real member sign-in through Cloudflare on 6 October and the later mainnet
   CPU assignment/result upload. This does not prove timely TIG completion.

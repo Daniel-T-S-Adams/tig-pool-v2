@@ -1,5 +1,11 @@
 # Pool data and its path to recovery
 
+**13 October update:** database/WAL archives and bounded pending snapshots now
+use the new EXT4 volume. Relocation, a fresh base and combined restore passed;
+pending-file protection and corrected recovery health are active. See
+[the current recovery path](RECOVERY_VOLUME_20261013.md). The 9 October trace
+below remains a historical measurement of the running application storage.
+
 This surveys the **running release**. The subsequently implemented
 [lean storage design](LEAN_STORAGE.md) is not deployed. Existing data and the
 measurements below have not changed: the running pool still saves binaries,

@@ -18,6 +18,10 @@ For a high-level view of hosting, connections and deployments, see the
 [pool structure diagram](docs/POOL_STRUCTURE.md) and
 [Cloudflare setup steps](docs/CLOUDFLARE_SETUP.md).
 
+The [13 October recovery update](docs/RECOVERY_VOLUME_20261013.md) records the new
+volume, verified database/WAL/pending-file restore and active protection.
+The lean application and paired member master worker await activation.
+
 For day-to-day operation, use the [v2 owner's guide](docs/OWNER_GUIDE.md).
 It explains the website and MetaMask steps, server configuration, software
 updates, and the remaining deployment requirements.

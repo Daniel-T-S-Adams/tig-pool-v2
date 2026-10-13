@@ -1,7 +1,8 @@
 # Pending protocol file protection
 
-Prepared on 12 October 2026, **not activated**. The German recovery host must
-first regain enough space for a fresh database backup and restore rehearsal.
+Prepared on 12 October and **activated/verified on 13 October 2026**. The German
+host now has the new volume, a fresh base and a successful combined production-copy
+restore. See [the activation record](RECOVERY_VOLUME_20261013.md).
 This supplements the existing three verified database bases, continuous WAL and
 encrypted settings/release exports. It does not activate a second pool or
 independent protocol collection.
