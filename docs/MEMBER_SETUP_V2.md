@@ -6,8 +6,8 @@ combined results and proofs. You decide how it distributes computation to your
 other machines. The pool requires no helper-machine registration.
 
 The updated **Connect your master** page at `/join` gives the same connection
-steps. That website update is prepared locally and requires deployment; the
-currently served page may still show only the reference installer.
+steps. It was deployed with the paired worker on 13 October; see
+[rollout status](LEAN_ROLLOUT_20261013.md).
 The supplied reference installer configures one machine. You can implement a
 custom master using the member API described here, or configure the paired
 reference worker's optional SSH helper mode. See the

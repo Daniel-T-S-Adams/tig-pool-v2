@@ -1,8 +1,9 @@
 # Serving the recorded pool and worker release
 
 The API publishes a paired release and its checked worker installer. A private
-CPU testnet pair was validated in September. Mainnet now serves pool
-`8477509` with worker `fd29279` (`mainnet-cpu-pilot-20261007`). The later mainnet
+CPU testnet pair was validated in September. Since 13 October mainnet serves pool
+`f5f1028` with worker `a715041` under the recorded
+[lean/member-master release](LEAN_ROLLOUT_20261013.md). The earlier mainnet
 CPU attempt expired before TIG accepted its results; a served release is not
 proof of timely execution or a completed reward cycle. New work remains paused.
 See [operations status](OPERATIONS_STATUS.md) and the

@@ -216,8 +216,10 @@ The 11 October contract increment added schema/route descriptions without new
 pool work fields or a migration. The 12 October worker implementation adds
 optional SSH helpers: `workers` controls local concurrency and helper entries
 add compatible remote capacity. Custom masters may still implement their own
-transport and aggregation. The deployed installer remains the earlier local
-worker until a paired release is activated.
+transport and aggregation. The updated paired installer is served on mainnet
+since 13 October; the default installation still configures one machine.
+Optional SSH helpers require member configuration. See
+[rollout status](LEAN_ROLLOUT_20261013.md).
 
 Tests combine helper outputs, recover missing work after restart and submit one
 complete result and sampled proofs. A real two-server CPU rehearsal passed

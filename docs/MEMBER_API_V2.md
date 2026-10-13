@@ -136,11 +136,10 @@ verifies either source against the assignment's checksum before
 extracting the expected named library. It does not require a token: these are
 already-public TIG algorithm binaries, and no member files are served.
 See [lean storage](LEAN_STORAGE.md); direct downloads require the paired worker
-update and are not active on the running mainnet release.
+update; the matched pair was activated on mainnet on 13 October.
 
-CI pins worker `4bba91962db48903326d18d6e00f6ed2a4d4ff84` for direct-download
-and member-master regression checks. The served mainnet worker remains
-`fd29279ce816c9f4e6e1416715971201c92775e0`, tag
-`mainnet-cpu-pilot-20261007`. The deployed pool application is recorded in
+CI pins worker `a715041901e865d136138cff0017f46b90b3d5ce` for direct-download
+and member-master regression checks. Mainnet serves that worker under tag
+`mainnet-direct-binaries-member-master-20261013`. The deployed pool application is recorded in
 [operations status](OPERATIONS_STATUS.md). Simulated pairing tests do not prove
 timely CPU/GPU execution or successful mainnet activation.

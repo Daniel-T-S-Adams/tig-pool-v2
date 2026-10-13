@@ -4,13 +4,13 @@
 movements. Hetzner hosts the services and their configuration. Software changes
 are reviewed and tested before a fixed release is deployed.**
 
-Revised **9 October 2026**, checked against release
-`mainnet-abandoned-benchmark-expiry-20261009` (`8477509`, schema through 019).
+Revised **13 October 2026**, checked against release
+`mainnet-lean-storage-member-master-20261013` (`f5f1028`, schema through 021).
 Member funds are enabled; new work is paused and settlement is disabled.
-The API serves pinned worker `fd29279`. Recovery preserves base backups, WAL
-and encrypted settings; its API and collectors are inactive and the full raw
-file-copy job is disabled. A usable Base RPC, unresolved round-137 block gaps
-and storage protection remain cleanup items. See [operations status](OPERATIONS_STATUS.md)
+The API serves pinned worker `a715041`. Recovery preserves base backups, WAL,
+encrypted settings and bounded pending files; its API and collectors are inactive.
+RPC failures still hold custody gates. Historical storage conversion, unresolved
+round-137 gaps and the capped mainnet test remain open. See [operations status](OPERATIONS_STATUS.md)
 for the current findings, what the evidence means and the storage discussion.
 
 This guide describes implemented controls. A control still depends on its

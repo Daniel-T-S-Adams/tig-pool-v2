@@ -4,12 +4,14 @@
 use the new EXT4 volume. Relocation, a fresh base and combined restore passed;
 pending-file protection and corrected recovery health are active. See
 [the current recovery path](RECOVERY_VOLUME_20261013.md). The 9 October trace
-below remains a historical measurement of the running application storage.
+below remains a historical measurement of the previous application storage.
 
-This surveys the **running release**. The subsequently implemented
-[lean storage design](LEAN_STORAGE.md) is not deployed. Existing data and the
-measurements below have not changed: the running pool still saves binaries,
-full network captures and repeated report responses.
+The [lean storage design](LEAN_STORAGE.md) was activated on 13 October. New
+assignments retain binary metadata, successful blocks retain compact pool data,
+and reports follow final obligations. Historical conversion is running; old raw
+copies remain until replacement backup and guarded pruning. See
+[the rollout record](LEAN_ROLLOUT_20261013.md). The tables and measurements below
+describe the **9 October running release**, before that change.
 
 Read-only trace of the running primary and recovery hosts on **9 October 2026,
 14:55 UTC**, plus the code in the installed pool release `8477509` and pinned

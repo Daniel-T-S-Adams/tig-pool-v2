@@ -1,9 +1,10 @@
 # Release candidate — 12 October 2026
 
 The pool candidate pairs with worker
-`a715041901e865d136138cff0017f46b90b3d5ce`. The production pool remains `8477509`
-with served worker `fd29279`, migrations 001–019, paused new work and disabled
-settlement. The application candidate is not activated. Pending-file protection
+`a715041901e865d136138cff0017f46b90b3d5ce`. The final pool candidate `f5f1028` and
+that worker were activated on 13 October, with migrations 001–021, paused new
+work and disabled settlement. See [the rollout record](LEAN_ROLLOUT_20261013.md).
+Pending-file protection
 and recovery health were activated and verified on 13 October. See
 [the completed storage/recovery record](RECOVERY_VOLUME_20261013.md).
 
@@ -43,21 +44,22 @@ the original slow job-scheduling workload. Actual TIG acceptance is still open.
 recovery health and combined production-copy restoration are complete. Exact
 44-table fingerprints and actual block/report replay passed; the health extension
 passed all **371 hosted tests**. Items 1/2 and the restore part of item 3 below
-record the original 12 October gates. Paired activation, compatible rollback and
-the exact capped paid trial remain open.
+record the original 12 October gates. Paired activation and the compatible
+reader are complete. Historical conversion and the exact capped paid trial remain open.
 
 1. **Recovery capacity and fresh backup — complete 13 October.** Verified
    relocation, a fresh base and normal three-base/WAL retention passed.
 2. **Pending-file protection — complete 13 October.** Restricted SSH, the timer,
    corrected health profile and encrypted configuration copies are verified.
-3. **Combined restore complete; paired activation pending.** Finance, ownership,
-   holds, gaps and replay checks passed on the isolated production copy. Prepare
-   a compact-format-compatible rollback reader before pool/worker activation
-   or production pruning.
-4. **Exact workload and paid trial.** Verify timing for the selected live
-   algorithm/track, install one-attempt/workload/fee/collateral bounds and obtain
-   the owner's paid-test approval and required signing. Watch actual acceptance
-   and subsequent reports/finalization.
+3. **Combined restore, paired activation and compatible reader — complete.**
+   Finance, ownership, holds, gaps and replay checks passed on the isolated
+   production copy. Both staged readers replay the same actual live compact
+   block. Guarded historical conversion/backup/pruning remains maintenance work.
+4. **Timing and bounded preparation complete; paid trial awaits approval.** All
+   five current `c003_a154` tracks passed hardware and isolated API checks. The
+   limited driver/launcher are staged inactive and reject unapproved execution;
+   the existing member token passed a read-only check. Obtain the owner's
+   approval for one bounded attempt, then watch actual acceptance and later finalization.
 
 See [pending evidence installation](PENDING_EVIDENCE_BACKUP.md) and
 [current operations](OPERATIONS_STATUS.md). Development logs, screenshots,

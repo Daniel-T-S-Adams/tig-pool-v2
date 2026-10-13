@@ -45,13 +45,14 @@ evidence is in `/root/mine-rootz/validation/recovery-volume-20261013/`.
 
 ## Scope and next work
 
-The production application remains pool `8477509`, worker `fd29279`, migrations
-001–019. The lean application/worker pair is not activated. New work remains
+After this storage verification, the production pair was activated at 13:28 UTC:
+pool `f5f1028`, worker `a715041`, migrations 001–021. See
+[the subsequent rollout](LEAN_ROLLOUT_20261013.md). New work remains
 paused, settlement disabled, and no paid TIG trial was submitted. This validates
 database and file recovery; a funded API takeover remains separate work.
 
-The running pool still writes the old larger captures. Future capacity must be
-measured after paired activation and guarded legacy conversion/pruning. Expiry
+The running pool now writes compact captures. Future capacity must be
+measured after guarded legacy conversion/pruning, which remains in progress. Expiry
 makes PostgreSQL pages reusable; it does not automatically shrink database files
 or retained physical backups. The added capacity provided migration and restore
 room, rather than establishing the steady footprint of the lean design.

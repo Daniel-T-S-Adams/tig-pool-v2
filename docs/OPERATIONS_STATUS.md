@@ -1,18 +1,26 @@
 # V2 operations and storage status
 
-Checked against the running services on **9 October 2026**. This is the current
-operations record. Wallet RPC recovery and backup capacity were checked
-separately on **12 October**; backup relocation and recovery verification passed
+Checked against the running services on **13 October 2026**. This is the current
+operations record. Wallet RPC recovery was checked on **12 October**; backup
+relocation, recovery verification and paired application activation passed
 on **13 October**, as recorded below. Older dated validation notes
 describe their own check state.
 
 ## Deployment and controls
 
-The [lean storage implementation](LEAN_STORAGE.md) is prepared on cleanup
-branches and has not been deployed. It adds direct worker binary downloads,
+The [lean storage implementation](LEAN_STORAGE.md) was activated at 13:28 UTC
+on 13 October. It adds direct worker binary downloads,
 compact pool evidence, selective final report fetching and guarded legacy
-conversion. Production migrations remain through 019; no existing evidence
-was pruned by this implementation.
+conversion. Production migrations are verified through 021. The matched worker,
+public installer, compatible readers and unchanged balances were checked.
+Historical conversion is running and current CPU timing passed; no primary raw
+archive has been deleted by this rollout. See [the rollout record](LEAN_ROLLOUT_20261013.md).
+
+The current two-host `c003_a154` test passed all five possible tracks, including
+three 4,000-nonce assignments. The worst took 12m33s; all actual uploads and
+sampled proofs passed an isolated API replay. This remains unpaid verification.
+The subsequent [RPC routing repair](RPC_ROUTING_20261013.md) separates Base's
+finality/basic reads from Pocket's log queries and recovered custody freshness.
 
 On 11 October, local verification passed all 336 pool tests (paired worker and
 Chromium enabled), 33 worker v2 tests, 17 inherited worker tests and both pool
@@ -24,7 +32,7 @@ The 12 October [release candidate](RELEASE_CANDIDATE_20261012.md) finishes membe
 onboarding and adds pending-file recovery/health tools. Its local suite passed
 370 pool tests without skips, the exact paired worker's 46 v2/17 inherited tests,
 and both accounting checks. Recovery capacity and combined production-copy
-backup/restore passed on 13 October; paired application activation remains open.
+backup/restore and paired application activation passed on 13 October.
 The backup health extension in `dfcfbf6` passed all 371 hosted tests.
 See [the recovery activation record](RECOVERY_VOLUME_20261013.md).
 
@@ -32,9 +40,9 @@ See [the recovery activation record](RECOVERY_VOLUME_20261013.md).
 |---|---|
 | Primary | Helsinki, `46.62.249.188`; website, API, coordinator and four observers |
 | Recovery | Nuremberg, `2.28.230.81`; database backups, WAL receiver and configuration copies |
-| Pool application | `8477509afafe80b59f8fa7752b5faa0f537fedb2`, tag `mainnet-abandoned-benchmark-expiry-20261009` |
-| Worker served by the API | `fd29279ce816c9f4e6e1416715971201c92775e0`, tag `mainnet-cpu-pilot-20261007` |
-| Schema | 19 verified migrations deployed; lean storage requires additive migrations 020/021 |
+| Pool application | `f5f1028ec3e8e2a0ee875e8cff4c0cb0a6d449e5`, tag `mainnet-lean-storage-member-master-20261013` |
+| Worker served by the API | `a715041901e865d136138cff0017f46b90b3d5ce`, tag `mainnet-direct-binaries-member-master-20261013` |
+| Schema | 21 verified migrations deployed; 020/021 applied twice with earlier checksums unchanged |
 | Member funds | Enabled, with custody freshness checks still applying |
 | New work | Operator pause is recorded; effective `work_enabled=false`, configured `work_enabled=true` |
 | TIG submission adapter | Configured for existing work; this does not bypass the pause on new precommits |
@@ -48,7 +56,7 @@ head may also differ from the pinned worker above.
 
 The preceding operational cleanup passed all **299 pool tests**, including the
 paired worker and Chromium flows, and the hosted `pool-baseline` check. See
-[PR #38](https://github.com/Daniel-T-S-Adams/tig-pool-v2/pull/38). The current
+[PR #38](https://github.com/Daniel-T-S-Adams/tig-pool-v2/pull/38). The earlier
 abandoned-results expiry change passed the existing required hosted checks in
 [PR #40](https://github.com/Daniel-T-S-Adams/tig-pool-v2/pull/40). It requires no
 migration, dependency or worker change. Activated at 14:28 UTC on 9 October,

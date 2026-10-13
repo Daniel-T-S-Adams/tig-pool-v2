@@ -1,17 +1,18 @@
 # InnoPool v2 implementation status
 
-Documentation updated **13 October 2026**; live application details were last
-checked on **9 October 2026**. The agreed design is
+Documentation and live application checked on **13 October 2026**. The agreed design is
 [POOL_REDESIGN_PLAN.md](POOL_REDESIGN_PLAN.md). The detailed current state and
 storage explanation are in [operations status](docs/OPERATIONS_STATUS.md).
 The foundation and increment records below are historical validation records.
 
 ## Current summary
 
-The 9 October [lean storage implementation](docs/LEAN_STORAGE.md) is prepared
-on cleanup branches. It has not been activated on the live database. Its
-migrations and readers were checked on an isolated production-copy restore on
-13 October. It requires a paired worker update and additive migrations 020/021. On 11
+The [lean storage implementation](docs/LEAN_STORAGE.md) and paired member master
+worker were activated on 13 October at 13:28 UTC, with new work paused. Pool
+`f5f1028`, worker `a715041` and migrations 001–021 are live. Compatible readers,
+public pairing and unchanged finance were verified. Historical conversion is
+running; current CPU timing passed on both servers. See
+[rollout details](docs/LEAN_ROLLOUT_20261013.md). On 11
 October all 336 pool tests, 33 worker v2 tests, 17 inherited worker tests and both
 pool accounting checks passed locally. A disposable upgrade from deployed
 migrations 001–019, verified physical backup, restore and bounded cleanup also
@@ -22,7 +23,7 @@ restore passed. Forty-four table fingerprints matched; actual block/report files
 were replayed twice without financial changes. Pending protection and the
 matching health profile are active and healthy. Root has about 135 GiB free and
 the volume 82 GiB free. Candidate `dfcfbf6` passed all **371 hosted tests**;
-production remains `8477509`/worker `fd29279` and migration 019. See
+the final `f5f1028` release also passed all 371 hosted tests. See
 [the recovery update](docs/RECOVERY_VOLUME_20261013.md).
 
 The 11 October [member master contract](docs/MEMBER_MASTER_V2.md) documents
@@ -36,8 +37,9 @@ all 200 knapsack nonces and three proofs in 20 minutes 35 seconds including
 setup and the probe/resume pause; the isolated pool API accepted both uploads.
 The original job-scheduling workload failed an eight-minute nonce probe.
 GPU execution and real TIG acceptance remain unverified. The later SSH check
-below establishes real remote helper coordination. These changes have not
-been deployed to the production pool or served worker.
+below establishes real remote helper coordination. The matched implementation
+is now deployed; its current live algorithm and all five possible tracks passed
+unpaid hardware and isolated API checks. The worst track took 12m33s.
 
 The 12 October [SSH member master implementation](docs/SSH_MEMBER_MASTER_VERIFICATION.md)
 adds an optional helper mode to the worker, using the existing whole-benchmark
@@ -48,10 +50,11 @@ all 200 knapsack nonces and three sampled proofs in 15 minutes 8 seconds,
 including deliberate disconnect/master-crash recovery. All 105 saved outputs
 survived unchanged; isolated API uploads/retries and financial preservation
 passed. Rehearsal units are stopped and isolated setup/evidence is retained.
-No paid TIG submission or production activation was made.
+That rehearsal made no paid TIG submission or production activation. Paired
+production activation followed on 13 October; the new hardware test remains unpaid.
 
-- **Application:** `8477509`, tag `mainnet-abandoned-benchmark-expiry-20261009`, runs
-  on all six primary services; migration history is verified through 019.
+- **Application:** `f5f1028`, tag `mainnet-lean-storage-member-master-20261013`, runs
+  on all six primary services; migration history is verified through 021.
   The same application is staged on recovery and its collector units point to
   it, with recovery API/collectors inactive.
 - **Controls:** member funds are enabled; configured work remains enabled but
@@ -72,20 +75,19 @@ No paid TIG submission or production activation was made.
   addition to the recorded prelaunch waiver at `1372249`. Exact settlement is
   held. Report import now uses validated block headers for height lookup. The
   saved backlog reached zero pending files at 13:46 UTC, with no import errors.
-- **Custody:** public Base RPC access is failing on historical queries. Calls
-  are paced and failure details are recorded; a usable endpoint is still needed.
+- **Custody:** historical catch-up was repaired on 12 October using a checked
+  public RPC. Calls are paced; intermittent failures still hold custody gates.
 - **Protection:** daily verified off-host base backups, continuous WAL and
   encrypted configuration/release copies are active. The full raw-evidence
   copy is disabled after its disk-reserve failure; independent recovery
-  collectors are inactive. Pending-file protection and the recovery health
-  profile need an agreed storage setup. The 4 October PITR rehearsal passed.
-- **Validation:** all 299 pool tests and hosted CI passed for PR #38, including
-  paired worker/browser checks. The current expiry fix passed the existing
-  required CI for PR #40. The API still serves worker `fd29279`, tag
-  `mainnet-cpu-pilot-20261007`; worker development is tracked separately.
+  collectors are inactive. The EXT4 volume, pending-file protection, recovery
+  health and combined production-copy restore passed on 13 October.
+- **Validation:** the final pool passed 371 hosted tests. The API serves worker
+  `a715041`, tag `mainnet-direct-binaries-member-master-20261013`; its 46 v2 and
+  17 inherited tests passed. Compatible recovery passed 370 tests again locally.
 - **Workflow:** protected `main` integrates PRs; `release/v2` follows the deployed
   application tag. `redesign/v2` was retired on 8 October.
-- **Remaining:** RPC access, gap recovery, storage protection, timely CPU/GPU
+- **Remaining:** RPC reliability, gap recovery, historical conversion/pruning, timely CPU/GPU
   validation, funded takeover and reward claim/unlock/receipt plus expense
   integration. Raw blocks/reports keep four rounds and wallet/fee captures
   thirty days under obligation/backup guards; financial records are permanent.

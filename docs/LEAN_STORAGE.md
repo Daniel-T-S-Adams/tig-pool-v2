@@ -1,10 +1,10 @@
 # Lean pool storage
 
-Implemented on the 9 October 2026 storage cleanup branches; local verification
-and a disposable physical backup/restore rehearsal passed on 11 October.
-**Not deployed.** See [verification details](LEAN_STORAGE_VERIFICATION.md).
-The primary remains pool `8477509` with worker `fd29279` and migrations through
-019. No production archives were deleted by this change. See
+Implemented on the 9 October 2026 storage cleanup branches and activated on
+13 October as pool `f5f1028`, worker `a715041`, with migrations through 021.
+See [rollout and remaining maintenance](LEAN_ROLLOUT_20261013.md) and
+[verification details](LEAN_STORAGE_VERIFICATION.md). Historical conversion is
+running; no production raw archive has been deleted by this rollout. See
 [operations status](OPERATIONS_STATUS.md) for live measurements and controls.
 
 ## Binary downloads
@@ -109,5 +109,6 @@ WAL, bases and configuration transfers keep their current transport and
 retention. Smaller writes reduce future backup volume. Expiry makes PostgreSQL
 space reusable; it does not shrink database files or purge retained backups.
 Local API, worker, browser and database checks and fixture-only pruning have
-been performed. Production migration, release activation, production archive
-deletion, table rewrite and backup purge remain separate release operations.
+been performed. Production migrations and paired activation are complete.
+Historical conversion, guarded archive deletion, any table rewrite and backup
+retirement remain separately recorded maintenance operations.
