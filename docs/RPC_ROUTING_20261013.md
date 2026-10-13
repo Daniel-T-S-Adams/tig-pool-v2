@@ -43,9 +43,16 @@ paired application/schema remain unchanged.
   Base block hash. An attempted broadcast method was refused locally.
 - After activation, the collector reconciled at **52,556,712** at 15:03 UTC;
   ledger audit was empty and financial hash remained `95f77c34…784e80`.
+- At 16:11 UTC, reconciliation was current at **52,558,823**, with the same
+  empty audit, balances and financial fingerprint. The router's source,
+  configuration and unit were staged on Germany without starting it or changing
+  its inactive pool configuration; takeover must explicitly select loopback RPC.
 - Export the source, configuration, regular units and protected rollback records
   in encrypted settings. Keep the router with compatible application
   rollback/recovery. No public firewall port was opened.
+- The 16:21 UTC primary configuration export passed off-host checksum and
+  private-decryption checks at 16:24, including router source/configuration/unit
+  and the unapproved trial plan. Temporary plaintext was removed.
 
 These endpoints remain public services. Sustained reconciliation must be
 measured; successful snapshots do not establish provider availability for wider

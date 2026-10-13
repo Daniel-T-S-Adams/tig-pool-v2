@@ -25,6 +25,10 @@ shared application logic requires a forward fix. Returning to `8477509` after
 compact writes would leave evidence unreadable. Do not rewind the live database
 to roll back an application.
 
+The later operations/documentation revision `46a5a0c` passed **377 hosted tests**
+in run `38427207573`. The six additional checks cover the read-only RPC router;
+the deployed pool application and worker pins remain the pair recorded above.
+
 ## Live checks
 
 At 13:32 UTC both loopback and public API responses matched the recorded pair,
@@ -36,9 +40,12 @@ Round-137 gaps at `1375817` and `1376650` remain visible; exact settlement is he
 Existing grants remain narrow; the runtime role can read compact replacements
 and insert binary metadata, without schema or metadata-deletion authority.
 
-The encrypted configuration export `configuration-daily-2026-10-13T133507Z`
-contains the new pair, installer, units, migration evidence and operational
-scripts. Off-host checks and private decryption are recorded with the rollout.
+The latest encrypted configuration export
+`configuration-daily-2026-10-13T162158Z` contains the new pair, installer, units,
+migration evidence, RPC router and inactive trial preparation. All file hashes
+and private decryption passed on Germany at 16:24 UTC; temporary plaintext was
+removed. The unapproved trial plan and supervisor pause behavior were checked
+inside that protected copy.
 The earlier [database/WAL/pending-file restore](RECOVERY_VOLUME_20261013.md)
 remains separate evidence from a funded API takeover.
 
@@ -94,6 +101,11 @@ prevent a second attempt; its supervisor restores the pause on exit. The
 existing member token was verified with GET only and was not exported. Obtain
 the owner's capped-test approval before starting either unit; no new wallet
 signing is currently needed while that token remains valid.
+The complete driver also passed disposable PostgreSQL replays for acceptance,
+transport timeout, a changed current block, a changed binary and a competing
+offer. Mocked writes happened only after the durable pause closed; no live
+protocol writes occurred. Reruns after binding were refused. Repeated supervisor
+exits use fresh control events and confirm the pause before restoring settings.
 Actual TIG acceptance, later report/finalization, GPU execution and funded
 takeover remain separate checks. Operator payout reserve remains unset.
 
