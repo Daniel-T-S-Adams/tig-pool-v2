@@ -1,4 +1,4 @@
-# InnoPool v2 owner's guide
+# Community Pool owner's guide
 
 **Most routine owner actions belong on the pool website. MetaMask signs money
 movements. Hetzner hosts the services and their configuration. Software changes

@@ -1,4 +1,4 @@
-# InnoPool v2
+# Community Pool
 
 The [14 October mainnet CPU trial](docs/MAINNET_CPU_TRIAL_20261014.md) established
 an initial runtime-pin failure followed by successful corrected activation.
@@ -6,10 +6,11 @@ The master and helper completed 4,000 nonces and uploaded results in 12m40s;
 TIG confirmed the proof and activated the benchmark. New work remains paused
 while the remaining storage and settlement launch checks are completed.
 
-This independent repository preserves the original pool's complete local Git
-history for the InnoPool v2 redesign. V2 is deployed on the mainnet servers with
-new work and settlement still disabled; the legacy instructions below are kept
-for reference only. The v2 system uses whole-benchmark
+Community Pool is the member-run pool for The Innovation Game that grew out of
+the InnoPool v2 redesign. This independent repository preserves the original
+pool's complete local Git history. The pool is deployed on the mainnet servers
+with new work and settlement still disabled; the legacy instructions below are
+kept for reference only. The system uses whole-benchmark
 member work, custodial balances and collateral, equal qualifying-bundle credit,
 round settlement and operator-reviewed withdrawals. See the
 [redesign plan](POOL_REDESIGN_PLAN.md) and
@@ -22,7 +23,8 @@ integration branch. The old `/static/install.sh` installer is retired in this fo
 
 For a high-level view of hosting, connections and deployments, see the
 [pool structure diagram](docs/POOL_STRUCTURE.md) and
-[Cloudflare setup steps](docs/CLOUDFLARE_SETUP.md).
+[Cloudflare setup steps](docs/CLOUDFLARE_SETUP.md). The name, mark and
+colours used by the website are recorded in the [branding guide](docs/BRANDING.md).
 
 The [13 October recovery update](docs/RECOVERY_VOLUME_20261013.md) records the new
 volume, verified database/WAL/pending-file restore and active protection.
@@ -31,7 +33,7 @@ were activated on 13 October with new work paused. Historical conversion and the
 [the storage ordering fix](docs/STORAGE_ORDERING_FIX_20261014.md) for verified backup, restore and
 completed redundant archive cleanup.
 
-For day-to-day operation, use the [v2 owner's guide](docs/OWNER_GUIDE.md).
+For day-to-day operation, use the [owner's guide](docs/OWNER_GUIDE.md).
 It explains the website and MetaMask steps, server configuration, software
 updates, and the remaining deployment requirements.
 

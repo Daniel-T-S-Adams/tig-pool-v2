@@ -42,7 +42,7 @@ class Auth:
             # ERC-4361/EIP-191 message, constructed by the server, not the client.
             message = (f"{self.domain} wants you to sign in with your Ethereum account:\n"
                        f"{to_checksum_address(wallet)}\n\n"
-                       "Sign in to InnoPool v2 to manage your member funds and execution tokens.\n\n"
+                       "Sign in to Community Pool to manage your member funds and execution tokens.\n\n"
                        f"URI: {self.origin}\nVersion: 1\nChain ID: {self.chain_id}\nNonce: {nonce}\n"
                        f"Issued At: {now.isoformat()}\nExpiration Time: {expiry.isoformat()}\nRequest ID: {identity}")
             cursor.execute("INSERT INTO auth_challenges(id,wallet,message,expires_at) VALUES (%s,%s,%s,%s)",
@@ -106,7 +106,7 @@ class Auth:
             cursor.execute('SELECT clock_timestamp() AS now');now=cursor.fetchone()['now']
             expiry=now+timedelta(minutes=5)
             message=(f'{self.domain} requests withdrawal wallet verification:\n{to_checksum_address(wallet)}\n\n'
-                f'Set this wallet for future withdrawals by InnoPool member {member_id}. Pending requests keep their existing destination.\n\n'
+                f'Set this wallet for future withdrawals by Community Pool member {member_id}. Pending requests keep their existing destination.\n\n'
                 f'URI: {self.origin}\nVersion: 1\nChain ID: {self.chain_id}\nNonce: {secrets.token_hex(24)}\n'
                 f'Issued At: {now.isoformat()}\nExpiration Time: {expiry.isoformat()}\nRequest ID: {identity}')
             cursor.execute('''INSERT INTO withdrawal_wallet_challenges(id,member_id,old_wallet,new_wallet,message,expires_at)

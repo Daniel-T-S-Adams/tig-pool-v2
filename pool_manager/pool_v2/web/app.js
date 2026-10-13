@@ -1,5 +1,5 @@
 const $ = id => document.getElementById(id);
-const apiOrigin = document.querySelector('meta[name="innopool-api-origin"]').content;
+const apiOrigin = document.querySelector('meta[name="pool-api-origin"]').content;
 const operatorPage = location.pathname === '/operator';
 let token = '', capabilities = {}, operatorIncome = {}, memberOffset = 0, operatorOffset = 0, dialogAction = null;
 const unit = 10n ** 18n;
