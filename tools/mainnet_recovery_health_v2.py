@@ -26,6 +26,17 @@ def recovery_health(config=Path('/etc/innopool-v2-mainnet'),
     record['free_bytes'] = shutil.disk_usage(data).free
     if record['free_bytes'] < 35 * 1024**3:
         issues.append('backup disk reserve is below 35 GiB')
+    # Bind-mounted archives can live on a different filesystem from data.
+    record['protected_disks'] = {}
+    for label, directory in (('database backup', data / 'primary-continuous'),
+                             ('pending evidence', data / 'primary-pending-evidence')):
+        try:
+            free = shutil.disk_usage(directory).free
+            record['protected_disks'][label] = {'path': str(directory), 'free_bytes': free}
+            if free < 35 * 1024**3:
+                issues.append(label + ' disk reserve is below 35 GiB')
+        except OSError:
+            issues.append(label + ' storage is unavailable')
     services = {}
     for name in ('api', 'coordinator', 'custody', 'funding', 'blocks', 'reports'):
         unit = 'innopoolv2mainnet-' + name + '.service'

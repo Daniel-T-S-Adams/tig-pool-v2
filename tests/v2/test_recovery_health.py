@@ -126,3 +126,17 @@ class RecoveryHealthTests(unittest.TestCase):
         self.assertIn('backup disk reserve is below 35 GiB', result['issues'])
         self.assertIn('recovery protection profile is missing or invalid', result['issues'])
         self.assertTrue(all(call.args[0][1] == 'is-active' for call in commands.call_args_list))
+
+    def test_full_backup_or_pending_volume_is_unhealthy_with_free_root_disk(self):
+        for label, directory in (('database backup', 'primary-continuous'),
+                                 ('pending evidence', 'primary-pending-evidence')):
+            with self.subTest(directory=directory):
+                def disk(path):
+                    return SimpleNamespace(free=(1 if Path(path).name == directory else 100 * 1024**3))
+                with patch.object(recovery.shutil, 'disk_usage', side_effect=disk), \
+                        patch.object(recovery, 'backup_health', return_value={'issues': []}), \
+                        patch.object(recovery.subprocess, 'run', return_value=SimpleNamespace(stdout='inactive\n')):
+                    result = recovery.recovery_health(self.config, self.data)
+                self.assertFalse(result['healthy'])
+                self.assertEqual(result['issues'], [label + ' disk reserve is below 35 GiB'])
+                self.assertEqual(result['free_bytes'], 100 * 1024**3)

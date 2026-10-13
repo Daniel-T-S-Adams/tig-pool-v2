@@ -71,7 +71,9 @@ copied. Database financial commits retain the existing synchronous WAL policy.
    existing recovery health service at `mainnet_recovery_health_v2.py` using the
    supplied recovery health service example. The recovery profile expects pool
    services and independent collectors to remain inactive. Database bases, WAL,
-   settings and pending-file protection must all be healthy. The primary health
+   settings and pending-file protection must all be healthy. The reserve check
+   covers the root disk and the actual database/pending-file destinations,
+   including separate mounted volumes. The primary health
    service remains responsible for its actual pool and collectors.
 6. Export encrypted settings, operations files and unit files again and verify
    their off-host copy. Rehearse restoring the database, later WAL and pending
