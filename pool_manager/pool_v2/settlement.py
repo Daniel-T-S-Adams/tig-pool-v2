@@ -166,7 +166,8 @@ def _settle(database,round_number,seal_id,*,post,expected_digest=None):
             return dict(previous)
         reports.require_seal(cursor,seal_id,round_number)
         # Recheck coverage while the observer cannot add a conflicting block.
-        if not BlockStore(database).round_coverage(round_number):
+        coverage=BlockStore(database).round_gaps(round_number,cursor=cursor)
+        if not coverage['credited_complete']:
             raise Conflict('reward-round credit coverage is incomplete')
         cursor.execute('SELECT * FROM round_earnings WHERE round=%s',(round_number,))
         earnings=cursor.fetchone()
@@ -194,7 +195,10 @@ def _settle(database,round_number,seal_id,*,post,expected_digest=None):
             'credits':{key:[value.numerator,value.denominator] for key,value in sorted(credits.items())},
             'receipts':{row['event_id']:int(row['amount']) for row in receipts},'cost_reimbursement':reimbursed,
             'forfeitures':{str(row['reservation_id']):int(row['amount']) for row in forfeitures},
-            'expected_received_net':int(earnings['expected_received_net'])}
+            'expected_received_net':int(earnings['expected_received_net']),
+            'missing_heights':coverage['missing_heights'],'waived_heights':coverage['waived_heights'],
+            'missing_block_policy':{'policy':coverage['policy'],'revision':coverage['policy_revision'],
+                'max_missing_per_round':coverage['max_missing_per_round']}}
         if not post:
             return {'round':round_number,'rule':RULE,'input_digest':ledger.fingerprint(inputs),
                 'inputs':inputs,'pot':amount,'operator_allocation':operator,

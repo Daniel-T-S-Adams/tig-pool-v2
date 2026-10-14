@@ -88,10 +88,14 @@ its separate reservation. The adapter checks the deployed block-round mapping
 against configured blocks per round; this does **not** establish the separate
 reporting-round mapping still listed in the Stage 0 integration checks.
 
-`round_credits()` requires every expected block and its credit marker in the
-round. An entirely observed, attributed zero-credit round is distinct from a
-missing round. A gap in one round does not prevent use of a different fully
-covered round. This check will gate settlement; it does not delay independently
+`round_credits()` requires the round to have ended, every observed block to
+carry its credit marker, no unresolved conflicting block, and no more
+unresolved missing heights than the
+[bounded tolerance](ROUND_SETTLEMENT.md#bounded-missing-block-tolerance)
+allows; tolerated heights count as zero credit. An entirely observed,
+attributed zero-credit round is distinct from a round with no observed block,
+which stays held. A gap in one round does not prevent use of a different
+covered round. This check gates settlement; it does not delay independently
 eligible collateral returns.
 
 ## Selector

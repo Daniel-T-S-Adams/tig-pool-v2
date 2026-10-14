@@ -52,6 +52,8 @@ class ObserverTests(DatabaseCase):
 
     def test_gap_is_held_then_recovered_by_other_collector(self):
         self.own()
+        self.store.set_gap_policy(max_missing_per_round=0, warn_missing_per_round=0, actor="operator",
+                                  reason="strict coverage for this scenario")
         for height in (8, 10, 11):
             self.store.record(observation(height), collector="one")
             credit_block(self.db, f"block-{height}", WALLET)
@@ -68,6 +70,8 @@ class ObserverTests(DatabaseCase):
         self.assertEqual(round_credits(self.db, 3), {str(self.member): Fraction(4)})
 
     def test_unrecoverable_gap_does_not_prevent_a_different_complete_round(self):
+        self.store.set_gap_policy(max_missing_per_round=0, warn_missing_per_round=0, actor="operator",
+                                  reason="strict coverage for this scenario")
         self.store.record(observation(8), collector="one")
         for height in range(12, 16):
             self.store.record(observation(height), collector="one")

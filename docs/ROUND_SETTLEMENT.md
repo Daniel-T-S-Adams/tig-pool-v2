@@ -8,7 +8,11 @@ evidence, reporting-round associations, finalization records and round accounts.
 Checked 9 October: settlement is disabled. Round 137 has unresolved block gaps
 at `1375817` and `1376650`, after the one-time prelaunch waiver for `1372249`.
 The expired CPU attempt's slot is free, with collateral still held for its
-existing X+2 rules. See [operations status](OPERATIONS_STATUS.md).
+existing X+2 rules. See [operations status](OPERATIONS_STATUS.md). On
+14 October the owner chose the
+[bounded missing-block tolerance](#bounded-missing-block-tolerance) below;
+once deployed, these three heights are within its limit and no longer hold
+round 137 by themselves.
 
 An acknowledged benchmark that expires without ever sending results uses the
 same finalization path as an explicitly rejected late result: release its work
@@ -114,9 +118,50 @@ submission or withdrawal charge is taken from the member allocations.
 
 Credit follows the reward round of each recorded block, even for benchmarks
 created earlier. Forfeitures follow the benchmark's creation round. Later
-fraud does not change recorded qualifying credit. An unwaived missing block or
-ownership data holds reward settlement; independently eligible collateral can
-finalize.
+fraud does not change recorded qualifying credit. Missing blocks beyond the
+tolerated limit, a conflicting block or missing ownership data hold reward
+settlement; independently eligible collateral can finalize.
+
+## Bounded missing-block tolerance
+
+Decided by the owner on 14 October 2026 and implemented in migration 023; not
+yet deployed. A reward round may settle while a bounded number of its heights
+have no complete snapshot. Each tolerated height counts as zero pool credit for
+everyone: the round's actual received reward is split by the credit recorded
+in the observed blocks. One block is about 0.01% of a round, so a few misses
+barely move any member's share, and no block is fabricated or interpolated.
+
+The limits live in the append-only `missing_block_policies` table. The
+migration records the chosen defaults: at most **50** missing heights per round
+settle, and more than **10** raise a warning in block status so a failing
+collector is noticed long before settlement. A round is held when it has more
+missing heights than the limit, when it has no observed block at all, when it
+has not yet ended on chain, or when it holds an unresolved conflicting block.
+Observed blocks still need their credit marker as before.
+
+`BlockStore.round_gaps(round)` reports the missing, waived, uncredited and
+conflicting heights of a round against the current limits; `round_coverage`
+and `round_credits` follow it. Block status lists `missing_by_round`,
+`held_rounds` and the current policy; the operator dashboard shows the missing
+count and state per round. Every settlement records the tolerated heights, the
+waived heights and the policy revision in its immutable inputs and digest. A
+genuine block recorded later cannot reopen a settled round; it still needs its
+own credit marker in any round that has not settled.
+
+Change the limits with the owner database role. Each change appends a reviewed
+revision with its actor and reason; identical limits add nothing:
+
+```sh
+python tools/set_missing_block_policy_v2.py            # show the current limits
+python tools/set_missing_block_policy_v2.py --max-missing-per-round 50 \
+  --warn-missing-per-round 10 --actor "pool operator" \
+  --reason "reviewed: the collector outage on 20 October was unrecoverable"
+```
+
+A limit of 0 restores the earlier strict rule. The primary health script
+deployed on the host is maintained outside this repository and still lists
+every unresolved gap as an issue; when this release is deployed, change it to
+flag `held_rounds` and conflicting heights instead.
 
 ## One-time prelaunch block-gap exception
 
@@ -126,8 +171,8 @@ documented assumption, not a fabricated block. It leaves the missing height
 visible in observation status and assumes zero pool-owned qualifying credit at
 that height. The waiver is allowed only while new work is paused, before any
 pool reservation exists, when the missing height is bracketed by complete,
-nonconflicting blocks in the same round. It may be used once; later gaps remain
-unwaived and hold settlement for their affected rounds.
+nonconflicting blocks in the same round. It may be used once; later gaps fall
+under the bounded tolerance above.
 
 The immutable waiver records the operator, reason, evidence, adjacent block
 identities and the missing block ID referenced by its successor. It does not

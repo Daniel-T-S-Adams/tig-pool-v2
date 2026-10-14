@@ -130,9 +130,14 @@ mean that PostgreSQL itself lost a transaction. Health currently lists:
   visible and contributes zero pool credit under that restricted waiver.
 - `1375817` and `1376650`: unresolved gaps in round 137, with no complete
   recoverable captures found. A later head or neighbouring snapshot cannot
-  establish the missing block's qualifiers. Exact settlement for this round
-  remains held. Do not interpolate credit or apply another prelaunch waiver
-  after reservations exist.
+  establish the missing block's qualifiers, and TIG's public API serves only
+  the latest block. On 14 October the owner decided not to pursue recovery and
+  chose the
+  [bounded missing-block tolerance](ROUND_SETTLEMENT.md#bounded-missing-block-tolerance):
+  once deployed, up to 50 missing heights per round count as zero pool credit,
+  so the three round-137 heights no longer hold that round. Rounds missing more
+  are held for review. Credit is never interpolated and the prelaunch waiver is
+  not reused.
 
 **Report captures** are saved responses from TIG's fraud/arbitration reports and
 its reportable-benchmark indices. Collectors write immutable manifests and
@@ -290,8 +295,9 @@ and its immutable replay proof. Ordinary PostgreSQL expiry makes pages
 reusable; allocated database files and retained recovery bases do not
 immediately shrink to the live logical data size.
 
-New work remains paused and settlement disabled. Round-137 gaps at **1375817**
-and **1376650** still prevent exact coverage. Reward claim/unlock/receipt and
+New work remains paused and settlement disabled. The round-137 gaps at
+**1375817** and **1376650** fall within the bounded missing-block tolerance
+implemented on 14 October, which is not yet deployed. Reward claim/unlock/receipt and
 expense integration, a funded takeover and real GPU execution remain
 unverified. The corrected two-server CPU benchmark **did** activate on TIG;
 point checks showed no pool qualifiers, so it does not demonstrate a reward

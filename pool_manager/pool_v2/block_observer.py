@@ -1,6 +1,7 @@
 """Durable, deduplicated block history and independent collection progress."""
 
 from collections import defaultdict
+from contextlib import nullcontext
 from copy import deepcopy
 from dataclasses import asdict
 import gzip
@@ -20,6 +21,7 @@ PAGE_TARGET = 8   # mean record digests per page; a changed record rewrites one 
 ITEM_PAGE_TARGET = 32   # mean ids per page for the block's active-id lists, which change rarely
 PAGE_MAXIMUM = 1024
 BLOB_THRESHOLD = 8192   # larger inline values become one chunk, order preserved
+GAP_POLICY = "bounded-zero-credit-v1"   # tolerated missing heights are zero credit, never fabricated
 
 
 def _is_digest(value):
@@ -469,8 +471,74 @@ class BlockStore:
             result['resolved_conflicting_heights'] = [row['height'] for row in cursor.fetchall()]
             cursor.execute("SELECT max(timestamp) AS latest_timestamp FROM observed_blocks")
             result["latest_timestamp"] = cursor.fetchone()["latest_timestamp"]
+            policy = self.gap_policy(cursor=cursor)
+            result["missing_block_policy"] = {key: policy[key] for key in
+                ("policy", "revision", "max_missing_per_round", "warn_missing_per_round")}
+            result["missing_by_round"] = self._missing_by_round(cursor, result, policy)
+            result["held_rounds"] = [row["round"] for row in result["missing_by_round"] if row["state"] == "held"]
             result["initialized"] = True
             return result
+
+    def _missing_by_round(self, cursor, stream, policy):
+        """Unresolved missing heights of each round since the contiguous cursor, against the limits."""
+        cursor.execute("SELECT round,blocks_per_round FROM observed_blocks ORDER BY height DESC LIMIT 1")
+        head = cursor.fetchone()
+        if not head:
+            return []
+        length = head["blocks_per_round"]
+        cursor.execute("""SELECT expected.height/%s+1 AS round,
+                count(*) FILTER (WHERE w.height IS NULL) AS missing,
+                count(*) FILTER (WHERE w.height IS NOT NULL) AS waived
+            FROM generate_series(%s,%s) AS expected(height)
+            LEFT JOIN observed_blocks b ON b.height=expected.height
+            LEFT JOIN observation_gap_waivers w ON w.height=expected.height
+            WHERE b.id IS NULL GROUP BY 1 ORDER BY 1""",
+            (length, stream["contiguous_height"]+1, stream["latest_seen_height"]))
+        rounds = []
+        for row in cursor.fetchall():
+            ended = stream["latest_seen_height"] >= row["round"]*length-1
+            if not ended:
+                state = "open"
+            elif row["missing"] > policy["max_missing_per_round"] or row["missing"] + row["waived"] >= length:
+                state = "held"
+            elif row["missing"] > policy["warn_missing_per_round"]:
+                state = "warning"
+            else:
+                state = "tolerated"
+            rounds.append({"round": row["round"], "missing": row["missing"], "waived": row["waived"],
+                           "ended": ended, "state": state})
+        return rounds
+
+    def gap_policy(self, *, cursor=None):
+        """The current missing-block tolerance: the latest append-only revision."""
+        with (self.database.transaction() if cursor is None else nullcontext(cursor)) as query:
+            query.execute("SELECT * FROM missing_block_policies ORDER BY revision DESC LIMIT 1")
+            row = query.fetchone()
+            if not row:
+                raise ProtocolDataError("the missing-block tolerance policy is not recorded")
+            return dict(row)
+
+    def set_gap_policy(self, *, max_missing_per_round, warn_missing_per_round, actor, reason):
+        """Append a reviewed tolerance revision; it applies to every round that has not settled."""
+        for value in (max_missing_per_round, warn_missing_per_round):
+            if type(value) is not int or value < 0:
+                raise ValueError("missing-block limits must be nonnegative integers")
+        if warn_missing_per_round > max_missing_per_round:
+            raise ValueError("the warning level cannot exceed the settlement limit")
+        if not isinstance(actor, str) or not actor.strip() or not isinstance(reason, str) or not reason.strip():
+            raise ValueError("a policy change requires an actor and reason")
+        with self.database.transaction() as cursor:
+            # Settlement rechecks coverage under this lock, so the limit cannot change mid-settlement.
+            lock(cursor, "observation-stream")
+            current = self.gap_policy(cursor=cursor)
+            if (current["max_missing_per_round"], current["warn_missing_per_round"]) == (
+                    max_missing_per_round, warn_missing_per_round):
+                return current
+            cursor.execute("""INSERT INTO missing_block_policies
+                (policy,max_missing_per_round,warn_missing_per_round,actor,reason)
+                VALUES (%s,%s,%s,%s,%s) RETURNING *""",
+                (GAP_POLICY, max_missing_per_round, warn_missing_per_round, actor.strip(), reason.strip()))
+            return dict(cursor.fetchone())
 
     def waive_prelaunch_gap(self, height, *, actor, reason, evidence):
         """Record the single prelaunch missing-height exception without fabricating a block.
@@ -534,22 +602,55 @@ class BlockStore:
                  next_block["id"], policy, actor.strip(), reason.strip(), Json(evidence)))
             return dict(cursor.fetchone())
 
-    def round_coverage(self, round_number, *, require_credits=True):
-        with self.database.transaction() as cursor:
-            cursor.execute("SELECT DISTINCT blocks_per_round FROM observed_blocks WHERE round=%s", (round_number,))
-            lengths = [row["blocks_per_round"] for row in cursor.fetchall()]
+    def round_gaps(self, round_number, *, cursor=None):
+        """One reward round's coverage against the missing-block policy.
+
+        The round is complete when it has ended on chain, holds no unresolved
+        conflicting block and its unresolved missing heights do not exceed the
+        policy limit. Tolerated heights count as zero pool credit; they are never
+        fabricated or interpolated, and a later genuine backfill still needs credit.
+        """
+        with (self.database.transaction() if cursor is None else nullcontext(cursor)) as query:
+            policy = self.gap_policy(cursor=query)
+            result = {"round": round_number, "policy": policy["policy"], "policy_revision": policy["revision"],
+                      "max_missing_per_round": policy["max_missing_per_round"],
+                      "warn_missing_per_round": policy["warn_missing_per_round"],
+                      "blocks_per_round": None, "ended": False, "observed": 0, "credited": 0, "uncredited": 0,
+                      "missing": 0, "missing_heights": [], "waived_heights": [], "conflicting": False,
+                      "complete": False, "credited_complete": False, "warning": False}
+            query.execute("SELECT DISTINCT blocks_per_round FROM observed_blocks WHERE round=%s", (round_number,))
+            lengths = [row["blocks_per_round"] for row in query.fetchall()]
             if len(lengths) != 1:
-                return False
+                return result
             length = lengths[0]
             first, last = (round_number-1)*length, round_number*length-1
-            cursor.execute("""SELECT
-                    count(*) FILTER (WHERE b.id IS NOT NULL OR w.height IS NOT NULL) AS captured,
-                    count(*) FILTER (WHERE c.block_id IS NOT NULL OR (b.id IS NULL AND w.height IS NOT NULL)) AS credited
+            query.execute("SELECT latest_seen_height FROM observation_stream WHERE name='tig'")
+            stream = query.fetchone()
+            query.execute("""SELECT expected.height, b.id AS block_id, w.height AS waived
                 FROM generate_series(%s,%s) AS expected(height)
                 LEFT JOIN observed_blocks b ON b.height=expected.height AND b.round=%s
                 LEFT JOIN credited_blocks c ON c.block_id=b.id
-                LEFT JOIN observation_gap_waivers w ON w.height=expected.height AND w.round_number=%s""",
+                LEFT JOIN observation_gap_waivers w ON w.height=expected.height AND w.round_number=%s
+                WHERE b.id IS NULL OR c.block_id IS NULL ORDER BY expected.height""",
                 (first, last, round_number, round_number))
-            counts = cursor.fetchone()
-            cursor.execute("SELECT 1 FROM unresolved_observation_conflicts WHERE kind='conflicting-block' AND height BETWEEN %s AND %s LIMIT 1", (first, last))
-            return not cursor.fetchone() and counts["captured"] == length and (not require_credits or counts["credited"] == length)
+            rows = query.fetchall()
+            missing = [row["height"] for row in rows if row["block_id"] is None and row["waived"] is None]
+            waived = [row["height"] for row in rows if row["block_id"] is None and row["waived"] is not None]
+            uncredited = sum(1 for row in rows if row["block_id"] is not None)
+            query.execute("""SELECT 1 FROM unresolved_observation_conflicts
+                WHERE kind='conflicting-block' AND height BETWEEN %s AND %s LIMIT 1""", (first, last))
+            conflicting = bool(query.fetchone())
+            ended = bool(stream) and stream["latest_seen_height"] >= last
+            complete = ended and not conflicting and len(missing) <= policy["max_missing_per_round"]
+            observed = length - len(missing) - len(waived)
+            result.update(blocks_per_round=length, ended=ended, observed=observed, credited=observed-uncredited,
+                          uncredited=uncredited, missing=len(missing),
+                          missing_heights=missing[:max(100, policy["max_missing_per_round"])],
+                          waived_heights=waived, conflicting=conflicting, complete=complete,
+                          credited_complete=complete and uncredited == 0,
+                          warning=len(missing) > policy["warn_missing_per_round"])
+            return result
+
+    def round_coverage(self, round_number, *, require_credits=True):
+        coverage = self.round_gaps(round_number)
+        return coverage["credited_complete"] if require_credits else coverage["complete"]

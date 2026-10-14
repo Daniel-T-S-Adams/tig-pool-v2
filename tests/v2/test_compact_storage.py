@@ -292,6 +292,8 @@ class CompactStorageTests(DatabaseCase):
         self.assertEqual(self.store.read('block-8')[0]['format'], FORMAT)
 
     def test_gap_is_not_waived_by_per_block_conversion_or_pruning(self):
+        self.store.set_gap_policy(max_missing_per_round=0, warn_missing_per_round=0, actor="operator",
+                                  reason="strict coverage for this scenario")
         self.record(legacy=True)
         self.record(10, legacy=True)
         compaction.backfill(self.db, player_id=WALLET)
