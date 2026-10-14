@@ -2,7 +2,7 @@
 
 The storage cleanup activated on 13 October adds compact pool captures, direct
 binary downloads, final report fetching and guarded legacy conversion.
-[Lean storage](LEAN_STORAGE.md) specifies migrations 020/021 and the cleanup
+[Lean storage](LEAN_STORAGE.md) specifies migrations 020–022 and the cleanup
 sequence. The policy below applies to retained legacy and new compact captures.
 Historical conversion is running; see [rollout status](LEAN_ROLLOUT_20261013.md).
 

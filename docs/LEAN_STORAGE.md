@@ -3,8 +3,9 @@
 Implemented on the 9 October 2026 storage cleanup branches and activated on
 13 October as pool `f5f1028`, worker `a715041`, with migrations through 021.
 See [rollout and remaining maintenance](LEAN_ROLLOUT_20261013.md) and
-[verification details](LEAN_STORAGE_VERIFICATION.md). Historical conversion is
-running; no production raw archive has been deleted by this rollout. See
+[verification details](LEAN_STORAGE_VERIFICATION.md). The 14 October ordering fix adds migration 022 and a verified resolution
+for the single held rollout-boundary capture. Historical cleanup requires
+a later backup and restore check before raw expiry. See
 [operations status](OPERATIONS_STATUS.md) for live measurements and controls.
 
 ## Binary downloads
@@ -75,7 +76,7 @@ cached fetch at the round transition.
 
 ## Existing archive cleanup
 
-Apply additive migrations 020/021 and the updated runtime/observer grants.
+Apply additive migrations 020–022 and the updated runtime/observer grants.
 Install all collector changes before pruning so writing-chunk pins protect
 captures during maintenance. The old deployed reader cannot read the new
 compact format; rollback must retain a reader that understands it.
@@ -89,7 +90,8 @@ compact format; rollback must retain a reader that understands it.
 2. Wait for a verified base backup containing those replacements.
 3. Run with that `--backup-proof` and `--prune`. A raw copy expires only after
    the compact replacement is backed, the block is credited/reconciled, and no
-   conflict exists. Identity rows stay; payload/provenance become tombstones.
+   unresolved conflict exists. Any ordering resolution must also be backed.
+   Identity rows stay; payload/provenance become tombstones.
 4. Add `--block-spool` or `--report-spool` to remove redundant recorded files
    in bounded batches. Report files require matching backed DB payload hashes.
    Pending files remain. After backfill/pruning, `--collect-unused-chunks`
@@ -112,3 +114,27 @@ Local API, worker, browser and database checks and fixture-only pruning have
 been performed. Production migrations and paired activation are complete.
 Historical conversion, guarded archive deletion, any table rewrite and backup
 retirement remain separately recorded maintenance operations.
+
+## Legacy ordering conflicts
+
+Source identity version 2 compares record lists in the header using the legacy
+canonical encoding while retaining the original header in the compact payload.
+Existing full and v1 compact source hashes remain readable; algorithm binary
+metadata ordering does not change bundle credit or selection references.
+
+Migration 022 adds immutable `observation_conflict_resolutions` and the
+`unresolved_observation_conflicts` view. Runtime and observer roles have read
+access only. The admin tool `tools/resolve_ordering_conflict_v2.py` requires
+an explicit alert ID, conflicting capture ID, actor and reason. It validates
+both retained captures, checks record values and multiplicities, and rebuilds
+the conflicting v1 projection from the entire original network after permuting
+only reward schedules and binary metadata lists. The canonical source hash and
+complete projection must match. The resolution retains payload hashes and the
+full replay hash; original block identities, captures and alerts stay unchanged.
+
+Resolution applies to one alert. Different block IDs, broken neighbor links,
+changed records, missing network evidence and later conflicts continue to
+block reads, coverage and pruning. Missing block heights remain unresolved.
+Pruning checks the backup cutoff against both the compact replacement and
+its resolution. Rollback must use a release with migration 022 and this reader;
+pre-resolution releases are insufficient after raw copies expire.

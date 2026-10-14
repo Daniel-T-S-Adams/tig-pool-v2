@@ -1,5 +1,10 @@
 # Lean storage and member master rollout — 13 October 2026
 
+This records the 13 October deployment. For the active 14 October runtime
+correction, consumed paid attempt and remaining storage hold, see the
+[trial record](MAINNET_CPU_TRIAL_20261014.md) and
+[current operations status](OPERATIONS_STATUS.md).
+
 The paired application was activated on Helsinki at **13:28 UTC**. Germany has
 the same application and worker artifacts staged, with pool services inactive.
 

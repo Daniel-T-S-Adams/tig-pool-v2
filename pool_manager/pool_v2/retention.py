@@ -249,7 +249,9 @@ def prune_compacted_spool(database, directory, *, proof, limit=200, collect_chun
             JOIN capture_attempts a ON a.id=b.attempt_id
             WHERE a.manifest ? 'expired' AND c.expired_at IS NULL
               AND c.created_at<=%s AND a.created_at<=%s
-              AND NOT EXISTS (SELECT 1 FROM observation_alerts x WHERE x.height=b.height AND x.kind='conflicting-block')''', (covered, covered))
+              AND NOT EXISTS (SELECT 1 FROM unresolved_observation_conflicts x WHERE x.height=b.height AND x.kind='conflicting-block')
+              AND NOT EXISTS (SELECT 1 FROM observation_conflict_resolutions z JOIN observation_alerts x ON x.id=z.alert_id
+                  WHERE x.height=b.height AND z.created_at>%s)''', (covered, covered, covered))
         eligible = {row['height']: row for row in cursor.fetchall()}
     removed = 0
     spool = Spool(directory)
