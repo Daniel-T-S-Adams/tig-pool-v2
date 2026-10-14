@@ -63,6 +63,18 @@ key. The pool's served runtime manifest has not yet been changed. Finish the
 corrected workload checks, update and verify the paired runtime manifest and
 documentation, then obtain approval before another paid attempt.
 
+Worker candidate `dddad9df9b0d051cf004a904fe7b7361f9816c43` adds a runtime
+release check before new offers, unlinked saved offers and queued-offer refresh.
+It verifies the pool's release digest and requires every configured backend's
+runtime map to match. Existing handed-over work can still drain. All 53 worker
+v2 tests and 17 inherited tests passed locally and in hosted run `38545322562`.
+The pool CI now pins this candidate for actual API interoperability checks.
+
+All five configured CPU challenge images have a different official 0.0.8
+digest from the 13 October pair. The corrected paired runtime manifest must
+pin all five current images. Hardware execution in this correction is limited
+to c003; other workload viability and GPU checks remain separate launch gates.
+
 ## Separate storage hold
 
 Historical conversion completed overnight except for one held block at
