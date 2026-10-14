@@ -128,7 +128,11 @@ and proofs, and one durable potentially-sent event. The member worker completed
 normally. Ledger audit remained empty and all trial approvals are disabled.
 Collateral remains held for normal X+2 settlement; it was not refunded early.
 This establishes the two-host CPU path on mainnet. Full reward/expense settlement,
-funded takeover and GPU checks remain separate launch gates.
+funded takeover and GPU checks remain separate launch gates. The activation
+block and next block recorded zero pool qualifying bundles. The benchmark had
+left the active set normally by the later height-1384005 check; its successful
+activation remains recorded. These point checks do not establish profitable
+mining or completed reward settlement.
 
 Both protected approvals are false, the send binding is durable, and normal
 new work is paused. Native WAL remains synchronous. Encrypted export
