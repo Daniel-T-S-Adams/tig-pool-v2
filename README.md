@@ -1,5 +1,9 @@
 # InnoPool v2
 
+The [14 October mainnet CPU trial](docs/MAINNET_CPU_TRIAL_20261014.md) established
+two-server timing and uploads, then exposed an outdated knapsack runtime pin.
+Corrected unpaid checks are running; new work remains paused.
+
 This independent repository preserves the original pool's complete local Git
 history for the InnoPool v2 redesign. V2 is deployed on the mainnet servers with
 new work and settlement still disabled; the legacy instructions below are kept

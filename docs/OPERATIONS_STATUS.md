@@ -1,5 +1,13 @@
 # V2 operations and storage status
 
+**14 October update:** the approved two-server CPU trial completed 4,000 nonces
+and uploaded results in 10m31s, but failed TIG's later solution verification.
+Replay identified an outdated pinned knapsack runtime (0.0.7 versus current
+0.0.8). Corrected unpaid checks are running; the pool's served manifest is still
+the 13 October pair. New work stays paused; no second paid attempt is authorized.
+Historical conversion finished except for one held rollout-boundary block;
+no primary raw archive was pruned. See [the actual trial record](MAINNET_CPU_TRIAL_20261014.md).
+
 Checked against the running services on **13 October 2026**. This is the current
 operations record. Wallet RPC recovery was checked on **12 October**; backup
 relocation, recovery verification and paired application activation passed
