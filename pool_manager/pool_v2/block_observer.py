@@ -1,6 +1,7 @@
 """Durable, deduplicated block history and independent collection progress."""
 
 from collections import defaultdict
+from copy import deepcopy
 from dataclasses import asdict
 import gzip
 import hashlib
@@ -214,7 +215,9 @@ def _semantic(snapshot, observation):
         scores[bundle.benchmark_id].append(bundle.quality)
     data={"block_id": snapshot.block_id, "previous": snapshot.previous_block_id,
         "height": snapshot.height, "round": snapshot.round, "timestamp": snapshot.timestamp,
-        "config": observation["start"]["block"]["config"], "scores": scores,
+        "config": (canonical_observation(observation["start"]["block"]["config"])
+                   if observation.get('source_identity_version') == 2
+                   else observation["start"]["block"]["config"]), "scores": scores,
         "precommits": snapshot.precommits, "algorithms": snapshot.algorithms, "challenges": snapshot.challenges,
         "qualifiers": sorted((*key, value) for key, value in snapshot.qualifiers.items())}
     if observation.get("pool_player_id"):
@@ -262,6 +265,7 @@ class BlockStore:
                 raise ProtocolDataError("block/round boundary mapping differs from the pinned adapter")
         except (ProtocolDataError, KeyError, TypeError) as exc:
             error = error or str(exc)
+        source_observation = observation
         if snapshot and not error and observation.get("pool_player_id"):
             from .compact import compact_observation, metadata_summary
             observation = compact_observation(observation)
@@ -302,9 +306,33 @@ class BlockStore:
                 # taken over that form. Blocks recorded before paged manifests
                 # kept the API's order; accept their digest for the same block.
                 semantic = _semantic(snapshot, canonical)
-                accepted = {semantic, _semantic(snapshot, observation), *observation.get("source_semantic_digests", [])}
+                accepted = {semantic, _semantic(snapshot, observation), *observation.get("source_semantic_digests", []),
+                            *observation.get('compatible_projection_digests', [])}
                 cursor.execute("SELECT id,semantic_digest FROM observed_blocks WHERE height=%s OR id=%s", (height, block_id))
                 previous = cursor.fetchall()
+                if source_observation.get('format') is None:
+                    for row in previous:
+                        if row['id'] != block_id or row['semantic_digest'] in accepted:
+                            continue
+                        cursor.execute('SELECT a.manifest FROM observed_blocks b JOIN capture_attempts a ON a.id=b.attempt_id WHERE b.id=%s', (block_id,))
+                        stored_manifest = cursor.fetchone()['manifest']
+                        if 'expired' in stored_manifest:
+                            continue
+                        stored = _unpack(cursor, stored_manifest)
+                        if stored.get('format') != 'pool-network-v1' or stored.get('source_identity_version', 1) != 1:
+                            continue
+                        # Recreate an immutable v1 compact identity using its
+                        # original header order, after checking header values.
+                        if canonical_observation(stored['start']['block']['config']) != canonical_observation(source_observation['start']['block']['config']):
+                            continue
+                        restored = deepcopy(source_observation)
+                        for anchor in ('start', 'end'):
+                            restored[anchor]['block']['config'] = deepcopy(stored[anchor]['block']['config'])
+                        from .compact import compact_observation
+                        old = compact_observation(restored, identity_version=1)
+                        candidate = _semantic(validate_snapshot(old), old)
+                        if candidate == row['semantic_digest']:
+                            accepted.add(candidate)
                 if any(row["id"] != block_id or row["semantic_digest"] not in accepted for row in previous):
                     error = "conflicting block identity or accounting evidence at a captured height"
                     cursor.execute("INSERT INTO observation_alerts(kind,height,details) VALUES ('conflicting-block',%s,%s)",
@@ -322,7 +350,7 @@ class BlockStore:
                 Json(manifest), Json(metadata or {}), error))
             if height is not None and height > stream["latest_seen_height"]:
                 cursor.execute("UPDATE observation_stream SET latest_seen_height=%s WHERE name='tig'", (height,))
-            cursor.execute("SELECT min(height) AS height FROM observation_alerts WHERE kind='conflicting-block' AND height >= %s",
+            cursor.execute("SELECT min(height) AS height FROM unresolved_observation_conflicts WHERE kind='conflicting-block' AND height >= %s",
                            (stream["launch_height"],))
             conflict_height = cursor.fetchone()["height"]
             if conflict_height is not None and conflict_height <= stream["contiguous_height"]:
@@ -380,7 +408,7 @@ class BlockStore:
         row = cursor.fetchone()
         previous_id = row["id"] if row else None
         cursor.execute("""SELECT id,height,previous_id FROM observed_blocks b WHERE height>%s
-            AND NOT EXISTS (SELECT 1 FROM observation_alerts a WHERE a.kind='conflicting-block' AND a.height=b.height)
+            AND NOT EXISTS (SELECT 1 FROM unresolved_observation_conflicts a WHERE a.kind='conflicting-block' AND a.height=b.height)
             ORDER BY height""", (contiguous,))
         for row in cursor.fetchall():
             if row["height"] != contiguous + 1 or (previous_id and row["previous_id"] != previous_id):
@@ -397,7 +425,7 @@ class BlockStore:
             row = cursor.fetchone()
             if not row:
                 raise ProtocolDataError("complete block is not available in the pool archive")
-            cursor.execute("SELECT 1 FROM observation_alerts WHERE kind='conflicting-block' AND height=%s LIMIT 1", (row["height"],))
+            cursor.execute("SELECT 1 FROM unresolved_observation_conflicts WHERE kind='conflicting-block' AND height=%s LIMIT 1", (row["height"],))
             if cursor.fetchone():
                 raise ProtocolDataError("conflicting observation requires investigation before use")
             if row['source_semantic_digest'] is not None:
@@ -434,8 +462,11 @@ class BlockStore:
             result["missing_heights"] = missing
             result["waived_missing_heights"] = [height for height in missing if height in waived]
             result["unresolved_missing_heights"] = [height for height in missing if height not in waived]
-            cursor.execute("SELECT DISTINCT height FROM observation_alerts WHERE kind='conflicting-block' ORDER BY height LIMIT 100")
+            cursor.execute("SELECT DISTINCT height FROM unresolved_observation_conflicts WHERE kind='conflicting-block' ORDER BY height LIMIT 100")
             result["conflicting_heights"] = [row["height"] for row in cursor.fetchall()]
+            cursor.execute('''SELECT DISTINCT a.height FROM observation_alerts a
+                JOIN observation_conflict_resolutions r ON r.alert_id=a.id ORDER BY a.height LIMIT 100''')
+            result['resolved_conflicting_heights'] = [row['height'] for row in cursor.fetchall()]
             cursor.execute("SELECT max(timestamp) AS latest_timestamp FROM observed_blocks")
             result["latest_timestamp"] = cursor.fetchone()["latest_timestamp"]
             result["initialized"] = True
@@ -491,7 +522,7 @@ class BlockStore:
             cursor.execute("SELECT height FROM observed_blocks WHERE id=%s", (next_block["previous_id"],))
             if cursor.fetchone():
                 raise ProtocolDataError("the successor points to an already recorded block at another height")
-            cursor.execute("""SELECT 1 FROM observation_alerts WHERE kind='conflicting-block'
+            cursor.execute("""SELECT 1 FROM unresolved_observation_conflicts WHERE kind='conflicting-block'
                 AND height=ANY(%s) LIMIT 1""", ([height-1, height, height+1],))
             if cursor.fetchone():
                 raise ProtocolDataError("conflicting neighbor evidence prevents a gap waiver")
@@ -520,5 +551,5 @@ class BlockStore:
                 LEFT JOIN observation_gap_waivers w ON w.height=expected.height AND w.round_number=%s""",
                 (first, last, round_number, round_number))
             counts = cursor.fetchone()
-            cursor.execute("SELECT 1 FROM observation_alerts WHERE kind='conflicting-block' AND height BETWEEN %s AND %s LIMIT 1", (first, last))
+            cursor.execute("SELECT 1 FROM unresolved_observation_conflicts WHERE kind='conflicting-block' AND height BETWEEN %s AND %s LIMIT 1", (first, last))
             return not cursor.fetchone() and counts["captured"] == length and (not require_credits or counts["credited"] == length)

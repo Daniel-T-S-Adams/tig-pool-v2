@@ -70,9 +70,11 @@ def prune(database, *, proof, limit=200):
             JOIN reconciled_blocks r ON r.block_id=b.id
             WHERE NOT (a.manifest ? 'expired') AND c.expired_at IS NULL
               AND a.created_at<=%s AND c.created_at<=%s
-              AND NOT EXISTS (SELECT 1 FROM observation_alerts x
+              AND NOT EXISTS (SELECT 1 FROM unresolved_observation_conflicts x
                   WHERE x.height=b.height AND x.kind='conflicting-block')
-            ORDER BY b.height LIMIT %s''', (covered, covered, limit))
+              AND NOT EXISTS (SELECT 1 FROM observation_conflict_resolutions z JOIN observation_alerts x ON x.id=z.alert_id
+                  WHERE x.height=b.height AND z.created_at>%s)
+            ORDER BY b.height LIMIT %s''', (covered, covered, covered, limit))
         rows = cursor.fetchall()
         tomb = {'expired': {'run': run_id, 'at': datetime.now(timezone.utc).isoformat(),
             'policy': 'compact-network-v1', 'covered_until': covered.isoformat()}}

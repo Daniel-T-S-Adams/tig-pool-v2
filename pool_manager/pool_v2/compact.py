@@ -37,7 +37,7 @@ def metadata_summary(metadata):
     }
 
 
-def compact_observation(observation):
+def compact_observation(observation, *, identity_version=2):
     if observation.get("format") == FORMAT:
         validate_compact(observation)
         return observation
@@ -55,8 +55,18 @@ def compact_observation(observation):
         canonical["players"] = {player: canonical_observation(feed)}
     else:
         canonical["pool_pending"] = canonical_observation(feed)
-    source_digests = sorted({_semantic(snapshot, observation), _semantic(snapshot, canonical)})
+    source_digests = {_semantic(snapshot, observation), _semantic(snapshot, canonical)}
+    v1_source_digest = _semantic(snapshot, canonical)
+    if identity_version == 2:
+        # Paged legacy manifests canonicalized header record lists as well.
+        # Keep the original header in the payload, but compare its replayable
+        # encoding when identifying a block. Retain the v1 identity too.
+        canonical['start'] = deepcopy(observation['start'])
+        canonical['start']['block']['config'] = canonical_observation(observation['start']['block']['config'])
+    elif identity_version != 1:
+        raise ValueError('unsupported compact source identity version')
     source_digest = _semantic(snapshot, canonical)
+    source_digests = sorted(source_digests | {source_digest})
     feed = canonical_observation(feed)
     pool_active = player in observation["players"]
     codes = []
@@ -88,17 +98,34 @@ def compact_observation(observation):
     result["end"] = {"block": {key: deepcopy(observation["end"]["block"][key]) for key in ("id", "details", "config")}}
     if not pool_active:
         result["pool_pending"] = deepcopy(feed)
+    if identity_version == 2:
+        result['source_identity_version'] = 2
+        # Existing compact observations have immutable v1 projection hashes.
+        # Accept both original and legacy header encodings during recapture.
+        old = deepcopy(result)
+        old.pop('source_identity_version')
+        old['source_semantic_digest'] = v1_source_digest
+        compatible = {_semantic(validate_compact(old), old)}
+        old['start']['block']['config'] = deepcopy(canonical['start']['block']['config'])
+        old['end']['block']['config'] = deepcopy(old['start']['block']['config'])
+        old['source_semantic_digest'] = source_digest
+        compatible.add(_semantic(validate_compact(old), old))
+        result['compatible_projection_digests'] = sorted(compatible)
     validate_compact(result)
     return result
 
 
 def validate_compact(observation):
+    if type(observation.get('source_identity_version', 1)) is not int or observation.get('source_identity_version', 1) not in (1, 2):
+        raise ProtocolDataError('unsupported compact source identity version')
     player = _text(observation["pool_player_id"], "compact pool player")
     if type(observation["pool_active"]) is not bool:
         raise ProtocolDataError("compact pool activity must be explicit")
     if not observation["source_semantic_digests"]:
         raise ProtocolDataError("compact capture needs its validated network digest")
     for value in observation["source_semantic_digests"]:
+        _digest(value)
+    for value in observation.get('compatible_projection_digests', []):
         _digest(value)
     if _digest(observation['source_semantic_digest']) not in observation['source_semantic_digests']:
         raise ProtocolDataError('compact canonical source identity is missing')
