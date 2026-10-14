@@ -1,11 +1,12 @@
-# Two-server mainnet CPU trial — 14 October 2026
+# Two-server mainnet CPU trials — 14 October 2026
 
-The owner authorized one CPU benchmark, with at most 0.0004 TIG member
-collateral and a 0.001 TIG pool submission fee. That attempt is complete;
-another paid attempt requires separate authorization. Both trial plans are
-consumed and disabled. Ordinary pool work remains paused and settlement disabled.
+The owner separately authorized the original CPU benchmark and one corrected
+attempt, each capped at 0.0004 TIG member collateral and a 0.001 TIG pool fee.
+The original attempt failed as recorded below. The corrected attempt activated successfully on TIG;
+its approval was consumed by one fenced precommit. All trial plans are now
+disabled. Ordinary pool work remains paused and settlement disabled.
 
-## Result
+## First attempt: verification failure
 
 Benchmark `0fd6714756833d70378a1b630f93c126` used `c003_a154` on `aws_c7g`,
 track `n_items=1000,budget=10`, four bundles and 4,000 nonces. Master
@@ -90,16 +91,60 @@ worker's unchanged compute/proof methods; source comparison confirms that only
 the offer guard changed. Both task-owned test installations now use the
 served guarded worker and preserve their prior source/configuration.
 
-Another mainnet attempt requires fresh approval. These unpaid results do not
-prove successful paid activation. Hardware checks cover c003 on these two
+The owner subsequently approved one corrected mainnet attempt, recorded below.
+Unpaid results alone do not prove successful paid activation. Hardware checks cover c003 on these two
 ARM64 servers; other workloads, GPU and the reward/expense flow remain separate
 launch gates.
+
+## Corrected paid attempt — successful activation
+
+The owner's additional **YES** authorized exactly one further attempt with the
+same caps. A first launch stopped before reservation/binding because TIG's
+current track-25 reference changed from `ils_rounds=135` to default parameters.
+It incurred no fee or collateral hold; that unused plan was disabled. A complete
+unpaid rerun of the changed 4,000-nonce default track passed in **10m54s**, with
+three verified proofs and an isolated API replay. Eleven bounds tests and six
+disposable driver scenarios passed, including refusal of unvalidated parameters
+and another paid send. The plan accepts only these measured track-25 variants;
+all other algorithm, workload, member and cost checks remain fixed.
+
+The same unconsumed approval then funded benchmark
+`8c7c7bc72f7769d9c65a562b20ca62d2`, reservation
+`76046f2f-c1b6-4355-9983-18c48417c96e`, in namespace
+`20261014-runtime08-v2`. One precommit was sent at **11:02:41 UTC**, confirmed at
+height **1383884**, and handed over at **11:03:08**. TIG selected
+`n_items=1000,budget=25`, 4,000 nonces and `ils_rounds=135`. Actual fee is
+**0.001 TIG** and collateral hold **0.0004 TIG**. Both servers finished all 4,000 outputs: master **1,968**, helper **2,032**.
+Results were accepted at **11:15:48 UTC**, **12m40s** after handover. Proofs were
+accepted at **11:16:11** and confirmed at height **1383898**, with no fraud.
+TIG activated the benchmark at height **1383916**, approximately **11:35 UTC**.
+The independent current-head check found both the benchmark and pool active;
+the detailed record had four active bundles and no verification failure.
+
+All 4,000 qualities, the Merkle root and all three sampled proofs exactly match
+the pool's stored payloads. The pool recorded the reservation `active` and freed
+its work slot. There is exactly one accepted intent each for precommit, results
+and proofs, and one durable potentially-sent event. The member worker completed
+normally. Ledger audit remained empty and all trial approvals are disabled.
+Collateral remains held for normal X+2 settlement; it was not refunded early.
+This establishes the two-host CPU path on mainnet. Full reward/expense settlement,
+funded takeover and GPU checks remain separate launch gates.
+
+Both protected approvals are false, the send binding is durable, and normal
+new work is paused. Native WAL remains synchronous. Encrypted export
+`configuration-daily-2026-10-14T110548Z` passed all hashes/private decryption on
+recovery at **11:07:32**, including the consumed plan, installer, router and
+service/exit controls. Temporary plaintext was removed. The original member
+installation and all prior trial data remain preserved.
 
 ## Separate storage hold
 
 Historical conversion completed overnight except for one held block at
 `1382587`, the legacy/compact rollout boundary. The two captures differ in
-reward-schedule and binary-list ordering. Originals and the conflict alert are
+reward-schedule and binary-list ordering. A bounded read-only comparison on
+14 October validated both snapshots and proved identical records and
+multiplicities in all three differing lists; their pool projections match after
+only those ordering changes. This is diagnostic evidence, not an alert waiver. Originals and the conflict alert are
 retained; no primary raw archive was pruned. The automatic watcher stopped
 before requesting a replacement backup. Validate the storage correction and
 its backup/restore evidence before guarded deletion.

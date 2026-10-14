@@ -1,12 +1,16 @@
 # V2 operations and storage status
 
-**14 October update:** the approved two-server CPU trial completed 4,000 nonces
-and uploaded results in 10m31s, but failed TIG's later solution verification.
-Replay identified an outdated pinned knapsack runtime (0.0.7 versus current
-0.0.8). All five corrected unpaid tracks passed (12,400 outputs, 15 proofs;
-slowest 12m29s). The corrected pool/worker pair was activated at 10:18 UTC. New work stays paused; no second paid attempt is authorized.
-Historical conversion finished except for one held rollout-boundary block;
-no primary raw archive was pruned. See [the actual trial record](MAINNET_CPU_TRIAL_20261014.md).
+**14 October update:** the corrected two-server mainnet CPU benchmark activated
+successfully at height **1383916**, around **11:35 UTC**. Results/proofs matched
+TIG exactly; no verification failure was recorded. Master/helper saved 4,000
+outputs (1,968/2,032), with results uploaded 12m40s after handover. Actual fee
+0.001 TIG and collateral hold 0.0004 TIG stayed within the additional approval.
+The earlier attempt failed because its runtime pin was outdated; both outcomes
+are preserved in [the trial record](MAINNET_CPU_TRIAL_20261014.md). The corrected
+pair remains a65b3a8/dddad9 with official 0.0.8 CPU runtimes. All trial approvals
+are consumed/disabled; ordinary work is paused and settlement disabled.
+Historical conversion finished except for the ordering conflict at 1382587;
+complete replay now proves the cause, but its alert and raw originals remain.
 
 Checked against the running services on **14 October 2026**. This is the current
 operations record. Wallet RPC recovery was checked on **12 October**; backup
