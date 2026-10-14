@@ -55,25 +55,45 @@ null-allegation decoder change was discarded before commit or deployment.
 
 ## Correction work
 
-A separate unpaid master and the drained task-owned helper now use the exact
-0.0.8 digest. Original helper configuration and all prior results are preserved.
-All five current workload tracks are being rerun with real runtime/verifier
-code and simulated pool/TIG replies, without a pool execution token or TIG API
-key. The pool's served runtime manifest has not yet been changed. Finish the
-corrected workload checks, update and verify the paired runtime manifest and
-documentation, then obtain approval before another paid attempt.
+The corrected pair was activated on primary at **10:18 UTC** and staged on
+recovery with its pool services inactive:
 
-Worker candidate `dddad9df9b0d051cf004a904fe7b7361f9816c43` adds a runtime
-release check before new offers, unlinked saved offers and queued-offer refresh.
-It verifies the pool's release digest and requires every configured backend's
-runtime map to match. Existing handed-over work can still drain. All 53 worker
-v2 tests and 17 inherited tests passed locally and in hosted run `38545322562`.
-The pool CI now pins this candidate for actual API interoperability checks.
+- Pool `a65b3a85d7d53285915ba6f75ac67df4cda503c5`, tag
+  `mainnet-runtime08-member-master-20261014`.
+- Worker `dddad9df9b0d051cf004a904fe7b7361f9816c43`, tag
+  `mainnet-runtime-release-guard-20261014`.
+- All five configured CPU runtime images now pin official **0.0.8** digests.
+- Public and loopback manifests, installer checksum, all six service paths,
+  retention, 21 migrations and compatible readers passed live checks.
+  Deployment preserved balances/journals and the durable work pause.
 
-All five configured CPU challenge images have a different official 0.0.8
-digest from the 13 October pair. The corrected paired runtime manifest must
-pin all five current images. Hardware execution in this correction is limited
-to c003; other workload viability and GPU checks remain separate launch gates.
+The unpaid two-host rerun completed all **12,400 outputs** and **15 sampled
+proofs** using the corrected runtime and simulated pool/TIG replies, without
+pool credentials. All actual result/proof sets passed an isolated pool API:
+retries were idempotent, changed roots were refused, accounting was unchanged,
+and only binary metadata was stored.
+
+| Current c003_a154 track | Nonces | Complete compute/proof time |
+|---|---:|---:|
+| n_items=1000,budget=10 | 4,000 | 10m40s |
+| n_items=1000,budget=25 | 4,000 | 12m29s |
+| n_items=1000,budget=5 | 4,000 | 9m13s |
+| n_items=5000,budget=10 | 200 | 11m06s |
+| n_items=5000,budget=25 | 200 | 10m37s |
+
+The worker checks the release digest and every backend's runtime map before
+new offers, unlinked saved offers and queued-offer refresh. Existing
+handed-over work can drain. All **53 worker v2 tests and 17 inherited tests**
+passed locally and in hosted run `38545322562`; the exact paired pool passed
+**377 hosted tests** in run `38545838913`. The hardware rerun used the prior
+worker's unchanged compute/proof methods; source comparison confirms that only
+the offer guard changed. Both task-owned test installations now use the
+served guarded worker and preserve their prior source/configuration.
+
+Another mainnet attempt requires fresh approval. These unpaid results do not
+prove successful paid activation. Hardware checks cover c003 on these two
+ARM64 servers; other workloads, GPU and the reward/expense flow remain separate
+launch gates.
 
 ## Separate storage hold
 

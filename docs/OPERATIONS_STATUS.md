@@ -3,12 +3,12 @@
 **14 October update:** the approved two-server CPU trial completed 4,000 nonces
 and uploaded results in 10m31s, but failed TIG's later solution verification.
 Replay identified an outdated pinned knapsack runtime (0.0.7 versus current
-0.0.8). Corrected unpaid checks are running; the pool's served manifest is still
-the 13 October pair. New work stays paused; no second paid attempt is authorized.
+0.0.8). All five corrected unpaid tracks passed (12,400 outputs, 15 proofs;
+slowest 12m29s). The corrected pool/worker pair was activated at 10:18 UTC. New work stays paused; no second paid attempt is authorized.
 Historical conversion finished except for one held rollout-boundary block;
 no primary raw archive was pruned. See [the actual trial record](MAINNET_CPU_TRIAL_20261014.md).
 
-Checked against the running services on **13 October 2026**. This is the current
+Checked against the running services on **14 October 2026**. This is the current
 operations record. Wallet RPC recovery was checked on **12 October**; backup
 relocation, recovery verification and paired application activation passed
 on **13 October**, as recorded below. Older dated validation notes
@@ -21,11 +21,11 @@ on 13 October. It adds direct worker binary downloads,
 compact pool evidence, selective final report fetching and guarded legacy
 conversion. Production migrations are verified through 021. The matched worker,
 public installer, compatible readers and unchanged balances were checked.
-Historical conversion is running and current CPU timing passed; no primary raw
+Historical conversion completed except for one held boundary block; corrected CPU timing passed; no primary raw
 archive has been deleted by this rollout. See [the rollout record](LEAN_ROLLOUT_20261013.md).
 
-The current two-host `c003_a154` test passed all five possible tracks, including
-three 4,000-nonce assignments. The worst took 12m33s; all actual uploads and
+The corrected 14 October two-host `c003_a154` test passed all five possible tracks,
+including three 4,000-nonce assignments. The worst took 12m29s; all actual uploads and
 sampled proofs passed an isolated API replay. This remains unpaid verification.
 The subsequent [RPC routing repair](RPC_ROUTING_20261013.md) separates Base's
 finality/basic reads from Pocket's log queries and recovered custody freshness.
@@ -48,8 +48,8 @@ See [the recovery activation record](RECOVERY_VOLUME_20261013.md).
 |---|---|
 | Primary | Helsinki, `46.62.249.188`; website, API, coordinator and four observers |
 | Recovery | Nuremberg, `2.28.230.81`; database backups, WAL receiver and configuration copies |
-| Pool application | `f5f1028ec3e8e2a0ee875e8cff4c0cb0a6d449e5`, tag `mainnet-lean-storage-member-master-20261013` |
-| Worker served by the API | `a715041901e865d136138cff0017f46b90b3d5ce`, tag `mainnet-direct-binaries-member-master-20261013` |
+| Pool application | `a65b3a85d7d53285915ba6f75ac67df4cda503c5`, tag `mainnet-runtime08-member-master-20261014` |
+| Worker served by the API | `dddad9df9b0d051cf004a904fe7b7361f9816c43`, tag `mainnet-runtime-release-guard-20261014` |
 | Schema | 21 verified migrations deployed; 020/021 applied twice with earlier checksums unchanged |
 | Member funds | Enabled, with custody freshness checks still applying |
 | New work | Operator pause is recorded; effective `work_enabled=false`, configured `work_enabled=true` |
