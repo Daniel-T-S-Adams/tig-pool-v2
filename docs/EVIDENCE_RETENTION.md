@@ -4,12 +4,16 @@ The storage cleanup activated on 13 October adds compact pool captures, direct
 binary downloads, final report fetching and guarded legacy conversion.
 [Lean storage](LEAN_STORAGE.md) specifies migrations 020–022 and the cleanup
 sequence. The policy below applies to retained legacy and new compact captures.
-Historical conversion is running; see [rollout status](LEAN_ROLLOUT_20261013.md).
+Historical conversion is complete; see [the ordering fix and cleanup](STORAGE_ORDERING_FIX_20261014.md).
 
 Decided by the operator on 8 October 2026. The pool reads the whole TIG network
 every block, but it only has to **keep** what an open obligation can still need.
 Ledger, credit, benchmark, collateral and settlement records are permanent.
 Raw captures are bounded-life evidence and expire under this policy.
+The lean format retains compact pool evidence under these floors. A redundant
+full-network copy can expire sooner when its validated compact replacement,
+credit, reconciliation and any conflict resolution are verified off-host;
+the original identity and accounting records remain.
 
 | Evidence | Expires when | Cap |
 |---|---|---|
@@ -87,16 +91,16 @@ chunks expire only once every block up to it has.
 - Expired block manifests free their space for reuse after PostgreSQL's
   autovacuum; returning it to the operating system needs a `VACUUM FULL` or
   `pg_repack` of `capture_attempts` during a maintenance window.
-- Report index captures still record one row per block per player and
-  challenge; expiry bounds them, but deduplicating unchanged indices is a
-  separate improvement.
-- Only the primary local block spool currently has file pruning. Report,
-  custody and funding database expiry does not prune their corresponding
-  spool files. No new file deletion or database table rewrite was performed
-  during the 9 October cleanup.
+- New report index collection retains positive membership and deduplicates
+  unchanged responses; empty indices are not archived. Final reports are
+  fetched for open obligations after the X+2 reporting window closes.
+- Both block and report spools have guarded file pruning. Recorded report
+  files require a matching backed database payload and scope; pending files
+  remain. Custody/funding spool cleanup retains its existing controls.
 - Recovery collectors are inactive and the full primary-evidence copy is
   disabled after a disk-reserve failure. At 14:55 UTC on 9 October, the configured
   recovery raw-copy directory was absent and its local spool measured only
   36 KiB; do not assume that a separate raw archive exists there.
-  See [operations status](OPERATIONS_STATUS.md) for the measured footprint and
-  the proposed pending-file recovery policy.
+  The replacement bounded pending-file snapshots were activated on 13 October
+  and include all four spools. See [operations status](OPERATIONS_STATUS.md)
+  for the current recovery path and measured footprint.

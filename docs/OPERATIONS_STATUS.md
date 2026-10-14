@@ -6,11 +6,12 @@ TIG exactly; no verification failure was recorded. Master/helper saved 4,000
 outputs (1,968/2,032), with results uploaded 12m40s after handover. Actual fee
 0.001 TIG and collateral hold 0.0004 TIG stayed within the additional approval.
 The earlier attempt failed because its runtime pin was outdated; both outcomes
-are preserved in [the trial record](MAINNET_CPU_TRIAL_20261014.md). The corrected
-pair remains a65b3a8/dddad9 with official 0.0.8 CPU runtimes. All trial approvals
+are preserved in [the trial record](MAINNET_CPU_TRIAL_20261014.md). The worker/runtime pair remains unchanged; the pool now runs the storage fix
+with official 0.0.8 CPU runtimes. All trial approvals
 are consumed/disabled; ordinary work is paused and settlement disabled.
-Historical conversion finished except for the ordering conflict at 1382587;
-complete replay now proves the cause, but its alert and raw originals remain.
+The [storage ordering fix](STORAGE_ORDERING_FIX_20261014.md) is deployed.
+All 26,050 historical blocks are converted; alert 2 has an immutable replay
+resolution. Fresh backup, actual restore and guarded redundant raw cleanup passed.
 
 Checked against the running services on **14 October 2026**. This is the current
 operations record. Wallet RPC recovery was checked on **12 October**; backup
@@ -23,10 +24,10 @@ describe their own check state.
 The [lean storage implementation](LEAN_STORAGE.md) was activated at 13:28 UTC
 on 13 October. It adds direct worker binary downloads,
 compact pool evidence, selective final report fetching and guarded legacy
-conversion. Production migrations are verified through 021. The matched worker,
+conversion. Production migrations are verified through 022. The matched worker,
 public installer, compatible readers and unchanged balances were checked.
-Historical conversion completed except for one held boundary block; corrected CPU timing passed; no primary raw
-archive has been deleted by this rollout. See [the rollout record](LEAN_ROLLOUT_20261013.md).
+Historical conversion, backup/restore verification, guarded redundant cleanup
+and corrected CPU timing passed. See [the rollout record](LEAN_ROLLOUT_20261013.md).
 
 The corrected 14 October two-host `c003_a154` test passed all five possible tracks,
 including three 4,000-nonce assignments. The worst took 12m29s; all actual uploads and
@@ -52,9 +53,9 @@ See [the recovery activation record](RECOVERY_VOLUME_20261013.md).
 |---|---|
 | Primary | Helsinki, `46.62.249.188`; website, API, coordinator and four observers |
 | Recovery | Nuremberg, `2.28.230.81`; database backups, WAL receiver and configuration copies |
-| Pool application | `a65b3a85d7d53285915ba6f75ac67df4cda503c5`, tag `mainnet-runtime08-member-master-20261014` |
+| Pool application | `59a3446add2804c7f4dc42309039d55f46bf1c96`, tag `mainnet-storage-ordering-20261014` |
 | Worker served by the API | `dddad9df9b0d051cf004a904fe7b7361f9816c43`, tag `mainnet-runtime-release-guard-20261014` |
-| Schema | 21 verified migrations deployed; 020/021 applied twice with earlier checksums unchanged |
+| Schema | 22 verified migrations deployed; 022 applied twice with earlier checksums unchanged |
 | Member funds | Enabled, with custody freshness checks still applying |
 | New work | Operator pause is recorded; effective `work_enabled=false`, configured `work_enabled=true` |
 | TIG submission adapter | Configured for existing work; this does not bypass the pause on new precommits |
@@ -167,8 +168,8 @@ still rejected under the existing freshness/reconciliation rules.
 
 Encrypted settings, the exact observer unit and protected rollback files were
 copied to Germany and verified. No new provider account, deposit, paid benchmark,
-application release or schema change was made. New work remains paused for the
-remaining paired-release and paid-test checks. See
+application release or schema change was made during that repair. New work
+stayed paused; the later corrected CPU activation is recorded above. See
 [the recovery record](RPC_RECOVERY_20261012.md).
 
 ## What is stored, and why
@@ -202,12 +203,37 @@ and the measured database breakdown.
 The approved evidence policy keeps raw blocks and reports for four rounds and
 wallet/fee captures for thirty days, with obligation, credit-coverage and backup
 guards. It expires database payloads and prunes eligible local **block** spool
-files. Report, wallet and funding spool files do not yet have equivalent file
-pruning. Expired database rows free space for PostgreSQL reuse; returning that
+files. Report spool files now have backed-payload pruning. Wallet/funding files
+continue to use their existing evidence controls. Expired database rows free space for PostgreSQL reuse; returning that
 space to the operating system requires a separately planned table rewrite.
 See [evidence retention](EVIDENCE_RETENTION.md).
 
-### Measured footprint
+### Current footprint — 14 October, 17:31 UTC
+
+Binary GiB after completed cleanup and archive relocation:
+
+| Host / data | Size |
+|---|---:|
+| Primary allocated database | 35.77 GiB |
+| Primary block spool | 0.67 GiB |
+| Primary report spool | 0.18 GiB |
+| Primary custody spool | 0.31 GiB |
+| Primary funding spool | 6.98 GiB |
+| Primary free disk | 90.34 GiB |
+| Recovery newest base on volume | 23.48 GiB |
+| Recovery two older bases on root | 44.47 GiB |
+| Recovery required WAL | 97.63 GiB |
+| Recovery volume free disk | 64.59 GiB |
+| Recovery root free disk | 89.91 GiB |
+
+Block/report spool allocation fell by about **33 GiB**. Allocated database
+space includes reusable pages; its logical replacement payloads are much
+smaller. Required WAL includes the cleanup activity until the relevant older
+bases retire under normal retention. The [base placement record](BACKUP_BASE_ARCHIVES_20261014.md)
+explains the two filesystem reserves and unchanged three-base/WAL policy.
+
+### Historical footprint — 9 October
+
 
 Approximate binary GiB, measured 9 October before the report catch-up:
 
@@ -229,57 +255,45 @@ import and subsequent backups can change the footprint during catch-up.
 
 ## Recovery protection and remaining cleanup
 
-The continuous WAL receiver and transfer jobs are active. The latest successful
-base completed on **10 October at 03:46 UTC**, with archive checksums and required
-WAL verified. Later daily attempts failed the disk reserve check. Three verified
-bases remain with WAL back to the oldest base. The actual point-in-time restore
-rehearsal passed on 4 October; these backup records are not a new restore check.
+The current recovery path is verified database bases plus continuous WAL,
+encrypted release/configuration copies and bounded snapshots of the four
+pending protocol spools. The 200 GiB EXT4 volume **107125099** holds the newest base,
+WAL and pending snapshots through persistent guarded mounts. Two older verified
+bases use the recovery server's existing root disk. The catalogue/retention and
+per-filesystem reserve checks cover both locations; see
+[the 14 October placement record](BACKUP_BASE_ARCHIVES_20261014.md). Three verified
+bases and WAL back to the oldest required base remain under the existing
+retention policy. Recovery's pool API and independent TIG collectors remain
+inactive; backup protection does not recreate a block never captured.
 
-The earlier cleanup application and encrypted configuration arrived on Germany
-at 13:24 UTC. The current expiry release and encrypted settings were exported
-at 14:29 UTC and copied there, with all exported-file checksums verified. This configuration copy
-does not advance the database recovery point. The primary ledger audit passed
-after the update and catch-up; new work remained paused throughout.
+On **14 October**, base `2026-10-14T134951Z` passed data checksums and WAL
+parsing. A separate actual restore used the verified 03:13 UTC base plus 229
+later WAL segments to reach `innopool_storage_20261014_134952`. All 26,050
+compact copies, all 47 protected table fingerprints, the ordering resolution,
+retained alert and 22 migration checksums passed. The disposable database was
+removed afterward. The encrypted configuration export
+`configuration-daily-2026-10-14T134952Z` was verified on Germany, including
+private decryption, all file hashes, the active pair, consumed trial approvals,
+RPC router and service/retention directories; temporary plaintext was removed.
 
-The former **full raw-evidence copy is disabled**, following its 8 October
-disk-reserve failure. Germany's independent block/report collectors have been
-inactive since 7 October. The old recovery health helper still expects those
-collectors and a full evidence copy; its overall result does not accurately
-describe the current backup-only host. Treat each backup job's evidence
-separately until that health profile is corrected.
+The old full raw-spool mirror stays disabled. The replacement pending-file
+protection covers blocks, reports, custody and funding, retains two verified
+snapshots and requires a durable WAL boundary plus five minutes of freshness.
+It was activated and verified on 13 October. See
+[pending evidence protection](PENDING_EVIDENCE_BACKUP.md) and
+[the recovery-volume record](RECOVERY_VOLUME_20261013.md).
 
-The proposed storage setup for discussion is:
+Historical compact conversion is complete. Guarded redundant raw/file/chunk
+cleanup completed after the new backup and actual restore checks. See
+[the storage ordering fix](STORAGE_ORDERING_FIX_20261014.md) for final counts
+and its immutable replay proof. Ordinary PostgreSQL expiry makes pages
+reusable; allocated database files and retained recovery bases do not
+immediately shrink to the live logical data size.
 
-1. Keep verified database bases plus WAL, and encrypted release/configuration
-   copies.
-2. Copy raw protocol manifests and content that are **still pending import**
-   separately, since they are outside the database recovery stream.
-3. Define the required freshness and disk reserve for that copy, and rehearse
-   restoring the database plus pending files together.
-4. Choose whether an independent TIG collector is also required. It protects
-   missed observations and needs its own storage; it is a separate decision
-   from copying the primary's files.
-
-On **12 October**, the pending-file copy and matching recovery health profile
-were implemented for the release candidate. They cover all four protocol spools,
-retain two verified snapshots, require a durable WAL boundary and enforce five
-minutes of freshness. They were **activated and production-copy verified on
-13 October**; see
-[pending evidence protection](PENDING_EVIDENCE_BACKUP.md).
-
-The historical 12 October survey found about 15 GiB free, with 44 GiB of bases
-and 76 GiB of required WAL; new daily backups could not start. On 13 October the
-owner attached a 200 GiB EXT4 volume. Relocation, a fresh base and combined
-production-copy restore passed, and normal backup retention resumed. The
-obsolete original copy was removed afterward. Root had about 135 GiB free and
-the volume about 82 GiB free. Recovery health was healthy at 12:18 UTC.
-Production still uses the old larger application storage design.
-
-Re-enabling the existing full copy would add
-roughly 24 GiB of block/report files and consume space reserved for the next
-base backup. No raw evidence was deleted to make the job pass. Storage policy,
-unresolved gaps remain open; keep new work paused while these are addressed.
-The repaired public RPC remains subject to ordinary custody availability/freshness gates. Reward claim/unlock/receipt and expense integration, a funded
-takeover, real TIG acceptance of timely CPU results and GPU execution also
-remain unvalidated. The isolated knapsack measurement above covers one CPU
-workload only.
+New work remains paused and settlement disabled. Round-137 gaps at **1375817**
+and **1376650** still prevent exact coverage. Reward claim/unlock/receipt and
+expense integration, a funded takeover and real GPU execution remain
+unverified. The corrected two-server CPU benchmark **did** activate on TIG;
+point checks showed no pool qualifiers, so it does not demonstrate a reward
+cycle or profitability. The RPC router remains subject to custody freshness
+and ordinary availability gates.

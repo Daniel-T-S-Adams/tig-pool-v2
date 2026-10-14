@@ -1,6 +1,7 @@
 """Recovery checks require real protection while leaving pool services inactive."""
 from datetime import timedelta
 import io
+import hashlib
 import json
 from pathlib import Path
 import sys
@@ -140,3 +141,46 @@ class RecoveryHealthTests(unittest.TestCase):
                 self.assertFalse(result['healthy'])
                 self.assertEqual(result['issues'], [label + ' disk reserve is below 35 GiB'])
                 self.assertEqual(result['free_bytes'], 100 * 1024**3)
+
+    def archive_layout(self):
+        older = self.root / 'older-bases';older.mkdir()
+        bases = self.data / 'primary-continuous' / 'base';bases.mkdir()
+        records = []
+        for day in (12,13,14):
+            stamp=f'2026-10-{day:02d}T100000Z'
+            path=(bases if day==14 else older)/stamp;path.mkdir()
+            files={}
+            for name in ('base.tar.gz','pg_wal.tar.gz','backup_manifest'):
+                raw=(stamp+name).encode();(path/name).write_bytes(raw)
+                files[name]=hashlib.sha256(raw).hexdigest()
+            record={'snapshot':stamp,'system_identifier':'123','data_checksums_verified':True,
+                'wal_parse_verified':True,'first_wal_segment':f'{1:08X}{0:08X}{day:08X}',
+                'completed_at_utc':pending.now().isoformat(),'files':files,
+                'archive_bytes':sum((path/name).stat().st_size for name in files)}
+            (path/'verified.json').write_text(json.dumps(record));records.append(record)
+        (self.data/'primary-continuous'/'latest.json').write_text(json.dumps(records[-1]))
+        (self.config/'continuous-backup.json').write_text(json.dumps({'base_archive_directory':str(older)}))
+        return bases,older,records
+
+    def test_archive_layout_requires_newest_base_on_volume(self):
+        bases,older,records=self.archive_layout()
+        with patch.object(recovery.shutil,'disk_usage',return_value=SimpleNamespace(free=100*1024**3)), \
+                patch.object(recovery,'backup_health',return_value={'issues':[]}), \
+                patch.object(recovery.subprocess,'run',return_value=SimpleNamespace(stdout='inactive\n')):
+            result=recovery.recovery_health(self.config,self.data)
+            self.assertTrue(result['healthy'],result['issues'])
+            self.assertEqual(result['database_base_snapshots'],[r['snapshot'] for r in records])
+            stamp=records[-1]['snapshot'];(bases/stamp).rename(older/stamp)
+            result=recovery.recovery_health(self.config,self.data)
+            self.assertFalse(result['healthy'])
+            self.assertIn('database base catalogue or newest volume copy is incomplete',result['issues'])
+
+    def test_older_archive_reserve_is_checked_independently(self):
+        _,older,_=self.archive_layout()
+        def disk(path):
+            return SimpleNamespace(free=1 if Path(path)==older else 100*1024**3)
+        with patch.object(recovery.shutil,'disk_usage',side_effect=disk), \
+                patch.object(recovery,'backup_health',return_value={'issues':[]}), \
+                patch.object(recovery.subprocess,'run',return_value=SimpleNamespace(stdout='inactive\n')):
+            result=recovery.recovery_health(self.config,self.data)
+        self.assertEqual(result['issues'],['older database base disk reserve is below 35 GiB'])

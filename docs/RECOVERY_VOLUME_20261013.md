@@ -1,5 +1,9 @@
 # Recovery volume and combined restore — 13 October 2026
 
+**14 October update:** the [storage ordering fix](STORAGE_ORDERING_FIX_20261014.md)
+uses this recovery path for schema 022, final compact conversion and guarded
+archive cleanup. The [14 October base placement](BACKUP_BASE_ARCHIVES_20261014.md) keeps the newest base on this volume and two older bases on spare root disk. The measurements below describe the 13 October migration.
+
 The owner-attached 200 GiB EXT4 volume **107125099** is mounted at
 `/mnt/HC_Volume_107125099` on Germany `2.28.230.81`. Database bases/WAL and
 pending-file snapshots use directories there, bound to their original

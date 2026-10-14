@@ -1,28 +1,31 @@
 # InnoPool v2 implementation status
 
-Documentation and live application checked on **13 October 2026**. The agreed design is
+Documentation and live application checked on **14 October 2026**. The agreed design is
 [POOL_REDESIGN_PLAN.md](POOL_REDESIGN_PLAN.md). The detailed current state and
 storage explanation are in [operations status](docs/OPERATIONS_STATUS.md).
 The foundation and increment records below are historical validation records.
 
 ## Current summary
 
-The [lean storage implementation](docs/LEAN_STORAGE.md) and paired member master
-worker were activated on 13 October at 13:28 UTC, with new work paused. Pool
-`f5f1028`, worker `a715041` and migrations 001–021 are live. Compatible readers,
-public pairing and unchanged finance were verified. Historical conversion is
-running; current CPU timing passed on both servers. See
-[rollout details](docs/LEAN_ROLLOUT_20261013.md). On 11
-October all 336 pool tests, 33 worker v2 tests, 17 inherited worker tests and both
-pool accounting checks passed locally. A disposable upgrade from deployed
-migrations 001–019, verified physical backup, restore and bounded cleanup also
-passed. See [verification details](docs/LEAN_STORAGE_VERIFICATION.md).
+The [storage ordering fix](docs/STORAGE_ORDERING_FIX_20261014.md) is deployed as
+pool `59a3446`, worker `dddad9d`, with migrations 001–022. All six primary
+services use the new reader; recovery is staged with its application inactive.
+The held boundary has an immutable ordering resolution, and all 26,050 legacy
+observed blocks have compact replacements. The exact release passed 390 hosted
+tests with PostgreSQL, paired worker and Chromium enabled. Backup and recovery
+checks passed and guarded redundant raw/file/chunk cleanup is complete.
+
+The corrected [two-server mainnet CPU benchmark](docs/MAINNET_CPU_TRIAL_20261014.md)
+activated on TIG at height 1383916. Results and sampled proofs matched exactly;
+new work remains paused, settlement disabled and all trial approvals consumed.
+Reward-cycle verification and the two round-137 gaps remain open. The dated
+foundation and increment notes below retain their original verification scope.
 
 On 13 October recovery volume migration, a fresh physical backup and later-WAL
 restore passed. Forty-four table fingerprints matched; actual block/report files
 were replayed twice without financial changes. Pending protection and the
-matching health profile are active and healthy. Root has about 135 GiB free and
-the volume 82 GiB free. Candidate `dfcfbf6` passed all **371 hosted tests**;
+matching health profile are active and healthy. At that check, root had about 135 GiB free and
+the volume 82 GiB free. The [14 October archive placement](docs/BACKUP_BASE_ARCHIVES_20261014.md) records current storage. Candidate `dfcfbf6` passed all **371 hosted tests**;
 the final `f5f1028` release also passed all 371 hosted tests. See
 [the recovery update](docs/RECOVERY_VOLUME_20261013.md).
 
@@ -51,10 +54,11 @@ including deliberate disconnect/master-crash recovery. All 105 saved outputs
 survived unchanged; isolated API uploads/retries and financial preservation
 passed. Rehearsal units are stopped and isolated setup/evidence is retained.
 That rehearsal made no paid TIG submission or production activation. Paired
-production activation followed on 13 October; the new hardware test remains unpaid.
+production activation followed on 13 October; the corrected paid benchmark
+activated on TIG on 14 October.
 
-- **Application:** `f5f1028`, tag `mainnet-lean-storage-member-master-20261013`, runs
-  on all six primary services; migration history is verified through 021.
+- **Application:** `59a3446`, tag `mainnet-storage-ordering-20261014`, runs
+  on all six primary services; migration history is verified through 022.
   The same application is staged on recovery and its collector units point to
   it, with recovery API/collectors inactive.
 - **Controls:** member funds are enabled; configured work remains enabled but
@@ -82,17 +86,16 @@ production activation followed on 13 October; the new hardware test remains unpa
   copy is disabled after its disk-reserve failure; independent recovery
   collectors are inactive. The EXT4 volume, pending-file protection, recovery
   health and combined production-copy restore passed on 13 October.
-- **Validation:** the final pool passed 371 hosted tests. The API serves worker
-  `a715041`, tag `mainnet-direct-binaries-member-master-20261013`; its 46 v2 and
-  17 inherited tests passed. Compatible recovery passed 370 tests again locally.
+- **Validation:** the deployed pool passed 390 hosted tests. The API serves worker
+  `dddad9d`, tag `mainnet-runtime-release-guard-20261014`; its 53 v2 and
+  17 inherited tests passed. Compatible recovery passed the 390-test hosted suite.
 - **Workflow:** protected `main` integrates PRs; `release/v2` follows the deployed
   application tag. `redesign/v2` was retired on 8 October.
-- **Remaining:** RPC reliability, gap recovery, historical conversion/pruning, timely CPU/GPU
-  validation, funded takeover and reward claim/unlock/receipt plus expense
+- **Remaining:** RPC reliability, gap recovery, timely job-scheduling/GPU validation, funded takeover and reward claim/unlock/receipt plus expense
   integration. Raw blocks/reports keep four rounds and wallet/fee captures
   thirty days under obligation/backup guards; financial records are permanent.
-  Returning database space to the OS and pruning non-block spool files are
-  separate maintenance work, not completed cleanup.
+  Returning allocated database space to the OS requires separate maintenance;
+  report spool pruning is implemented and retains unbacked captures.
 
 ## Foundation record — 20 September 2026
 

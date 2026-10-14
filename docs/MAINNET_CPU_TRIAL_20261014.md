@@ -155,3 +155,7 @@ its backup/restore evidence before guarded deletion.
 
 Detailed artifacts are in the shared workspace at
 `/root/mine-rootz/validation/mainnet-cpu-trial-20261014/`.
+
+The later [storage ordering fix](STORAGE_ORDERING_FIX_20261014.md) deployed
+schema 022, appended the audited resolution for alert 2 and converted the held
+boundary. The diagnosis above records the state at the end of the CPU trial.

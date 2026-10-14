@@ -28,6 +28,29 @@ def recovery_health(config=Path('/etc/innopool-v2-mainnet'),
         issues.append('backup disk reserve is below 35 GiB')
     # Bind-mounted archives can live on a different filesystem from data.
     record['protected_disks'] = {}
+    try:
+        backup_config = json.loads((config / 'continuous-backup.json').read_text())
+        older_bases = backup_config.get('base_archive_directory')
+        if older_bases:
+            from mainnet_backup_v2 import base_catalogue, retention_plan
+            older_bases = Path(older_bases)
+            free = shutil.disk_usage(older_bases).free
+            record['protected_disks']['older database bases'] = {'path': str(older_bases), 'free_bytes': free}
+            if free < 35 * 1024**3:
+                issues.append('older database base disk reserve is below 35 GiB')
+            bases = data / 'primary-continuous' / 'base'
+            catalogue, locations = base_catalogue(bases, older_bases, checksums=False)
+            retention_plan(catalogue, [])
+            latest = json.loads((data / 'primary-continuous' / 'latest.json').read_text())
+            if len(catalogue) < 3 or catalogue[-1] != latest or bases / latest['snapshot'] not in locations[latest['snapshot']]:
+                issues.append('database base catalogue or newest volume copy is incomplete')
+            record['database_base_snapshots'] = [row['snapshot'] for row in catalogue]
+    except FileNotFoundError:
+        # The optional archive layout is enabled only by its explicit setting.
+        if 'older_bases' in locals() and older_bases:
+            issues.append('older database base archive is unavailable')
+    except (OSError, ValueError, KeyError, TypeError):
+        issues.append('database base archive configuration is invalid')
     for label, directory in (('database backup', data / 'primary-continuous'),
                              ('pending evidence', data / 'primary-pending-evidence')):
         try:

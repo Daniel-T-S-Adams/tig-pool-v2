@@ -3,9 +3,9 @@
 Implemented on the 9 October 2026 storage cleanup branches and activated on
 13 October as pool `f5f1028`, worker `a715041`, with migrations through 021.
 See [rollout and remaining maintenance](LEAN_ROLLOUT_20261013.md) and
-[verification details](LEAN_STORAGE_VERIFICATION.md). The 14 October ordering fix adds migration 022 and a verified resolution
-for the single held rollout-boundary capture. Historical cleanup requires
-a later backup and restore check before raw expiry. See
+[verification details](LEAN_STORAGE_VERIFICATION.md). The [14 October ordering fix](STORAGE_ORDERING_FIX_20261014.md) adds migration 022 and a verified resolution
+for the single held rollout-boundary capture. Historical conversion, backup/restore
+verification and guarded redundant raw/file/chunk cleanup are complete. See
 [operations status](OPERATIONS_STATUS.md) for live measurements and controls.
 
 ## Binary downloads
@@ -112,8 +112,10 @@ retention. Smaller writes reduce future backup volume. Expiry makes PostgreSQL
 space reusable; it does not shrink database files or purge retained backups.
 Local API, worker, browser and database checks and fixture-only pruning have
 been performed. Production migrations and paired activation are complete.
-Historical conversion, guarded archive deletion, any table rewrite and backup
-retirement remain separately recorded maintenance operations.
+Historical conversion and guarded redundant archive/chunk cleanup completed on
+14 October. Allocated-table rewrites were not performed. Normal backup
+retirement still retains three verified bases and their required WAL; the
+[archive placement](BACKUP_BASE_ARCHIVES_20261014.md) uses existing server disks.
 
 ## Legacy ordering conflicts
 

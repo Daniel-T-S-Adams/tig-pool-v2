@@ -137,7 +137,9 @@ contiguous cursor past it. This was a read-only test, with no member liabilities
 
 The primary collector now runs continuously and the coordinator performs
 current-head checks before precommit submission. Database backup/restore
-preparation is installed. The operator chose manual health inspection rather
-than external alerts. Redundant collection and pending-file recovery protection
-are currently inactive; gaps and storage remain the open cleanup described in
+protection is active, including verified bases, continuous WAL and bounded
+pending-file snapshots. The operator chose manual health inspection rather
+than external alerts. Independent recovery collectors remain inactive. The
+storage ordering conflict is resolved; the two historical round-137 gaps remain
+as described in
 [operations status](OPERATIONS_STATUS.md).

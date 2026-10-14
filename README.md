@@ -27,8 +27,9 @@ For a high-level view of hosting, connections and deployments, see the
 The [13 October recovery update](docs/RECOVERY_VOLUME_20261013.md) records the new
 volume, verified database/WAL/pending-file restore and active protection.
 The [lean application and paired member master worker](docs/LEAN_ROLLOUT_20261013.md)
-were activated on 13 October with new work paused. Historical conversion and
-current CPU timing remain in progress.
+were activated on 13 October with new work paused. Historical conversion and the corrected mainnet CPU test have passed. See
+[the storage ordering fix](docs/STORAGE_ORDERING_FIX_20261014.md) for verified backup, restore and
+completed redundant archive cleanup.
 
 For day-to-day operation, use the [v2 owner's guide](docs/OWNER_GUIDE.md).
 It explains the website and MetaMask steps, server configuration, software

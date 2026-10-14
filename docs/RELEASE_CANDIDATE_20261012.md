@@ -1,5 +1,11 @@
 # Release candidate — 12 October 2026
 
+**14 October update:** this is a historical preparation record. The current
+pool `59a3446`, worker `dddad9d` and schema 022 are recorded in
+[the storage ordering fix](STORAGE_ORDERING_FIX_20261014.md). Historical compact
+conversion and corrected paid CPU activation passed; the gates below describe
+their original 12–13 October state.
+
 The pool candidate pairs with worker
 `a715041901e865d136138cff0017f46b90b3d5ce`. The final pool candidate `f5f1028` and
 that worker were activated on 13 October, with migrations 001–021, paused new

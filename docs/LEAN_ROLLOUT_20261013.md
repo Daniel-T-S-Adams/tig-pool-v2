@@ -1,7 +1,13 @@
 # Lean storage and member master rollout — 13 October 2026
 
-This records the 13 October deployment. For the active 14 October runtime
-correction, consumed paid attempt and remaining storage hold, see the
+**14 October update:** [the ordering fix](STORAGE_ORDERING_FIX_20261014.md)
+resolved the held boundary and completed all 26,050 compact replacements.
+The current release is `59a3446` with schema 022 and worker `dddad9d`.
+Backup, actual restore and guarded redundant raw/file/chunk cleanup passed. The dated rollout below
+records the initial 13 October activation.
+
+This records the 13 October deployment. For the 14 October runtime
+correction and consumed paid attempts, see the
 [trial record](MAINNET_CPU_TRIAL_20261014.md) and
 [current operations status](OPERATIONS_STATUS.md).
 

@@ -20,7 +20,7 @@ not change reporting evidence, finalization gates or settlement controls. See
 
 ## Evidence collected before financial decisions
 
-The undeployed [storage cleanup](LEAN_STORAGE.md) fetches final responses for
+The deployed [storage cleanup](LEAN_STORAGE.md) fetches final responses for
 open obligations after X+2 and the applicable reporting window close. It keeps
 positive benchmark/reporting-round mappings while available, and saves relevant
 final facts instead of every repeated global response. Pending arbitration and

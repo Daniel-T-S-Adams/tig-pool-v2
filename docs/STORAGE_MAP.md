@@ -1,225 +1,173 @@
 # Pool data and its path to recovery
 
-**13 October update:** database/WAL archives and bounded pending snapshots now
-use the new EXT4 volume. Relocation, a fresh base and combined restore passed;
-pending-file protection and corrected recovery health are active. See
-[the current recovery path](RECOVERY_VOLUME_20261013.md). The 9 October trace
-below remains a historical measurement of the previous application storage.
-
-The [lean storage design](LEAN_STORAGE.md) was activated on 13 October. New
-assignments retain binary metadata, successful blocks retain compact pool data,
-and reports follow final obligations. Historical conversion is running; old raw
-copies remain until replacement backup and guarded pruning. See
-[the rollout record](LEAN_ROLLOUT_20261013.md). The tables and measurements below
-describe the **9 October running release**, before that change.
-
-Read-only trace of the running primary and recovery hosts on **9 October 2026,
-14:55 UTC**, plus the code in the installed pool release `8477509` and pinned
-worker `fd29279`. No runtime settings, retention policy or financial/protocol
-records were changed by this trace. Connection settings were also read from
-the actual service DSNs during the follow-up.
+Checked against the **14 October 2026** deployment: pool `59a3446`, worker
+`dddad9d`, migrations through 022. Primary is Helsinki `46.62.249.188`;
+recovery is Nuremberg `2.28.230.81`. The ordering conflict is resolved and all
+26,050 historical observed blocks have compact replacements. See
+[the storage fix](STORAGE_ORDERING_FIX_20261014.md) for recovery verification,
+cleanup counts and measurements. The previous full-network storage survey is
+preserved as [the historical 9 October trace](STORAGE_MAP_20261009.md).
 
 ## Data sources and contents
 
-| Data | Source | What the pool stores and why |
+| Data | Source | What the pool retains |
 |---|---|---|
-| Member identity and access | Member wallet login and execution-token issuance | Wallet addresses, withdrawal destination, collateral multiplier and revision history, login challenge messages and their use/expiry, token digests and revocation. The token table stores hashes. |
-| Money and member obligations | Pool transactions and verified chain receipts | Account balances, append-only journals and entries, deposit attribution, collateral holds and outcomes, withdrawal reviews/attempts/payments, operator funding and audit events. These establish ownership of TIG held in the shared wallet. |
-| Work ownership and submissions | Member requests, coordinator and worker uploads | Immutable selections, exact assignment JSON/digest, benchmark owner, confirmed acknowledgment time, results, sampled nonces, proofs, submission intents, send timestamps and TIG response evidence. These prevent duplicate sends and establish responsibility. |
-| Algorithm binaries | TIG's public binary download, including its permitted artifact redirects | The exact compressed archive and SHA-256 in `algorithm_archives`, linked to the reservation; members download that saved copy. |
-| TIG network history | Public `/get-block`, `/get-challenges`, `/get-algorithms`, `/get-opow`, `/get-benchmarks` | Block/configuration data, all active players' benchmark feeds and the pool's pending feed, captured between two reads of the same head. Used for selection, exact qualifying credit and outcome reconciliation. |
-| Reports and arbitration | Public `/get-reports`, `/get-reportable-benchmark-ids` | Round report responses, reportable benchmark indices, confirmed reports/arbitrations, reporting-round associations and final evidence seals. Used for collateral and settlement. |
-| Base wallet evidence | Configured read-only Base RPC | Block anchors, finalized transfer logs, receipts/transactions and TIG/native balance checks, with collection cursors and failure evidence. Used for verified receipts, withdrawals and wallet reconciliation. |
-| TIG submission-credit evidence | Public `/get-player-data`, bracketed by `/get-block` | Pool fee balance, top-up facts and captured top-up configuration. Used to reconcile operator-paid protocol credit. |
-| Credit and settlement | Pool calculations over validated observations | Per-block member benchmark credit, coverage markers, earnings/receipt/reimbursement attribution, collateral finalizations and round allocations. Implemented settlement tables may be empty while settlement is disabled. |
-| Operational controls | Operator and maintenance services | Work pause, multiplier/pilot controls, schema migration checksums, retention floors/runs and coverage/conflict alerts. |
+| Member access | Wallet login and execution-token issuance | Member identity, destinations, settings/revisions, used/expired login challenges and execution-token hashes/revocation. |
+| Money and obligations | Pool transactions and verified Base/TIG facts | `accounts`, append-only `journals`/`entries`, deposits, withdrawals, collateral holds/outcomes, fee funding and reconciliation. These establish ownership of the shared wallet's funds. |
+| Work ownership and submissions | Member requests/uploads, coordinator and confirmed TIG responses | Reservations, exact assignment/digest, owner, acknowledgment, results, sampled nonces/proofs, protocol send intents/timestamps and outcome evidence. |
+| Algorithm downloads | Checked public TIG/GitHub archive | URL, SHA-256 and byte count in `reservation_binaries`. Members fetch and verify the public archive directly. The compatibility store/endpoint remains for old assignments. |
+| Block observations | TIG block, challenge, algorithm, opow and benchmark APIs | Compact pool feed, original block/config headers, qualifier totals, best selection references, source hashes and bounded request provenance. Other members' full feeds are discarded before spool/database writes. |
+| Reports and arbitration | TIG confirmation headers and selective reporting/report APIs | Positive reporting membership, scoped final reports/arbitrations for pool obligations, their source hashes, parsed facts, associations and seals. Final collection waits until X+2 and the applicable reporting window close. |
+| Wallet and submission-credit evidence | Read-only Base RPC and TIG player-data API | Chain anchors, finalized transfers, receipts/balance observations, fee balance and top-up facts, cursors and failure diagnostics. |
+| Credit and settlement | Calculations over validated observations | Per-block pool/member credit, coverage/reconciliation, collateral finalization, earnings/receipts/reimbursements and round allocations. Financial, ownership and derived credit records are permanent. |
+| Operational controls | Operator and maintenance jobs | Recorded pause, limits/revisions, migration checksums, retention floors/runs, alerts and immutable conflict resolutions. |
+| Member machine evidence | Member's worker | Worker SQLite state and nonce/result/proof files stay on that member's machine. Pool server backups do not copy those files. |
 
-The block collector reads the **whole active TIG network** for every new head,
-even with new pool work paused. Reports currently cover the latest four rounds,
-with indices for the pool player across challenges `c001` through `c008`.
-It saves partial/failed attempts too, but only complete validated observations
-can supply accounting evidence. Custody failures can therefore occupy storage
-without supplying a fresh wallet reconciliation.
+The block collector still **reads and validates the whole current network**
+to calculate credit and selection references. Its saved observation is the
+compact `pool-network-v1` projection. New failed captures retain a header and
+bounded diagnostic; they do not supply valid financial evidence.
 
-Member login, uploads and operator actions enter PostgreSQL directly through
-the API. Collector data takes the separate file-spool path below.
+Reporting follows open collateral/reward obligations. Empty index responses
+are not archived; positive membership and unchanged responses are deduplicated.
+Final evidence keeps relevant pool facts. Incomplete responses, open windows
+and pending arbitration cause retries. Collection itself does not move money.
+See [lean storage](LEAN_STORAGE.md) for the precise format and reporting gates.
 
 ## What happens to a captured response
 
 ```mermaid
 flowchart LR
-    TIG["TIG public APIs"] --> Collectors["Primary collectors"]
-    Base["Base RPC"] --> Collectors
-    Collectors --> Spool["Primary spool: files first"]
-    Spool --> Import["Validate and import"]
-    Import --> DB["Primary PostgreSQL"]
+    Sources["TIG APIs and Base RPC"] --> Collectors["Primary collectors"]
+    Collectors --> Spool["Primary spool: pending then recorded"]
+    Spool -->|"Validate and import"| DB["Primary PostgreSQL"]
     Members["Member uploads and operator actions"] --> DB
-    DB -->|"Continuous WAL over SSH"| WAL["Germany: WAL files"]
-    DB -->|"Daily pg_basebackup over SSH"| Bases["Germany: verified database bases"]
-    Settings["Primary settings and exact release"] -->|"Daily export; encrypted settings"| Export["Primary export files"]
-    Export -->|"SSH pull every five minutes"| Config["Germany: configuration and release copies"]
-    Spool -.->|"Separate raw-file copy disabled"| Files["Germany: raw-file destination absent"]
+    DB -->|"Synchronous WAL + daily verified bases"| Recovery["Germany: backup storage"]
+    Spool -->|"Pending files and referenced chunks"| Recovery
+    Settings["Exact release and settings"] -->|"Encrypted export + SSH pull"| Recovery
 ```
 
-Each collector writes a compressed JSON manifest and its content chunks to
-local disk **before database import**. File data and directory changes are
-flushed, and the manifest is published atomically. The manifest references
-chunks by SHA-256; unchanged records reuse chunks. Block record lists also use
-deduplicated pages of hashes. This preserves replayable JSON semantics, rather
-than every byte of the original HTTP encoding.
+Collectors save compressed, checksummed files **before database import**.
+Publication is atomic and flushed to disk. A recorder imports each observation
+and moves its manifest from `pending/` to `recorded/`. Repeated content uses
+SHA-256 addressed chunks; compact blocks use one compressed blob.
 
-The spool has `pending/`, `recorded/` and `chunks/` directories. A separate
-recorder validates the capture, commits it to PostgreSQL, then moves its
-manifest from pending to recorded. Block manifests and compressed chunks are
-also stored in the database; reports, custody and funding keep their capture
-payloads and parsed facts there. Thus imported evidence normally exists in
-both stores. Database observations also support recorded gaps, conflicts and
-incomplete attempts without treating them as valid financial evidence.
+`recorded` means the recorder processed a file. A failed capture can be recorded
+without valid financial evidence, and some failed report files have no database
+capture row. Those files cannot be removed merely because they are recorded.
+Successful imported spool copies are redundant once the matching database
+record is backed. Guarded pruning checks the original identity or report
+payload/scope, backup cutoff and applicable obligations. Pending files are
+protected; future, failed and unmatched files are preserved when they lack the
+required backup/identity proof. Writing pins protect unpublished chunks while
+maintenance runs.
 
-`recorded` means the recorder processed the file, not that its contents were
-complete. In particular, a failed report attempt with no starting block can be
-archived as recorded without a database capture row. The report database keeps
-the report response plus abridged block provenance and links to the independent
-block archive, rather than reproducing every redundant field of the spool file.
-
-Balances are updated through journal entries. Transaction locks, uniqueness
-checks and immutable-record guards keep ownership, charges and credit from
-being duplicated or silently rewritten. Large protocol history is the main
-storage consumer.
+Balances change through journal entries. Locks, unique identities, append-only
+records and checksums prevent duplicate sends, ownership changes or repeated
+credit. A compact replacement does not change an observed block's original
+identity, credit or reconciliation.
 
 ## Exactly how Germany receives the data
 
 ### Continuous WAL
 
-PostgreSQL writes a recovery log called **write-ahead log (WAL)**. Germany's
-`pg_receivewal` receives that stream over a restricted SSH tunnel and saves it
-as files. The tunnel connects to the primary's loopback PostgreSQL port using
-a dedicated replication-only database role. Host keys are pinned.
+WAL is PostgreSQL's **write-ahead log**, the ordered changes needed to advance
+a database backup. Germany's `pg_receivewal` stores this stream through a
+restricted SSH tunnel using a replication-only database role and pinned host
+keys. The receiver saves files; it does not run an active replacement pool.
 
-The receiver flushes received bytes to disk and acknowledges them. **All six
-current primary services use `innopool_runtime` with synchronous commits**,
-so API/coordinator writes and collector database imports wait for that disk
-acknowledgment. The configured local-commit observer role is currently unused
-by these services. File capture can continue while database recording waits.
-The live receiver was streaming, synchronous and zero bytes behind at the
-survey instant. This is a measurement, not a permanent freshness guarantee.
+Normal runtime and migration-owner transactions require the receiver's disk
+acknowledgment. All six primary application services use the runtime role with
+synchronous commits. The separately configured observer role uses local
+commits and is not the role those services use. File capture can continue
+while database import waits for the receiver.
 
-WAL contains database changes, including imported evidence. External spool
-files, application files and worker files are outside that stream.
-See PostgreSQL's [WAL introduction](https://www.postgresql.org/docs/18/wal-intro.html)
-and [pg_receivewal](https://www.postgresql.org/docs/18/app-pgreceivewal.html).
+WAL protects imported database data. Files awaiting import, application/settings
+files and member machine files are outside that stream.
 
 ### Daily database bases
 
-Around **03:10 UTC**, with up to five minutes of randomized delay, Germany
-runs `pg_basebackup` against the primary over that tunnel. It creates a physical
-backup of the **whole PostgreSQL cluster**, including auxiliary databases and
-database roles, while the primary remains online. It stores `base.tar.gz`,
-the WAL required for the backup's consistency, a manifest and verification
-record. Checksums and the required WAL range are checked before publication.
+Recovery takes a physical database base daily. A new base is published only
+after archive checksums, PostgreSQL data checksums and required WAL parsing
+pass. Retention keeps **three verified bases plus the WAL required since the
+oldest base**. Removing an old base does not permit deleting WAL needed by a
+base that remains.
 
-Three verified bases are retained, with subsequent WAL back to the oldest
-retained base. A successful new base permits pruning older redundant bases
-and earlier WAL on the same timeline. A restored base plus later WAL
-reconstructs newer committed database state. Germany stores recovery files;
-takeover requires restoration and WAL replay before starting the pool there.
-See [pg_basebackup](https://www.postgresql.org/docs/18/app-pgbasebackup.html).
+An actual isolated restore on 14 October replayed 229 later WAL segments from
+the 03:13 UTC base to the sealed conversion boundary. All 26,050 compact copies
+and 47 protected table fingerprints matched, including accounting, ownership,
+the original conflict alert and its resolution. The disposable database was
+removed after verification. See [the detailed record](STORAGE_ORDERING_FIX_20261014.md).
 
-The current base completed **9 October, 03:42 UTC**, with checksum/WAL checks
-passed. The last actual isolated restoration and post-backup WAL replay check
-was **4 October**. Today's checksum checks are not a new restore rehearsal.
+### Pending protocol files
 
-### Settings and application
+Recovery copies bounded snapshots of **pending** block, report, custody and
+funding manifests, plus only their referenced content. The job runs again one
+minute after completion; health requires the protected source snapshot to be
+no more than five minutes old. It verifies file/content hashes, cluster identity
+and a source WAL boundary durably acknowledged on Germany before publication.
+Two verified generations are retained. The copy never deletes primary files.
 
-Around **02:30 UTC**, with up to two minutes of randomized delay, the primary
-exports service settings, credentials, TLS material, systemd/nginx configuration
-and operational helpers into an **encrypted settings archive**. The export also
-includes the exact deployed application source, release record and retained
-public website assets. Exported-file hashes are recorded.
+This covers the interval before a capture enters PostgreSQL. There is no full
+recorded-spool mirror. Independent recovery collectors remain inactive.
+See [pending evidence protection](PENDING_EVIDENCE_BACKUP.md).
 
-Germany pulls published exports with `rsync` over restricted read-only SSH
-every five minutes. The current release/settings export is from **14:29 UTC**;
-all its file hashes were verified on Germany. Copying settings does not advance
-the database recovery point. The database-base and WAL jobs do not themselves
-encrypt their output files; SSH protects their transport, and access to the
-stored files is restricted. Settings receive the additional archive encryption.
+### Release and settings
 
-### Separate raw evidence files
+The daily export includes the pinned pool source archive, service units and
+encrypted settings, credentials and TLS configuration. Recovery pulls these
+exports over restricted SSH every five minutes. Off-host file hashes and
+private decryption were verified on 14 October. Configuration export does not
+advance the database recovery point; WAL and bases provide that protection.
 
-The installed full-spool copy would copy **blocks and reports** using a separate
-read-only SSH/rsync job. Its timer is disabled after the 8 October disk-reserve
-failure; its destination `primary-evidence/` was absent in this survey.
-It does not provide current protection for pending files, and its implementation
-does not copy custody/funding spools. Germany's independent block/report
-collectors and pool API are inactive; its local spool measured only 36 KiB.
+## Paths
 
-A future pending-file copy must include manifests **and all referenced chunks**
-and explicitly cover each required capture type. The proposed copy is not
-installed. Re-enabling the old full-spool job is a separate storage decision.
+| Host | Location | Content |
+|---|---|---|
+| Primary | Docker `innopool-v2-mainnet-db`, database `innopool_v2_mainnet`, schema `pool_v2` | Ledger, ownership, captures, credit, settlement and controls |
+| Primary | `/var/lib/innopool-v2-mainnet/spool/{blocks,reports,custody,funding}/` | `pending/`, `recorded/`, `chunks/` and writing pins |
+| Primary | `/opt/innopool-v2-mainnet/` | Pinned releases, worker releases, artifacts and operation scripts |
+| Primary | `/etc/innopool-v2-mainnet/` | Protected runtime/deployment settings and credentials |
+| Primary | `/var/lib/innopool-v2-mainnet-backups/` | Encrypted exports and checked release/configuration manifests |
+| Recovery | `/var/lib/innopool-v2-mainnet/primary-continuous/` | Verified database bases, WAL and protection records |
+| Recovery | `/var/lib/innopool-v2-mainnet/primary-base-archives/` | Two older verified bases on existing root disk; newest stays on the volume |
+| Recovery | `/var/lib/innopool-v2-mainnet/primary-pending-evidence/` | Two verified pending-file snapshots |
+| Recovery | `/var/lib/innopool-v2-mainnet/primary-backups/` | Pulled release and encrypted configuration exports |
 
-## Paths and measured size
+The newest database base, continuous WAL and pending snapshots use persistent
+guarded bind mounts on the **200 GiB EXT4 volume 107125099** at
+`/mnt/HC_Volume_107125099`. Mount checks prevent silently writing those archives
+to the root filesystem if the volume is unavailable. See
+[the volume record](RECOVERY_VOLUME_20261013.md). Two older retained bases use
+the server's spare root disk, with a combined catalogue and reserve checks for
+both filesystems. The policy still keeps three bases and all WAL required by
+the oldest. See [current base placement](BACKUP_BASE_ARCHIVES_20261014.md).
 
-Sizes are allocated binary GiB at the survey instant. The database table sizes
-include indexes and large-value storage. They are not all live payload bytes.
+## Retention and cleanup
 
-| Host | Path / contents | GiB |
-|---|---|---:|
-| Primary | `postgres/` under `/var/lib/innopool-v2-mainnet` | 27.1 |
-| Primary | Main `innopool_v2_mainnet` database, within that cluster | 26.7 |
-| Primary | `spool/blocks` | 21.4 |
-| Primary | `spool/reports` | 2.1 |
-| Primary | `spool/custody` | 0.2 |
-| Primary | `spool/funding` | 2.0 |
-| Primary | `/var/lib/innopool-v2-mainnet-backups`, including configuration/manual exports | 2.9 |
-| Recovery | `primary-continuous/base` under `/var/lib/innopool-v2-mainnet` | 38.6 |
-| Recovery | `primary-continuous/wal` | 51.1 |
-| Recovery | `primary-backups`, including copied configuration/manual exports | 2.9 |
+Compact block/report payloads follow the four-round policy, with obligations,
+credit coverage, references and verified-backup guards. Wallet/fee database
+captures follow the thirty-day policy. Capture identities/tombstones and
+financial/credit/settlement records remain. Coverage gaps can hold an evidence
+floor; the cap does not justify discarding uncredited evidence.
 
-Primary free space was **83.1 GiB** and recovery free space **45.0 GiB**.
-The primary's four pending import queues were all empty in this sample.
+Redundant full-network originals can expire earlier after their validated
+compact replacement, credit/reconciliation and any conflict resolution are
+verified off-host. That is the 14 October historical cleanup. File chunk
+collection honors surviving references and writing pins; database chunk
+collection checks all current surviving captures under the writer lock.
 
-The largest database tables were:
+Expiry makes PostgreSQL space reusable after vacuum. Allocated database files
+and retained physical backups do not immediately shrink to logical payload
+size. Current measurements belong in [operations status](OPERATIONS_STATUS.md)
+and [the storage fix record](STORAGE_ORDERING_FIX_20261014.md), rather than
+being treated as fixed capacity requirements.
 
-| Table | Content | GiB |
-|---|---|---:|
-| `capture_attempts` | Block-capture manifests, request metadata and failed-attempt records | 18.5 |
-| `observation_chunks` | Deduplicated compressed block evidence | 2.9 |
-| `funding_captures` | TIG fee-balance/top-up snapshots | 2.0 |
-| `report_index_captures` | Repeated reporting-round/player/challenge index captures | 1.9 |
+## Current verification and holds
 
-Continuous WAL records writes across time, including index and page changes,
-so its retained size can exceed one current database. Compressed bases and
-compressed evidence chunks have different size characteristics.
-
-## Retention and recovery limits
-
-The agreed policy preserves ledger, member benchmark ownership, collateral,
-credit and settlement records permanently. Raw block/report evidence is bounded
-to four rounds subject to obligation, coverage and verified-backup guards;
-custody/funding captures are bounded to thirty days. Expiry keeps identifiers
-and hashes while removing eligible payloads. Local file pruning currently covers
-the **block spool**; report/custody/funding spool files have no equivalent pruning.
-The latest daily retention run expired some report/index payloads and removed
-no block manifests or chunks. See [evidence retention](EVIDENCE_RETENTION.md).
-
-PostgreSQL can reuse space freed by expiry. Returning all of that allocated
-space to the operating system requires separate maintenance; it is not an
-automatic consequence of clearing a payload. See
-[routine vacuuming](https://www.postgresql.org/docs/18/routine-vacuuming.html).
-
-Three different losses have different consequences:
-
-- A primary loss after protected database commit can be recovered from a
-  verified base and the required WAL, together with the exact release/settings.
-- A primary loss before a new spool capture enters the database can lose that
-  file because its separate off-host copy is disabled. An empty queue now does
-  not remove this future interval.
-- A TIG block that was never captured cannot be reconstructed from either
-  backup path. The existing block gaps are collection gaps.
-
-Workers separately retain exact assignments and every computed nonce's full
-solution leaf/quality in local `member-worker.sqlite3`, plus runtime/cache files.
-The pool receives all nonce qualities and a Merkle root, followed by sampled
-solution proofs; it does not receive all nonce solutions. Server backups do
-not cover member machines. Host service/web logs and the development workspace
-also have no blanket coverage through these pool backup streams.
+The ordering conflict at 1382587 has an immutable, fully replayed resolution.
+Historical gaps **1375817** and **1376650** remain unresolved; the earlier
+prelaunch waiver at 1372249 is unchanged. A backup cannot recreate a block
+that was never captured. These gaps continue to hold exact settlement.
+New work is durably paused and settlement disabled. The successful two-server
+CPU activation is recorded separately from still-unverified reward settlement.

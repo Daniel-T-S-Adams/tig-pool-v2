@@ -98,12 +98,12 @@ browser test completes member payment, fee funding and operator payment in one
 flow using simulated chain evidence and exact integer amounts. These tests send
 no real funds and do not establish a completed mainnet reward cycle.
 
-## Current deployment — 13 October 2026
+## Current deployment — 14 October 2026
 
-The payout implementation remains in current release `f5f1028`, schema
-through 021. Member funds are enabled, new work paused and settlement disabled.
+The payout implementation remains in current release `59a3446`, schema
+through 022. Member funds are enabled, new work paused and settlement disabled.
 The operator reserve is still unset, so operator payout configuration remains
-disabled. Intermittent custody RPC failures continue to hold ordinary gates. See
+disabled. Custody freshness checks continue to gate payouts. See
 [operations status](OPERATIONS_STATUS.md).
 
 ## Historical deployment verification — 4 October 2026

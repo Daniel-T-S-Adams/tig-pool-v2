@@ -138,8 +138,9 @@ already-public TIG algorithm binaries, and no member files are served.
 See [lean storage](LEAN_STORAGE.md); direct downloads require the paired worker
 update; the matched pair was activated on mainnet on 13 October.
 
-CI pins worker `a715041901e865d136138cff0017f46b90b3d5ce` for direct-download
+CI pins worker `dddad9df9b0d051cf004a904fe7b7361f9816c43` for direct-download
 and member-master regression checks. Mainnet serves that worker under tag
-`mainnet-direct-binaries-member-master-20261013`. The deployed pool application is recorded in
+`mainnet-runtime-release-guard-20261014`. The deployed pool application is recorded in
 [operations status](OPERATIONS_STATUS.md). Simulated pairing tests do not prove
-timely CPU/GPU execution or successful mainnet activation.
+timely CPU/GPU execution. The separate corrected master/helper mainnet trial
+activated on TIG on 14 October; reward-cycle verification remains open.
