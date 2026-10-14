@@ -49,7 +49,7 @@ def deadline(database,creation_round,block_id):
 
 def require_block(cursor,block_id):
     """Caller holds observation-stream while performing financial mutations."""
-    cursor.execute("""SELECT 1 FROM observed_blocks b JOIN observation_alerts a ON a.height=b.height
+    cursor.execute("""SELECT 1 FROM observed_blocks b JOIN unresolved_observation_conflicts a ON a.height=b.height
         WHERE b.id=%s AND a.kind='conflicting-block'""",(block_id,))
     if cursor.fetchone():raise Conflict('settlement evidence has a conflicting observed block')
 

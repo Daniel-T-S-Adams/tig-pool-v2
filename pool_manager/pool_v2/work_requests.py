@@ -103,7 +103,7 @@ def reserve_next(database, player_id, *, now, max_age=120):
         cursor.execute("SELECT id FROM observed_blocks ORDER BY height DESC LIMIT 1")
         if cursor.fetchone()["id"] != block_id:
             raise ProtocolDataError("new block arrived before work reservation")
-        cursor.execute("SELECT 1 FROM observation_alerts WHERE kind='conflicting-block' AND height=%s", (snapshot.height,))
+        cursor.execute("SELECT 1 FROM unresolved_observation_conflicts WHERE kind='conflicting-block' AND height=%s", (snapshot.height,))
         if cursor.fetchone():
             raise ProtocolDataError("current snapshot has conflicting evidence")
         cursor.execute("UPDATE work_requests SET state='expired' WHERE state='queued' AND expires_at<=clock_timestamp()")

@@ -4,7 +4,8 @@ from unittest.mock import patch
 
 import psycopg2
 
-from pool_manager.pool_v2 import compaction
+from pool_manager.pool_v2 import compaction, reports, dashboard
+from pool_manager.pool_v2.money import Conflict
 from pool_manager.pool_v2.block_observer import _semantic, canonical_observation
 from pool_manager.pool_v2.compact import compact_observation
 from pool_manager.pool_v2.ordering_conflicts import ordering_proof, resolve
@@ -88,6 +89,9 @@ class OrderingStorageTests(storage.CompactStorageTests):
         self.assertEqual(self.row('SELECT * FROM observed_blocks'), before)
         self.assertEqual(self.row("SELECT count(*) AS n FROM observation_alerts WHERE kind='conflicting-block'")['n'], 1)
         self.assertEqual(self.store.status()['conflicting_heights'], [])
+        self.assertTrue(next(row for row in dashboard.operator(self.db)['alerts'] if row['kind']=='conflicting-block')['resolved'])
+        with self.db.transaction() as cursor:
+            reports.require_block(cursor, 'block-8')
         self.assertEqual(compaction.backfill(self.db, player_id=raw['pool_player_id'])['converted'], 1)
         self.ready('block-8')
         self.assertEqual(compaction.prune(self.db, proof=old_backup)['expired_raw_blocks'], 0)
@@ -103,6 +107,23 @@ class OrderingStorageTests(storage.CompactStorageTests):
         self.assertEqual(self.store.status()['conflicting_heights'], [8])
         with self.assertRaises(ProtocolDataError):
             self.store.read('block-8')
+        with self.assertRaises(Conflict), self.db.transaction() as cursor:
+            reports.require_block(cursor, 'block-8')
+
+    def test_backup_of_copy_before_resolution_cannot_prune(self):
+        raw = scheduled(observation())
+        raw['pool_player_id'] = storage.WALLET
+        with patch('pool_manager.pool_v2.compact.compact_observation', side_effect=lambda value: value):
+            self.store.record(raw, collector='legacy-fixture')
+        compaction.backfill(self.db, player_id=storage.WALLET)
+        self.ready('block-8')
+        old_backup = self.proof()
+        with patch('pool_manager.pool_v2.compact.compact_observation', side_effect=lambda value: compact_observation(value, identity_version=1)):
+            second = self.store.record(raw, collector='transition-fixture')
+        alert = self.row("SELECT id FROM observation_alerts WHERE kind='conflicting-block'")['id']
+        self.resolution(alert, second)
+        self.assertEqual(compaction.prune(self.db, proof=old_backup)['expired_raw_blocks'], 0)
+        self.assertEqual(compaction.prune(self.db, proof=self.proof())['expired_raw_blocks'], 1)
 
     def test_wrong_capture_and_missing_operator_are_rejected(self):
         _, first, second, alert = self.conflict()
