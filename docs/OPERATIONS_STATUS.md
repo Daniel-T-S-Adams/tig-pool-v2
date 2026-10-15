@@ -36,6 +36,20 @@ relocation, recovery verification and paired application activation passed
 on **13 October**, as recorded below. Older dated validation notes
 describe their own check state.
 
+## Open items
+
+Tracked as GitHub issues, in priority order:
+[#50](https://github.com/Daniel-T-S-Adams/tig-pool-v2/issues/50) recovery base
+backup failing in the base-archive catalogue step;
+[#51](https://github.com/Daniel-T-S-Adams/tig-pool-v2/issues/51) recovery
+evidence-pull refusing on low disk reserve;
+[#52](https://github.com/Daniel-T-S-Adams/tig-pool-v2/issues/52) primary health
+check reporting the historical gaps instead of held rounds;
+[#53](https://github.com/Daniel-T-S-Adams/tig-pool-v2/issues/53) enabling bounded
+benchmark work for the two members;
+[#54](https://github.com/Daniel-T-S-Adams/tig-pool-v2/issues/54) verifying the 14
+October benchmark's reward settlement before settlement is enabled.
+
 ## Deployment and controls
 
 The [lean storage implementation](LEAN_STORAGE.md) was activated at 13:28 UTC
