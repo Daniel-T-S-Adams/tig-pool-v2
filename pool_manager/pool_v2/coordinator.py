@@ -1,6 +1,7 @@
 """One durable submission cycle; observer, API and this service stay separate."""
 
 from datetime import datetime,timezone
+import hashlib
 import io
 import json
 import re
@@ -8,7 +9,7 @@ import tarfile
 import time
 from urllib.request import Request,build_opener
 
-from . import controls,submissions,work_requests
+from . import controls,references,submissions,work_requests
 from .artifacts import ArtifactRedirect,DEFAULT_HOSTS,check_url
 from .money import Conflict,FundsError
 from .protocol import ProtocolDataError,_index
@@ -46,13 +47,28 @@ def verify_archive(archive, algorithm_name, compute_type):
 
 
 class Coordinator:
-    def __init__(self,database,player_id,public_client,submission_client,*,new_work=False,binary_hosts=None,download=None,max_age=120,artifact_origin=None):
+    def __init__(self,database,player_id,public_client,submission_client,*,new_work=False,binary_hosts=None,download=None,max_age=120,artifact_origin=None,binary_reuse_seconds=24*3600,reference_max_age=1800):
         self.database,self.player_id=database,player_id
         self.public,self.writer=public_client,submission_client
         self.new_work,self.max_age=new_work,max_age
         self.binary_hosts=binary_hosts or DEFAULT_HOSTS
         self.artifact_origin=artifact_origin
         self.download=download or (lambda url:download_archive(url,allowed_hosts=self.binary_hosts))
+        if type(binary_reuse_seconds) is not int or binary_reuse_seconds<0:
+            raise ValueError("binary reuse age must be a nonnegative integer of seconds")
+        # A checked archive is reused for this long before it is downloaded
+        # and checked again. Zero checks every reservation.
+        self.binary_reuse_seconds=binary_reuse_seconds
+        if type(reference_max_age) is not int or reference_max_age<=0:
+            raise ValueError("reference age must be a positive integer of seconds")
+        # Selection copies parameters from a whole-network reference at most
+        # this old. A staler one is re-read only while members wait for work.
+        self.reference_max_age=reference_max_age
+
+    def refresh_references(self):
+        """One whole-network read, kept as the best bundle per algorithm and track."""
+        payload,metadata=references.capture(self.public,self.player_id)
+        return references.record(self.database,payload,metadata)
 
     def preflight(self,row):
         start=self.public.get("/get-block")
@@ -98,9 +114,18 @@ class Coordinator:
                     archived=cursor.fetchone()
                 if not archived:
                     url=intent["selection"]["binary"]["details"]["download_url"]
-                    archive=self.download(url)
-                    verify_archive(archive,intent["selection"]["algorithm_name"],intent["payload"]["compute_type"])
-                    submissions.prepare_archive(self.database,intent["reservation_id"],url,archive)
+                    name,compute=intent["selection"]["algorithm_name"],intent["payload"]["compute_type"]
+                    verified=submissions.verified_binary(self.database,url,name,compute,max_age_seconds=self.binary_reuse_seconds)
+                    if verified:
+                        # Same URL, library and compute type checked recently:
+                        # the worker verifies the same hash before running.
+                        submissions.reuse_archive(self.database,intent["reservation_id"],url,verified)
+                    else:
+                        archive=self.download(url)
+                        verify_archive(archive,name,compute)
+                        digest=hashlib.sha256(archive).hexdigest()
+                        submissions.remember_verified(self.database,url,name,compute,digest,len(archive))
+                        submissions.prepare_archive(self.database,intent["reservation_id"],url,archive)
                 preflight,cancellation=self.preflight(intent)
                 if cancellation:
                     submissions.cancel_unsent(self.database,intent["id"],evidence=cancellation)
@@ -135,7 +160,8 @@ class Coordinator:
         submitted=self.dispatch_one()
         reserved=None
         if self.new_work and self.writer.enabled and not controls.blocked(self.database):
-            reserved=work_requests.reserve_next(self.database,self.player_id,now=int(time.time()),max_age=self.max_age)
+            reserved=work_requests.reserve_next(self.database,self.player_id,now=int(time.time()),max_age=self.max_age,
+                reference_max_age=self.reference_max_age,refresh_references=self.refresh_references)
         # Historical replay is deliberately bounded to one block per cycle;
         # current protocol receipts and member work stay ahead of the backlog.
         replay=reconcile_pending(self.database,self.player_id,limit=1,artifact_origin=self.artifact_origin,

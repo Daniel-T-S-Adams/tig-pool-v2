@@ -5,7 +5,7 @@ import uuid
 
 from psycopg2.extras import Json
 
-from . import benchmarks, ledger
+from . import benchmarks, ledger, references as network_references
 from .block_observer import BlockStore
 from .database import lock
 from .members import member_lock
@@ -85,7 +85,26 @@ def enqueue(cursor, reservation_id, kind, payload):
         raise Conflict("existing submission intent has different immutable inputs")
 
 
-def reserve_next(database, player_id, *, now, max_age=120):
+def has_queued(database):
+    """Whether any member is waiting for work; offers past their expiry are retired first."""
+    with database.transaction() as cursor:
+        cursor.execute("UPDATE work_requests SET state='expired' WHERE state='queued' AND expires_at<=clock_timestamp()")
+        cursor.execute("SELECT 1 FROM work_requests WHERE state='queued' LIMIT 1")
+        return cursor.fetchone() is not None
+
+
+def network_reference(database, *, now, max_age, refresh=None):
+    """A fresh whole-network reference for selection, reading one if the caller allows."""
+    index = network_references.latest(database, now=now, max_age_seconds=max_age)
+    if index is None and refresh is not None:
+        refresh()
+        index = network_references.latest(database, now=now, max_age_seconds=max_age)
+    if index is None:
+        raise ProtocolDataError("no fresh whole-network reference is available for selection")
+    return index
+
+
+def reserve_next(database, player_id, *, now, max_age=120, reference_max_age=1800, refresh_references=None):
     store = BlockStore(database)
     with database.transaction() as cursor:
         cursor.execute("SELECT id FROM observed_blocks ORDER BY height DESC LIMIT 1")
@@ -94,6 +113,15 @@ def reserve_next(database, player_id, *, now, max_age=120):
             raise ProtocolDataError("no complete current snapshot")
         block_id = row["id"]
     observation, snapshot = store.read(block_id)
+    if snapshot.scoped:
+        # The credited block holds only the pool's own feed. Parameters are
+        # copied from a whole-network reference read on demand, so no read
+        # happens while nobody is waiting for work.
+        if not has_queued(database):
+            return None
+        reference_index = network_reference(database, now=now, max_age=reference_max_age, refresh=refresh_references)
+    else:
+        reference_index = references(snapshot)
     with database.transaction() as cursor:
         # Fence updates to the selected block/coverage while making the decision.
         lock(cursor, "observation-stream")
@@ -110,14 +138,13 @@ def reserve_next(database, player_id, *, now, max_age=120):
         cursor.execute("""SELECT * FROM work_requests WHERE state='queued'
             ORDER BY coalesce(last_attempted_at,created_at),created_at,id LIMIT 100 FOR UPDATE SKIP LOCKED""")
         requests = cursor.fetchall()
-        reference_index = references(snapshot)
         for request in requests:
             cursor.execute("UPDATE work_requests SET last_attempted_at=clock_timestamp() WHERE id=%s", (request["id"],))
             offer = request["offer"]
             try:
                 selection = choose(snapshot, observation["algorithms"]["binarys"], player_id=player_id,
                     resource=offer["resource"], compute_type=offer["compute_type"], now=now, max_age=max_age,
-                    reference_index=reference_index)
+                    reference_index=reference_index, reference_max_age=reference_max_age)
             except NoCompatibleWork:
                 continue
             # An unavailable member cannot prevent the next queued member from

@@ -16,6 +16,10 @@ class ProtocolDataError(ValueError):
     """An observation cannot support a complete, consistent calculation."""
 
 
+# A per-block capture of the block tables plus only the pool's own feed.
+SCOPED_FORMAT = "pool-scoped-v2"
+
+
 def _object(value, label):
     if not isinstance(value, dict):
         raise ProtocolDataError(f"{label}: expected an object")
@@ -93,26 +97,52 @@ class Snapshot:
     # Compact captures retain the best network reference per algorithm/track,
     # with its parameters, separately from the pool's credit-bearing bundles.
     selection_references: dict | None = None
+    # A scoped capture holds only the pool's bundles and qualifier counts;
+    # selection then needs a separately captured whole-network reference.
+    scoped: bool = False
 
 
 def validate_snapshot(observation: dict) -> Snapshot:
     """Reject mixed blocks, missing active benchmarks, and mismatched totals.
 
-    All current OPoW players are queried through /get-benchmarks. Its compact
-    response includes the active bundle scores and precommit parameters without
-    the large solution/proof bodies returned by /get-benchmark-data. Coverage
-    is checked against the block's authoritative active benchmark ID list.
+    A full observation queries every current OPoW player through
+    /get-benchmarks. Its compact response includes the active bundle scores
+    and precommit parameters without the large solution/proof bodies returned
+    by /get-benchmark-data. Coverage is checked against the block's
+    authoritative active benchmark ID list. A pool-scoped observation holds
+    only the pool's own feed; see _validate_scoped.
     """
     try:
         if observation.get("format") == "pool-network-v1":
             from .compact import validate_compact
             return validate_compact(observation)
+        if observation.get("format") == SCOPED_FORMAT:
+            return _validate_scoped(observation)
         return _validate_snapshot(observation)
     except (KeyError, TypeError, AttributeError) as error:
         raise ProtocolDataError(f"missing or malformed protocol field: {error}") from error
 
 
-def _validate_snapshot(observation):
+def _validate_scoped(observation):
+    """A capture of the block tables plus only the pool's own feed.
+
+    Other players' feeds are never requested. Their qualifier counts still
+    arrive inside every algorithm record and are reconciled against the OPoW
+    and challenge totals, so a truncated or inconsistent block is rejected.
+    The header's active benchmark list is reduced to the pool's own IDs; the
+    original count and list digest are kept for comparison. Only the pool's
+    bundles and qualifier counts enter the snapshot.
+    """
+    player = _text(observation.get("pool_player_id"), "pool player")
+    scope = _object(observation["scope"], "scope")
+    _integer(scope["active_benchmark_count"], "active benchmark count")
+    digest = _text(scope["active_benchmark_ids_sha256"], "active benchmark digest")
+    if len(digest) != 64 or any(c not in "0123456789abcdef" for c in digest):
+        raise ProtocolDataError("active benchmark digest must be a SHA-256 hex string")
+    return _validate_snapshot(observation, scope=player)
+
+
+def _validate_snapshot(observation, scope=None):
     start = _object(observation["start"]["block"], "start.block")
     end = _object(observation["end"]["block"], "end.block")
     details = _object(start["details"], "block.details")
@@ -129,7 +159,13 @@ def _validate_snapshot(observation):
         values = _array(active[kind], f"active_ids.{kind}")
         ids[kind] = {_text(value, kind) for value in values}
         expected_count = _integer(details["num_active"][kind], f"num_active.{kind}")
-        if len(ids[kind]) != len(values) or len(values) != expected_count:
+        if len(ids[kind]) != len(values):
+            raise ProtocolDataError(f"active {kind} ID count is inconsistent")
+        if kind == "benchmark" and scope is not None:
+            # The capture kept only the pool's own active benchmark IDs.
+            if observation["scope"]["active_benchmark_count"] != expected_count or len(values) > expected_count:
+                raise ProtocolDataError("scoped active benchmark IDs contradict the block's count")
+        elif len(values) != expected_count:
             raise ProtocolDataError(f"active {kind} ID count is inconsistent")
 
     algorithms = _index(observation["algorithms"]["codes"], "id", "codes")
@@ -141,12 +177,21 @@ def _validate_snapshot(observation):
     algorithms = {key: algorithms[key] for key in ids["code"]}
     challenges = {key: challenges[key] for key in ids["challenge"]}
     players = _object(observation["players"], "players")
-    if set(players) != ids["opow"]:
-        raise ProtocolDataError("player observations do not cover the active OPoW players")
+    if scope is None:
+        if set(players) != ids["opow"]:
+            raise ProtocolDataError("player observations do not cover the active OPoW players")
+        feeds = players
+    else:
+        pool_active = scope in ids["opow"]
+        if set(players) != ({scope} if pool_active else set()):
+            raise ProtocolDataError("scoped observation must hold exactly the pool's own feed")
+        feeds = players if pool_active else {scope: _object(observation.get("pool_pending"), "pool_pending")}
+        if not pool_active and ids["benchmark"]:
+            raise ProtocolDataError("inactive pool has active benchmark credit")
 
     precommits, benchmarks, proofs = {}, {}, {}
     frauds = set()
-    for player_id, payload in players.items():
+    for player_id, payload in feeds.items():
         for field, key, target in (
             ("precommits", "benchmark_id", precommits),
             ("benchmarks", "id", benchmarks),
@@ -225,7 +270,10 @@ def _validate_snapshot(observation):
         for track_id, counts in _object(block_data["num_qualifiers_by_track_by_player"], "algorithm qualifiers").items():
             for player_id, count in _counts(counts, "algorithm player qualifiers").items():
                 key = (player_id, challenge_id, algorithm_id, track_id)
-                if count > candidates[key]:
+                # Only the pool's bundles are present in a scoped capture; its
+                # counts are still checked against them, and every player's
+                # counts still reconcile with the OPoW and challenge totals.
+                if (scope is None or player_id == scope) and count > candidates[key]:
                     raise ProtocolDataError("qualifying count exceeds the available eligible bundles")
                 qualifiers[key] = count
                 by_player[player_id, challenge_id, track_id] += count
@@ -248,8 +296,11 @@ def _validate_snapshot(observation):
             expected_challenges[challenge_id, track_id] = count
     if _nonzero(by_challenge) != _nonzero(expected_challenges):
         raise ProtocolDataError("algorithm qualifiers do not reconcile with challenge totals")
+    if scope is not None:
+        qualifiers = {key: value for key, value in qualifiers.items() if key[0] == scope}
     return Snapshot(block_id, previous, height, round_number, timestamp, tuple(bundles), qualifiers,
-                    {key: precommits[key] for key in active_benchmarks}, algorithms, challenges)
+                    {key: precommits[key] for key in active_benchmarks}, algorithms, challenges,
+                    scoped=scope is not None)
 
 
 def equal_bundle_credit(snapshot: Snapshot) -> dict[tuple[str, int], Fraction]:

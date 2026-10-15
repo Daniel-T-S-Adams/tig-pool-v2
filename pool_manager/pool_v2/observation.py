@@ -133,6 +133,63 @@ def capture_snapshot(client, start=None, max_workers=4, pool_player_id=None):
         raise CaptureError(str(error), observation) from error
 
 
+def capture_pool_snapshot(client, pool_player_id, start=None, max_workers=4):
+    """Collect the block tables and only the pool's own feed between two reads of one block.
+
+    Other players' feeds are never requested; their qualifier counts arrive
+    inside the algorithm records. The header's active benchmark list is
+    reduced to the pool's own IDs, keeping the original count and a digest
+    of the full list so independent collectors can be compared. The caller
+    validates the result; partial responses stay in CaptureError.
+    """
+    from .protocol import SCOPED_FORMAT
+    observation = {"format": SCOPED_FORMAT, "pool_player_id": pool_player_id, "players": {}}
+    try:
+        observation["start"] = start or client.get("/get-block", {"include_data": "true"})
+        block = observation["start"]["block"]
+        block_id = block["id"]
+        active = block["data"]["active_ids"]
+        for kind in ("benchmark", "opow", "code", "challenge"):
+            values = active[kind]
+            if (not isinstance(values, list) or not all(isinstance(value, str) for value in values)
+                    or len(set(values)) != len(values)):
+                raise ProtocolDataError(f"invalid active {kind} IDs")
+        requests = [
+            ("algorithms", "/get-algorithms", {"block_id": block_id}),
+            ("challenges", "/get-challenges", {"block_id": block_id}),
+            ("opow", "/get-opow", {"block_id": block_id}),
+            ("feed", "/get-benchmarks", {"block_id": block_id, "player_id": pool_player_id}),
+        ]
+        results, errors = {}, []
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = {executor.submit(client.get, path, params): name for name, path, params in requests}
+            for future in as_completed(futures):
+                name = futures[future]
+                try:
+                    results[name] = future.result()
+                except Exception as error:
+                    errors.append(f"{name}: {error}")
+        observation["end"] = client.get("/get-block")
+        for name in ("algorithms", "challenges", "opow"):
+            if name in results:
+                observation[name] = results[name]
+        if "feed" in results:
+            if pool_player_id in active["opow"]:
+                observation["players"][pool_player_id] = results["feed"]
+            else:
+                observation["pool_pending"] = results["feed"]
+        if errors:
+            raise ProtocolDataError("; ".join(errors))
+        owned = {row["benchmark_id"] for row in results["feed"]["precommits"]}
+        listed = sorted(active["benchmark"])
+        observation["scope"] = {"active_benchmark_count": len(listed),
+            "active_benchmark_ids_sha256": hashlib.sha256(canonical_json(listed)).hexdigest()}
+        active["benchmark"] = [identity for identity in listed if identity in owned]
+        return observation
+    except Exception as error:
+        raise CaptureError(str(error), observation) from error
+
+
 def write_archive(destination, payload):
     """Atomically store a compressed, replayable JSON observation."""
     destination = Path(destination)

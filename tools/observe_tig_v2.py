@@ -17,7 +17,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from pool_manager.pool_v2.block_observer import BlockStore
 from pool_manager.pool_v2.compact import compact_observation, metadata_summary
 from pool_manager.pool_v2.database import Database
-from pool_manager.pool_v2.observation import CaptureError, PublicTigClient, capture_snapshot
+from pool_manager.pool_v2.observation import CaptureError, PublicTigClient, capture_pool_snapshot, capture_snapshot
 from pool_manager.pool_v2.protocol import ProtocolDataError, validate_snapshot
 from pool_manager.pool_v2.members import address
 from pool_manager.pool_v2.spool import Spool
@@ -30,7 +30,9 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--api-url", default="https://mainnet-api.tig.foundation")
     parser.add_argument("--collector", required=True)
-    parser.add_argument("--pool-player-id", help="retain compact pool evidence and selection references after full network validation")
+    parser.add_argument("--pool-player-id", help="capture the block tables and only this pool's own feed each block")
+    parser.add_argument("--full-network", action="store_true",
+                        help="read every active player's feed each block, validate the whole network and keep the compact pool projection")
     parser.add_argument("--spool", required=True)
     parser.add_argument("--launch-height", required=True, type=int)
     parser.add_argument("--poll-seconds", type=float, default=3)
@@ -39,6 +41,8 @@ def main(argv=None):
     args = parser.parse_args(argv)
     if args.pool_player_id:
         args.pool_player_id = address(args.pool_player_id)
+    elif args.full_network:
+        parser.error("--full-network requires --pool-player-id")
     if not 0 < args.poll_seconds <= 30 or args.max_block_age <= 0 or args.captures < 0:
         parser.error("invalid polling interval, age or capture count")
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -90,7 +94,10 @@ def main(argv=None):
                         # Preserve every observable block even if publication is
                         # delayed. Work selection enforces freshness separately.
                         log.warning("TIG block timestamp differs from wall time by %.1fs; preserving history", age)
-                    observation = capture_snapshot(client, start=start, pool_player_id=args.pool_player_id)
+                    if args.pool_player_id and not args.full_network:
+                        observation = capture_pool_snapshot(client, args.pool_player_id, start=start)
+                    else:
+                        observation = capture_snapshot(client, start=start, pool_player_id=args.pool_player_id)
                 except CaptureError as exc:
                     observation, error = exc.observation, str(exc)
                 except Exception as exc:

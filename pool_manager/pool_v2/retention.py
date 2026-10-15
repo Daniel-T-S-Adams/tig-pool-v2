@@ -1,7 +1,8 @@
 """Expire bounded-life evidence under a recorded policy; derived records are permanent.
 
-Raw block captures, fraud-report captures and wallet/fee captures are kept
-only while an obligation can still need them. Ledger, credit, benchmark and
+Raw block captures, fraud-report captures, wallet/fee captures and
+whole-network selection references are kept only while an obligation can
+still need them. Ledger, credit, benchmark and
 settlement records are never expired. A run advances recorded floors, blanks
 payloads under them, removes chunks that only expired captures referenced,
 and records what it did. Nothing expires unless a verified backup covers it.
@@ -475,6 +476,13 @@ def run(database, *, proof, policy=POLICY, now=None, spools=(), dry_run=False, b
         "chain_captures", "payload_gzip", "created_at<=%s", (capture_cutoff,),
         """SELECT capture_id AS id FROM chain_alerts UNION SELECT capture_id FROM custody_opening_baselines
            UNION (SELECT id FROM chain_captures ORDER BY created_at DESC LIMIT 1)""")
+    # Whole-network references follow the raw block floor; a reference a
+    # reservation cites, and the newest one, stay readable.
+    counts["expired_reference_captures"] = expire(
+        "reference_captures", "compressed_payload", "height<=%s AND created_at<=%s",
+        (target["block_height"], covered_until),
+        """SELECT (selection->'reference_capture'->>'id')::uuid AS id FROM reservations WHERE selection ? 'reference_capture'
+           UNION (SELECT id FROM reference_captures ORDER BY height DESC,created_at DESC LIMIT 1)""")
 
     for spool in spools:
         counts["spool:" + str(spool)] = prune_spool(spool, block_floor=target["block_height"],

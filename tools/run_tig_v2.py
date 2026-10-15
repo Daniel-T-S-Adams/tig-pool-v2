@@ -39,9 +39,14 @@ def main(argv=None):
     if enabled and not key:parser.error('enabled submissions require POOL_V2_TIG_API_KEY in the service environment')
     if new_work and not enabled:parser.error('new work requires an enabled, configured submission service')
     if new_work and not config.get('public_origin'):parser.error('new work requires the HTTPS member API public_origin for saved artifacts')
+    reuse=config.get('binary_reuse_seconds',24*3600)
+    if type(reuse) is not int or reuse<0:parser.error('binary_reuse_seconds must be a nonnegative integer; 0 checks every reservation')
+    reference_age=config.get('reference_max_age_seconds',1800)
+    if type(reference_age) is not int or reference_age<=0:parser.error('reference_max_age_seconds must be a positive integer')
     coordinator=Coordinator(database,address(config['pool_player_id']),PublicTigClient(origin),
         TigSubmissionClient(origin,key,enabled=enabled),new_work=new_work,
-        binary_hosts=config.get('binary_hosts'),max_age=config.get('max_block_age',120),artifact_origin=config.get('public_origin'))
+        binary_hosts=config.get('binary_hosts'),max_age=config.get('max_block_age',120),artifact_origin=config.get('public_origin'),
+        binary_reuse_seconds=reuse,reference_max_age=reference_age)
     logging.basicConfig(level=logging.INFO,format='%(asctime)s %(levelname)s %(message)s')
     log=logging.getLogger('innopool-v2-coordinator')
     stop=threading.Event()

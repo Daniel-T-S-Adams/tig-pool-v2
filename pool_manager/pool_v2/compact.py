@@ -13,7 +13,7 @@ import hashlib
 import re
 
 from .observation import canonical_json
-from .protocol import (Bundle, ProtocolDataError, _index, _integer, _text,
+from .protocol import (Bundle, ProtocolDataError, SCOPED_FORMAT, _index, _integer, _text,
                        _validate_snapshot, validate_snapshot)
 from .selection import references
 
@@ -41,6 +41,13 @@ def compact_observation(observation, *, identity_version=2):
     if observation.get("format") == FORMAT:
         validate_compact(observation)
         return observation
+    if observation.get("format") == SCOPED_FORMAT:
+        # Nothing to discard: the capture never held other players' feeds.
+        # Record lists are put in digest order so independent collectors
+        # produce the same block identity.
+        from .block_observer import canonical_observation
+        validate_snapshot(observation)
+        return canonical_observation(observation)
     player = _text(observation.get("pool_player_id"), "compact pool player")
     snapshot = validate_snapshot(observation)
     feed = observation["players"].get(player, observation.get("pool_pending"))

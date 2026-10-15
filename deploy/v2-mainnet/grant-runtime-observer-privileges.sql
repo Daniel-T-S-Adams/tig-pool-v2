@@ -20,3 +20,8 @@ GRANT SELECT ON TABLE pool_v2.observation_conflict_resolutions, pool_v2.unresolv
 -- Migration 023: block status and round coverage read the missing-block
 -- tolerance; only the owner role appends policy revisions.
 GRANT SELECT ON TABLE pool_v2.missing_block_policies TO innopool_observer, innopool_runtime;
+
+-- Migration 024: the coordinator remembers checked archives and reuses them.
+GRANT SELECT, INSERT ON TABLE pool_v2.verified_binaries TO innopool_runtime;
+-- Migration 025: the coordinator records and reads whole-network selection references.
+GRANT SELECT, INSERT ON TABLE pool_v2.reference_captures TO innopool_runtime;
