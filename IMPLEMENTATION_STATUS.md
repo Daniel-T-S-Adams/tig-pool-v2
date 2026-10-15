@@ -35,8 +35,9 @@ The pool-scoped block capture, on-demand selection references, verified-binary
 reuse, bounded missing-block tolerance and Community Pool branding were merged
 to `main` and deployed on 15 October as pool `4e64bf3` with worker `c6eccfb`
 and migrations 023 to 025. The collector switch recorded height 1385323 in both
-formats; the format-boundary resolution policy and collector resume guard
-(migration 026) are prepared to resolve it. See
+formats; the same day the collector resume guard, migration 026 and the
+corrected boundary proof were deployed (pool `e3cf0d2`) and the conflict was
+resolved under `format-boundary-projection-v1` with every alert retained. See
 [the rollout record](docs/POOL_SCOPED_ROLLOUT_20261015.md) and
 [lean storage](docs/LEAN_STORAGE.md).
 

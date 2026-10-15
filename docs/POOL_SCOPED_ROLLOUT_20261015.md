@@ -97,6 +97,25 @@ and challenge tables on both sides. The corrected proof matched all fourteen
 compared sections of the live captures in a read-only dry run before it was
 released and applied.
 
+## Resolution applied
+
+The corrected proof shipped as pool `e3cf0d2dda69a6bfe393716b0f5eabc7b16e6f65`,
+tag `mainnet-boundary-proof-20261015`, activated at **12:06:53 UTC** at
+boundary height 1385388 after the unchanged 26-migration schema was verified
+against the release behind restore point `innopool_boundary_proof_20261015`
+(LSN `3F/A78EC920`). At **12:07:06 UTC** the resolution for alert 5 was
+appended under `format-boundary-projection-v1` by
+`operator-authorized-format-boundary-maintenance`, citing the original attempt
+`904799b3-620c-423c-8ed1-31f8a04e7558` and the conflicting attempt
+`4edb06ac-1efb-4d53-b794-7947542dda26`. All six alerts remain, the original
+block identity and the financial digest are unchanged, the stream reports no
+conflicting heights, the three historical missing heights are unchanged, and
+the collector no longer logs the conflict. `release/v2` follows the deployed
+commit. Records: `/etc/innopool-v2-mainnet/boundary-proof-paired-deployment-20261015.json`
+and `/var/lib/innopool-v2-mainnet/boundary-proof-resolution-20261015.json` on
+the primary, with local copies under
+`/root/mine-rootz/validation/boundary-proof-rollout-20261015/`.
+
 ## Open items
 
 - Recovery's daily base backup failed on 15 October inside the base-archive

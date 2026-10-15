@@ -7,10 +7,14 @@ with additive migrations 023 to 025 behind restore point
 `innopool_pool_scoped_20261015`. The financial digest was unchanged before and
 after. The collector now records only the pool's own feed per block; the first
 scoped captures at heights 1385324 onward were complete and credited. The
-restart re-captured height **1385323**, already recorded compact, so that
-height holds one unresolved conflicting-block alert (alert 5). New work stays
-paused and settlement disabled; neither gate depends on that height. The
-resolution policy and the collector resume guard are in
+restart re-captured height **1385323**, already recorded compact, which the
+store flagged as alert 5. Two follow-up releases the same day added the
+collector resume guard and migration 026 (pool `be87fdc`, 11:51 UTC) and the
+corrected boundary proof (pool `e3cf0d2`, tag `mainnet-boundary-proof-20261015`,
+12:06 UTC); alert 5 was resolved at **12:07 UTC** under
+`format-boundary-projection-v1` with every alert retained, no conflicting
+heights remain, and each later restart captured every height exactly once.
+New work stays paused and settlement disabled. See
 [the rollout record](POOL_SCOPED_ROLLOUT_20261015.md).
 
 **14 October update:** the corrected two-server mainnet CPU benchmark activated
@@ -37,7 +41,7 @@ describe their own check state.
 The [lean storage implementation](LEAN_STORAGE.md) was activated at 13:28 UTC
 on 13 October. It adds direct worker binary downloads,
 compact pool evidence, selective final report fetching and guarded legacy
-conversion. Production migrations are verified through 025 since 15 October. The matched worker,
+conversion. Production migrations are verified through 026 since 15 October. The matched worker,
 public installer, compatible readers and unchanged balances were checked.
 Historical conversion, backup/restore verification, guarded redundant cleanup
 and corrected CPU timing passed. See [the rollout record](LEAN_ROLLOUT_20261013.md).
@@ -66,9 +70,9 @@ See [the recovery activation record](RECOVERY_VOLUME_20261013.md).
 |---|---|
 | Primary | Helsinki, `46.62.249.188`; website, API, coordinator and four observers |
 | Recovery | Nuremberg, `2.28.230.81`; database backups, WAL receiver and configuration copies |
-| Pool application | `4e64bf32cfb124bef8ea1c526eb6ed3f9ede45bc`, tag `mainnet-pool-scoped-capture-20261015` |
+| Pool application | `e3cf0d2dda69a6bfe393716b0f5eabc7b16e6f65`, tag `mainnet-boundary-proof-20261015` |
 | Worker served by the API | `c6eccfb4f7bf4fc1ceb448f80983dd954bfc99ef`, tag `mainnet-library-cache-20261015`; installer bytes unchanged |
-| Schema | 25 verified migrations deployed; 023 to 025 applied twice on 15 October with earlier checksums unchanged |
+| Schema | 26 verified migrations deployed; 023 to 026 applied twice on 15 October with earlier checksums unchanged |
 | Member funds | Enabled, with custody freshness checks still applying |
 | New work | Operator pause is recorded; effective `work_enabled=false`, configured `work_enabled=true` |
 | TIG submission adapter | Configured for existing work; this does not bypass the pause on new precommits |
