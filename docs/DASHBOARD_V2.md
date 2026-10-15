@@ -4,6 +4,8 @@ The v2 API serves its own static website at `/`, `/join` and `/operator`.
 It does not load the inherited dashboard, scheduler or payout processes.
 Deploy it behind HTTPS at the exact origin configured for wallet signatures.
 Assets are local; no third-party scripts or analytics are required.
+The screens carry the Community Pool identity; the name, mark, colours and
+the rules for member-facing wording are in the [branding guide](BRANDING.md).
 
 The updated `/join` page, prepared locally for deployment, is **Connect your
 master**. Its public guide covers account setup, the deployment's API address,

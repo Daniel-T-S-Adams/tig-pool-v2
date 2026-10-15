@@ -1,4 +1,4 @@
-# Connect your master to InnoPool v2
+# Connect your master to Community Pool
 
 Use this guide to receive a complete benchmark in your own master. Your master
 is the software that connects to the pool, saves assignments and submits your
