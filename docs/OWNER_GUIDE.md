@@ -11,8 +11,9 @@ The API serves pinned worker `dddad9d`, with official 0.0.8 CPU runtimes.
 Recovery preserves base backups, WAL, encrypted settings and pending files;
 its API and collectors are inactive. The master/helper CPU benchmark activated
 successfully on TIG. Historical compact conversion, backup/restore
-verification and guarded redundant raw cleanup are complete. Round-137 gaps and reward settlement
-verification remain open. See [operations status](OPERATIONS_STATUS.md).
+verification and guarded redundant raw cleanup are complete. The round-137 gaps
+fall under the bounded missing-block tolerance once it is deployed; reward
+settlement verification remains open. See [operations status](OPERATIONS_STATUS.md).
 
 This guide describes implemented controls. A control still depends on its
 deployed capability, custody checks and complete evidence; its presence on the
@@ -292,7 +293,7 @@ v2 ledger controls.
 | Withdrawal/top-up is pending or uncertain | Check the original MetaMask transaction and use the same attempt's Check transfer | Conflicting nonce, unsupported payment route, missing finality or receipt verification failure |
 | Missing member deposit | Refresh after finality; review unattributed receipts and verify ownership | Missing chain observations, incorrect network/token, or a deposit already credited to a different account |
 | Workers receive no new work | Check pause status, member funds/slots and fee reconciliation | Collector, coordinator, credentials, release or runtime failures |
-| Observation gaps or custody mismatch | Pause new work and retain the recorded evidence | Investigate/recover observations and reconcile balances before resuming |
+| Observation gaps or custody mismatch | Check block status: a few missing blocks per round count as zero credit, while a held round or a conflicting block needs review. Pause new work and retain the recorded evidence | Investigate/recover observations, review the [missing-block policy](ROUND_SETTLEMENT.md#bounded-missing-block-tolerance) and reconcile balances before resuming |
 | Website unavailable | Check the configured hostname and whether the API is reachable | Inspect nginx, TLS, API services, Cloudflare routing and host health |
 | Disk/backup/server failure | Ask the maintainer to follow the documented recovery procedure | Restore and compare the ledger; stop the old primary before a takeover |
 

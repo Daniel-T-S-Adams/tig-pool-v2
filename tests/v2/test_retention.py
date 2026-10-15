@@ -268,3 +268,11 @@ class RetentionTests(DatabaseCase):
             self.assertEqual(spool.read(pending)[0], canonical_observation(observation(32)))
             for path in (Path(directory) / "recorded").glob("*.json.gz"):
                 spool.read(path)
+
+    def test_tolerated_missing_height_lets_the_raw_floor_advance(self):
+        self.record((8, 10, 11))   # Height 9 is a tolerated gap under the default policy.
+        self.record(range(12, 32))
+        record = retention.run(self.db, proof=self.proof())
+        self.assertEqual(record["floors"]["block_height"], 15)
+        self.assertFalse(any("credit coverage" in note for note in record["notes"]), record["notes"])
+        self.assertEqual(self.store.status()["missing_by_round"][0]["state"], "tolerated")
