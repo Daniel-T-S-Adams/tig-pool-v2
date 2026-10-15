@@ -190,7 +190,7 @@ def create_app(settings):
             raise ValueError('operator income wallet must differ from pool custody')
         income_reserve = int(settings.operator_tig_reserve_units)
     auth = Auth(database, origin=website_origin, chain_id=settings.chain_id)
-    app = FastAPI(title="InnoPool v2", version=API_VERSION)
+    app = FastAPI(title="Community Pool", version=API_VERSION)
     app.state.database, app.state.auth = database, auth
     app.state.payment_chain = payment_chain
     if settings.custody_trace_rpc_url and payment_chain is None:

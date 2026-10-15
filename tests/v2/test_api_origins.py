@@ -111,6 +111,16 @@ class WebsiteAssetTests(unittest.TestCase):
         self.assertEqual(client.get('/assets/app.js').headers['cache-control'], 'no-store')
         self.assertEqual(client.get('/assets/'+'0'*64+'/index.html').status_code, 404)
 
+    def test_the_website_shell_and_api_carry_the_community_pool_identity(self):
+        client = TestClient(create_app(Settings('dbname=unused_test', 'https://pool.example',
+            8453, '0'*64, api_origin='https://pool-api.example')))
+        page = client.get('/').text
+        self.assertIn('<title>Community Pool · Member accounts</title>', page)
+        self.assertIn('<span class="wordmark">Community Pool</span>', page)
+        self.assertIn('<link rel="icon" href="data:image/svg+xml,', page)
+        self.assertNotIn('InnoPool v2', page)
+        self.assertEqual(client.get('/openapi.json').json()['info']['title'], 'Community Pool')
+
     def test_a_changed_asset_gets_a_new_url_and_does_not_change_loaded_release_bytes(self):
         with tempfile.TemporaryDirectory() as temporary:
             directory = Path(temporary)
