@@ -72,6 +72,11 @@ def operator(database,*,limit=50,offset=0):
             LEFT JOIN round_earnings e ON e.round=numbers.round LEFT JOIN round_settlements s ON s.round=numbers.round
             ORDER BY numbers.round DESC LIMIT 100''')
         rounds=cursor.fetchall()
+        gaps={row['round']:row for row in status.get('missing_by_round',[])}
+        for row in rounds:
+            gap=gaps.get(row['round'])
+            row['missing_blocks']=gap['missing'] if gap else 0
+            row['gap_state']=gap['state'] if gap else None
         cursor.execute('''SELECT id,member_id,benchmark_id,creation_round,state,amount,base_amount,multiplier,handed_over_at
             FROM reservations WHERE collateral_outcome IS NULL ORDER BY creation_round,created_at LIMIT %s OFFSET %s''',(limit,offset))
         holds=cursor.fetchall()

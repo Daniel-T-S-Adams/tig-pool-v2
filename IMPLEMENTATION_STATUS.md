@@ -18,7 +18,9 @@ checks passed and guarded redundant raw/file/chunk cleanup is complete.
 The corrected [two-server mainnet CPU benchmark](docs/MAINNET_CPU_TRIAL_20261014.md)
 activated on TIG at height 1383916. Results and sampled proofs matched exactly;
 new work remains paused, settlement disabled and all trial approvals consumed.
-Reward-cycle verification and the two round-137 gaps remain open. The dated
+Reward-cycle verification remains open. The two round-137 gaps fall under the
+[bounded missing-block tolerance](docs/ROUND_SETTLEMENT.md#bounded-missing-block-tolerance)
+added on 14 October (migration 023, not yet deployed). The dated
 foundation and increment notes below retain their original verification scope.
 
 On 13 October recovery volume migration, a fresh physical backup and later-WAL
@@ -76,8 +78,9 @@ activated on TIG on 14 October.
   collateral for the same X+2 forfeiture as rejected late results. Uncertain
   writes remain held. See [submission recovery](docs/SUBMISSION_RECOVERY.md).
 - **Evidence:** round 137 has unresolved gaps at `1375817` and `1376650`, in
-  addition to the recorded prelaunch waiver at `1372249`. Exact settlement is
-  held. Report import now uses validated block headers for height lookup. The
+  addition to the recorded prelaunch waiver at `1372249`. Under the bounded
+  missing-block tolerance they count as zero credit instead of holding the
+  round. Report import now uses validated block headers for height lookup. The
   saved backlog reached zero pending files at 13:46 UTC, with no import errors.
 - **Custody:** historical catch-up was repaired on 12 October using a checked
   public RPC. Calls are paced; intermittent failures still hold custody gates.
@@ -91,7 +94,7 @@ activated on TIG on 14 October.
   17 inherited tests passed. Compatible recovery passed the 390-test hosted suite.
 - **Workflow:** protected `main` integrates PRs; `release/v2` follows the deployed
   application tag. `redesign/v2` was retired on 8 October.
-- **Remaining:** RPC reliability, gap recovery, timely job-scheduling/GPU validation, funded takeover and reward claim/unlock/receipt plus expense
+- **Remaining:** RPC reliability, timely job-scheduling/GPU validation, funded takeover and reward claim/unlock/receipt plus expense
   integration. Raw blocks/reports keep four rounds and wallet/fee captures
   thirty days under obligation/backup guards; financial records are permanent.
   Returning allocated database space to the OS requires separate maintenance;

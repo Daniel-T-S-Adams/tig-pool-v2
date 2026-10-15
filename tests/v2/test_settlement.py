@@ -386,6 +386,8 @@ class SettlementTests(DatabaseCase):
         self.assertIsNone(result["journal_id"])
 
     def test_missing_credit_block_holds_rewards_but_not_independent_collateral(self):
+        self.store.set_gap_policy(max_missing_per_round=0, warn_missing_per_round=0, actor="operator",
+                                  reason="strict coverage for this scenario")
         self.credits(zero=True, heights=(8, 10, 11))
         row = self.benchmark()
         seal = self.seal()
@@ -398,3 +400,43 @@ class SettlementTests(DatabaseCase):
             settlement.allocate(self.db, 3, seal["id"])
         qualifiers.credit_block(self.db, "block-9", EMPTY_POOL)
         self.assertEqual(settlement.allocate(self.db, 3, seal["id"])["operator_allocation"], 10*TIG)
+
+    def test_tolerated_missing_height_settles_as_zero_credit_and_is_recorded(self):
+        self.credits(heights=(8, 10, 11))   # Height 9 is never captured; the default policy tolerates it.
+        seal = self.seal()
+        self.earnings(100*TIG)
+        preview = settlement.preview(self.db, 3, seal["id"])
+        self.assertEqual(preview["inputs"]["missing_heights"], [9])
+        self.assertEqual(preview["inputs"]["waived_heights"], [])
+        self.assertEqual(preview["inputs"]["missing_block_policy"],
+                         {"policy": "bounded-zero-credit-v1", "revision": 1, "max_missing_per_round": 50})
+        result = settlement.allocate(self.db, 3, seal["id"], expected_digest=preview["input_digest"])
+        self.assertEqual(result["inputs"]["missing_heights"], [9])
+        # Credit comes only from the three observed blocks, still 3:2 between the members.
+        self.assertEqual(result["operator_allocation"], 5*TIG)
+        self.assertEqual(result["member_allocations"], {str(self.member): 57*TIG, str(self.other): 38*TIG})
+        # A later genuine backfill cannot reopen the settled round or change its record.
+        self.block(9)
+        qualifiers.credit_block(self.db, "block-9", POOL)
+        again = settlement.allocate(self.db, 3, seal["id"])
+        self.assertEqual((again["input_digest"], again["inputs"]["missing_heights"]), (result["input_digest"], [9]))
+        # Round 3 is complete now; the unobserved rounds before the seal block stay held.
+        self.assertEqual([(row["round"], row["state"]) for row in self.store.status()["missing_by_round"]],
+                         [(4, "held"), (5, "held")])
+
+    def test_round_held_above_the_tolerance_cannot_settle_until_the_policy_allows_it(self):
+        self.store.set_gap_policy(max_missing_per_round=1, warn_missing_per_round=0, actor="operator",
+                                  reason="tight limit for this scenario")
+        self.credits(zero=True, heights=(8, 11))   # Two missing heights exceed the limit of one.
+        seal = self.seal()
+        self.earnings(10*TIG)
+        with self.assertRaisesRegex(ProtocolDataError, "incomplete"):
+            settlement.allocate(self.db, 3, seal["id"])
+        self.assertEqual(self.store.status()["held_rounds"], [3, 4, 5])   # 4 and 5 have no observed block.
+        self.store.set_gap_policy(max_missing_per_round=2, warn_missing_per_round=0, actor="operator",
+                                  reason="reviewed: both heights are unrecoverable")
+        result = settlement.allocate(self.db, 3, seal["id"])
+        self.assertEqual(result["inputs"]["missing_heights"], [9, 10])
+        self.assertEqual(result["inputs"]["missing_block_policy"]["revision"], 3)
+        self.assertEqual(result["operator_allocation"], 10*TIG)
+        self.assertEqual(self.store.status()["held_rounds"], [4, 5])

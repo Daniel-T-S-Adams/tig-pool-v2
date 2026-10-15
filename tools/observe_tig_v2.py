@@ -61,10 +61,11 @@ def main(argv=None):
                     log.info("database capture: %s", json.dumps(outcome))
                 status = store.status()
                 behind = bool(status.get("latest_timestamp") and time.time() - status["latest_timestamp"] > args.max_block_age)
-                alarm = (status.get("missing_heights"), status.get("conflicting_heights"), behind)
+                alarm = (status.get("missing_heights"), status.get("conflicting_heights"), behind, status.get("held_rounds"))
                 if alarm != last_alarm or time.monotonic() - last_alarm_at >= 60:
                     if alarm[0]: log.warning("missing block observations: %s", alarm[0])
                     if alarm[1]: log.error("conflicting block observations: %s", alarm[1])
+                    if alarm[3]: log.error("rounds held: missing blocks exceed the tolerance: %s", alarm[3])
                     if behind: log.warning("block collection is behind the configured freshness limit")
                     last_alarm, last_alarm_at = alarm, time.monotonic()
             except Exception:
