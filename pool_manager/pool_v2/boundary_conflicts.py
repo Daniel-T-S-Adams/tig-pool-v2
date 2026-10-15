@@ -59,16 +59,19 @@ def projection_proof(original, conflicting, source_digest):
             raise ProtocolDataError('boundary captures need the complete pool feed')
         return {key: _records(records.get(key, [])) for key in FEED_KEYS}
 
-    def codes(observation):
+    def codes(snapshot):
+        # Only the block's active algorithms carry block data; the compact
+        # projection stores exactly those, the scoped capture keeps every row.
         rows = {}
-        for row in observation['algorithms']['codes']:
-            counts = row['block_data']['num_qualifiers_by_track_by_player']
-            rows[row['id']] = {'details': row['details'], 'state': row['state'], 'adoption': row['block_data']['adoption'],
-                               'pool_counts': {track: players[player] for track, players in counts.items() if player in players}}
+        for identity, row in snapshot.algorithms.items():
+            data = row.get('block_data') or {}
+            counts = data.get('num_qualifiers_by_track_by_player') or {}
+            rows[identity] = {'details': row['details'], 'state': row['state'], 'adoption': data.get('adoption'),
+                              'pool_counts': {track: players[player] for track, players in counts.items() if player in players}}
         return rows
 
-    def challenges(observation):
-        return {row['id']: {'config': row['config'], 'state': row['state']} for row in observation['challenges']['challenges']}
+    def challenges(snapshot):
+        return {identity: {'config': row['config'], 'state': row['state']} for identity, row in snapshot.challenges.items()}
 
     def opow(observation):
         return _records(row for row in observation['opow']['opow'] if row['player_id'] == player)
@@ -88,9 +91,9 @@ def projection_proof(original, conflicting, source_digest):
     same('pool_qualifiers', sorted((*key, value) for key, value in first.qualifiers.items()),
          sorted((*key, value) for key, value in second.qualifiers.items()))
     same('pool_credit', credit(first), credit(second))
-    same('algorithms', codes(original), codes(conflicting))
+    same('algorithms', codes(first), codes(second))
     same('binaries', _records(original['algorithms'].get('binarys', [])), _records(conflicting['algorithms'].get('binarys', [])))
-    same('challenges', challenges(original), challenges(conflicting))
+    same('challenges', challenges(first), challenges(second))
     same('pool_opow', opow(original), opow(conflicting))
     same('pool_active_benchmark_ids', sorted(original['pool_active_benchmark_ids']),
          sorted(conflicting['start']['block']['data']['active_ids']['benchmark']))
