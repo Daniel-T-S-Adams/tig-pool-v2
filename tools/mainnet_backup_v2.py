@@ -263,10 +263,11 @@ def basebackup(config):
         if len(ranges) != 1 or config['wal_segment_bytes'] != 16 * 1024**2:
             raise RuntimeError('unexpected WAL layout; retained for inspection')
         with tempfile.TemporaryDirectory(prefix='.verify-wal-', dir=root) as directory:
-            with tarfile.open(staging / 'pg_wal.tar.gz') as archive:
-                if not all(item.isfile() or item.isdir() for item in archive.getmembers()):
+            # Keep `archive` for the older-base directory; this is the WAL tarball.
+            with tarfile.open(staging / 'pg_wal.tar.gz') as wal_tarball:
+                if not all(item.isfile() or item.isdir() for item in wal_tarball.getmembers()):
                     raise ValueError('unexpected WAL archive members')
-                archive.extractall(directory, filter='data')
+                wal_tarball.extractall(directory, filter='data')
             value = ranges[0]
             checked(docker(config, [(directory, '/wal', 'ro')],
                 ['/usr/lib/postgresql/18/bin/pg_waldump', '--quiet', '--path=/wal',
