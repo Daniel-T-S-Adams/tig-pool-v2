@@ -48,7 +48,10 @@ describe their own check state.
 Tracked as GitHub issues. Open:
 [#54](https://github.com/Daniel-T-S-Adams/tig-pool-v2/issues/54) verifying the
 reward settlement of the 14 and 15 October benchmarks before settlement is
-enabled. Closed on 15 October:
+enabled; both earned zero emissions, so the rounds demonstrate the
+zero-earnings path only, with round 137 sealable from 26 October and round 138
+from 2 November. See [the verification plan](SETTLEMENT_VERIFICATION_PLAN.md).
+Closed on 15 October:
 [#50](https://github.com/Daniel-T-S-Adams/tig-pool-v2/issues/50) recovery base
 backup fixed and verified;
 [#51](https://github.com/Daniel-T-S-Adams/tig-pool-v2/issues/51) retired raw
