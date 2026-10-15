@@ -12,7 +12,15 @@ verification and guarded redundant raw/file/chunk cleanup are complete. See
 
 Before a paid precommit, the coordinator downloads and checks the selected
 public archive. It retains only the URL, SHA-256 and byte count in
-`reservation_binaries`; it does not save those archive bytes. New assignments
+`reservation_binaries`; it does not save those archive bytes. Each actual
+check is also appended to `verified_binaries` by URL, library name and compute
+type. A later reservation of the same algorithm and compute type reuses that
+hash and size without downloading again while the newest check is younger
+than `binary_reuse_seconds` in the coordinator configuration (default 86400;
+0 checks every reservation). A check for another compute type is never
+reused, because that architecture's library or PTX was not inspected. The
+worker still verifies the assigned hash against the bytes it downloads, so a
+replaced public archive fails before any computation. New assignments
 give the worker the public URL. Workers download from TIG or TIG's GitHub media
 host, verify the hash and safely extract the required library/PTX. Public GET
 redirects are restricted to allowed HTTPS sources and do not forward credentials.
@@ -26,29 +34,56 @@ An existing explicit `binary_hosts` override must include
 
 ## Block capture and credit
 
-The collector validates the complete current network, then saves
-`pool-network-v1` with:
-
-- The original block ID, height, predecessor, timestamp, round and config.
-- Our pending/active feed, active benchmark IDs and authoritative qualifier
-  totals per algorithm and track.
-- Active algorithm adoption, state and binary metadata, and challenge config.
-- One best network reference per algorithm/track, with benchmark ID, original
-  active-array index, quality and hyperparameters.
-- Source identity digests and a summary/hash of the request log.
-
-Other miners' full feeds and global active benchmark/player ID lists are
-discarded before spool/database writes. Failed collection saves a header and
-bounded diagnostic. Scoped replay checks pool bundles, confirmations and totals;
-it does not recreate the discarded network.
+With `--pool-player-id`, the collector reads six public responses per block
+and saves `pool-scoped-v2`: the block header with its active algorithm,
+challenge and OPoW ID lists, the full algorithm, challenge and OPoW tables,
+and only the pool's own benchmark feed. Other players' feeds are never
+requested. The header's active benchmark list is reduced to the pool's own
+IDs, keeping the original count and a digest of the full list so independent
+collectors can be compared. The capture is validated before it is saved: the
+two block reads must match, every pool benchmark listed active must have its
+precommit, benchmark and proof records, the pool's qualifier counts may not
+exceed its own bundles, and every player's counts inside the algorithm
+records must reconcile with the OPoW and challenge totals. Record lists are
+stored in digest order, so collectors that received the same data in a
+different order record the same block identity. Failed collection saves a
+header and bounded diagnostic.
 
 The approved credit rule groups bundles by **player**, challenge, algorithm and
-track. Complete eligible pool bundles plus pool totals therefore reproduce the
-exact fractional credit. Selection uses the separate best-reference summary.
+track. The pool's own eligible bundles plus its own qualifier counts therefore
+reproduce the exact fractional credit; member credit needs nothing else.
 Ownership, per-block credit, coverage and financial records remain permanent.
-Compact captures are one compressed, checksummed blob and use the existing
-bounded retention floors. Open selection anchors remain until collateral is
-finalized. The separate capture/DB-recorder threads and legacy readers remain.
+Pool-scoped and compact captures are one compressed, checksummed blob and use
+the existing bounded retention floors. Open selection anchors remain until
+collateral is finalized. The separate capture/DB-recorder threads and legacy
+readers remain.
+
+`--full-network` restores the previous behaviour: every active player's feed
+is read, the whole network is validated, and the compact `pool-network-v1`
+projection is saved with the original header, the pool's feed, its qualifier
+totals, algorithm and challenge config, one best network reference per
+algorithm/track with its parameters, and source identity digests. The guarded
+conversion of historical full captures to that format remains.
+
+Deploy every collector with this change at once: a legacy full capture and a
+pool-scoped capture of the same block carry different block identities and
+would be reported as a conflicting observation at that height.
+
+## Selection references
+
+Choosing hyperparameters copies the best bundle per algorithm and track from
+the whole network. The coordinator reads every active player's feed for one
+current block only when a member is waiting for work and the newest stored
+reference is older than `reference_max_age_seconds` (default 1800). It
+validates the whole network and keeps only the best bundle per algorithm and
+track, with its parameters, in `reference_captures`. Selection then uses that
+index: a reference from after the credited block, or older than the configured
+age, is refused, and the reservation records the reference capture's identity,
+block and digest beside the credited block. Nothing is read while new work is
+paused or no offer is queued. Reference payloads expire under the raw block
+floor; a reference a reservation cites, and the newest one, stay readable.
+Compact `pool-network-v1` captures keep their embedded references and need no
+separate read.
 
 ## Reports
 
@@ -76,7 +111,8 @@ cached fetch at the round transition.
 
 ## Existing archive cleanup
 
-Apply additive migrations 020–022 and the updated runtime/observer grants.
+Apply the additive migrations through 025 and the updated runtime/observer
+grants; 020 to 022 are already deployed.
 Install all collector changes before pruning so writing-chunk pins protect
 captures during maintenance. The old deployed reader cannot read the new
 compact format; rollback must retain a reader that understands it.

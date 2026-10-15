@@ -2,12 +2,15 @@
 
 The storage cleanup activated on 13 October adds compact pool captures, direct
 binary downloads, final report fetching and guarded legacy conversion.
-[Lean storage](LEAN_STORAGE.md) specifies migrations 020–022 and the cleanup
+[Lean storage](LEAN_STORAGE.md) specifies migrations 020 to 022, 024 and 025 and the cleanup
 sequence. The policy below applies to retained legacy and new compact captures.
 Historical conversion is complete; see [the ordering fix and cleanup](STORAGE_ORDERING_FIX_20261014.md).
+The pool-scoped capture branch adds whole-network selection references under
+migration 025; their payloads follow the same floors.
 
-Decided by the operator on 8 October 2026. The pool reads the whole TIG network
-every block, but it only has to **keep** what an open obligation can still need.
+Decided by the operator on 8 October 2026. The pool reads the block tables and
+its own feed every block, reads the whole network only when selection needs a
+reference, and only has to **keep** what an open obligation can still need.
 Ledger, credit, benchmark, collateral and settlement records are permanent.
 Raw captures are bounded-life evidence and expire under this policy.
 The lean format retains compact pool evidence under these floors. A redundant
@@ -18,6 +21,7 @@ the original identity and accounting records remain.
 | Evidence | Expires when | Cap |
 |---|---|---|
 | Raw block captures (database manifests and chunks, spool archives) | Round X is settled, and never before round X+2 has ended | 4 rounds, even while settlement is disabled |
+| Whole-network selection references | Under the raw block floor; never one a reservation cites, nor the newest | 4 rounds |
 | Fraud-report captures and report indices | Every pool benchmark created up to that round has its collateral outcome, and the round is at least three rounds old | 4 rounds |
 | Wallet (custody) and fee-balance captures | Older than 30 days | 30 days |
 | Database backups | Unchanged: three verified bases plus the WAL since the oldest | about 3 days |
@@ -31,8 +35,8 @@ What never expires, whatever the cap:
 - Anything captured after the most recent verified base backup started.
 - A capture cited by a confirmed report, arbitration, round seal, benchmark
   reporting round, fee top-up, funding alert, opening credit or custody
-  baseline. The most recent capture per key is also kept so sealing and
-  status checks keep working.
+  baseline, and a network reference cited by a reservation. The most recent
+  capture per key is also kept so sealing and status checks keep working.
 - The capture rows themselves. Expiry blanks a payload and stamps
   `expired_at` (or replaces a block manifest with an `expired` tombstone
   carrying the manifest's checksum); an expired report capture also replaces
@@ -53,7 +57,8 @@ admin DSN. It:
    advance.
 3. Inside a session flagged `pool_v2.retention`, tombstones block manifests
    under the floor, removes chunks that only expired captures referenced,
-   blanks report, funding and custody payloads under their floors, and prunes
+   blanks report, funding, custody and network reference payloads under their
+   floors, and prunes
    the local block spool (archives under the floor, chunk files the database
    removed, never a chunk a pending archive still needs).
 4. Appends a `retention_runs` row with the policy, proof, floors, counts and

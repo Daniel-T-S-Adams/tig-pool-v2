@@ -13,7 +13,7 @@ from contextlib import contextmanager
 
 from .block_observer import _is_digest, _pack
 from .observation import read_archive, write_archive
-from .protocol import ProtocolDataError
+from .protocol import ProtocolDataError, SCOPED_FORMAT
 
 
 class Spool:
@@ -39,7 +39,7 @@ class Spool:
         _sync(self.directory.parent)
 
     def save(self, observation, metadata, error=None):
-        if observation.get("format") == "pool-network-v1":
+        if observation.get("format") in ("pool-network-v1", SCOPED_FORMAT):
             from .observation import canonical_json
             raw = canonical_json(observation)
             digest = hashlib.sha256(raw).hexdigest()

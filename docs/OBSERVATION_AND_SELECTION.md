@@ -15,6 +15,18 @@ It was activated on 13 October; see [rollout status](LEAN_ROLLOUT_20261013.md).
 The full-snapshot encoding below describes the historical format that remains
 readable during conversion. New successful captures use one compact blob.
 
+The pool-scoped capture on `cleanup/pool-scoped-capture` reads, each block, the
+block header, the algorithm, challenge and OPoW tables and only the pool's
+own benchmark feed: six requests and under one megabyte instead of one feed
+per active player. Other players' qualifier counts still arrive inside every
+algorithm record and are reconciled against the OPoW and challenge totals, so
+a truncated or inconsistent block is rejected, and the pool's own counts are
+checked against its own bundles. Member credit depends only on those inputs.
+The whole network is read separately, on demand, for selection references;
+see [lean storage](LEAN_STORAGE.md) for fields and deployment requirements.
+It is not deployed; the running release still reads every active player's
+feed into its compact blob.
+
 `tools/observe_tig_v2.py` runs separately from the API and scheduler. Its capture
 thread saves raw evidence to a local spool before a separate recorder thread
 touches PostgreSQL. A database outage, lock or recovery backlog cannot stop the
@@ -111,6 +123,12 @@ overall adoption. For each active track it copies the hyperparameters of that
 algorithm's highest-scoring active bundle, taken from the benchmark that produced
 it; equal scores use benchmark ID and active-array index. Only a complete absence
 of such a bundle produces JSON `null`, so TIG uses the algorithm's defaults.
+With pool-scoped captures that bundle comes from a separate whole-network
+reference, read by the coordinator only while a member is waiting for work
+and the newest stored reference is older than `reference_max_age_seconds`
+(default 1800). The reservation records the reference capture's identity,
+block and digest beside the credited block. A reference from after the
+current block, or older than the configured age, is refused.
 
 Bundle counts use exactly each track's minimum, falling back to the challenge
 minimum when TIG does not provide a track-specific minimum. Fuel defaults to the

@@ -9,5 +9,7 @@
     "mainnet-api.tig.foundation",
     "media.githubusercontent.com"
   ],
-  "max_block_age": 120
+  "max_block_age": 120,
+  "binary_reuse_seconds": 86400,
+  "reference_max_age_seconds": 1800
 }

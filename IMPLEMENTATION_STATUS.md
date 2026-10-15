@@ -31,6 +31,10 @@ the volume 82 GiB free. The [14 October archive placement](docs/BACKUP_BASE_ARCH
 the final `f5f1028` release also passed all 371 hosted tests. See
 [the recovery update](docs/RECOVERY_VOLUME_20261013.md).
 
+The pool-scoped block capture, on-demand selection references and verified-binary
+reuse are implemented on `cleanup/pool-scoped-capture` with additive migrations
+024 and 025; they are not deployed. See [lean storage](docs/LEAN_STORAGE.md).
+
 The 11 October [member master contract](docs/MEMBER_MASTER_V2.md) documents
 member-managed nonce distribution across compatible machines using the existing
 whole-benchmark API. API schema/route descriptions now explain aggregate

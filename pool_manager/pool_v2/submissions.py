@@ -37,27 +37,70 @@ def _locked(cursor, identity):
     return row, dict(cursor.fetchone())
 
 
+def _record_binary(cursor, reservation_id, source_url, digest, size_bytes):
+    row = benchmarks._locked(cursor, reservation_id)
+    expected = row["selection"]["binary"]["details"]["download_url"]
+    if source_url != expected:
+        raise Conflict("algorithm archive URL differs from reserved selection")
+    cursor.execute("SELECT sha256,source_url FROM reservation_binaries WHERE reservation_id=%s UNION ALL SELECT sha256,source_url FROM reservation_archives WHERE reservation_id=%s", (reservation_id, reservation_id))
+    previous = cursor.fetchone()
+    if previous:
+        if (previous["sha256"], previous["source_url"]) != (digest, source_url):
+            raise Conflict("reserved algorithm archive changed")
+        return digest
+    if row["state"] != "reserved":
+        raise Conflict("algorithm archive must be saved before precommit submission")
+    cursor.execute("INSERT INTO reservation_binaries(reservation_id,sha256,source_url,size_bytes) VALUES (%s,%s,%s,%s)",
+                   (reservation_id, digest, source_url, size_bytes))
+    return digest
+
+
 def prepare_archive(database, reservation_id, source_url, archive):
     """Remember checked binary metadata; the worker downloads the public bytes."""
     if not isinstance(archive, bytes) or not 0 < len(archive) <= 64*1024*1024:
         raise FundsError("invalid algorithm archive size")
     digest = hashlib.sha256(archive).hexdigest()
     with database.transaction() as cursor:
-        row = benchmarks._locked(cursor, reservation_id)
-        expected = row["selection"]["binary"]["details"]["download_url"]
-        if source_url != expected:
-            raise Conflict("algorithm archive URL differs from reserved selection")
-        cursor.execute("SELECT sha256,source_url FROM reservation_binaries WHERE reservation_id=%s UNION ALL SELECT sha256,source_url FROM reservation_archives WHERE reservation_id=%s", (reservation_id, reservation_id))
-        previous = cursor.fetchone()
-        if previous:
-            if (previous["sha256"], previous["source_url"]) != (digest, source_url):
-                raise Conflict("reserved algorithm archive changed")
-            return digest
-        if row["state"] != "reserved":
-            raise Conflict("algorithm archive must be saved before precommit submission")
-        cursor.execute("INSERT INTO reservation_binaries(reservation_id,sha256,source_url,size_bytes) VALUES (%s,%s,%s,%s)",
-                       (reservation_id, digest, source_url, len(archive)))
-    return digest
+        return _record_binary(cursor, reservation_id, source_url, digest, len(archive))
+
+
+def reuse_archive(database, reservation_id, source_url, verified):
+    """Bind a reservation to an archive this pool already downloaded and checked."""
+    with database.transaction() as cursor:
+        return _record_binary(cursor, reservation_id, source_url, verified["sha256"], verified["size_bytes"])
+
+
+def remember_verified(database, source_url, algorithm_name, compute_type, digest, size_bytes):
+    """Append the outcome of one actual download and archive check."""
+    if not isinstance(source_url, str) or not source_url or not isinstance(algorithm_name, str) or not algorithm_name \
+            or not isinstance(compute_type, str) or not compute_type:
+        raise FundsError("verified archive identity requires a URL, library name and compute type")
+    if not isinstance(digest, str) or not re.fullmatch(r"[0-9a-f]{64}", digest) or type(size_bytes) is not int \
+            or not 0 < size_bytes <= 64*1024*1024:
+        raise FundsError("verified archive requires its SHA-256 and byte count")
+    with database.transaction() as cursor:
+        cursor.execute("""INSERT INTO verified_binaries(id,source_url,algorithm_name,compute_type,sha256,size_bytes)
+            VALUES (%s,%s,%s,%s,%s,%s)""", (uuid.uuid4(), source_url, algorithm_name, compute_type, digest, size_bytes))
+
+
+def verified_binary(database, source_url, algorithm_name, compute_type, *, max_age_seconds):
+    """The newest check of this exact archive for this library and compute type, if recent enough.
+
+    A check for another compute type is never reused: the archive's library
+    for a different architecture, or its PTX, has not been looked at. An age
+    of zero disables reuse and checks every reservation.
+    """
+    if type(max_age_seconds) is not int or max_age_seconds < 0:
+        raise FundsError("archive reuse age must be a nonnegative number of seconds")
+    if max_age_seconds == 0:
+        return None
+    with database.transaction() as cursor:
+        cursor.execute("""SELECT sha256,size_bytes,verified_at FROM verified_binaries
+            WHERE source_url=%s AND algorithm_name=%s AND compute_type=%s
+              AND verified_at >= clock_timestamp() - (%s * interval '1 second')
+            ORDER BY verified_at DESC LIMIT 1""", (source_url, algorithm_name, compute_type, max_age_seconds))
+        row = cursor.fetchone()
+    return dict(row) if row else None
 
 
 def begin(database, identity, *, preflight=None):

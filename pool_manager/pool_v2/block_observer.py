@@ -14,7 +14,7 @@ from psycopg2.extras import Json, execute_values
 from .database import lock
 from .ledger import fingerprint
 from .observation import canonical_json
-from .protocol import ProtocolDataError, validate_snapshot
+from .protocol import ProtocolDataError, SCOPED_FORMAT, validate_snapshot
 
 
 PAGE_TARGET = 8   # mean record digests per page; a changed record rewrites one page, and changes land in larger pages
@@ -279,7 +279,7 @@ class BlockStore:
             height = None
         if not isinstance(block_id, str):
             block_id = None
-        if observation.get("format") == "pool-network-v1":
+        if observation.get("format") in ("pool-network-v1", SCOPED_FORMAT):
             # One small blob avoids a per-field manifest and millions of tiny
             # chunks. The entire retained projection is checksummed together.
             raw = canonical_json(observation)
