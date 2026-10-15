@@ -220,6 +220,12 @@ External alerts, sustained storage and funded takeover checks remain open.
   custody and protocol-fee reconciliation, ledger audit, active service build,
   pending send ambiguity and backup age. Monitor from another host too;
   alerts must be arranged with an explicitly chosen destination.
+  The primary's five-minute check is `tools/mainnet_health_check_v2.py`,
+  installed as `operations/mainnet_health_check.py`. Since 15 October it
+  judges block history by the deployed missing-block tolerance: held rounds,
+  a current round already over the limit and unresolved conflicting heights
+  are issues; tolerated and waived gaps are recorded only. Release
+  activations must not overwrite it with the dated 13 October copy.
 - Rehearse worker interruption and restart on the separate member machine,
   then the bounded GPU path. Preserve worker SQLite and evidence files.
   A restarted worker must recover its existing benchmark before requesting more.
