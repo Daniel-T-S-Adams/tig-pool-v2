@@ -15,7 +15,14 @@ corrected boundary proof (pool `e3cf0d2`, tag `mainnet-boundary-proof-20261015`,
 `format-boundary-projection-v1` with every alert retained, no conflicting
 heights remain, and each later restart captured every height exactly once.
 New work stays paused and settlement disabled. See
-[the rollout record](POOL_SCOPED_ROLLOUT_20261015.md).
+[the rollout record](POOL_SCOPED_ROLLOUT_20261015.md). At **15:21 UTC** one
+owner-approved benchmark ran on this release through a scoped window for member
+`cc713240` on both of its machines: TIG activated benchmark `3685bada…` with no
+fraud, results were uploaded 12m26s after handover, the coordinator read its
+first on-demand selection reference, and the fee and collateral stayed at the
+0.001 and 0.0004 TIG caps. See [the trial record](MAINNET_CPU_TRIAL_20261015.md).
+The recovery base backup failure, the retired evidence copy's stale state and
+the primary health check were fixed the same day (issues #50 to #52).
 
 **14 October update:** the corrected two-server mainnet CPU benchmark activated
 successfully at height **1383916**, around **11:35 UTC**. Results/proofs matched
@@ -38,17 +45,18 @@ describe their own check state.
 
 ## Open items
 
-Tracked as GitHub issues, in priority order:
+Tracked as GitHub issues. Open:
+[#54](https://github.com/Daniel-T-S-Adams/tig-pool-v2/issues/54) verifying the
+reward settlement of the 14 and 15 October benchmarks before settlement is
+enabled. Closed on 15 October:
 [#50](https://github.com/Daniel-T-S-Adams/tig-pool-v2/issues/50) recovery base
-backup failing in the base-archive catalogue step;
-[#51](https://github.com/Daniel-T-S-Adams/tig-pool-v2/issues/51) recovery
-evidence-pull refusing on low disk reserve;
+backup fixed and verified;
+[#51](https://github.com/Daniel-T-S-Adams/tig-pool-v2/issues/51) retired raw
+evidence copy, stale unit state cleared;
 [#52](https://github.com/Daniel-T-S-Adams/tig-pool-v2/issues/52) primary health
-check reporting the historical gaps instead of held rounds;
-[#53](https://github.com/Daniel-T-S-Adams/tig-pool-v2/issues/53) enabling bounded
-benchmark work for the two members;
-[#54](https://github.com/Daniel-T-S-Adams/tig-pool-v2/issues/54) verifying the 14
-October benchmark's reward settlement before settlement is enabled.
+check now judges held rounds and conflicts;
+[#53](https://github.com/Daniel-T-S-Adams/tig-pool-v2/issues/53) one bounded
+benchmark completed on the deployed release, ordinary work still paused.
 
 ## Deployment and controls
 
