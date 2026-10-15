@@ -1,0 +1,8 @@
+{
+  "directory": "/var/lib/innopool-v2-mainnet/primary-pending-evidence",
+  "source_host": "46.62.249.188",
+  "ssh_key": "/etc/innopool-v2-mainnet/pending-evidence-ssh",
+  "known_hosts": "/etc/innopool-v2-mainnet/backup-known-hosts",
+  "base_record": "/var/lib/innopool-v2-mainnet/primary-continuous/latest.json",
+  "minimum_free_gib": 35
+}

@@ -75,7 +75,12 @@ and transaction fees. Stop pool spending manually at the authorized budget.
 below once those deployment details are known. The member browser runs on
 Daniel's local computer. Worker execution belongs to the member role.
 
-## Current initialization status — 9 October
+## Historical initialization status — 9 October
+
+For current state, use [operations status](OPERATIONS_STATUS.md). Wallet catch-up
+was repaired on 12 October; public RPC failures still hold ordinary custody gates.
+Recovery capacity, pending-file protection and the combined production-copy
+restore passed on 13 October. [Recovery update](RECOVERY_VOLUME_20261013.md).
 
 The named prelaunch custody baseline and confirmed protocol-fee credit have
 been initialized. The custody and funding observers are running, and member

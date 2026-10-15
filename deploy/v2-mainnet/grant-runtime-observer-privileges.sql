@@ -9,3 +9,10 @@ GRANT SELECT ON TABLE pool_v2.observation_gap_waivers TO innopool_runtime;
 -- recorder fails every block after the migration (seen 8 October 2026).
 GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE pool_v2.chunk_last_ref TO innopool_observer, innopool_runtime;
 GRANT SELECT ON TABLE pool_v2.retention_floors, pool_v2.retention_runs TO innopool_observer, innopool_runtime;
+-- Migration 020: metadata only; workers fetch the public binary directly.
+GRANT SELECT, INSERT ON TABLE pool_v2.reservation_binaries TO innopool_runtime;
+GRANT SELECT ON TABLE pool_v2.compact_block_copies TO innopool_observer, innopool_runtime;
+
+-- Migration 022: operators alone append replay proofs; services can read them.
+REVOKE ALL ON TABLE pool_v2.observation_conflict_resolutions, pool_v2.unresolved_observation_conflicts FROM innopool_observer, innopool_runtime;
+GRANT SELECT ON TABLE pool_v2.observation_conflict_resolutions, pool_v2.unresolved_observation_conflicts TO innopool_observer, innopool_runtime;

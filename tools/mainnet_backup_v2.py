@@ -69,7 +69,7 @@ def checked(command, timeout):
     subprocess.run(command, check=True, timeout=timeout)
 
 
-def validated_records(root):
+def validated_records(root, *, checksums=True):
     records = []
     for directory in sorted(Path(root).iterdir()):
         if not STAMP.fullmatch(directory.name):
@@ -85,10 +85,117 @@ def validated_records(root):
             raise ValueError('unexpected backup file set')
         for name, expected in record['files'].items():
             path = directory / name
-            if path.is_symlink() or not path.is_file() or digest(path) != expected:
+            if path.is_symlink() or not path.is_file() or (checksums and digest(path) != expected):
                 raise ValueError('retained backup checksum mismatch')
         records.append(record)
     return records
+
+
+def base_catalogue(root, archive=None, *, checksums=True):
+    """One catalogue across the volume and optional older-base archive."""
+    records, locations = {}, {}
+    directories = [Path(root)] + ([Path(archive)] if archive is not None else [])
+    for directory in directories:
+        if directory.is_symlink() or not directory.is_dir():
+            raise ValueError('base archive directory is missing or unsafe')
+        for record in validated_records(directory, checksums=checksums):
+            stamp = record['snapshot']
+            if stamp in records and records[stamp] != record:
+                raise ValueError('conflicting copies of a base snapshot')
+            records[stamp] = record
+            locations.setdefault(stamp, []).append(directory / stamp)
+    return [records[key] for key in sorted(records)], locations
+
+
+def locate_base(root, snapshot, archive=None):
+    if not STAMP.fullmatch(snapshot):
+        raise ValueError('invalid backup snapshot')
+    _, locations = base_catalogue(root, archive, checksums=False)
+    if snapshot not in locations:
+        raise ValueError('verified base snapshot is unavailable')
+    return locations[snapshot][0]
+
+
+def copy_verified_base(source, destination, record, *, minimum_free_gib):
+    source, destination = Path(source), Path(destination)
+    if destination.exists():
+        found = [r for r in validated_records(destination.parent) if r['snapshot'] == record['snapshot']]
+        if found != [record]:
+            raise ValueError('different archive already occupies the destination')
+        return
+    required = sum((source / name).stat().st_size for name in record['files'])
+    if shutil.disk_usage(destination.parent).free < required + minimum_free_gib * GIB:
+        raise RuntimeError('older-base archive disk reserve is too low')
+    staging = destination.with_name('.copying-' + destination.name)
+    staging.mkdir(mode=0o700)
+    for name, expected in record['files'].items():
+        target = staging / name
+        with (source / name).open('rb') as incoming, target.open('xb') as outgoing:
+            unflushed = 0
+            while chunk := incoming.read(8 * 1024**2):
+                outgoing.write(chunk)
+                unflushed += len(chunk)
+                if unflushed >= 128 * 1024**2:
+                    outgoing.flush(); os.fsync(outgoing.fileno())
+                    if hasattr(os, 'posix_fadvise'):
+                        os.posix_fadvise(outgoing.fileno(), 0, 0, os.POSIX_FADV_DONTNEED)
+                    unflushed = 0
+            outgoing.flush(); os.fsync(outgoing.fileno())
+        target.chmod(0o600)
+        with target.open('rb') as saved:
+            os.fsync(saved.fileno())
+        if digest(target) != expected:
+            raise ValueError('copied base archive checksum mismatch')
+    shutil.copyfile(source / 'verified.json', staging / 'verified.json')
+    with (staging / 'verified.json').open('rb') as saved:
+        os.fsync(saved.fileno())
+    if json.loads((staging / 'verified.json').read_text()) != record:
+        raise ValueError('copied backup verification record differs')
+    sync_directory(staging)
+    os.rename(staging, destination)
+    sync_directory(destination.parent)
+
+
+def maintain_bases(root, archive, *, minimum_free_gib=35, keep=3):
+    """Keep the newest base on the volume and older retained bases on root.
+
+    Every retained copy is verified before originals or required WAL can go.
+    Snapshot identities and archive bytes are unchanged by relocation.
+    """
+    root, archive = Path(root), Path(archive)
+    bases, wal = root / 'base', root / 'wal'
+    records, locations = base_catalogue(bases, archive)
+    if len(records) < keep:
+        raise ValueError('fewer than three verified bases; do not relocate or prune')
+    old_bases, old_wal = retention_plan(records, [p.name for p in wal.iterdir()], keep=keep)
+    retained = [r for r in records if r['snapshot'] not in old_bases]
+    newest = retained[-1]['snapshot']
+    desired = {}
+    for record in retained:
+        stamp = record['snapshot']
+        target = (bases if stamp == newest else archive) / stamp
+        if target not in locations[stamp]:
+            copy_verified_base(locations[stamp][0], target, record, minimum_free_gib=minimum_free_gib)
+        desired[stamp] = target
+    # All three final locations now hold verified immutable bytes. Delete only
+    # redundant copies, superseded bases and the WAL selected by the same policy.
+    removed_duplicates = []
+    for stamp, paths in locations.items():
+        for path in paths:
+            if stamp not in desired or path != desired[stamp]:
+                shutil.rmtree(path)
+                if stamp in desired:
+                    removed_duplicates.append(str(path))
+    for name in old_wal:
+        (wal / name).unlink()
+    sync_directory(bases); sync_directory(archive); sync_directory(wal)
+    result = {'at_utc': datetime.now(timezone.utc).isoformat(),
+        'removed_base_snapshots': old_bases, 'removed_wal_segments': len(old_wal),
+        'kept_base_snapshots': [r['snapshot'] for r in retained],
+        'newest_base_on_volume': newest, 'older_base_archive': str(archive),
+        'removed_duplicate_locations': removed_duplicates}
+    atomic_json(root / 'retention.json', result)
+    return result
 
 
 def retention_plan(records, wal_names, keep=3):
@@ -122,6 +229,15 @@ def basebackup(config):
     wal.mkdir(mode=0o700, exist_ok=True)
     with (root / 'backup.lock').open('w') as lock:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        archive = Path(config['base_archive_directory']) if config.get('base_archive_directory') else None
+        if archive is not None:
+            records, _ = base_catalogue(bases, archive, checksums=False)
+            if len(records) < 3:
+                raise RuntimeError('verified base catalogue is incomplete')
+            forecast = max(r['archive_bytes'] for r in records) * 1.15
+            for directory in (bases, archive):
+                if shutil.disk_usage(directory).free < config['minimum_free_gib'] * GIB + forecast:
+                    raise RuntimeError('base backup filesystem reserve is too low')
         if shutil.disk_usage(root).free < config['minimum_free_gib'] * GIB:
             raise RuntimeError('disk reserve too low; existing backups retained')
         stamp = datetime.now(timezone.utc).strftime('%Y-%m-%dT%H%M%SZ')
@@ -171,6 +287,10 @@ def basebackup(config):
         os.rename(staging, bases / stamp)
         sync_directory(bases)
         atomic_json(root / 'latest.json', record)
+        if archive is not None:
+            maintain_bases(root, archive, minimum_free_gib=config['minimum_free_gib'])
+            print(json.dumps(record), flush=True)
+            return
         # Verify every retained archive before allowing any pruning. This removes
         # duplicate recovery copies only, never unresolved protocol evidence.
         records = validated_records(bases)

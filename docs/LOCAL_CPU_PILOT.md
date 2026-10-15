@@ -8,8 +8,9 @@ to the final test.
 The worker now supplies a local pilot launcher and systemd slice. Follow the
 [recorded worker procedure](https://github.com/Daniel-T-S-Adams/innopool-slave-v2/blob/ded5f4b4fe07de0cfeb1845cb50f9ef97ae65c36/docs/LOCAL_CPU_PILOT.md).
 That was the original September testnet pin. Current CI and mainnet serve
-worker `fd29279`; the mainnet CPU attempt expired before TIG accepted its
-results. See [operations status](OPERATIONS_STATUS.md). The resource procedure
+worker `dddad9d`; the corrected master/helper benchmark activated on TIG on
+14 October. The earlier late attempt remains recorded as expired.
+See [operations status](OPERATIONS_STATUS.md). The resource procedure
 below describes the bounded shared-machine pilot, not a performance guarantee.
 
 All new pilot services must share `innopoolv2pilot.slice`: one CPU's worth of

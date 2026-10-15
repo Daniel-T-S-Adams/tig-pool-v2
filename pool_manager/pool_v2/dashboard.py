@@ -59,7 +59,10 @@ def operator(database,*,limit=50,offset=0):
         cursor.execute('''SELECT o.id,o.kind,o.sent_at,r.member_id,r.benchmark_id FROM protocol_outbox o
             JOIN reservations r ON r.id=o.reservation_id WHERE o.state='uncertain' ORDER BY o.created_at LIMIT 100''')
         pending=cursor.fetchall()
-        cursor.execute('SELECT height,kind,details,created_at FROM observation_alerts ORDER BY created_at DESC LIMIT 50')
+        cursor.execute('''SELECT a.height,a.kind,a.details,a.created_at,
+            r.alert_id IS NOT NULL AS resolved,r.created_at AS resolved_at,r.reason AS resolution_reason
+            FROM observation_alerts a LEFT JOIN observation_conflict_resolutions r ON r.alert_id=a.id
+            ORDER BY a.created_at DESC LIMIT 50''')
         alerts=cursor.fetchall()
         cursor.execute('''SELECT numbers.round,e.expected_received_net,e.withheld_operating_cost,s.pot,s.operator_allocation,s.created_at AS settled_at,
             (SELECT count(*) FROM reservations r WHERE r.creation_round=numbers.round AND r.collateral_outcome IS NULL) AS pending_collateral,

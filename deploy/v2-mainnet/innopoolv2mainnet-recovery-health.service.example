@@ -1,0 +1,15 @@
+[Unit]
+Description=Check database and pending-file protection on the recovery host
+After=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 /opt/innopool-v2-mainnet/operations/mainnet_recovery_health_v2.py
+CPUQuota=20%
+MemoryMax=384M
+MemorySwapMax=0
+Nice=10
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+TimeoutStartSec=120

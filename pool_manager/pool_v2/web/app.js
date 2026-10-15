@@ -47,7 +47,7 @@ async function loadCapabilities() {
   capabilities = await api('capabilities');
   $('work-status').textContent = capabilities.work_enabled ? 'Accepting work' : capabilities.new_work_paused ? 'New work paused' : capabilities.work_block_reason==='custody-reconciliation' ? 'Checking pool funds' : capabilities.work_block_reason==='protocol-fee-reconciliation' ? 'Checking submission funds' : 'Work not enabled';
   $('worker-install-options').hidden=!capabilities.release_digest;
-  $('worker-install-status').textContent=capabilities.release_digest?'Download the installer paired with this pool. It asks privately for your execution token.':'The paired v2 installer will be available with the verified release.';
+  $('worker-install-status').textContent=capabilities.release_digest?'Single-machine reference installer. It asks privately for your execution token and does not connect helper machines.':'The single-machine reference installer will be available with the verified release.';
   $('work-status').classList.toggle('active', capabilities.work_enabled);
 }
 function field(label, id, value = '', options = {}) {
@@ -73,6 +73,7 @@ async function sign(message, wallet) {
 }
 async function connect() {
   if (!window.ethereum) throw Error('Open this page with an Ethereum wallet extension to connect.');
+  if (!capabilities.origin) await loadCapabilities();
   if (capabilities.origin.replace(/\/$/,'') !== location.origin) throw Error('The pool’s configured address does not match this page. Contact the operator.');
   const wallets = await window.ethereum.request({method:'eth_requestAccounts'});
   const chain = await window.ethereum.request({method:'eth_chainId'});
@@ -210,7 +211,7 @@ async function loadOperator() {
   table('operator-withdrawals',payments.withdrawals.map(row=>{const actions=node('div');if(row.state==='requested')actions.append(button('Approve',()=>reviewWithdrawal(row,true)),button('Reject',()=>reviewWithdrawal(row,false),'danger'));if(row.state==='approved'){const prepare=button('Prepare payment',()=>prepareWithdrawal(row));prepare.disabled=!directWallet;actions.append(prepare,button('Reject',()=>reviewWithdrawal(row,false),'danger'));}if(row.state==='uncertain'){const attempt=payments.attempts.find(value=>value.withdrawal_id===row.id&&!value.outcome);if(attempt)actions.append(button('Check transfer',async()=>showPayment(await api('operator/withdrawal-attempts/'+attempt.id))));}return[row.kind==='operator'?'Operator income':address(row.wallet),tig(row.amount),address(row.recipient),status(row.state),actions];}),5);
   table('operator-rounds',data.rounds.map(row=>[row.round,row.credited_blocks+' / '+row.observed_blocks+' observed',row.pending_collateral,row.pot===null?'—':tig(row.pot),row.settled_at?'Settled':'Awaiting finalization',button(row.settled_at?'View allocation':'Preview',()=>previewRound(row))]),6);
   table('operator-holds',data.collateral.map(row=>{const finalize=button('Finalize',async()=>{await api('operator/collateral/'+row.id+'/finalize',{});await loadOperator();});finalize.disabled=!capabilities.settlement_enabled;return[address(row.benchmark_id),row.creation_round,status(row.state),row.handed_over_at?'Yes':'No',tig(row.amount),finalize];}),6);
-  for(const [id,items] of [['uncertain-submissions',data.uncertain_submissions.map(row=>[row.kind+' · '+short(row.benchmark_id),'Awaiting authoritative protocol confirmation since '+date(row.sent_at)])],['observation-alerts',data.alerts.map(row=>[row.kind+' · block '+(row.height??'unknown'),date(row.created_at)])]]) {$(id).replaceChildren();for(const [title,text]of items){const item=node('div',undefined,'alert-item');item.append(node('strong',title),node('span',text));$(id).append(item);}if(!items.length)$(id).append(node('p','No records to show.','muted small'));}
+  for(const [id,items] of [['uncertain-submissions',data.uncertain_submissions.map(row=>[row.kind+' · '+short(row.benchmark_id),'Awaiting authoritative protocol confirmation since '+date(row.sent_at)])],['observation-alerts',data.alerts.map(row=>[row.kind+(row.resolved?' (resolved)':'')+' · block '+(row.height??'unknown'),row.resolved?'Resolved '+date(row.resolved_at)+' · '+row.resolution_reason:date(row.created_at)])]]) {$(id).replaceChildren();for(const [title,text]of items){const item=node('div',undefined,'alert-item');item.append(node('strong',title),node('span',text));$(id).append(item);}if(!items.length)$(id).append(node('p','No records to show.','muted small'));}
   table('multiplier-history',data.multiplier_changes.map(row=>[address(row.member_id),row.old_value+'×',row.new_value+'×',row.reason,date(row.created_at)]),5);
   $('operator-page-number').textContent='Page '+(operatorOffset/50+1);$('operator-newer').disabled=operatorOffset===0;$('operator-older').disabled=data.members.length<50&&data.collateral.length<50;
 }
@@ -249,5 +250,6 @@ $('refresh-operator').addEventListener('click',()=>run(loadOperator,$('refresh-o
 $('pause-work').addEventListener('click',()=>run(async()=>{await api('operator/controls/new-work',{paused:!capabilities.new_work_paused,reason:capabilities.new_work_paused?'Operator resumed new work':'Operator paused new work',event_key:key()});await loadOperator();notice('Work control updated. Existing benchmark recovery remains available.');},$('pause-work')));
 for(const [id,change] of [['operator-newer',-50],['operator-older',50]])$(id).addEventListener('click',()=>run(async()=>{operatorOffset=Math.max(0,operatorOffset+change);await loadOperator();}));
 $('member-page').hidden=operatorPage;$('operator-page').hidden=!operatorPage;
+$('master-setup-guide').hidden=location.pathname!=='/join';
 for(const link of document.querySelectorAll('nav a'))if(new URL(link.href).pathname===location.pathname)link.setAttribute('aria-current','page');
 await run(loadCapabilities);

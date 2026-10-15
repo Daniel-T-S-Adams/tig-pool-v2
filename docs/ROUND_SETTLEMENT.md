@@ -20,6 +20,13 @@ not change reporting evidence, finalization gates or settlement controls. See
 
 ## Evidence collected before financial decisions
 
+The deployed [storage cleanup](LEAN_STORAGE.md) fetches final responses for
+open obligations after X+2 and the applicable reporting window close. It keeps
+positive benchmark/reporting-round mappings while available, and saves relevant
+final facts instead of every repeated global response. Pending arbitration and
+failed requests hold final evidence. The following describes the legacy capture
+path; financial ownership and credit rules remain the same.
+
 `tools/observe_reports_v2.py` independently polls public reports/arbitrations.
 It captures the current and preceding three protocol rounds by default. Add
 `--reporting-round` for an older unresolved round. Each request is bracketed by

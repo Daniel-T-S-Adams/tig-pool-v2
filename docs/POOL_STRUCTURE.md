@@ -1,6 +1,7 @@
 # Pool structure
 
-Checked 9 October 2026. Cloudflare proxies both addresses; the website and backend
+Live hosting checked 9 October 2026; the member master model was clarified on
+11 October 2026. Cloudflare proxies both addresses; the website and backend
 run on the same primary Hetzner server. The code is implemented and tested;
 public HTTPS is active. Browser access and the normal worker client both pass
 connectivity checks; see the [setup checklist](CLOUDFLARE_SETUP.md).
@@ -13,7 +14,8 @@ flowchart TD
 
     Browser["Member / operator browser"] <-->|Load website| WebProxy
     Browser <-->|Live balances, login and actions| ApiProxy
-    Workers["Members' CPU / GPU workers"] <-->|Request work and return results| ApiProxy
+    Workers["Member masters / reference workers"] <-->|Whole benchmarks and proofs| ApiProxy
+    Workers <-->|Member-managed computation| Helpers["Compatible helper machines<br/>Optional, managed by members"]
 
     subgraph Cloudflare["Cloudflare — proxied HTTPS"]
         WebProxy["pool.tig.foundation<br/>Cache public website files"]
@@ -60,6 +62,11 @@ flowchart TD
   HTML/API responses on 2 October.
 - **The coordinator and observers talk directly to TIG and Base.** Outgoing protocol connections and
   backup transfers do not pass through the website's Cloudflare proxy.
+- **Members coordinate their own compute.** A member's master may use local
+  cores and compatible helper machines while presenting one complete benchmark
+  to the pool. Members manage the helper connections shown above. The installed
+  reference worker uses local concurrency; it includes no helper transport.
+  See the [member master contract](MEMBER_MASTER_V2.md).
 - **Backup takeover is manual.** The German server preserves recovery data until
   needed. Recovery includes switching Cloudflare's origin to the backup after
   stopping the old primary and verifying the restored pool.
@@ -72,7 +79,8 @@ flowchart TD
 The existing API version remains `/api/v2`; the hostname split does not require
 renaming it to `/api/v1` or creating a second backend.
 
-The diagram shows current connections. It does not establish a completed
+The diagram shows pool connections and the optional member-managed helper
+arrangement. It does not establish validated multi-machine execution or a completed
 mainnet reward cycle. See [operations status](OPERATIONS_STATUS.md) for the
 pause, unresolved block gaps, custody access and remaining cleanup.
 

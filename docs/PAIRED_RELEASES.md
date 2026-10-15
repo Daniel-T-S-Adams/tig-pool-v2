@@ -1,10 +1,11 @@
 # Serving the recorded pool and worker release
 
 The API publishes a paired release and its checked worker installer. A private
-CPU testnet pair was validated in September. Mainnet now serves pool
-`8477509` with worker `fd29279` (`mainnet-cpu-pilot-20261007`). The later mainnet
-CPU attempt expired before TIG accepted its results; a served release is not
-proof of timely execution or a completed reward cycle. New work remains paused.
+CPU testnet pair was validated in September. Since 14 October mainnet serves
+pool `59a3446` with worker `dddad9d` under the recorded
+[storage ordering release](STORAGE_ORDERING_FIX_20261014.md), using the official
+0.0.8 CPU runtime map. The corrected two-server CPU benchmark activated on TIG;
+reward-cycle verification remains open. New work remains paused.
 See [operations status](OPERATIONS_STATUS.md) and the
 [deployment procedure](MAINNET_DEPLOYMENT.md).
 

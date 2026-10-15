@@ -4,7 +4,7 @@ Only stored complete block observations drive this adapter. A disappeared
 record is not an expiry signal, and a proof POST is not an activation signal.
 """
 
-from . import benchmarks, member_protocol, submissions, qualifiers
+from . import benchmarks, member_protocol, submissions, qualifiers, reports
 from .block_observer import BlockStore
 from .money import Conflict
 from .protocol import ProtocolDataError, _index, _integer
@@ -203,6 +203,7 @@ def reconcile_block(database, block_id, player_id, *, artifact_origin=None, subm
                 raise ProtocolDataError("TIG benchmark has no matching member-owned root and handover")
             submissions.confirm_payload(database,row["id"],"results",evidence=evidence)
             if benchmark["details"].get("stopped") is False:
+                reports.record_confirmation_round(database, identity, benchmark['state']['block_confirmed'], block_id)
                 member_protocol.sampled(database,identity,benchmark["details"].get("sampled_nonces"),evidence=evidence)
         if confirmed(fraud,snapshot.height):
             # This is the confirmed pre-activation verification failure feed.

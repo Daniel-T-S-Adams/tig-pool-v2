@@ -4,14 +4,15 @@
 movements. Hetzner hosts the services and their configuration. Software changes
 are reviewed and tested before a fixed release is deployed.**
 
-Revised **9 October 2026**, checked against release
-`mainnet-abandoned-benchmark-expiry-20261009` (`8477509`, schema through 019).
+Revised **14 October 2026**, checked against release
+`mainnet-storage-ordering-20261014` (schema through 022).
 Member funds are enabled; new work is paused and settlement is disabled.
-The API serves pinned worker `fd29279`. Recovery preserves base backups, WAL
-and encrypted settings; its API and collectors are inactive and the full raw
-file-copy job is disabled. A usable Base RPC, unresolved round-137 block gaps
-and storage protection remain cleanup items. See [operations status](OPERATIONS_STATUS.md)
-for the current findings, what the evidence means and the storage discussion.
+The API serves pinned worker `dddad9d`, with official 0.0.8 CPU runtimes.
+Recovery preserves base backups, WAL, encrypted settings and pending files;
+its API and collectors are inactive. The master/helper CPU benchmark activated
+successfully on TIG. Historical compact conversion, backup/restore
+verification and guarded redundant raw cleanup are complete. Round-137 gaps and reward settlement
+verification remain open. See [operations status](OPERATIONS_STATUS.md).
 
 This guide describes implemented controls. A control still depends on its
 deployed capability, custody checks and complete evidence; its presence on the
@@ -94,7 +95,7 @@ Use **Resume new work** once the cause is resolved. This button cannot override
 disabled server capabilities or unresolved funding/evidence checks. The current
 owner screen has no separate per-member suspend/ban control.
 
-**To onboard a member, the member signs in and installs their own worker.**
+**To onboard a member, the member signs in and connects their own master.**
 
 1. The member opens **Member account**, selects **Connect wallet**, and signs
    the pool login message in MetaMask. This verifies and registers the account;
@@ -103,12 +104,20 @@ owner screen has no separate per-member suspend/ban control.
 3. Once deposits are enabled, the member sends TIG from their verified member
    wallet to the address and network shown under **Member funds**. The pool
    credits a verified, finalized direct-source deposit to that member.
-4. The member selects **Create execution token** and opens **Connect a worker**.
-   They select their hardware/capacity, choose **Show installation steps**, and
-   download the verified installer.
-5. They run the displayed commands on their worker machine, supply the execution
-   token privately, and start that installation. This is worker administration;
-   it does not require editing the pool server's code.
+4. The member selects **Create execution token** and opens **Connect your master**.
+   The guide shows the deployment's API address, required headers and the work
+   request and confirmed-handover steps. They keep the token in their master.
+5. Their master offers compatible capacity, receives and acknowledges one whole
+   benchmark, then coordinates their helpers and submits the combined result and
+   proofs. Follow the [member setup guide](MEMBER_SETUP_V2.md). Connecting a custom
+   master requires no website concurrency choice or editing of pool server code.
+
+For several machines tackling one benchmark, the member uses their own master
+to coordinate compatible helpers and submit one combined result. The displayed
+installer supplies a single-machine reference worker; installing it independently
+on several machines requests separate benchmarks. See the
+[member setup and shared-benchmark diagram](MEMBER_MASTER_V2.md#member-onboarding-and-a-shared-benchmark)
+for the expected multi-machine arrangement and the current setup boundary.
 
 Installer availability depends on a configured, tested pool/worker release.
 Members can **Revoke** execution tokens on their member page and create

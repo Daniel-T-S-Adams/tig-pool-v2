@@ -1,14 +1,64 @@
 # InnoPool v2 implementation status
 
-Updated **9 October 2026** against the live deployment. The agreed design is
+Documentation and live application checked on **14 October 2026**. The agreed design is
 [POOL_REDESIGN_PLAN.md](POOL_REDESIGN_PLAN.md). The detailed current state and
 storage explanation are in [operations status](docs/OPERATIONS_STATUS.md).
 The foundation and increment records below are historical validation records.
 
 ## Current summary
 
-- **Application:** `8477509`, tag `mainnet-abandoned-benchmark-expiry-20261009`, runs
-  on all six primary services; migration history is verified through 019.
+The [storage ordering fix](docs/STORAGE_ORDERING_FIX_20261014.md) is deployed as
+pool `59a3446`, worker `dddad9d`, with migrations 001–022. All six primary
+services use the new reader; recovery is staged with its application inactive.
+The held boundary has an immutable ordering resolution, and all 26,050 legacy
+observed blocks have compact replacements. The exact release passed 390 hosted
+tests with PostgreSQL, paired worker and Chromium enabled. Backup and recovery
+checks passed and guarded redundant raw/file/chunk cleanup is complete.
+
+The corrected [two-server mainnet CPU benchmark](docs/MAINNET_CPU_TRIAL_20261014.md)
+activated on TIG at height 1383916. Results and sampled proofs matched exactly;
+new work remains paused, settlement disabled and all trial approvals consumed.
+Reward-cycle verification and the two round-137 gaps remain open. The dated
+foundation and increment notes below retain their original verification scope.
+
+On 13 October recovery volume migration, a fresh physical backup and later-WAL
+restore passed. Forty-four table fingerprints matched; actual block/report files
+were replayed twice without financial changes. Pending protection and the
+matching health profile are active and healthy. At that check, root had about 135 GiB free and
+the volume 82 GiB free. The [14 October archive placement](docs/BACKUP_BASE_ARCHIVES_20261014.md) records current storage. Candidate `dfcfbf6` passed all **371 hosted tests**;
+the final `f5f1028` release also passed all 371 hosted tests. See
+[the recovery update](docs/RECOVERY_VOLUME_20261013.md).
+
+The 11 October [member master contract](docs/MEMBER_MASTER_V2.md) documents
+member-managed nonce distribution across compatible machines using the existing
+whole-benchmark API. API schema/route descriptions now explain aggregate
+capacity and master responsibilities. The pool still binds work to a member,
+with one combined result and shared slots. The contract increment passed
+simulated CPU/GPU master aggregation and restart-recovery
+checks. A subsequent [real CPU check](docs/CPU_HARDWARE_VERIFICATION.md) verified
+all 200 knapsack nonces and three proofs in 20 minutes 35 seconds including
+setup and the probe/resume pause; the isolated pool API accepted both uploads.
+The original job-scheduling workload failed an eight-minute nonce probe.
+GPU execution and real TIG acceptance remain unverified. The later SSH check
+below establishes real remote helper coordination. The matched implementation
+is now deployed; its current live algorithm and all five possible tracks passed
+unpaid hardware and isolated API checks. The worst track took 12m33s.
+
+The 12 October [SSH member master implementation](docs/SSH_MEMBER_MASTER_VERIFICATION.md)
+adds an optional helper mode to the worker, using the existing whole-benchmark
+pool API. It checks compatible capacity before new work and queued refresh,
+preserves outputs on both sides, and recovers unfinished work after a helper
+disconnects. A full real rehearsal on `poolminer1` and its ARM64 helper passed
+all 200 knapsack nonces and three sampled proofs in 15 minutes 8 seconds,
+including deliberate disconnect/master-crash recovery. All 105 saved outputs
+survived unchanged; isolated API uploads/retries and financial preservation
+passed. Rehearsal units are stopped and isolated setup/evidence is retained.
+That rehearsal made no paid TIG submission or production activation. Paired
+production activation followed on 13 October; the corrected paid benchmark
+activated on TIG on 14 October.
+
+- **Application:** `59a3446`, tag `mainnet-storage-ordering-20261014`, runs
+  on all six primary services; migration history is verified through 022.
   The same application is staged on recovery and its collector units point to
   it, with recovery API/collectors inactive.
 - **Controls:** member funds are enabled; configured work remains enabled but
@@ -17,7 +67,9 @@ The foundation and increment records below are historical validation records.
 - **CPU attempt:** the 7 October benchmark completed after its 120-block
   lifetime and TIG rejected it. The evidenced rejection now resolves its slot
   as expired and its result intent as rejected, preserving collateral and the
-  financial journal for later finalization. Timely CPU completion is unproved.
+  financial journal for later finalization. The later isolated knapsack check
+  fits the nominal lifetime; the original job-scheduling workload remains
+  unvalidated for timely completion on this machine.
 - **Abandoned results:** acknowledged work with no possibly sent result now
   expires automatically using archived lifetime and complete later absence
   evidence. It frees the slot, cancels queued unsent results, and preserves
@@ -27,25 +79,23 @@ The foundation and increment records below are historical validation records.
   addition to the recorded prelaunch waiver at `1372249`. Exact settlement is
   held. Report import now uses validated block headers for height lookup. The
   saved backlog reached zero pending files at 13:46 UTC, with no import errors.
-- **Custody:** public Base RPC access is failing on historical queries. Calls
-  are paced and failure details are recorded; a usable endpoint is still needed.
+- **Custody:** historical catch-up was repaired on 12 October using a checked
+  public RPC. Calls are paced; intermittent failures still hold custody gates.
 - **Protection:** daily verified off-host base backups, continuous WAL and
   encrypted configuration/release copies are active. The full raw-evidence
   copy is disabled after its disk-reserve failure; independent recovery
-  collectors are inactive. Pending-file protection and the recovery health
-  profile need an agreed storage setup. The 4 October PITR rehearsal passed.
-- **Validation:** all 299 pool tests and hosted CI passed for PR #38, including
-  paired worker/browser checks. The current expiry fix passed the existing
-  required CI for PR #40. The API still serves worker `fd29279`, tag
-  `mainnet-cpu-pilot-20261007`; worker development is tracked separately.
+  collectors are inactive. The EXT4 volume, pending-file protection, recovery
+  health and combined production-copy restore passed on 13 October.
+- **Validation:** the deployed pool passed 390 hosted tests. The API serves worker
+  `dddad9d`, tag `mainnet-runtime-release-guard-20261014`; its 53 v2 and
+  17 inherited tests passed. Compatible recovery passed the 390-test hosted suite.
 - **Workflow:** protected `main` integrates PRs; `release/v2` follows the deployed
   application tag. `redesign/v2` was retired on 8 October.
-- **Remaining:** RPC access, gap recovery, storage protection, timely CPU/GPU
-  validation, funded takeover and reward claim/unlock/receipt plus expense
+- **Remaining:** RPC reliability, gap recovery, timely job-scheduling/GPU validation, funded takeover and reward claim/unlock/receipt plus expense
   integration. Raw blocks/reports keep four rounds and wallet/fee captures
   thirty days under obligation/backup guards; financial records are permanent.
-  Returning database space to the OS and pruning non-block spool files are
-  separate maintenance work, not completed cleanup.
+  Returning allocated database space to the OS requires separate maintenance;
+  report spool pruning is implemented and retains unbacked captures.
 
 ## Foundation record — 20 September 2026
 

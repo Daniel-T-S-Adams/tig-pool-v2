@@ -102,6 +102,59 @@ class DashboardBrowserTests(DatabaseCase):
             while not server.started and thread.is_alive() and time.monotonic()<deadline:time.sleep(.02)
             self.assertTrue(server.started,'isolated HTTPS server failed to start')
 
+    def test_master_setup_is_public_and_uses_the_configured_api_origin(self):
+        from playwright.sync_api import sync_playwright, expect
+        playwright = sync_playwright().start()
+        self.addCleanup(playwright.stop)
+        browser = playwright.chromium.launch()
+        self.addCleanup(browser.close)
+        context = browser.new_context(ignore_https_errors=True, viewport={'width': 390, 'height': 844})
+        def wallet_request(request):
+            if request['method'] == 'eth_requestAccounts':
+                return [self.wallet]
+            if request['method'] == 'eth_chainId':
+                return '0x2105'
+            if request['method'] == 'personal_sign':
+                return '0x' + Account.sign_message(
+                    encode_defunct(hexstr=request['params'][0]), self.signer.key).signature.hex()
+            raise AssertionError('Unexpected wallet request: ' + request['method'])
+        context.expose_function('fixtureWallet', wallet_request)
+        context.add_init_script('window.ethereum={request: request => window.fixtureWallet(request)};')
+        page = context.new_page()
+        initial_capabilities = []
+        def delay_initial_settings(route):
+            if not initial_capabilities:
+                initial_capabilities.append(route)
+            else:
+                route.continue_()
+        page.route(self.api_origin + '/api/v2/capabilities', delay_initial_settings)
+        errors = []
+        page.on('pageerror', lambda error: errors.append(str(error)))
+        page.goto(self.origin + '/join')
+        guide = page.locator('#master-setup-guide')
+        expect(guide).to_be_visible()
+        expect(page.locator('#member-content')).not_to_be_visible()
+        expect(guide).to_contain_text(self.api_origin + '/api/v2')
+        expect(guide).not_to_contain_text('__POOL_V2_API_ORIGIN__')
+        guide.get_by_text('Pool connection and receiving a benchmark', exact=True).click()
+        expect(guide).to_contain_text('X-InnoPool-Version: 2.0')
+        expect(guide).to_contain_text('POST /api/v2/benchmarks/{benchmark_id}/acknowledge')
+        self.assertLessEqual(page.evaluate('document.documentElement.scrollWidth'), 390)
+        page.get_by_role('button', name='Connect wallet', exact=True).click()
+        expect(page.locator('#member-content')).to_be_visible()
+        self.assertEqual(len(initial_capabilities), 1)
+        initial_capabilities[0].continue_()
+        expect(guide).to_be_visible()
+        expect(page.get_by_role('heading', name='Single-machine reference installer')).to_be_visible()
+        page.get_by_role('button', name='Sign out', exact=True).click()
+        expect(page.locator('#member-content')).not_to_be_visible()
+        expect(guide).to_be_visible()
+        page.goto(self.origin)
+        expect(guide).not_to_be_visible()
+        page.goto(self.origin + '/operator')
+        expect(guide).not_to_be_visible()
+        self.assertEqual(errors, [])
+
     def test_member_and_operator_complete_reviewed_payment_without_float_rounding(self):
         from playwright.sync_api import sync_playwright, expect
         playwright=sync_playwright().start()

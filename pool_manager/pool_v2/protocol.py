@@ -90,6 +90,9 @@ class Snapshot:
     precommits: dict[str, dict[str, Any]]
     algorithms: dict[str, dict[str, Any]]
     challenges: dict[str, dict[str, Any]]
+    # Compact captures retain the best network reference per algorithm/track,
+    # with its parameters, separately from the pool's credit-bearing bundles.
+    selection_references: dict | None = None
 
 
 def validate_snapshot(observation: dict) -> Snapshot:
@@ -101,6 +104,9 @@ def validate_snapshot(observation: dict) -> Snapshot:
     is checked against the block's authoritative active benchmark ID list.
     """
     try:
+        if observation.get("format") == "pool-network-v1":
+            from .compact import validate_compact
+            return validate_compact(observation)
         return _validate_snapshot(observation)
     except (KeyError, TypeError, AttributeError) as error:
         raise ProtocolDataError(f"missing or malformed protocol field: {error}") from error

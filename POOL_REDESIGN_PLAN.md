@@ -26,7 +26,7 @@ This document incorporates the conversation's later clarifications. They superse
 | Member identity | Benchmarks, funds, credit, and limits belong to a member, independently of how many machines they operate. |
 | Work request | Each request offers exactly one compute family: CPU or GPU. It also declares the supported AWS verification compute type and available resources. |
 | Ownership | Assign a whole benchmark to one member. No other member takes it over. |
-| Member execution | Members organize their own machines. Pool-managed fleet distribution is outside this redesign. |
+| Member execution | A member's master may distribute nonces among machines compatible with the assignment's compute type, architecture, binary and runtime. Members manage internal communication, scheduling and recovery, then return one complete result and its proofs. |
 | Concurrency | At most two reserved or unfinished assignments per member, shared across CPU and GPU. |
 | Slot release | Release a slot when the benchmark becomes active, fails TIG solution verification, or definitively expires before verification. A rejected precommit also releases its reservation. |
 | Challenge selection | Among compatible active challenges in the offered CPU/GPU family, choose the one where the pool currently has the fewest qualifying bundles. Break equal counts uniformly at random. |
@@ -72,6 +72,26 @@ Decisions D1–D6 are resolved and incorporated throughout the design. D6 confir
 **D5 — resolved: per-member collateral multipliers apply to new benchmarks only.** The operator can set and change each member's multiplier in [0, 1]. Multiply the normal required collateral by that value. Capture it when reserving a new benchmark; later changes cannot reduce or increase existing holds, including reservations awaiting submission or reconciliation. A multiplier of 1 requires the full base collateral; 0 requires no member collateral. Release or forfeit the amount actually reserved for that benchmark. The multiplier does not change qualifying credit, reward weighting, slot limits, or the timing of collateral finalization.
 
 **D6 — resolved: confirm handover; return collateral if the member was never given the work.** The pool must confirm that the member received the complete benchmark assignment. Implement this with an authenticated acknowledgement from the member's client, durably recorded by the pool before execution starts. Making work available for retrieval alone does not establish handover. If TIG accepts a precommit but handover never completes before expiry, release the slot on definitive expiry and return the recorded collateral at the existing end-of-X+2 finalization point once the outcome and handover record are reconciled. Submission costs remain the operator's responsibility. Once handover is confirmed, the member is responsible for all subsequent failures, including pool infrastructure failures. A lost response after the acknowledgement was committed does not undo handover; recover the recorded confirmation through an idempotent retry or status lookup.
+
+**D7 — resolved on 9 October: retain minimal pool evidence.** Members download
+algorithm archives from TIG's public GitHub sources; the pool keeps checked
+URL/hash metadata. Validate current network data, then retain pool credit
+inputs and compact selection references. Keep benchmark reporting-round
+mappings while available, and fetch final relevant reports after X+2 and the
+applicable reporting window close. Preserve ownership, exact per-block credit,
+financial records and final decisions. Existing full snapshots may retire only
+after backed compact replacement and completed reconciliation/credit. Missing
+blocks remain settlement holds. See [lean storage](docs/LEAN_STORAGE.md).
+
+**D8 — clarified on 11 October: member-managed master coordination.** The pool
+communicates with a member's master through the existing whole-benchmark API.
+Members arrange communication and work distribution among their own compatible
+machines. Treat `capacity.workers` as available concurrent nonce computations
+for that offer, including member-managed remote capacity. Keep one immutable
+result, one member owner and one slot per unfinished benchmark. The master saves
+the required evidence and supplies authoritative sampled proofs. No pool fleet
+registry or helper transport is required. The official reference worker remains
+a single-machine implementation. See [master integration](docs/MEMBER_MASTER_V2.md).
 
 Implementation defaults proposed for the plan, rather than additional economic rules:
 
@@ -158,7 +178,12 @@ Suggested modules under `tig-pool/pool_manager/pool_v2/`:
 
 These names are proposed destinations, not existing files. Keep financial calculations and selection functions independent of HTTP clients and background loops so they can be tested directly.
 
-Run collection independently of the member API and benchmark scheduler, so their restarts or pauses do not interrupt accounting history. Keep durable raw observations and a redundant collector in a separate failure domain, with deduplication by block ID. Back up the database and observation store; a backup can restore captured data but cannot recreate a block that no collector observed.
+Run block collection independently of the member API and benchmark scheduler,
+so their restarts or pauses do not interrupt accounting history. Validate the
+full current network and retain compact pool inputs and selection references
+under D7, with deduplication by block ID and a redundant collector in a separate
+failure domain. Back up captured data; a backup cannot recreate an unobserved
+block. Fetch final reports for unresolved obligations at their deadline.
 
 Only the coordinator creates benchmarks; only the ledger posts money movements; only the settlement worker finalizes round allocations. Background tasks use durable records with leases and unique operation IDs. Recover expired task leases after crashes without repeating completed financial actions. Expiry of a worker lease does not prove that an external submission or transfer was never sent; fence stale workers and reconcile uncertain effects before another worker submits or releases funds.
 
@@ -220,23 +245,31 @@ These states also apply when the multiplier is zero. Record the reservation and 
 
 ### Member protocol and reference client
 
-Expose a versioned member API, for example:
+Use the implemented [member API 2.0](docs/MEMBER_API_V2.md):
 
 | Endpoint | Purpose |
 |---|---|
+| `GET /api/v2/capabilities` | Read API version, assignment unit and work availability. |
 | `POST /api/v2/work-requests` | Offer CPU or GPU resources and request a whole benchmark. |
 | `GET /api/v2/work-requests/{id}` | Recover a pending request and its eventual assignment. |
-| `GET /api/v2/benchmarks/{id}` | Get complete settings, state, deadlines, and later sampled nonces. |
+| `POST /api/v2/work-requests/{id}/refresh` | Refresh an unexpired queued offer while its capacity remains available. |
+| `GET /api/v2/benchmarks/{id}` | Get the exact assignment, digest, state, handover confirmation and later sampled nonces. |
 | `POST /api/v2/benchmarks/{id}/acknowledge` | Confirm receipt of the complete assignment; record handover once and return its durable status. |
-| `POST /api/v2/benchmarks/{id}/result` | Submit the whole benchmark root and required quality data. |
+| `POST /api/v2/benchmarks/{id}/results` | Submit the whole benchmark root and required quality data. |
 | `POST /api/v2/benchmarks/{id}/proofs` | Submit proofs for TIG's sampled nonces. |
-| `POST /api/v2/benchmarks/{id}/audit-response` | Supply requested original evidence and commitment proofs. |
 
 Validate ownership for every endpoint. Validate payload size and expected nonce counts against the assigned benchmark. Identical resubmissions are harmless; conflicting submissions after a commitment are rejected. Persist uploads before acknowledging them, and submit to TIG from the durable queue.
 
 The client first saves the complete assignment locally, then acknowledges its benchmark ID and immutable payload digest using the member's execution credentials. The pool checks ownership, payload identity, and that the benchmark remains eligible to start, then commits the acknowledgement and handover timestamp atomically before responding. Reject a first acknowledgement after definitive expiry; a retry of an already committed acknowledgement returns the original confirmation. The client starts execution only after receiving or recovering that confirmation. Lost delivery responses do not establish handover; lost acknowledgement responses require retry or status reconciliation. Never infer non-delivery solely from an HTTP error. Accept results and proofs only for a benchmark with recorded handover, so execution cannot bypass this boundary.
 
 Publish the API contract and a single-machine reference runner by adapting useful parts of `innopool-slave`. It must demonstrate the full benchmark/root/proof lifecycle and recovery after restart. Members can replace it or distribute the work internally. Building a multi-machine scheduler for them is not part of the plan.
+
+Document the [member master contract](docs/MEMBER_MASTER_V2.md), including
+aggregate compatible capacity, confirmed handover, full nonce aggregation,
+immutable uploads, retained proof evidence and member responsibility for helper
+failures. The pool authenticates the master as the member and applies the shared
+two-slot limit across all of that member's pool-facing clients. Machine count
+and internal job assignment do not alter collateral or reward accounting.
 
 Members must retain required solution artifacts through final collateral settlement and pending evidence requests. The current fixed 14-day archive policy cannot be the new default for unresolved benchmarks.
 

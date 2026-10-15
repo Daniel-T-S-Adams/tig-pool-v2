@@ -136,10 +136,16 @@ class RevokeToken(Input):
 
 
 class Capacity(Input):
-    workers: StrictInt = Field(ge=1, le=4096)
+    """Compatible nonce concurrency offered by a member's pool-facing client."""
+
+    workers: StrictInt = Field(ge=1, le=4096, description=(
+        "Concurrent nonce computations available for this compute type across "
+        "local or member-managed machines. Member benchmark slots are counted separately."))
 
 
 class WorkRequest(Input):
+    """One member-owned benchmark offer; members coordinate their own machines."""
+
     request_key: StrictStr = Field(min_length=1, max_length=128)
     resource: Literal["CPU", "GPU"]
     compute_type: StrictStr = Field(max_length=32)
@@ -688,7 +694,10 @@ def create_app(settings):
         value.pop('preflight',None)
         return response(value)
 
-    @app.post("/api/v2/work-requests", dependencies=[Depends(compatible)])
+    @app.post("/api/v2/work-requests", dependencies=[Depends(compatible)], description=(
+        "Request one whole benchmark for the authenticated member. A member's master "
+        "may distribute nonce computation across machines compatible with the offered "
+        "compute type. The member manages that coordination and returns one complete result."))
     def work_request(body: WorkRequest, member_id=Depends(principal)):
         if not settings.work_enabled or controls.blocked(database):
             raise HTTPException(503, "new work is currently disabled")
@@ -708,15 +717,22 @@ def create_app(settings):
     def benchmark_status(identity: str, member_id=Depends(principal)):
         return response(member_protocol.get(database, identity, member_id))
 
-    @app.post("/api/v2/benchmarks/{identity}/acknowledge", dependencies=[Depends(compatible)])
+    @app.post("/api/v2/benchmarks/{identity}/acknowledge", dependencies=[Depends(compatible)], description=(
+        "Confirm durable receipt of the exact assignment. Member responsibility starts "
+        "with confirmed handover, including when computation is delegated to helper machines."))
     def handover(identity: str, body: Acknowledge, member_id=Depends(principal)):
         return response(member_protocol.acknowledge(database, identity, member_id, body.assignment_digest))
 
-    @app.post("/api/v2/benchmarks/{identity}/results", dependencies=[Depends(compatible)])
+    @app.post("/api/v2/benchmarks/{identity}/results", dependencies=[Depends(compatible)], description=(
+        "Store one whole-benchmark Merkle root and all nonce qualities in nonce order. "
+        "A member's master aggregates any helper outputs before uploading. "
+        "A stored response acknowledges pool storage; TIG activation is confirmed separately."))
     def result_upload(identity: str, body: dict, member_id=Depends(principal)):
         return response(member_protocol.results(database, identity, member_id, body))
 
-    @app.post("/api/v2/benchmarks/{identity}/proofs", dependencies=[Depends(compatible)])
+    @app.post("/api/v2/benchmarks/{identity}/proofs", dependencies=[Depends(compatible)], description=(
+        "Store proofs for exactly TIG's authoritative sampled nonces against the committed "
+        "whole-benchmark root. The member's master retains the required output evidence."))
     def proof_upload(identity: str, body: dict, member_id=Depends(principal)):
         return response(member_protocol.proofs(database, identity, member_id, body))
 

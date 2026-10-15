@@ -15,6 +15,8 @@ from .selection import COMPUTE_FAMILIES, NoCompatibleWork, choose, references
 
 
 def _offer(resource, compute_type, capacity):
+    """Validate one compute offer; capacity may span member-managed machines."""
+
     if resource not in ("CPU", "GPU") or COMPUTE_FAMILIES.get(compute_type) != resource:
         raise FundsError("offer must specify one compatible CPU or GPU verification compute type")
     if not isinstance(capacity, dict) or set(capacity) != {"workers"} or type(capacity["workers"]) is not int or not 1 <= capacity["workers"] <= 4096:
@@ -101,7 +103,7 @@ def reserve_next(database, player_id, *, now, max_age=120):
         cursor.execute("SELECT id FROM observed_blocks ORDER BY height DESC LIMIT 1")
         if cursor.fetchone()["id"] != block_id:
             raise ProtocolDataError("new block arrived before work reservation")
-        cursor.execute("SELECT 1 FROM observation_alerts WHERE kind='conflicting-block' AND height=%s", (snapshot.height,))
+        cursor.execute("SELECT 1 FROM unresolved_observation_conflicts WHERE kind='conflicting-block' AND height=%s", (snapshot.height,))
         if cursor.fetchone():
             raise ProtocolDataError("current snapshot has conflicting evidence")
         cursor.execute("UPDATE work_requests SET state='expired' WHERE state='queued' AND expires_at<=clock_timestamp()")

@@ -1,18 +1,61 @@
 # V2 operations and storage status
 
-Checked against the running services on **9 October 2026**. This is the current
-operations record. Older dated validation notes describe the state at the time
-of their checks; they do not override this record.
+**14 October update:** the corrected two-server mainnet CPU benchmark activated
+successfully at height **1383916**, around **11:35 UTC**. Results/proofs matched
+TIG exactly; no verification failure was recorded. Master/helper saved 4,000
+outputs (1,968/2,032), with results uploaded 12m40s after handover. Actual fee
+0.001 TIG and collateral hold 0.0004 TIG stayed within the additional approval.
+The earlier attempt failed because its runtime pin was outdated; both outcomes
+are preserved in [the trial record](MAINNET_CPU_TRIAL_20261014.md). The worker/runtime pair remains unchanged; the pool now runs the storage fix
+with official 0.0.8 CPU runtimes. All trial approvals
+are consumed/disabled; ordinary work is paused and settlement disabled.
+The [storage ordering fix](STORAGE_ORDERING_FIX_20261014.md) is deployed.
+All 26,050 historical blocks are converted; alert 2 has an immutable replay
+resolution. Fresh backup, actual restore and guarded redundant raw cleanup passed.
+
+Checked against the running services on **14 October 2026**. This is the current
+operations record. Wallet RPC recovery was checked on **12 October**; backup
+relocation, recovery verification and paired application activation passed
+on **13 October**, as recorded below. Older dated validation notes
+describe their own check state.
 
 ## Deployment and controls
+
+The [lean storage implementation](LEAN_STORAGE.md) was activated at 13:28 UTC
+on 13 October. It adds direct worker binary downloads,
+compact pool evidence, selective final report fetching and guarded legacy
+conversion. Production migrations are verified through 022. The matched worker,
+public installer, compatible readers and unchanged balances were checked.
+Historical conversion, backup/restore verification, guarded redundant cleanup
+and corrected CPU timing passed. See [the rollout record](LEAN_ROLLOUT_20261013.md).
+
+The corrected 14 October two-host `c003_a154` test passed all five possible tracks,
+including three 4,000-nonce assignments. The worst took 12m29s; all actual uploads and
+sampled proofs passed an isolated API replay. This remains unpaid verification.
+The subsequent [RPC routing repair](RPC_ROUTING_20261013.md) separates Base's
+finality/basic reads from Pocket's log queries and recovered custody freshness.
+
+On 11 October, local verification passed all 336 pool tests (paired worker and
+Chromium enabled), 33 worker v2 tests, 17 inherited worker tests and both pool
+accounting checks. A disposable upgrade, physical backup/restore and guarded
+cleanup rehearsal also passed. See [verification details](LEAN_STORAGE_VERIFICATION.md).
+These results do not change the last measured production state below.
+
+The 12 October [release candidate](RELEASE_CANDIDATE_20261012.md) finishes member
+onboarding and adds pending-file recovery/health tools. Its local suite passed
+370 pool tests without skips, the exact paired worker's 46 v2/17 inherited tests,
+and both accounting checks. Recovery capacity and combined production-copy
+backup/restore and paired application activation passed on 13 October.
+The backup health extension in `dfcfbf6` passed all 371 hosted tests.
+See [the recovery activation record](RECOVERY_VOLUME_20261013.md).
 
 | Item | Current state |
 |---|---|
 | Primary | Helsinki, `46.62.249.188`; website, API, coordinator and four observers |
 | Recovery | Nuremberg, `2.28.230.81`; database backups, WAL receiver and configuration copies |
-| Pool application | `8477509afafe80b59f8fa7752b5faa0f537fedb2`, tag `mainnet-abandoned-benchmark-expiry-20261009` |
-| Worker served by the API | `fd29279ce816c9f4e6e1416715971201c92775e0`, tag `mainnet-cpu-pilot-20261007` |
-| Schema | 19 verified migrations; no migration required for this cleanup |
+| Pool application | `59a3446add2804c7f4dc42309039d55f46bf1c96`, tag `mainnet-storage-ordering-20261014` |
+| Worker served by the API | `dddad9df9b0d051cf004a904fe7b7361f9816c43`, tag `mainnet-runtime-release-guard-20261014` |
+| Schema | 22 verified migrations deployed; 022 applied twice with earlier checksums unchanged |
 | Member funds | Enabled, with custody freshness checks still applying |
 | New work | Operator pause is recorded; effective `work_enabled=false`, configured `work_enabled=true` |
 | TIG submission adapter | Configured for existing work; this does not bypass the pause on new precommits |
@@ -26,7 +69,7 @@ head may also differ from the pinned worker above.
 
 The preceding operational cleanup passed all **299 pool tests**, including the
 paired worker and Chromium flows, and the hosted `pool-baseline` check. See
-[PR #38](https://github.com/Daniel-T-S-Adams/tig-pool-v2/pull/38). The current
+[PR #38](https://github.com/Daniel-T-S-Adams/tig-pool-v2/pull/38). The earlier
 abandoned-results expiry change passed the existing required hosted checks in
 [PR #40](https://github.com/Daniel-T-S-Adams/tig-pool-v2/pull/40). It requires no
 migration, dependency or worker change. Activated at 14:28 UTC on 9 October,
@@ -69,6 +112,15 @@ hardware and resource limits, and check that the whole protocol minimum fits
 inside the lifetime with time for result/proof exchange. The completed pilot
 does not establish that this CPU/algorithm combination can meet that deadline.
 
+The isolated [11 October CPU hardware check](CPU_HARDWARE_VERIFICATION.md)
+found that `poolminer1` had configured only one worker and one CPU on its
+eight-CPU ARM64 host. With an independent six-worker budget, a real 200-nonce
+knapsack benchmark completed in 20 minutes 35 seconds including setup and the
+probe/resume pause. Its results and three proofs passed the isolated pool API.
+The original job-scheduling algorithm did not finish a single nonce in a
+480-second probe. Production controls and the existing worker installation
+were unchanged; no real TIG submission was made.
+
 A **block gap** means that no complete, validated snapshot exists for a required
 TIG height. The snapshot supplies network qualifiers and the pool's protocol
 feed used to assign exact member credit and reconcile outcomes. It does not
@@ -101,17 +153,24 @@ be pending briefly while the regular recorder imports them.
 
 ## Wallet observation
 
-Custody observation last caught up successfully on 8 October at 15:12 UTC,
-through Base height `52340909`. The public Base RPC rejects or rate-limits the
-historical log requests needed to advance. A quiet, spaced request also failed;
-other tested public endpoints rejected historical reads or returned service
-errors. This is an RPC access failure, not evidence of a ledger balance mismatch.
+Wallet observation was repaired on **12 October 2026**. The primary API and
+observer now use the verified public Pocket Base endpoint. At 13:11 UTC the
+observer was reconciled and ready at Base **52510065**, recovering **169,056
+blocks** from the previously stuck cursor. Account/journal fingerprints and the
+member's 0.9995 TIG available balance were unchanged; every sampled audit passed.
 
-The observer now spaces calls by two seconds, polls at sixty seconds and records
-the failed RPC method plus numeric HTTP/RPC status without exposing provider
-credentials. It still needs a usable Base endpoint for historical `eth_call`
-and `eth_getLogs`. New spending remains subject to custody reconciliation.
-No replacement provider or credential was configured during this cleanup.
+The previous `mainnet.base.org` connection had rejected historical reads since
+the earlier 9 October record. Candidate checks verified a known deposit/receipt,
+complete historical ranges and canonical anchors before the switch. Catch-up
+used 1,000-block batches with 0.25-second request spacing and one-second polls;
+steady polling is now 30 seconds. Older supplier targets and rate limits are
+still rejected under the existing freshness/reconciliation rules.
+
+Encrypted settings, the exact observer unit and protected rollback files were
+copied to Germany and verified. No new provider account, deposit, paid benchmark,
+application release or schema change was made during that repair. New work
+stayed paused; the later corrected CPU activation is recorded above. See
+[the recovery record](RPC_RECOVERY_20261012.md).
 
 ## What is stored, and why
 
@@ -144,12 +203,37 @@ and the measured database breakdown.
 The approved evidence policy keeps raw blocks and reports for four rounds and
 wallet/fee captures for thirty days, with obligation, credit-coverage and backup
 guards. It expires database payloads and prunes eligible local **block** spool
-files. Report, wallet and funding spool files do not yet have equivalent file
-pruning. Expired database rows free space for PostgreSQL reuse; returning that
+files. Report spool files now have backed-payload pruning. Wallet/funding files
+continue to use their existing evidence controls. Expired database rows free space for PostgreSQL reuse; returning that
 space to the operating system requires a separately planned table rewrite.
 See [evidence retention](EVIDENCE_RETENTION.md).
 
-### Measured footprint
+### Current footprint — 14 October, 17:31 UTC
+
+Binary GiB after completed cleanup and archive relocation:
+
+| Host / data | Size |
+|---|---:|
+| Primary allocated database | 35.77 GiB |
+| Primary block spool | 0.67 GiB |
+| Primary report spool | 0.18 GiB |
+| Primary custody spool | 0.31 GiB |
+| Primary funding spool | 6.98 GiB |
+| Primary free disk | 90.34 GiB |
+| Recovery newest base on volume | 23.48 GiB |
+| Recovery two older bases on root | 44.47 GiB |
+| Recovery required WAL | 97.63 GiB |
+| Recovery volume free disk | 64.59 GiB |
+| Recovery root free disk | 89.91 GiB |
+
+Block/report spool allocation fell by about **33 GiB**. Allocated database
+space includes reusable pages; its logical replacement payloads are much
+smaller. Required WAL includes the cleanup activity until the relevant older
+bases retire under normal retention. The [base placement record](BACKUP_BASE_ARCHIVES_20261014.md)
+explains the two filesystem reserves and unchanged three-base/WAL policy.
+
+### Historical footprint — 9 October
+
 
 Approximate binary GiB, measured 9 October before the report catch-up:
 
@@ -171,40 +255,45 @@ import and subsequent backups can change the footprint during catch-up.
 
 ## Recovery protection and remaining cleanup
 
-The continuous WAL receiver and transfer jobs are active. The daily 9 October
-base backup completed at 03:42 UTC with archive checksums and required WAL
-verified. Three verified daily bases are retained with WAL back to the oldest
-base. The actual point-in-time restore rehearsal passed on 4 October; today's
-checksum verification is not a new restore rehearsal.
+The current recovery path is verified database bases plus continuous WAL,
+encrypted release/configuration copies and bounded snapshots of the four
+pending protocol spools. The 200 GiB EXT4 volume **107125099** holds the newest base,
+WAL and pending snapshots through persistent guarded mounts. Two older verified
+bases use the recovery server's existing root disk. The catalogue/retention and
+per-filesystem reserve checks cover both locations; see
+[the 14 October placement record](BACKUP_BASE_ARCHIVES_20261014.md). Three verified
+bases and WAL back to the oldest required base remain under the existing
+retention policy. Recovery's pool API and independent TIG collectors remain
+inactive; backup protection does not recreate a block never captured.
 
-The earlier cleanup application and encrypted configuration arrived on Germany
-at 13:24 UTC. The current expiry release and encrypted settings were exported
-at 14:29 UTC and copied there, with all exported-file checksums verified. This configuration copy
-does not advance the database recovery point. The primary ledger audit passed
-after the update and catch-up; new work remained paused throughout.
+On **14 October**, base `2026-10-14T134951Z` passed data checksums and WAL
+parsing. A separate actual restore used the verified 03:13 UTC base plus 229
+later WAL segments to reach `innopool_storage_20261014_134952`. All 26,050
+compact copies, all 47 protected table fingerprints, the ordering resolution,
+retained alert and 22 migration checksums passed. The disposable database was
+removed afterward. The encrypted configuration export
+`configuration-daily-2026-10-14T134952Z` was verified on Germany, including
+private decryption, all file hashes, the active pair, consumed trial approvals,
+RPC router and service/retention directories; temporary plaintext was removed.
 
-The former **full raw-evidence copy is disabled**, following its 8 October
-disk-reserve failure. Germany's independent block/report collectors have been
-inactive since 7 October. The old recovery health helper still expects those
-collectors and a full evidence copy; its overall result does not accurately
-describe the current backup-only host. Treat each backup job's evidence
-separately until that health profile is corrected.
+The old full raw-spool mirror stays disabled. The replacement pending-file
+protection covers blocks, reports, custody and funding, retains two verified
+snapshots and requires a durable WAL boundary plus five minutes of freshness.
+It was activated and verified on 13 October. See
+[pending evidence protection](PENDING_EVIDENCE_BACKUP.md) and
+[the recovery-volume record](RECOVERY_VOLUME_20261013.md).
 
-The proposed storage setup for discussion is:
+Historical compact conversion is complete. Guarded redundant raw/file/chunk
+cleanup completed after the new backup and actual restore checks. See
+[the storage ordering fix](STORAGE_ORDERING_FIX_20261014.md) for final counts
+and its immutable replay proof. Ordinary PostgreSQL expiry makes pages
+reusable; allocated database files and retained recovery bases do not
+immediately shrink to the live logical data size.
 
-1. Keep verified database bases plus WAL, and encrypted release/configuration
-   copies.
-2. Copy raw protocol manifests and content that are **still pending import**
-   separately, since they are outside the database recovery stream.
-3. Define the required freshness and disk reserve for that copy, and rehearse
-   restoring the database plus pending files together.
-4. Choose whether an independent TIG collector is also required. It protects
-   missed observations and needs its own storage; it is a separate decision
-   from copying the primary's files.
-
-This proposal is not installed. Re-enabling the existing full copy would add
-roughly 24 GiB of block/report files and consume space reserved for the next
-base backup. No raw evidence was deleted to make the job pass. Storage policy,
-RPC access and unresolved gaps remain open; keep new work paused while these
-are addressed. Reward claim/unlock/receipt and expense integration, a funded
-takeover, timely CPU completion and GPU execution also remain unvalidated.
+New work remains paused and settlement disabled. Round-137 gaps at **1375817**
+and **1376650** still prevent exact coverage. Reward claim/unlock/receipt and
+expense integration, a funded takeover and real GPU execution remain
+unverified. The corrected two-server CPU benchmark **did** activate on TIG;
+point checks showed no pool qualifiers, so it does not demonstrate a reward
+cycle or profitability. The RPC router remains subject to custody freshness
+and ordinary availability gates.

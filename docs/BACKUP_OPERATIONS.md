@@ -1,7 +1,7 @@
 # Mainnet backup and recovery operations
 
 The primary is **46.62.249.188** in Helsinki; the independent recovery host is
-**2.28.230.81** in Nuremberg. Checked **9 October 2026**: recovery is currently
+**2.28.230.81** in Nuremberg. Checked **14 October 2026**: recovery is currently
 a backup host, with its API and independent block/report collectors inactive.
 The primary has member funds enabled, new work paused and settlement disabled.
 See [operations status](OPERATIONS_STATUS.md) for the exact release and controls.
@@ -14,15 +14,51 @@ See [operations status](OPERATIONS_STATUS.md) for the exact release and controls
 | Compressed database backup | Germany, daily around 03:10 UTC | Entire primary PostgreSQL cluster; data checksums and required WAL are checked before publication. |
 | Encrypted configuration export | Primary, daily around 02:30 UTC | Credentials, TLS key/certificate, service configuration, operational helpers, exact application and retained website assets. |
 | Configuration/archive pull | Germany, every five minutes | Published primary exports over restricted read-only SSH. |
-| Raw evidence copy | **Disabled** following the 8 October disk-reserve failure | The installed job would copy the full primary block/report spool; current pending files have no separate file-copy protection. |
-| Health checks | Installed helpers and timers | Primary checks and individual backup-job records remain useful; the old recovery overall check expects inactive collectors/full evidence copy and needs a corrected profile. |
+| Raw evidence copy | **Disabled** following the 8 October disk-reserve failure | The installed job would copy the full primary block/report spool; bounded pending-file protection is now active. |
+| Pending evidence snapshot | **Active and verified** on 13 October | Copies only pending block/report/custody/funding manifests and their referenced chunks, with a durable WAL boundary and two verified snapshots. |
+| Health checks | Installed helpers and timers | Checks database/WAL/settings/pending-file protection, actual destination reserves and inactive recovery pool services. |
+
+## Current capacity and cleanup — 14 October
+
+Historical conversion and guarded raw/file/chunk cleanup are complete. The
+actual restore verified all 26,050 compact copies and 47 protected table
+fingerprints. Block/report spool allocation fell by about 33 GiB. See
+[the storage ordering fix](STORAGE_ORDERING_FIX_20261014.md).
+
+The newest verified base, required WAL and pending files stay on the 200 GiB
+EXT4 volume. Two older bases use existing spare root disk; the catalogue,
+three-base retention and filesystem reserve checks cover both locations.
+Recovery health and fresh pending copying passed with about 65 GiB free on the
+volume and 90 GiB on root. No required WAL was removed to make space. See
+[base placement and verification](BACKUP_BASE_ARCHIVES_20261014.md).
+
+## Historical capacity update — 13 October
+
+The new 200 GiB EXT4 volume is in use for database/WAL archives and pending-file
+snapshots. A fresh verified base and combined production-copy restore passed;
+the obsolete original copy was removed only afterward. Root had about 135 GiB
+free and the volume 82 GiB free. The pending-file timer and corrected recovery
+health profile are active; health at 12:18 UTC was healthy with no issues.
+See [the full verification record](RECOVERY_VOLUME_20261013.md).
+
+The historical **12 October, 17:11 UTC** survey found about **15.0 GiB free on Germany**:
+three retained bases use about 44.0 GiB and required WAL about 75.7 GiB. The last
+successful verified base completed on **10 October at 03:46 UTC**; subsequent
+daily attempts failed the disk reserve check. The WAL stream remained active,
+but the stale base and low reserve were release blockers in that survey. A read-only retention
+plan found **zero eligible bases and zero eligible WAL segments**. Do not delete
+required recovery data or reduce the three-base policy to make the job pass.
+
+The owner attached the proposed volume on 13 October. Migration, a fresh base,
+combined restore and pending-file/health activation are complete. The detailed
+protection is described in [pending evidence protection](PENDING_EVIDENCE_BACKUP.md).
 
 The full evidence copy is not running. Its former interval was measured after
 completion, with no guarantee of five-minute freshness. Germany's collectors
 have been inactive since 7 October. Database WAL is a separate stream and
 cannot protect protocol files that have not entered the database, or supply a
-TIG block never observed. Pending-file protection and whether to run an
-independent collector are storage decisions still under discussion.
+TIG block never observed. Pending-file protection is active; whether to run an
+independent collector remains a separate storage and coverage decision.
 
 The backup connection uses a dedicated replication-only PostgreSQL role and an
 SSH account restricted to forwarding the primary's loopback database port.
@@ -53,6 +89,9 @@ clear a waiting transaction.
 ## Retention and resource limits
 
 The backup tool retains at least **three complete verified daily base backups**.
+The newest stays on the volume and older retained bases use the configured root
+archive. Archive copies are checksum verified before redundant sources are
+removed; the catalogue and WAL floor include both locations.
 Only after checking the retained archives may it remove older redundant bases
 and WAL preceding the oldest retained base on the same timeline. Different
 cluster identities or timelines stop automatic pruning. Partial WAL, timeline
@@ -63,7 +102,7 @@ A base backup or checksum verifier is limited to two CPUs and 768 MiB RAM.
 The WAL receiver uses at most a quarter CPU and 128 MiB. Evidence copying and
 configuration exports have separate systemd limits. Full evidence verification
 uses two CPUs and 1.5 GiB. These are on the dedicated recovery VM; no local
-benchmarking worker was started. The primary application slice was increased
+benchmarking worker was started. At the 9 October check, the primary application slice had been increased
 from one CPU to 1.5 CPUs, retaining its 2 GiB memory limit, after measured report
 processing fell behind. The dedicated primary has eight CPUs; its database
 retains its separate two-CPU/two-GiB ceiling.
@@ -79,8 +118,8 @@ Small membership and paused work do not reduce network-wide observation.
 The approved database/block-spool retention is described in
 [evidence retention](EVIDENCE_RETENTION.md). No new deletion or storage-policy
 change was made in the 9 October cleanup.
-The later 14:55 read-only [storage map](STORAGE_MAP.md) records the current sizes
-and explains the complete data path. All four pending import queues were empty
+The 9 October, 14:55 read-only [historical trace](STORAGE_MAP_20261009.md) records
+the sizes then. The [current storage map](STORAGE_MAP.md) explains the lean path. All four pending import queues were empty
 in that sample; the configured recovery raw-copy destination was absent.
 
 ## Inspect without moving funds
@@ -168,19 +207,23 @@ These are distinct tests. No funded mainnet takeover or token transfer occurred.
 
 - [x] Operator chose manual inspection on 6 October; external alerts remain
   disabled. No external destination has been configured.
-- [ ] Restore pending-file protection and correct recovery health to the
+- [x] Restore pending-file protection and correct recovery health to the
   agreed backup/collector profile; rehearse the database-plus-file restore.
-- [ ] Sufficient archive storage and a measured, obligation-aware retention plan.
+- [x] Recovery capacity, verified relocation and the three-base/WAL retention
+  plan checked on 13 October; completed lean cleanup and both filesystem
+  reserves verified on 14 October.
 - [ ] Funded takeover, uncertain-send recovery and concurrent/retried-request tests.
 - [x] Real member sign-in through Cloudflare on 6 October and the later mainnet
   CPU assignment/result upload. This does not prove timely TIG completion.
-- [ ] Timely mainnet CPU/GPU execution and live interruption/restart validation.
+- [x] Corrected master/helper knapsack benchmark activated on TIG on 14 October.
+- [ ] GPU execution, job-scheduling timing and live interruption/restart validation.
 - [ ] Reward claim/unlock/withdraw integration, final round attribution and
   expense/correction operations; backup completion does not complete these.
 - [x] Operator-approved mainnet budgets: 10 TIG for protocol-fee top-ups and
   0.0005 Base ETH for pool-wallet transaction fees, monitored manually.
-- [ ] Restore current mainnet custody reconciliation with a usable historical
-  Base RPC. Custody baseline and fee funding were initialized before the pilot.
+- [x] Historical custody catch-up repaired on 12 October; the 13 October RPC
+  router recovered freshness. Ordinary availability/freshness checks remain.
+  Scoped paid trial approvals are consumed/disabled.
 
 The backup mechanisms follow the PostgreSQL 18 documentation for
 [base backups](https://www.postgresql.org/docs/18/app-pgbasebackup.html),

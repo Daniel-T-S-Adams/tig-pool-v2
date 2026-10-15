@@ -4,9 +4,12 @@ import gzip
 import hashlib
 import json
 import os
+import stat
 from pathlib import Path
 import tempfile
 import uuid
+import fcntl
+from contextlib import contextmanager
 
 from .block_observer import _is_digest, _pack
 from .observation import read_archive, write_archive
@@ -22,11 +25,47 @@ class Spool:
         (self.directory / "chunks").mkdir(parents=True, exist_ok=True)
         (self.directory / "pending").mkdir(exist_ok=True)
         (self.directory / "recorded").mkdir(exist_ok=True)
+        (self.directory / "writing").mkdir(exist_ok=True)
+        # Root maintenance may initialize a spool before its collector starts.
+        # Known child directories must remain writable by the spool's owner.
+        for name in ('chunks', 'pending', 'recorded', 'writing'):
+            path = self.directory / name
+            if path.is_symlink():
+                raise ProtocolDataError('unsafe spool directory')
+            if os.geteuid() == 0:
+                owner = self.directory.stat()
+                os.chown(path, owner.st_uid, owner.st_gid, follow_symlinks=False)
         _sync(self.directory)
         _sync(self.directory.parent)
 
     def save(self, observation, metadata, error=None):
-        manifest, chunks, _ = _pack(observation, paged=self.paged)
+        if observation.get("format") == "pool-network-v1":
+            from .observation import canonical_json
+            raw = canonical_json(observation)
+            digest = hashlib.sha256(raw).hexdigest()
+            manifest, chunks = {"blob": digest}, {digest: gzip.compress(raw, mtime=0)}
+            metadata = {**metadata, 'block_height': observation['start']['block']['details']['height'],
+                        'block_id': observation['start']['block']['id']}
+        else:
+            manifest, chunks, _ = _pack(observation, paged=self.paged)
+        # Pin all chunks before writing any of them. Cleanup can then run
+        # without holding the capture thread behind a long directory scan.
+        pin = self.directory / 'writing' / (uuid.uuid4().hex + '.json.gz')
+        with spool_lock(self.directory):
+            write_archive(pin, {'digests': list(chunks)})
+            if (self.directory / '.gc-active').exists():
+                with (self.directory / '.gc-pins').open('a') as stream:
+                    stream.write(json.dumps(list(chunks)) + '\n')
+                    stream.flush()
+                    os.fsync(stream.fileno())
+        try:
+            return self._publish(manifest, chunks, metadata, error)
+        finally:
+            with spool_lock(self.directory):
+                pin.unlink()
+                _sync(self.directory / 'writing')
+
+    def _publish(self, manifest, chunks, metadata, error):
         for digest, compressed in chunks.items():
             directory = self.directory / "chunks" / digest[:2]
             directory.mkdir(exist_ok=True)
@@ -90,10 +129,11 @@ class Spool:
         return decode(saved["manifest"]), saved["metadata"], saved["error"]
 
     def recorded(self, path):
-        path = Path(path)
-        os.replace(path, self.directory / "recorded" / path.name)
-        _sync(self.directory / "recorded")
-        _sync(self.directory / "pending")
+        with spool_lock(self.directory):
+            path = Path(path)
+            os.replace(path, self.directory / "recorded" / path.name)
+            _sync(self.directory / "recorded")
+            _sync(self.directory / "pending")
 
     def pending(self):
         return sorted((self.directory / "pending").glob("*.json.gz"))
@@ -105,3 +145,54 @@ def _sync(path):
         os.fsync(descriptor)
     finally:
         os.close(descriptor)
+
+
+def _owned_descriptor(directory, name):
+    directory = Path(directory)
+    descriptor = os.open(directory / name, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+    try:
+        info = os.fstat(descriptor)
+        if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+            raise ProtocolDataError('unsafe spool control file')
+        if os.geteuid() == 0:
+            owner = directory.stat()
+            os.fchown(descriptor, owner.st_uid, owner.st_gid)
+            os.fchmod(descriptor, 0o600)
+        return descriptor
+    except BaseException:
+        os.close(descriptor)
+        raise
+
+
+def _control_file(directory, name):
+    """Create/reset a maintenance marker or journal with the collector's owner."""
+    descriptor = _owned_descriptor(directory, name)
+    try:
+        os.ftruncate(descriptor, 0)
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+@contextmanager
+def _lock(directory, name):
+    with os.fdopen(_owned_descriptor(directory, name), 'a') as stream:
+        fcntl.flock(stream, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(stream, fcntl.LOCK_UN)
+
+
+@contextmanager
+def spool_lock(directory):
+    """Serialize chunk publication and pruning, including unpublished captures."""
+    with _lock(directory, '.spool.lock'):
+        yield
+
+
+@contextmanager
+def pruning_lock(directory):
+    """Serialize maintenance runs without preventing live captures."""
+    with _lock(directory, '.pruning.lock'):
+        yield

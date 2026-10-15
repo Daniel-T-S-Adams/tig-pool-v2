@@ -36,6 +36,9 @@ class ReferenceIndex:
 
 def references(snapshot: Snapshot):
     """Index once per snapshot; equal scores use stable benchmark/array order."""
+    if snapshot.selection_references is not None:
+        return ReferenceIndex(snapshot.block_id, {key: value["bundle"]
+            for key, value in snapshot.selection_references.items()})
     best = {}
     for bundle in snapshot.bundles:
         key = (bundle.algorithm_id, bundle.track_id)
@@ -135,7 +138,9 @@ def _choose(snapshot, binary_rows, *, player_id, resource, compute_type, now,
         count = _integer(track_config.get("min_num_bundles", default_min), "track minimum bundles", 1)
         reference = best.values.get((algorithm_id, track_id))
         if reference:
-            parameters = deepcopy(snapshot.precommits[reference.benchmark_id]["details"]["hyperparameters"])
+            parameters = deepcopy(snapshot.selection_references[(algorithm_id, track_id)]["hyperparameters"]
+                if snapshot.selection_references is not None
+                else snapshot.precommits[reference.benchmark_id]["details"]["hyperparameters"])
             reference_evidence[track_id] = {"benchmark_id": reference.benchmark_id,
                 "active_index": reference.active_index, "quality": reference.quality}
         else:

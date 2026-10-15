@@ -124,7 +124,7 @@ class RetentionTests(DatabaseCase):
         with self.assertRaisesRegex(Exception, "append-only"):
             with self.db.transaction() as cursor:
                 cursor.execute("DELETE FROM observation_chunks WHERE digest=(SELECT digest FROM observation_chunks LIMIT 1)")
-        with self.assertRaisesRegex(Exception, "retention floor"):
+        with self.assertRaisesRegex(Exception, "raw capture still needs its evidence"):
             with self.db.transaction() as cursor:
                 cursor.execute("SET LOCAL pool_v2.retention TO 'on'")
                 cursor.execute("UPDATE capture_attempts SET manifest=%s WHERE height=31", (Json({"expired": {}}),))

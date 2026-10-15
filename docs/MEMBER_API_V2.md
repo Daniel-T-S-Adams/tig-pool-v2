@@ -1,7 +1,11 @@
 # Member benchmark protocol 2.0
 
 This contract pairs `pool_manager.pool_v2` with the separate `worker_v2`
-package in the user's `innopool-slave-v2` repository. All work routes require
+reference client in the user's `innopool-slave-v2` repository and compatible
+member-managed masters. Members may distribute a benchmark's nonce computation
+across their own compatible machines and return one complete result. They manage
+internal communication and scheduling. See the [master integration contract](MEMBER_MASTER_V2.md).
+All work routes require
 `Authorization: Bearer <member-token>` and `X-InnoPool-Version: 2.0`. A wrong or
 missing work-protocol version returns 426 before reserving funds. The pool's
 capabilities route reports `api_version`, `assignment_unit: whole-benchmark`
@@ -23,7 +27,13 @@ of token base units, with 18 decimal places per TIG.
 
 Each request offers only CPU or GPU. Verification compute type must match:
 `aws_g4dn` is GPU, while TIG's supported t3/t3a/t4g/c7i/c7a/c7g/m7i/m7a/m7g
-types are CPU. Capacity is 1–4096 workers. Persist the key before sending; reuse
+types are CPU. Capacity is 1–4096 concurrent nonce computations available for
+this compute type, including capacity across member-managed machines. Members
+check every participating machine's compatibility with the assigned compute
+type, architecture, algorithm binary and runtime. Capacity does not change the
+benchmark's minimum bundle count, reward weighting or the member's two-slot
+limit. The reference worker's `workers` setting controls local concurrency.
+Persist the key before sending; reuse
 with different inputs returns 409. Repeating the same offer returns its original
 request, even after expiry. The default offer lifetime is 60 seconds.
 
@@ -34,7 +44,9 @@ immutable reservation, collateral, shared operator fee commitment, member slot
 and durable precommit intent using one complete current block's selection.
 
 Member slots are shared across CPU and GPU. A queued request has not consumed
-a slot or funds. Returned state becomes `reserved` while acceptance is pending
+a slot or funds. All masters and worker installations for the same member share
+that limit; helper machines consume no additional pool slots. Returned state
+becomes `reserved` while acceptance is pending
 and `assigned` when complete benchmark data is available. `active`,
 `verification_failed`, `expired`, `rejected` and `cancelled` end that work
 request. An uncertain submission never becomes eligible for a resend or refund
@@ -118,12 +130,17 @@ TIG responses in that test are simulated. Separate worker tests check durable
 restart recovery and reproduce a recorded public TIG Merkle root.
 
 `GET /api/v2/artifacts/{sha256}` serves the exact saved public algorithm
-archive. The worker verifies it against the assignment's checksum before
+archive for legacy assignments. The storage cleanup gives new assignments
+a direct TIG/GitHub URL and saves only checked binary metadata. The worker
+verifies either source against the assignment's checksum before
 extracting the expected named library. It does not require a token: these are
 already-public TIG algorithm binaries, and no member files are served.
+See [lean storage](LEAN_STORAGE.md); direct downloads require the paired worker
+update; the matched pair was activated on mainnet on 13 October.
 
-CI and the served mainnet worker pin are
-`fd29279ce816c9f4e6e1416715971201c92775e0`, tag
-`mainnet-cpu-pilot-20261007`. The deployed pool application is recorded in
+CI pins worker `dddad9df9b0d051cf004a904fe7b7361f9816c43` for direct-download
+and member-master regression checks. Mainnet serves that worker under tag
+`mainnet-runtime-release-guard-20261014`. The deployed pool application is recorded in
 [operations status](OPERATIONS_STATUS.md). Simulated pairing tests do not prove
-timely CPU/GPU execution or successful mainnet activation.
+timely CPU/GPU execution. The separate corrected master/helper mainnet trial
+activated on TIG on 14 October; reward-cycle verification remains open.

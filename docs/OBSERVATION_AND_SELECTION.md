@@ -8,6 +8,13 @@ coverage, unresolved gaps and deployment controls.
 
 ## Collection and recovery
 
+The storage cleanup implementation saves validated pool inputs and best network
+reference summaries. It retains legacy readers and a guarded backfill path.
+See [lean storage](LEAN_STORAGE.md) for fields and deployment requirements.
+It was activated on 13 October; see [rollout status](LEAN_ROLLOUT_20261013.md).
+The full-snapshot encoding below describes the historical format that remains
+readable during conversion. New successful captures use one compact blob.
+
 `tools/observe_tig_v2.py` runs separately from the API and scheduler. Its capture
 thread saves raw evidence to a local spool before a separate recorder thread
 touches PostgreSQL. A database outage, lock or recovery backlog cannot stop the
@@ -39,6 +46,7 @@ service environment and run, for example:
 
 ```sh
 python3 tools/observe_tig_v2.py --collector primary \
+  --pool-player-id YOUR_POOL_ADDRESS \
   --spool /var/lib/innopool-v2/observations --launch-height YOUR_START_HEIGHT
 ```
 
@@ -129,7 +137,9 @@ contiguous cursor past it. This was a read-only test, with no member liabilities
 
 The primary collector now runs continuously and the coordinator performs
 current-head checks before precommit submission. Database backup/restore
-preparation is installed. The operator chose manual health inspection rather
-than external alerts. Redundant collection and pending-file recovery protection
-are currently inactive; gaps and storage remain the open cleanup described in
+protection is active, including verified bases, continuous WAL and bounded
+pending-file snapshots. The operator chose manual health inspection rather
+than external alerts. Independent recovery collectors remain inactive. The
+storage ordering conflict is resolved; the two historical round-137 gaps remain
+as described in
 [operations status](OPERATIONS_STATUS.md).
