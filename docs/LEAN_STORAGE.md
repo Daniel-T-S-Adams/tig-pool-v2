@@ -67,7 +67,18 @@ conversion of historical full captures to that format remains.
 
 Deploy every collector with this change at once: a legacy full capture and a
 pool-scoped capture of the same block carry different block identities and
-would be reported as a conflicting observation at that height.
+would be reported as a conflicting observation at that height. A restarted
+collector resumes after the newest recorded block instead of capturing the
+current head again. The 15 October rollout switched before that guard existed
+and recorded height 1385323 twice, once compact and once scoped. Such a
+same-block format conflict is resolved under the policy
+`format-boundary-projection-v1` (migration 026): the resolution is appended
+only when the block identity, configuration, the pool's feed, bundles,
+qualifier counts and credit, the pool's own algorithm counts, the algorithm,
+binary and challenge records, the pool's OPoW row and the active benchmark
+list all agree between the two captures. The alert, both captures and the
+original block identity stay immutable; a later genuine conflict at the same
+height still blocks use.
 
 ## Selection references
 
@@ -111,8 +122,8 @@ cached fetch at the round transition.
 
 ## Existing archive cleanup
 
-Apply the additive migrations through 025 and the updated runtime/observer
-grants; 020 to 022 are already deployed.
+Apply the additive migrations through 026 and the updated runtime/observer
+grants; 020 to 025 are deployed since 15 October.
 Install all collector changes before pruning so writing-chunk pins protect
 captures during maintenance. The old deployed reader cannot read the new
 compact format; rollback must retain a reader that understands it.

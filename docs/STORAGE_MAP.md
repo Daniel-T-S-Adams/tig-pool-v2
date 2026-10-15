@@ -8,10 +8,10 @@ recovery is Nuremberg `2.28.230.81`. The ordering conflict is resolved and all
 cleanup counts and measurements. The previous full-network storage survey is
 preserved as [the historical 9 October trace](STORAGE_MAP_20261009.md).
 
-The pool-scoped capture branch replaces the per-block whole-network read with
-six responses and an on-demand reference read, and reuses checked binaries
-across reservations; the sources and measurements below describe only the
-running release.
+Since 15 October the deployed pool-scoped capture replaces the per-block
+whole-network read with six responses and an on-demand reference read, and
+reuses checked binaries across reservations; the sources and measurements
+below describe the 14 October release and have not been re-measured.
 
 ## Data sources and contents
 

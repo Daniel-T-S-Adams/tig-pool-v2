@@ -6,6 +6,7 @@ import hashlib
 from psycopg2.extras import Json
 
 from .block_observer import BlockStore, _semantic, _unpack
+from .boundary_conflicts import POLICY as BOUNDARY_POLICY, projection_proof
 from .compact import FORMAT, compact_observation
 from .database import lock
 from .observation import canonical_json
@@ -70,7 +71,13 @@ def ordering_proof(legacy, compact, source_digest):
             'complete_network_replay_matches': True}
 
 
-def resolve(database, *, alert_id, conflicting_attempt_id, actor, reason):
+PROOFS = {POLICY: ordering_proof, BOUNDARY_POLICY: projection_proof}
+
+
+def resolve(database, *, alert_id, conflicting_attempt_id, actor, reason, policy=POLICY):
+    """Append one immutable resolution for a conflicting capture under the named policy."""
+    if policy not in PROOFS:
+        raise ValueError('unknown conflict resolution policy')
     if type(alert_id) is not int or alert_id <= 0:
         raise ValueError('a positive conflict alert ID is required')
     if not isinstance(actor, str) or not actor.strip() or not isinstance(reason, str) or not reason.strip():
@@ -80,7 +87,7 @@ def resolve(database, *, alert_id, conflicting_attempt_id, actor, reason):
         cursor.execute('SELECT * FROM observation_conflict_resolutions WHERE alert_id=%s', (alert_id,))
         previous = cursor.fetchone()
         if previous:
-            if (str(previous['conflicting_attempt_id']), previous['actor'], previous['reason']) != (str(conflicting_attempt_id), actor.strip(), reason.strip()):
+            if (str(previous['conflicting_attempt_id']), previous['actor'], previous['reason'], previous['policy']) != (str(conflicting_attempt_id), actor.strip(), reason.strip(), policy):
                 raise ProtocolDataError('conflict already has a different immutable resolution')
             return dict(previous)
         cursor.execute('SELECT * FROM observation_alerts WHERE id=%s', (alert_id,))
@@ -100,11 +107,11 @@ def resolve(database, *, alert_id, conflicting_attempt_id, actor, reason):
             (block['height'], str(conflicting_attempt_id), attempt['error']))
         if not cursor.fetchone():
             raise ProtocolDataError('conflicting capture provenance is missing')
-        proof = ordering_proof(_unpack(cursor, block['manifest']), _unpack(cursor, attempt['manifest']), block['semantic_digest'])
+        proof = PROOFS[policy](_unpack(cursor, block['manifest']), _unpack(cursor, attempt['manifest']), block['semantic_digest'])
         cursor.execute('''INSERT INTO observation_conflict_resolutions
             (alert_id,block_id,original_attempt_id,conflicting_attempt_id,policy,actor,reason,proof)
             VALUES (%s,%s,%s,%s,%s,%s,%s,%s) RETURNING *''',
-            (alert_id, block['id'], block['attempt_id'], conflicting_attempt_id, POLICY, actor.strip(), reason.strip(), Json(proof)))
+            (alert_id, block['id'], block['attempt_id'], conflicting_attempt_id, policy, actor.strip(), reason.strip(), Json(proof)))
         result = dict(cursor.fetchone())
         cursor.execute("SELECT contiguous_height FROM observation_stream WHERE name='tig'")
         BlockStore(database)._advance(cursor, cursor.fetchone()['contiguous_height'])
