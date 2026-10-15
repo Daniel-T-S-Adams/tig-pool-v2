@@ -83,8 +83,19 @@ Two changes are prepared on `operations/format-boundary-resolution`:
   captures and the original identity stay immutable, and a later genuine
   conflict at the same height still blocks use.
 
-The resolution of alert 5 is applied after that change is reviewed, merged,
-and deployed as a schema-only release.
+That change merged as PR #47 and was deployed at **11:51 UTC** as pool
+`be87fdc5c2ede719618ff9701594ad0944d45211`, tag
+`mainnet-format-boundary-resolution-20261015`, with migration 026 applied
+behind restore point `innopool_format_boundary_20261015` (LSN `3F/A67689C0`);
+the worker pair, grants and financial digest were unchanged. The restarted
+collector logged that it resumed after the recorded head at 1385372 and
+captured each later height exactly once. The first resolution attempt was
+refused by the proof itself: the live scoped capture lists 721 algorithm rows,
+94 of them inactive with null block data, while the compact projection stores
+the 627 active ones, so the comparison now uses the validated active algorithm
+and challenge tables on both sides. The corrected proof matched all fourteen
+compared sections of the live captures in a read-only dry run before it was
+released and applied.
 
 ## Open items
 

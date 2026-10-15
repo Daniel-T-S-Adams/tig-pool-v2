@@ -35,6 +35,12 @@ class BoundaryProjectionTests(unittest.TestCase):
             data = network_observation()
             original = compact_observation(deepcopy(data), identity_version=version)
             conflicting = canonical_observation(scoped(data, WALLET))
+            # The live API also lists inactive algorithms and challenges without block data;
+            # the compact projection stores only the block's active records.
+            conflicting['algorithms']['codes'].append({'id': 'retired', 'state': {'banned': True, 'round_active': 1},
+                                                       'details': {'challenge_id': 'c1', 'name': 'retired'}, 'block_data': None})
+            conflicting['challenges']['challenges'].append({'id': 'c9', 'config': {'type': 'cpu', 'active_tracks': {}},
+                                                            'state': {'round_active': 1}, 'block_data': None})
             digest = _semantic(validate_snapshot(original), original)
             proof = projection_proof(original, conflicting, digest)
             self.assertEqual(proof['policy'], POLICY)
