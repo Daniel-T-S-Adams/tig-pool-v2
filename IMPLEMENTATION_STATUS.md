@@ -31,9 +31,14 @@ the volume 82 GiB free. The [14 October archive placement](docs/BACKUP_BASE_ARCH
 the final `f5f1028` release also passed all 371 hosted tests. See
 [the recovery update](docs/RECOVERY_VOLUME_20261013.md).
 
-The pool-scoped block capture, on-demand selection references and verified-binary
-reuse are implemented on `cleanup/pool-scoped-capture` with additive migrations
-024 and 025; they are not deployed. See [lean storage](docs/LEAN_STORAGE.md).
+The pool-scoped block capture, on-demand selection references, verified-binary
+reuse, bounded missing-block tolerance and Community Pool branding were merged
+to `main` and deployed on 15 October as pool `4e64bf3` with worker `c6eccfb`
+and migrations 023 to 025. The collector switch recorded height 1385323 in both
+formats; the format-boundary resolution policy and collector resume guard
+(migration 026) are prepared to resolve it. See
+[the rollout record](docs/POOL_SCOPED_ROLLOUT_20261015.md) and
+[lean storage](docs/LEAN_STORAGE.md).
 
 The 11 October [member master contract](docs/MEMBER_MASTER_V2.md) documents
 member-managed nonce distribution across compatible machines using the existing

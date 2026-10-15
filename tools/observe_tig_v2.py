@@ -79,6 +79,17 @@ def main(argv=None):
     drainer = threading.Thread(target=drain, name="observation-recorder", daemon=True)
     drainer.start()
     last_id, captured = None, 0
+    # A restarted collector resumes after the newest recorded block. Capturing
+    # that head again in a newer format would conflict with its stored identity.
+    try:
+        with database.transaction() as cursor:
+            cursor.execute("SELECT id,height FROM observed_blocks ORDER BY height DESC LIMIT 1")
+            latest = cursor.fetchone()
+        if latest:
+            last_id = latest["id"]
+            log.info("resuming after recorded block %s at height %s", latest["id"], latest["height"])
+    except Exception:
+        log.exception("newest recorded block unavailable; the current head will be captured")
     while not stop.is_set():
         # Only this thread captures live data. A database outage, lock, or replay
         # backlog is confined to the separate recorder and cannot stall capture.

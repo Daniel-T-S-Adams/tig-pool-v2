@@ -1,5 +1,18 @@
 # V2 operations and storage status
 
+**15 October update:** `main` now carries every ready feature, and the pair
+pool `4e64bf3` (tag `mainnet-pool-scoped-capture-20261015`) with worker
+`c6eccfb` (tag `mainnet-library-cache-20261015`) was deployed at **11:02 UTC**
+with additive migrations 023 to 025 behind restore point
+`innopool_pool_scoped_20261015`. The financial digest was unchanged before and
+after. The collector now records only the pool's own feed per block; the first
+scoped captures at heights 1385324 onward were complete and credited. The
+restart re-captured height **1385323**, already recorded compact, so that
+height holds one unresolved conflicting-block alert (alert 5). New work stays
+paused and settlement disabled; neither gate depends on that height. The
+resolution policy and the collector resume guard are in
+[the rollout record](POOL_SCOPED_ROLLOUT_20261015.md).
+
 **14 October update:** the corrected two-server mainnet CPU benchmark activated
 successfully at height **1383916**, around **11:35 UTC**. Results/proofs matched
 TIG exactly; no verification failure was recorded. Master/helper saved 4,000
@@ -24,7 +37,7 @@ describe their own check state.
 The [lean storage implementation](LEAN_STORAGE.md) was activated at 13:28 UTC
 on 13 October. It adds direct worker binary downloads,
 compact pool evidence, selective final report fetching and guarded legacy
-conversion. Production migrations are verified through 022. The matched worker,
+conversion. Production migrations are verified through 025 since 15 October. The matched worker,
 public installer, compatible readers and unchanged balances were checked.
 Historical conversion, backup/restore verification, guarded redundant cleanup
 and corrected CPU timing passed. See [the rollout record](LEAN_ROLLOUT_20261013.md).
@@ -53,9 +66,9 @@ See [the recovery activation record](RECOVERY_VOLUME_20261013.md).
 |---|---|
 | Primary | Helsinki, `46.62.249.188`; website, API, coordinator and four observers |
 | Recovery | Nuremberg, `2.28.230.81`; database backups, WAL receiver and configuration copies |
-| Pool application | `59a3446add2804c7f4dc42309039d55f46bf1c96`, tag `mainnet-storage-ordering-20261014` |
-| Worker served by the API | `dddad9df9b0d051cf004a904fe7b7361f9816c43`, tag `mainnet-runtime-release-guard-20261014` |
-| Schema | 22 verified migrations deployed; 022 applied twice with earlier checksums unchanged |
+| Pool application | `4e64bf32cfb124bef8ea1c526eb6ed3f9ede45bc`, tag `mainnet-pool-scoped-capture-20261015` |
+| Worker served by the API | `c6eccfb4f7bf4fc1ceb448f80983dd954bfc99ef`, tag `mainnet-library-cache-20261015`; installer bytes unchanged |
+| Schema | 25 verified migrations deployed; 023 to 025 applied twice on 15 October with earlier checksums unchanged |
 | Member funds | Enabled, with custody freshness checks still applying |
 | New work | Operator pause is recorded; effective `work_enabled=false`, configured `work_enabled=true` |
 | TIG submission adapter | Configured for existing work; this does not bypass the pause on new precommits |

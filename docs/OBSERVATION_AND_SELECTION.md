@@ -15,7 +15,7 @@ It was activated on 13 October; see [rollout status](LEAN_ROLLOUT_20261013.md).
 The full-snapshot encoding below describes the historical format that remains
 readable during conversion. New successful captures use one compact blob.
 
-The pool-scoped capture on `cleanup/pool-scoped-capture` reads, each block, the
+Since 15 October the deployed pool-scoped capture reads, each block, the
 block header, the algorithm, challenge and OPoW tables and only the pool's
 own benchmark feed: six requests and under one megabyte instead of one feed
 per active player. Other players' qualifier counts still arrive inside every
@@ -24,8 +24,10 @@ a truncated or inconsistent block is rejected, and the pool's own counts are
 checked against its own bundles. Member credit depends only on those inputs.
 The whole network is read separately, on demand, for selection references;
 see [lean storage](LEAN_STORAGE.md) for fields and deployment requirements.
-It is not deployed; the running release still reads every active player's
-feed into its compact blob.
+A restarted collector resumes after the newest recorded block, so the current
+head is not captured a second time in a newer format. A same-block format
+conflict that did occur is resolved only under the proven
+`format-boundary-projection-v1` policy described there.
 
 `tools/observe_tig_v2.py` runs separately from the API and scheduler. Its capture
 thread saves raw evidence to a local spool before a separate recorder thread

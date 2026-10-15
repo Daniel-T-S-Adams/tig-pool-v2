@@ -106,6 +106,6 @@ Development evidence is retained under
    The 12 October survey found stale daily bases and low recovery disk reserve;
    resolve [backup capacity and pending-file protection](PENDING_EVIDENCE_BACKUP.md)
    before activation. Include the recovery health profile and combined restore.
-4. Apply migrations 020 to 025 and grants, backfill bounded reviewed batches, then
+4. Apply migrations 020 to 026 and grants, backfill bounded reviewed batches, then
    obtain a verified backup containing their replacements before production
    pruning. Existing monetary controls and gap/settlement gates still apply.
