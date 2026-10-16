@@ -6,6 +6,7 @@ os.umask(0o077)
 CONFIG=Path('/etc/innopool-v2-mainnet')
 ROOT=Path('/var/lib/innopool-v2-mainnet/primary-continuous')
 config=json.loads((CONFIG/'continuous-backup.json').read_text())
+HOSTS=json.loads((CONFIG/'deployment.json').read_text()).get('hosts') or {}
 seal=json.loads((ROOT/'rehearsal-seal.json').read_text())
 record=json.loads((ROOT/'latest.json').read_text())
 assert seal['snapshot']==record['snapshot']
@@ -64,7 +65,7 @@ try:
  # Journal conservation and reconstructed balances in the restored database.
  assert sql("SELECT count(*) FROM (SELECT journal_id,asset,sum(amount) FROM pool_v2.entries GROUP BY journal_id,asset HAVING sum(amount)<>0) bad")=='0'
  assert sql("SELECT count(*) FROM pool_v2.accounts a LEFT JOIN (SELECT account_id,sum(amount) amount FROM pool_v2.entries GROUP BY account_id) e ON e.account_id=a.id WHERE a.balance<>coalesce(e.amount,0)")=='0'
- result={'verified_at_utc':datetime.now(timezone.utc).isoformat(),'snapshot':record['snapshot'],'restore_point':seal['restore_point'],'source_host':'46.62.249.188','recovery_host':'2.28.230.81','data_and_wal_checksums_verified':True,'post_backup_transaction_replayed':True,'financial_state_matches':True,'ledger_audit':[],'recovery_target_reached_and_paused':True,'network':'none','public_ports':[],'live_databases_replaced':False,'credentials_activated':False,'real_funded_mainnet_state_tested':False}
+ result={'verified_at_utc':datetime.now(timezone.utc).isoformat(),'snapshot':record['snapshot'],'restore_point':seal['restore_point'],'source_host':HOSTS.get('primary'),'recovery_host':HOSTS.get('recovery'),'data_and_wal_checksums_verified':True,'post_backup_transaction_replayed':True,'financial_state_matches':True,'ledger_audit':[],'recovery_target_reached_and_paused':True,'network':'none','public_ports':[],'live_databases_replaced':False,'credentials_activated':False,'real_funded_mainnet_state_tested':False}
  (ROOT/'restore-rehearsal.json').write_text(json.dumps(result,indent=2)+'\n')
  print(json.dumps(result),flush=True)
 finally:

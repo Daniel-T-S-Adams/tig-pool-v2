@@ -1,7 +1,7 @@
 # Member benchmark protocol 2.0
 
 This contract pairs `pool_manager.pool_v2` with the separate `worker_v2`
-reference client in the user's `innopool-slave-v2` repository and compatible
+reference client in the `innopool-slave-v2` repository and compatible
 member-managed masters. Members may distribute a benchmark's nonce computation
 across their own compatible machines and return one complete result. They manage
 internal communication and scheduling. See the [master integration contract](MEMBER_MASTER_V2.md).
@@ -137,12 +137,12 @@ a direct TIG/GitHub URL and saves only checked binary metadata. The worker
 verifies either source against the assignment's checksum before
 extracting the expected named library. It does not require a token: these are
 already-public TIG algorithm binaries, and no member files are served.
-See [lean storage](LEAN_STORAGE.md); direct downloads require the paired worker
-update; the matched pair was activated on mainnet on 13 October.
+See [lean storage](LEAN_STORAGE.md); direct downloads require a worker from
+the matching paired release.
 
-CI pins worker `dddad9df9b0d051cf004a904fe7b7361f9816c43` for direct-download
-and member-master regression checks. Mainnet serves that worker under tag
-`mainnet-runtime-release-guard-20261014`. The deployed pool application is recorded in
-[operations status](OPERATIONS_STATUS.md). Simulated pairing tests do not prove
-timely CPU/GPU execution. The separate corrected master/helper mainnet trial
-activated on TIG on 14 October; reward-cycle verification remains open.
+CI pins an exact worker commit for direct-download and member-master
+regression checks; the served pool/worker pair is the one named in the
+[paired release manifest](PAIRED_RELEASES.md). Simulated pairing tests do not
+prove timely CPU/GPU execution. A master/helper benchmark has activated on TIG;
+the checks that remain open, including the reward cycle, are listed in
+[ROADMAP.md](ROADMAP.md).

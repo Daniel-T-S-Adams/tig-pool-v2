@@ -4,92 +4,82 @@ The templates in [deploy/v2-mainnet](../deploy/v2-mainnet) are a staging bundle,
 not an enabled installation. They contain placeholders, no credentials, and
 default to funds, work, settlement and TIG submissions being disabled. The
 coordinator receives no TIG API key in this configuration.
-The templates describe safe starting defaults. Current live controls differ:
-funds and existing submission recovery are enabled, new work is paused and
-settlement is disabled. See [operations status](OPERATIONS_STATUS.md).
-This document describes the procedure; the funding/opening notes below record
-the historical 6 October preparation before initialization.
+The templates describe safe starting defaults; a live deployment enables the
+controls (funds, submission recovery, new work, settlement) one at a time as
+the checks below pass. This document describes the procedure; the
+funding/opening notes below describe what to establish before initialization.
 
 ## Inputs and roles
 
-**Daniel as pool operator:** choose the hostname, server, independent archive
-location and initial member count. The operator has authorized a maximum of
-**10 TIG total** for the pool wallet's mainnet protocol-fee budget, plus the
-previously stated **0.0005 Base ETH** native-transaction-fee ceiling per spending
-wallet. This authorizes funding that fee balance; it does not enable benchmark
-work or other pool spending. TIG top-ups consume TIG from the pool wallet.
-Existing testnet collateral and observers remain on their own database.
+**The pool operator:** choose the hostname, server, independent archive
+location and initial member count, and authorize the mainnet budgets: a
+maximum total for the pool wallet's mainnet protocol-fee top-ups (for example
+**10 TIG**) and a native-transaction-fee ceiling per spending wallet (for
+example **0.0005 Base ETH**). This authorizes funding that fee balance; it does
+not enable benchmark work or other pool spending. TIG top-ups consume TIG from
+the pool wallet. Existing testnet collateral and observers remain on their own
+database.
 
-**Funding status:** on 2026-10-06 the operator dashboard and independent
-read-only mainnet TIG API captures agreed: 5 TIG total topped up, 5 TIG
-available and 0 TIG deducted, against the authorized 10 TIG total budget. The
-latest capture was at TIG height 1,372,652 and showed one confirmed top-up. Its
-Base transaction was independently verified on chain 8453, finalized at Base
-height 52,255,649, and transferred exactly 5 TIG from the pool wallet to TIG's
-top-up address. A complete capture at TIG height 1,372,666 is now archived in
-the mainnet funding spool and database (`21b0d47c…89acc5e`) and records the
-confirmed top-up facts. The available 5 TIG has not yet been credited to the
-pool ledger, so funding health correctly remains not-ready. No further top-up
-is currently planned. The runtime role's missing INSERT permission on the
-immutable protocol identity table was corrected narrowly and recorded in the
-deployment SQL grant.
+**Funding check:** before initialization, confirm that the operator dashboard
+and an independent read-only mainnet TIG API capture agree on the total topped
+up, available and deducted protocol fee against the authorized budget, and
+that each top-up's Base transaction is independently verified on chain 8453,
+finalized, and transferred exactly the expected amount from the pool wallet to
+TIG's top-up address. A complete funding capture archived in the mainnet
+funding spool and database records the confirmed top-up facts. Until the
+available fee balance is credited to the pool ledger, funding health correctly
+remains not-ready. The runtime role needs INSERT permission on the immutable
+protocol identity table; this is recorded in the deployment SQL grant.
 
-**Custody opening state:** the operator confirmed that all earlier wallet
-transfers and the 10 TIG burn were setup for pre-launch mainnet testing. They
-are not member deposits, collateral or pool rewards and will not be attributed
-to individual pool activity. The mainnet database has no custody identity or
-chain history, reservations or credited top-ups; it has one complete TIG
-funding capture and its confirmed 5 TIG top-up fact. At finalized Base block
-52,255,649 the wallet held 0 TIG and 0.000998944758821286 ETH, with outgoing
-nonce 3. This historical value is a reference only; initialization must fetch a
-fresh finalized opening snapshot.
+**Custody opening state:** any earlier wallet transfers and TIG burn made for
+pre-launch mainnet testing are setup. They are not member deposits, collateral
+or pool rewards and are not attributed to individual pool activity. A fresh
+mainnet database has no custody identity or chain history, reservations or
+credited top-ups; it may hold a complete TIG funding capture and its confirmed
+top-up fact. Any balance noted during preparation is a reference only;
+initialization must fetch a fresh finalized opening snapshot.
 
 Initialize custody with a named, immutable pre-launch baseline while new work
 remains paused and before any pool reservations or withdrawals. The baseline
 records the then-current TIG/native balances as operator opening funds and the
 current outgoing nonce as the stream offset. It does not reconstruct or credit
-the prior test transfers. The confirmed 5 TIG fee top-up is credited separately
-to the operator's protocol-fee ledger only after a fresh TIG capture matches its
-finalized Base transaction and exact transfer receipt. The custody collector is
-still masked. The mainnet submission key is stored in the root-only
-`/etc/innopool-v2-mainnet/submission.env`; submission and new work remain
-disabled.
+the prior test transfers. A confirmed fee top-up is credited separately to the
+operator's protocol-fee ledger only after a fresh TIG capture matches its
+finalized Base transaction and exact transfer receipt. The mainnet submission
+key is stored in the root-only `/etc/innopool-v2-mainnet/submission.env`;
+keep submission and new work disabled until the launch stages below.
 
 For [operator income payouts](OPERATOR_INCOME.md), the service template records
-the operator's selected income wallet. The amount of operator TIG to retain for
-running costs is still unset and must be chosen before using this configuration.
-Financial operations remain disabled in the template. Migration 015 and the
-matching API/website are required.
+the operator's selected income wallet (`<income wallet>`). The amount of
+operator TIG to retain for running costs must be chosen before using this
+configuration. Financial operations remain disabled in the template. Migration
+015 and the matching API/website are required.
 
-The **10 TIG** TIG protocol-fee budget and **0.0005 Base ETH** native-fee
-ceiling are cumulative limits, not per-send limits. In the current design, the
-pool's TIG submission account and Base custody wallet are the same address, so
-the pool limits apply once to that shared account; member balances are internal
-ledger entries and must not multiply the pool's spending allowance. These are
-operator-monitored budgets; the software will not enforce them. Before and
-during a pilot, the operator should check the TIG dashboard's total top-ups,
-available fee balance and deductions, and the pool wallet's Base ETH balance
-and transaction fees. Stop pool spending manually at the authorized budget.
+The protocol-fee budget and the native-fee ceiling are cumulative limits, not
+per-send limits. In the current design, the pool's TIG submission account and
+Base custody wallet are the same address (`<pool custody wallet>`), so the pool
+limits apply once to that shared account; member balances are internal ledger
+entries and must not multiply the pool's spending allowance. These are
+operator-monitored budgets; the software will not enforce them by itself (see
+the spending cap under [launch stages](#launch-stages)). Before and during a
+pilot, the operator should check the TIG dashboard's total top-ups, available
+fee balance and deductions, and the pool wallet's Base ETH balance and
+transaction fees. Stop pool spending manually at the authorized budget.
 
-**Codex assisting the pool operator, on the remote server:** complete the steps
-below once those deployment details are known. The member browser runs on
-Daniel's local computer. Worker execution belongs to the member role.
+**On the remote server:** complete the steps below once those deployment
+details are known. The member browser runs on the member's own computer.
+Worker execution belongs to the member role.
 
-## Historical initialization status — 9 October
+## Initialization status
 
-For current state, use [operations status](OPERATIONS_STATUS.md). Wallet catch-up
-was repaired on 12 October; public RPC failures still hold ordinary custody gates.
-Recovery capacity, pending-file protection and the combined production-copy
-restore passed on 13 October. [Recovery update](RECOVERY_VOLUME_20261013.md).
-
-The named prelaunch custody baseline and confirmed protocol-fee credit have
-been initialized. The custody and funding observers are running, and member
-registrations plus benchmark reservations exist. Do not rerun the prelaunch
-baseline or assume that no pool activity has occurred. The recent CPU attempt
-expired; custody cannot catch up using the current public RPC. Recovery is
-currently a backup host with inactive independent collectors and a disabled
-full raw-file copy, so that protection step below remains open. Monetary
-budgets remain operator-monitored, and new work stays paused.
+Once the named prelaunch custody baseline and confirmed protocol-fee credit
+have been initialized, the custody and funding observers are running, and
+member registrations plus benchmark reservations exist, do not rerun the
+prelaunch baseline or assume that no pool activity has occurred. Public RPC
+failures hold the ordinary custody gates until wallet catch-up completes.
+Recovery is a backup host with inactive independent collectors and an
+optional, disabled-by-default raw-file copy; both choices are listed in
+[the roadmap](ROADMAP.md). Monetary budgets remain operator-monitored.
 
 ## Prepare the release and storage
 
@@ -101,27 +91,29 @@ budgets remain operator-monitored, and new work stays paused.
    `/opt/innopool-v2-mainnet/releases/<commit>`; runtime users cannot write it.
 2. Produce a **mainnet** runtime manifest for the actual worker architectures
    and current challenges. Do not copy the testnet ARM runtime manifest into
-   production. The 23 September probe saw five CPU and three GPU challenges.
-   Verify the actual digest and executable compatibility before a member joins.
-3. Provision separate database and spool storage. The bounded mainnet probe
-   captured three consecutive blocks with 2,223–2,233 active benchmarks, under
-   a 384 MiB / 20%-of-one-CPU cap. The three compressed archives occupied about
-   4.9 MiB: roughly 2.3 GiB/day per collector at one block/minute, before database
-   expansion, reports, custody archives and backups. This short sample is an
-   estimate, not a sustained capacity guarantee. The longer-run 9 October
-   measurement is in [operations status](OPERATIONS_STATUS.md#measured-footprint):
-   primary database about 26.4 GiB, blocks 21.2 GiB, and recovery bases plus WAL
-   about 88.2 GiB. Size retention and copy staging from measured growth.
+   production. Probe the mainnet API for the current set of CPU and GPU
+   challenges. Verify the actual digest and executable compatibility before a
+   member joins.
+3. Provision separate database and spool storage. A bounded probe capturing
+   three consecutive full-network blocks with about 2,200 active benchmarks,
+   under a 384 MiB / 20%-of-one-CPU cap, produced about 4.9 MiB of compressed
+   archives: roughly 2.3 GiB/day per collector at one block/minute in the
+   full-network format, before database expansion, reports, custody archives
+   and backups. This short sample is an estimate, not a sustained capacity
+   guarantee; the pool-scoped capture format ([lean storage](LEAN_STORAGE.md))
+   writes less per block. A longer-running full-network deployment measured a
+   primary database of about 26 GiB, a block spool of about 21 GiB, and
+   recovery bases plus WAL of about 88 GiB. Size retention and copy staging
+   from measured growth.
 4. Keep immutable raw evidence until all related collateral, disputes and
    settlement obligations are resolved and backed up. Do not delete old
    evidence merely to keep a service running. A second directory on the same
    host is not an independent archive.
 
-The mainnet application slice has a separate 1.5-CPU/2-GiB ceiling, now used by
-the preparation services on the dedicated VMs. Before sharing a host, review the
-combined testnet, mainnet, database and worker limits; separate slice limits
-alone do not impose a shared machine-wide ceiling. A worker belongs on its
-member's machine for the final test.
+The mainnet application slice has a separate 1.5-CPU/2-GiB ceiling. Before
+sharing a host, review the combined testnet, mainnet, database and worker
+limits; separate slice limits alone do not impose a shared machine-wide
+ceiling. A worker belongs on its member's machine for the final test.
 
 ## Isolate database and credentials
 
@@ -145,6 +137,10 @@ member's machine for the final test.
 4. Copy and fill the example JSON and environment files, removing the
    `.example` suffix. Generate a fresh operator token. Do not copy the testnet
    DSN, token, member sessions or fee grant. Leave all enable flags false.
+   `/etc/innopool-v2-mainnet/deployment.json` carries a `hosts` object with
+   the `primary` and `recovery` addresses; the backup, restore and
+   pending-evidence tools read it, and the pending-evidence receiver refuses a
+   source that is not the recorded primary.
 5. Verify the selected pool wallet's actual mainnet history and starting
    balances before initializing custody. The same address can have different
    state on Base and Base Sepolia. Record the first Base block before its
@@ -157,9 +153,10 @@ member's machine for the final test.
 ## HTTPS and services
 
 1. Point the proxied website and API hostnames to the server. For this setup,
-   generate the key/CSR on Hetzner and obtain a Cloudflare Origin CA certificate
-   covering both hosts. Keep Full (strict); verify the signed certificate and
-   record/monitor expiry before activation. No HTTP/ACME challenge is needed.
+   generate the key/CSR on the primary server and obtain a Cloudflare Origin CA
+   certificate covering both hosts. Keep Full (strict); verify the signed
+   certificate and record/monitor expiry before activation. No HTTP/ACME
+   challenge is needed.
    Configure `origin` as the website address and
    `api_origin` as the worker/dashboard API address; omitting `api_origin`
    preserves a same-origin deployment. Set the coordinator's `public_origin`
@@ -195,9 +192,9 @@ submissions, reward contract calls or withdrawals.
 
 ## Backups, recovery and monitoring
 
-The installed two-host backup schedule, retention limits and completed October
-restore tests are described in [backup operations](BACKUP_OPERATIONS.md).
-External alerts, sustained storage and funded takeover checks remain open.
+The two-host backup schedule, retention limits and restore rehearsal are
+described in [backup operations](BACKUP_OPERATIONS.md). External alerts,
+sustained storage and funded takeover are listed in [the roadmap](ROADMAP.md).
 
 - Archive immutable spools on another host as they arrive; monitor both
   collectors for missed/conflicting blocks. Store database backups and the
@@ -221,18 +218,18 @@ External alerts, sustained storage and funded takeover checks remain open.
   pending send ambiguity and backup age. Monitor from another host too;
   alerts must be arranged with an explicitly chosen destination.
   The primary's five-minute check is `tools/mainnet_health_check_v2.py`,
-  installed as `operations/mainnet_health_check.py`. Since 15 October it
-  judges block history by the deployed missing-block tolerance: held rounds,
-  a current round already over the limit and unresolved conflicting heights
-  are issues; tolerated and waived gaps are recorded only. Release
-  activations must not overwrite it with the dated 13 October copy.
+  installed as `operations/mainnet_health_check.py`. It judges block history
+  by the configured missing-block tolerance: held rounds, a current round
+  already over the limit and unresolved conflicting heights are issues;
+  tolerated and waived gaps are recorded only. Release activations must not
+  overwrite it with an older copy.
 - Rehearse worker interruption and restart on the separate member machine,
   then the bounded GPU path. Preserve worker SQLite and evidence files.
   A restarted worker must recover its existing benchmark before requesting more.
 
 ## Launch stages
 
-Keep the existing testnet arbitration waiting in a separate checklist item.
+Keep any outstanding testnet arbitration in a separate checklist item.
 Complete software tests, public historical replays, deposit withdrawals,
 production storage/TLS setup and independent recovery now. Final reward
 payment still requires the verified [TokenLocker lifecycle](REWARD_RECEIPTS.md)
@@ -241,14 +238,14 @@ independent preparation work.
 
 Before enabling a limited mainnet pilot, resolve the remaining authoritative
 outcome/reporting and operator reward-call/correction integrations and confirm
-the deployment inputs. The authorized 10 TIG and 0.0005 Base ETH budgets are
-enforced in software by the operator's recorded spending cap (migration 027):
-without a cap row the pool commits no submission fee and reserves no custody
-gas, and every committed ceiling counts in full inside the rolling window. The
-operator records the cap through `POST /api/v2/operator/spending-cap` or the
-operator screen; the health check reports a missing cap or a window more than
-90% committed. This repository's two-member pilot policy is **testnet-only** and
-separate from the mainnet cap.
+the deployment inputs. The authorized budgets are enforced in software by the
+operator's recorded spending cap (migration 027): without a cap row the pool
+commits no submission fee and reserves no custody gas, and every committed
+ceiling counts in full inside the rolling window. The operator records the cap
+through `POST /api/v2/operator/spending-cap` or the operator screen; the
+health check reports a missing cap or a window more than 90% committed. This
+repository's two-member pilot policy is **testnet-only** and separate from the
+mainnet cap.
 
 With the budget authorized and members ready, start a small monitored pilot.
 Keep incomplete or unfunded reward

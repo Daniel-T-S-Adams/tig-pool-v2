@@ -59,7 +59,7 @@ def main():
                     raise ValueError('public asset is not an immutable hash')
                 saved.add(path, arcname=str(path.relative_to(root / 'web')))
         record = {'created_at_utc': datetime.now(timezone.utc).isoformat(), 'supplement': name,
-            'source_host': '46.62.249.188', 'application_commit': application['pool_commit'],
+            'source_host': (deployment.get('hosts') or {}).get('primary'), 'application_commit': application['pool_commit'],
             'configuration_encrypted': True, 'database_snapshot_advanced': False,
             'files': {p.name: digest(p) for p in pending.iterdir() if p.is_file()}}
         atomic_json(pending / 'manifest.json', record)

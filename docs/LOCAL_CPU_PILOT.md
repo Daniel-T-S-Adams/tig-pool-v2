@@ -1,17 +1,13 @@
 # Local CPU validation scope
 
-Daniel selected CPU-only testing on the existing workspace host on 21 September
-2026. Both member identities use separate worker installations on that machine,
-one at a time. GPU execution and validation with separate machines are deferred
-to the final test.
+This scope covers CPU-only testing on one shared host. Both member identities
+use separate worker installations on that machine, one at a time. GPU
+execution and validation with separate machines are deferred to a later test.
 
-The worker now supplies a local pilot launcher and systemd slice. Follow the
-[recorded worker procedure](https://github.com/Daniel-T-S-Adams/innopool-slave-v2/blob/ded5f4b4fe07de0cfeb1845cb50f9ef97ae65c36/docs/LOCAL_CPU_PILOT.md).
-That was the original September testnet pin. Current CI and mainnet serve
-worker `dddad9d`; the corrected master/helper benchmark activated on TIG on
-14 October. The earlier late attempt remains recorded as expired.
-See [operations status](OPERATIONS_STATUS.md). The resource procedure
-below describes the bounded shared-machine pilot, not a performance guarantee.
+The worker supplies a local pilot launcher and systemd slice. Follow the worker
+repository's pilot procedure (`docs/LOCAL_CPU_PILOT.md`) for the worker
+commit named in the paired release. The resource procedure below describes
+the bounded shared-machine pilot, not a performance guarantee.
 
 All new pilot services must share `innopoolv2pilot.slice`: one CPU's worth of
 processing, 2 GiB total memory, no swap and at most 256 processes/threads. Native
@@ -28,14 +24,13 @@ Drained updates retain the configuration. An offline Docker test demonstrated
 CPU throttling and a container-local out-of-memory termination under these controls.
 It did not submit TIG work or exercise a member's collateral.
 
-Before another paid mainnet attempt, measure running time on the intended
+Before a paid mainnet attempt, measure running time on the intended
 hardware and verify that the entire minimum benchmark fits TIG's lifetime,
-including result/proof exchange. The 7–9 October attempt did not fit. The
-financial ceilings below belong to the historical testnet pilot, not the
-operator-monitored mainnet budget. A single worker can otherwise continue
-requesting benchmarks. Hitting a resource limit
-can fail an acknowledged assignment and forfeit its collateral under the agreed
-rules; do not silently raise the host resource ceiling to avoid that failure.
+including result/proof exchange. The financial ceilings below belong to the
+testnet pilot, not an operator-monitored mainnet budget. A single worker can
+otherwise continue requesting benchmarks. Hitting a resource limit can fail an
+acknowledged assignment and forfeit its collateral under the agreed rules; do
+not silently raise the host resource ceiling to avoid that failure.
 
 ## Initial testnet budget and attempt limits
 
@@ -99,10 +94,8 @@ match the browser's origin and worker settings.
 
 Capture protocol, custody, fee and arbitration data from before funding/work.
 Local archive replay is in scope; copies on this same host cannot demonstrate
-recovery from losing the host. Independent recovery coverage remains a final
-validation requirement. Missing observations still hold the affected settlement.
-CPU-only activation also does not prove GPU execution or eligibility for a
-positive protocol reward; reward-payment validation requires an actual receipt.
-
-The working checklist and host evidence remain in the shared workspace at
-`LIVE_VALIDATION_CHECKLIST.md` and `validation/2026-09-21-local-cpu-pilot/`.
+recovery from losing the host. Independent recovery coverage is a separate
+validation item listed in [ROADMAP.md](ROADMAP.md). Missing observations still
+hold the affected settlement. CPU-only activation also does not prove GPU
+execution or eligibility for a positive protocol reward; reward-payment
+validation requires an actual receipt.

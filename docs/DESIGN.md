@@ -1,6 +1,6 @@
-# InnoPool redesign and implementation plan
+# Community Pool design
 
-Prepared 20 September 2026. Scope: a fresh deployment of the pool and its member interface, developed in separate forks of `tig-pool` and `innopool-slave`. This document specifies the implementation; current progress is recorded in [IMPLEMENTATION_STATUS.md](IMPLEMENTATION_STATUS.md). The initial 20 September preparation was unfunded. The current mainnet deployment and controls are recorded in the implementation status; this plan specifies behavior rather than live status.
+Prepared 20 September 2026 as the design for a fresh pool and its member worker. Later clarifications are incorporated and supersede earlier wording.
 
 ## 1. Intended result
 
@@ -16,7 +16,7 @@ All redesign implementation belongs in the two forks. Preserve the original repo
 
 **First implementation milestone:** demonstrate continuous collection of complete live TIG block data and public report/arbitration outcomes. The pool records its own history from launch; a TIG historical-block service is not a prerequisite for starting implementation or settling a round fully captured by the pool. The approved credit rule shares qualifying credit equally among bundles tied at the cutoff; exact identities of TIG's winning tied bundles are not required. Verify complete eligible bundle data, authoritative qualifying totals, and detection and handling of collection gaps before enabling payouts.
 
-This document incorporates the conversation's later clarifications. They supersede earlier wording in [pool-redesign-questions.txt](pool-redesign-questions.txt), including its now-outdated statement that the operator fee can be left aside.
+This document incorporates the conversation's later clarifications. They supersede earlier wording in the owner\'s earlier answers, including its now-outdated statement that the operator fee can be left aside.
 
 ## 2. Agreed operating rules
 
@@ -81,7 +81,7 @@ mappings while available, and fetch final relevant reports after X+2 and the
 applicable reporting window close. Preserve ownership, exact per-block credit,
 financial records and final decisions. Existing full snapshots may retire only
 after backed compact replacement and completed reconciliation/credit. Missing
-blocks remain settlement holds. See [lean storage](docs/LEAN_STORAGE.md).
+blocks remain settlement holds. See [lean storage](LEAN_STORAGE.md).
 
 **D8 — clarified on 11 October: member-managed master coordination.** The pool
 communicates with a member's master through the existing whole-benchmark API.
@@ -91,7 +91,7 @@ for that offer, including member-managed remote capacity. Keep one immutable
 result, one member owner and one slot per unfinished benchmark. The master saves
 the required evidence and supplies authoritative sampled proofs. No pool fleet
 registry or helper transport is required. The official reference worker remains
-a single-machine implementation. See [master integration](docs/MEMBER_MASTER_V2.md).
+a single-machine implementation. See [master integration](MEMBER_MASTER_V2.md).
 
 Implementation defaults proposed for the plan, rather than additional economic rules:
 
@@ -113,15 +113,15 @@ At the 20 September baseline inspection, the original checkouts used the upstrea
 
 | Existing component | Finding and redesign consequence |
 |---|---|
-| [master/slave_manager.py](https://github.com/Daniel-T-S-Adams/tig-pool-v2/blob/19a7cafc135b4a1d3281d6acf48b5ebf13ed2b1a/master/slave_manager.py) and [job_manager.py](https://github.com/Daniel-T-S-Adams/tig-pool-v2/blob/19a7cafc135b4a1d3281d6acf48b5ebf13ed2b1a/master/job_manager.py) | Work ownership is recorded on batches, with reassignment and sharing logic. Replace that scheduling path with member-owned benchmarks. |
-| [precommit_manager.py](https://github.com/Daniel-T-S-Adams/tig-pool-v2/blob/19a7cafc135b4a1d3281d6acf48b5ebf13ed2b1a/master/precommit_manager.py) | Selection includes fleet-wide tuning and many capacity heuristics. Replace its decision logic with the agreed selection sequence. |
-| [submissions_manager.py](https://github.com/Daniel-T-S-Adams/tig-pool-v2/blob/19a7cafc135b4a1d3281d6acf48b5ebf13ed2b1a/master/submissions_manager.py) | Useful request shapes and serialization exist, but accepted precommit IDs and uncertain outcomes need stronger handling. Its automatic block-ID replacement cannot be reused without revalidating the recorded selection. |
-| [data_fetcher.py](https://github.com/Daniel-T-S-Adams/tig-pool-v2/blob/19a7cafc135b4a1d3281d6acf48b5ebf13ed2b1a/master/data_fetcher.py) | Can publish a new block alongside cached older maps, and fall back to cached tracks. Financial decisions and selection must require a complete, consistent snapshot. |
-| [revenue_split.py](https://github.com/Daniel-T-S-Adams/tig-pool-v2/blob/19a7cafc135b4a1d3281d6acf48b5ebf13ed2b1a/pool_manager/pool/revenue_split.py) and [work_credits.py](https://github.com/Daniel-T-S-Adams/tig-pool-v2/blob/19a7cafc135b4a1d3281d6acf48b5ebf13ed2b1a/pool_manager/pool/work_credits.py) | Reward sampling and effort weighting do not implement cumulative qualifying-bundle credit. Replace their accounting role. |
-| [coinbase.py](https://github.com/Daniel-T-S-Adams/tig-pool-v2/blob/19a7cafc135b4a1d3281d6acf48b5ebf13ed2b1a/pool_manager/pool/coinbase.py) | Sends percentage allocations to TIG. The new deployment must receive pool rewards centrally and stop publishing per-member splits. |
-| [retention.py](https://github.com/Daniel-T-S-Adams/tig-pool-v2/blob/19a7cafc135b4a1d3281d6acf48b5ebf13ed2b1a/pool_manager/pool/retention.py) | Deletes operational benchmark history after a default 14 days. New ownership, collateral, credit, and settlement records must be excluded from this cleanup. |
-| [batch_audit.py](https://github.com/Daniel-T-S-Adams/tig-pool-v2/blob/19a7cafc135b4a1d3281d6acf48b5ebf13ed2b1a/master/batch_audit.py) and [auditor](https://github.com/Daniel-T-S-Adams/tig-pool-v2/blob/19a7cafc135b4a1d3281d6acf48b5ebf13ed2b1a/auditor/main.py) | Verification and evidence handling are useful. Adapt them to member-owned benchmarks and longer evidence retention. Local audit results must not be confused with final TIG arbitration. |
-| [innopool-slave/main.py](https://github.com/Daniel-T-S-Adams/innopool-slave-v2/blob/14109c90b38ea342c8264e86ae122b6e9a0e49ea/main.py) | Execution and artifact handling are reusable, but its protocol assumes assigned batches. A whole-benchmark reference client needs an explicit new interface. |
+| `master/slave_manager.py` and `job_manager.py` | Work ownership is recorded on batches, with reassignment and sharing logic. Replace that scheduling path with member-owned benchmarks. |
+| `precommit_manager.py` | Selection includes fleet-wide tuning and many capacity heuristics. Replace its decision logic with the agreed selection sequence. |
+| `submissions_manager.py` | Useful request shapes and serialization exist, but accepted precommit IDs and uncertain outcomes need stronger handling. Its automatic block-ID replacement cannot be reused without revalidating the recorded selection. |
+| `data_fetcher.py` | Can publish a new block alongside cached older maps, and fall back to cached tracks. Financial decisions and selection must require a complete, consistent snapshot. |
+| `revenue_split.py` and `work_credits.py` | Reward sampling and effort weighting do not implement cumulative qualifying-bundle credit. Replace their accounting role. |
+| `coinbase.py` | Sends percentage allocations to TIG. The new deployment must receive pool rewards centrally and stop publishing per-member splits. |
+| `retention.py` | Deletes operational benchmark history after a default 14 days. New ownership, collateral, credit, and settlement records must be excluded from this cleanup. |
+| `batch_audit.py` and `auditor` | Verification and evidence handling are useful. Adapt them to member-owned benchmarks and longer evidence retention. Local audit results must not be confused with final TIG arbitration. |
+| the original batch worker | Execution and artifact handling are reusable, but its protocol assumes assigned batches. A whole-benchmark reference client needs an explicit new interface. |
 
 ### TIG data and protocol checks
 
@@ -245,7 +245,7 @@ These states also apply when the multiplier is zero. Record the reservation and 
 
 ### Member protocol and reference client
 
-Use the implemented [member API 2.0](docs/MEMBER_API_V2.md):
+Use the implemented [member API 2.0](MEMBER_API_V2.md):
 
 | Endpoint | Purpose |
 |---|---|
@@ -262,9 +262,9 @@ Validate ownership for every endpoint. Validate payload size and expected nonce 
 
 The client first saves the complete assignment locally, then acknowledges its benchmark ID and immutable payload digest using the member's execution credentials. The pool checks ownership, payload identity, and that the benchmark remains eligible to start, then commits the acknowledgement and handover timestamp atomically before responding. Reject a first acknowledgement after definitive expiry; a retry of an already committed acknowledgement returns the original confirmation. The client starts execution only after receiving or recovering that confirmation. Lost delivery responses do not establish handover; lost acknowledgement responses require retry or status reconciliation. Never infer non-delivery solely from an HTTP error. Accept results and proofs only for a benchmark with recorded handover, so execution cannot bypass this boundary.
 
-Publish the API contract and a single-machine reference runner by adapting useful parts of `innopool-slave`. It must demonstrate the full benchmark/root/proof lifecycle and recovery after restart. Members can replace it or distribute the work internally. Building a multi-machine scheduler for them is not part of the plan.
+Publish the API contract and a single-machine reference runner by adapting useful parts of the original batch worker. It must demonstrate the full benchmark/root/proof lifecycle and recovery after restart. Members can replace it or distribute the work internally. Building a multi-machine scheduler for them is not part of the plan.
 
-Document the [member master contract](docs/MEMBER_MASTER_V2.md), including
+Document the [member master contract](MEMBER_MASTER_V2.md), including
 aggregate compatible capacity, confirmed handover, full nonce aggregation,
 immutable uploads, retained proof evidence and member responsibility for helper
 failures. The pool authenticates the master as the member and applies the shared
@@ -450,105 +450,7 @@ Core invariants:
 
 Keep financial records and settlement evidence durable, with tested backup and restoration. Large execution artifacts may have a separate retention policy, but unresolved benchmarks and reports must remain recoverable. Do not make the current 14-day cleanup responsible for the new records.
 
-## 10. Repository forks and development workflow
-
-### Create and establish the two forks
-
-The user selected their GitHub account, `daniel-t-s-adams`, to own both redesign repositories. Both destinations now exist: `daniel-t-s-adams/tig-pool-v2` and `daniel-t-s-adams/innopool-slave-v2`. The worker is a native GitHub fork. The original pool remote became inaccessible; the user explicitly approved creating an independent pool repository from the intact local Git history. It was initially private, and the user subsequently made it public to allow standard GitHub Actions checks to run. That repository preserves all 445 commits reachable from the inspected pool baseline. References to the pool fork in this document mean this approved development repository; GitHub does not identify it as a native fork. See [implementation status](IMPLEMENTATION_STATUS.md) for verified progress. Record the repository URLs and release-image namespace during setup. Preserve the original Git history and start the redesign at the inspected commits:
-
-| Fork | Upstream source | Pinned starting commit | Implementation responsibility |
-|---|---|---|---|
-| `daniel-t-s-adams/tig-pool-v2` | `rootztigmod/tig-pool` | `19a7cafc135b4a1d3281d6acf48b5ebf13ed2b1a` | Member API, selection, ownership, funds, observation, settlement, dashboards, deployment, and member installer. |
-| `daniel-t-s-adams/innopool-slave-v2` | `rootztigmod/innopool-slave` | `14109c90b38ea342c8264e86ae122b6e9a0e49ea` | Whole-benchmark reference runner, results/proofs, artifact retention, and installation/update behavior. |
-
-1. Create the hosted repositories under `daniel-t-s-adams` and use separate working directories `/root/mine-rootz/forks/tig-pool-v2` and `/root/mine-rootz/forks/innopool-slave-v2`. The worker must retain its native upstream fork relationship; the pool retains the complete original local history in the independent repository under the user's approved exception. Both destinations are public as currently selected by the user. If a destination already exists, verify its provenance and existing work before reusing it; do not overwrite it. Leave the existing source checkouts and their remotes intact. Verify that each pinned commit exists in its destination; do not silently substitute a newer upstream revision.
-2. Set the new clones' `origin` URLs to `https://github.com/daniel-t-s-adams/tig-pool-v2.git` and `https://github.com/daniel-t-s-adams/innopool-slave-v2.git`, respectively, and add the corresponding original repository as `upstream`. Configure pushes to go to `origin` and disable pushes through the `upstream` remote. Record an immutable baseline tag, such as `redesign-base`, at the pinned commit in each fork.
-3. Use `main` as the integration branch in each fork. Implement each stage on short-lived feature branches based on `main`, with pull requests targeting `main` in the same fork. `release/v2` is fast-forwarded to each deployed, tested release tag and never receives direct development. Protect `main` against force pushes and require pull requests with the baseline check; protect `release/v2` against force pushes and deletion. A local branch or worktree in an original repository is not the fork deliverable. The `redesign/v2` integration branches used until 8 October 2026 are retired: PR #22 in the pool fork and PR #6 in the worker fork promoted their contents to `main`.
-4. Version the maintained plan and the `/api/v2` contract in the pool fork. Link the worker documentation to the matching contract revision. Record paired pull requests when one change affects both repositories, so neither half is released without its counterpart being tested.
-
-### Keep installation, updates, and tests inside the fork deployment
-
-Update the pool fork's [member installer](https://github.com/Daniel-T-S-Adams/tig-pool-v2/blob/19a7cafc135b4a1d3281d6acf48b5ebf13ed2b1a/pool_website/static/install.sh), installation examples, and Join-page commands to use the worker fork and a tested release reference. Update the worker fork's [startup/update script](https://github.com/Daniel-T-S-Adams/innopool-slave-v2/blob/14109c90b38ea342c8264e86ae122b6e9a0e49ea/scripts/start-fresh.sh) and README accordingly. Give the redesign its own installation directories, service-unit names, pool URL, and configuration. An existing checkout at an installation destination must match the expected fork; a mismatch must stop the install instead of resetting an original checkout.
-
-Replace startup-time tracking of a moving branch with installation of the selected release tag and verification of its recorded commit. A routine restart must keep running the installed release. An explicit update selects a compatible new release, preserves configuration and evidence, and waits for in-flight benchmark work to finish before restarting the worker. Do not carry the current hard-reset fallback into this update path.
-
-Give development, staging, and the fresh production deployment separate databases, data directories, credentials, URLs/ports, and Docker resources. Remove or parameterize fixed container names in both fork Compose files and update runtime lookups to match; a different Compose project name alone will not isolate the existing fixed names. Namespace worker images and system services too. Test installers and startup scripts in an isolated environment, including their Docker-socket operations, so they cannot start, stop, or replace the existing pool's containers. Keep official TIG runtime dependencies pinned to the tested versions; only the pool and worker application repositories are being forked.
-
-Configure each fork's CI for its own code and isolated test environment. Run the existing relevant checks first to record the baseline, then add the planned financial, protocol, and worker tests. CI for the new API must exercise both a specified pool commit and a specified worker commit. The server and client must detect unsupported protocol versions before any work assignment or collateral reservation; legacy batch workers cannot silently enter the new workflow.
-
-### Release and maintain the forks together
-
-Once a candidate pair passes the implementation-stage checks, verify the final paired commits, tag those tested revisions, and fast-forward each fork's `release/v2` branch to the deployed tag. Record a release manifest in the pool fork containing both fork URLs and full commit IDs, their release tags, the API version, database migration version, and the tested TIG/runtime and application-image versions or digests. Keep this metadata in a separate deployment record referencing the tested application commits, so recording the manifest does not change the commits it identifies. Build and deploy that recorded pair; production installations must not follow a moving branch.
-
-Rehearse installation and updates from those fork releases in staging before the fresh launch. Keep the previous tested fork release available for recovery, subject to database compatibility and preservation of all new-system obligations. The unchanged original pool remains a separate system; it is not a rollback target for the new ledger.
-
-Later upstream changes enter through deliberate feature branches in the forks, using reviewed merges or selected commits followed by compatibility and financial checks. Disable automatic upstream synchronization and deployment from upstream branches. This redesign does not require merging its changes back into either original repository.
-
-## 11. Implementation stages
-
-### Prerequisite — Prepare the fork workspace
-
-Carry out section 10's repository setup before adding integration probes or implementation code. Record the fork URLs, full baseline commits, working directories, branch rules, and baseline check results. Establish isolated CI and test configuration; complete installer and deployment changes in Stages 3 and 6 before using them to run the new system.
-
-**Exit:** both independently hosted forks preserve the original history, both `main` integration branches descend from the recorded baselines, and development pushes and pull requests target the forks. The original checkouts, repositories, and deployment are unchanged. This prerequisite is complete only when both forks and their required configuration have been verified.
-
-### Stage 0 — Validate the protocol and complete the specification
-
-Deliver a small read-only integration probe and recorded fixtures for the target TIG release. Demonstrate capture of consecutive live blocks with complete eligible bundle data and aggregate qualifying totals for the approved D4 rule. Establish best-bundle hyperparameter lookup with the D3 JSON `null` fallback, definitive lifecycle events, public report/arbitration result mapping using populated examples, submission reconciliation, and the relation between final round emissions and received funds. Identify how operating charges are collected so D1 assigns their full cost to the operator. Verify the benchmark-round boundary mapping and that complete data can distinguish zero credit under D2 from missing observations. Record any available external gap-recovery interface, but do not make an external historical-block service a prerequisite for this work. Exact winning-bundle identities are not a prerequisite.
-
-Verify the actual token network, chain ID, token contract/decimals, wallet, and RPC agree. Establish whether receiving final rewards requires an operator claim or other wallet action and document that step; a final emissions figure alone is not a receipt. Do not inherit these settings blindly from an old deployment configuration.
-
-**Exit:** executable fixture-based checks demonstrate the live inputs and outcome mappings needed for monetary decisions, including safe handling of an incomplete block or unavailable report response. Verify that equal sharing reconciles exactly to authoritative qualifying totals, and that saved observations can be replayed. If a required live field is unavailable, identify that specific integration gap before implementing dependent accounting. Absence of external historical retrieval does not block implementation; an actual unrecoverable collection gap blocks settlement of its affected round. Do not substitute estimated totals or interpolated block data.
-
-### Stage 1 — Member identity, database, and funds foundation
-
-Add migrations, verified member identities, scoped execution tokens, per-member multiplier settings and operator-only updates with audit history, the journal, reservations, confirmed-deposit indexing, operator funding and expense accounting, and wallet reconciliation. Replace machine-name-based ownership with stable member IDs. Add member balance and ledger views without enabling benchmark submission.
-
-**Exit:** real PostgreSQL concurrency tests show that simultaneous deposits, work reservations, and withdrawal requests cannot duplicate credits or overspend. Operator multiplier changes and reservation creation have a consistent transaction order; existing reservations remain unchanged. Replay and restart tests produce identical balances.
-
-### Stage 2 — Block observer and work selector
-
-Build continuous block capture, durable raw snapshots, the pool's local history, redundant collection, coverage cursors and alerts, qualifier attribution, and the indexed network benchmark reference cache. Implement replay and recovery from the pool's own records; add an external recovery adapter only if a suitable interface is available. Implement the selection function over captured snapshots, including CPU/GPU restrictions, least-qualifier challenge choice, adoption choice, track settings with the JSON `null` default fallback, and exact base collateral calculation followed by the member multiplier and token-unit rounding.
-
-**Exit:** consecutive live blocks are captured and replay correctly after an application restart; redundant capture survives one collector stopping without double counting. A deliberate unrecoverable gap is recorded and prevents settlement of that round. Missing or mixed-version current data prevents selection rather than inventing one. A complete snapshot with no reference bundle produces JSON `null` hyperparameters for that track and permits selection to continue. Selection outputs match the agreed rules and preserve their evidence.
-
-### Stage 3 — Whole-benchmark coordinator and member protocol
-
-Implement request idempotency, atomic slot/collateral reservation with a captured multiplier and final amount, durable submission attempts, accepted benchmark ownership, authenticated receipt acknowledgement and handover recovery under D6, result/proof delivery, and outcome reconciliation in the pool fork. Preserve multiplier snapshots across retries and recoveries, including zero-amount reservations. Provide the versioned API contract there and the single-machine reference runner in the worker fork, using linked changes and compatibility tests. Update the fork installer and worker startup behavior according to section 10. Adapt verification and audit evidence to whole benchmarks.
-
-**Exit:** CPU and GPU fixtures complete from request through confirmed handover to active status using recorded commits of both forks; the correct slot is released while collateral remains locked. Rejections, expiry before or after handover, disconnects, duplicate requests, and lost submission or acknowledgement responses follow the required states without takeover. Incompatible workers are rejected before funds or slots are reserved, and a restart does not update the installed code.
-
-### Stage 4 — Arbitration and round settlement
-
-Implement round-linked collateral finalization, including return of collateral for expired benchmarks never handed over under D6, nonce-report handling, complete cumulative credit totals, received-earnings reconciliation, the 5% fee and exact proportional allocation for rounds with credit, and allocation of the whole pot to the operator for rounds with zero total credit under D2. Keep calculation previews separate from posted ledger movements.
-
-**Exit:** an accelerated multi-round simulation covers X through the end of X+2, including several reports for one benchmark, a round with zero credit and forfeited collateral, and a restart midway through settlement. Replaying it cannot forfeit or pay twice, including the operator allocation under D2. Previously counted credit remains unchanged by later fraud findings.
-
-### Stage 5 — Operator-reviewed withdrawals and product screens
-
-Implement reservation of withdrawal requests, seven-day eligibility, operator review, manual-send tracking, transaction verification, and failed/uncertain payment recovery. Send the full requested amount and account for transaction fees separately against operator funds. Update the member dashboard to show available funds, current collateral multiplier, benchmark-specific base amounts and multiplier snapshots, actual held collateral, pending withdrawals, unsettled credit, assignments, and settled earnings. Update operator screens for multiplier management and its audit history, approvals, data gaps, ambiguous submissions, finalization, and wallet reconciliation. Explain in the multiplier editor that changes apply only to new benchmarks.
-
-**Exit:** the UI amounts derive from the same ledger and settlement records as the enforcement rules. A transaction hash for the wrong wallet, token, amount, network, or failed transfer cannot mark a withdrawal paid.
-
-### Stage 6 — Integrate, retire legacy behavior, and rehearse deployment
-
-Create a dedicated fresh-deployment configuration in the forks, with the repository, service, container, data, and update isolation specified in section 10. Remove the old master scheduler, per-member coinbase updater, and effort-based payment logic from the new deployment's service graph. Preserve the original deployment. Direct TIG reward allocation to the new pool's receiving account and verify the configuration actually takes effect before accumulating new obligations.
-
-Run the end-to-end scenarios below against a test environment or controlled replay, then exercise real compatible CPU/GPU workers where available. Rehearse installation and an explicit update of the paired fork releases from their manifest, including the Join-page installer. Restore a database backup and resume observation and pending tasks. Document the operator's deposit, fee-funding, reward-receipt or claim, withdrawal, settlement, recovery, and software-upgrade procedures.
-
-**Exit:** no legacy process can create unexpected work or change reward destinations in the new pool; a restarted or restored deployment preserves ownership, funds, and missing-block awareness. Fork installation, startup, and updates leave the original deployment intact and reproduce the recorded release pair.
-
-### Stage 7 — Fresh launch and monitored operation
-
-Deploy the tested fork release pair identified by the release manifest. Start collection before a chosen round boundary and begin accepting members/work from a recorded launch block. Keep test and previous deployment data separate. Fund the operator's submission and withdrawal costs before fee income is available, including any native asset needed for transaction fees. Confirm member deposit attribution, target chain configuration, and current hardware compatibility.
-
-Use a dedicated pool benchmarking account with no other process submitting work. If reusing an account, wait until earlier unowned benchmarks can no longer affect the new accounting window and verify the central reward destination before that window begins. Unknown benchmark owners must not be assigned invented member credit simply to make totals match.
-
-Begin with a small set of members, measure submission queues and observation lag, and verify every initial deposit, collateral transition, and withdrawal against the chain and ledger. Complete a full settlement cycle before expanding substantially. Retain an operator control that pauses new assignments while allowing existing proofs, observation, reconciliation, and legitimate withdrawals to continue.
-
-This is a plan for a fresh launch, so there is no migration of old liabilities. A later software rollback must still preserve any new-system funds, obligations, and pending payments; reverting to the old database or batch scheduler is not a valid rollback after real member funds arrive.
-
-## 12. Validation and acceptance scenarios
+## 10. Validation and acceptance scenarios
 
 Use ordinary unit tests for selection and allocation mathematics, real PostgreSQL integration tests for concurrency and accounting, recorded TIG/chain fixtures for adapters, and an accelerated multi-round end-to-end simulator. Tests that merely search source text or extract isolated functions are insufficient for the new financial path.
 
@@ -630,11 +532,3 @@ Use ordinary unit tests for selection and allocation mathematics, real PostgreSQ
 | Pool software is restored from backup | Replay external events and resume tasks without duplicate spending. |
 
 Choose a representative fleet size for load testing before launch. Verify database contention, snapshot completion time, network reference-cache refresh, artifact upload limits, and withdrawal/settlement responsiveness. The two-per-member limit does not override TIG's pool-wide capacity or request limits.
-
-## 13. Delivery scope and effort
-
-The deliverables are two maintained forks with preserved upstream history and recorded baselines, a new member benchmark API and reference runner, a durable funds and collateral ledger with operator-managed per-member multipliers, qualifying-credit accounting with equal sharing at tied cutoffs, final round settlement, operator-reviewed withdrawals, updated member/operator screens, database migrations, fixtures and integration tests, fork-specific installers, paired release manifests, and deployment/recovery documentation.
-
-A rough planning allowance is **6–12 engineer-weeks after the live data interfaces are validated**, for one experienced engineer with access to a suitable test environment. Decisions D1–D6 are resolved; Stage 0 still verifies the technical integration requirements. This allowance includes the fork workflow, continuous collection and local history, integration, failure testing, and rollout preparation. Additional upstream data-provider work, if a required live input is unavailable, or a separately chosen external recovery service needs its own estimate. An external historical-block service and an export of exact tied-bundle winners are not prerequisites for the planned live-collection design.
-
-No implementation phase should introduce automated signing, a member-fleet scheduler, or a different reward formula without a separate decision. The initial version should make the agreed behavior explicit, observable, and recoverable before adding optimization features.

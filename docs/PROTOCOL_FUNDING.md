@@ -139,8 +139,8 @@ Base transfer. TIG identifies its event as index **443** of transaction
 The transfer's source matches the protocol player and its destination matches
 the observed top-up address. Its actual Base fee is **279580507888 wei**.
 The captured minimum is **5 TIG**; runtime instructions always read the current
-policy. The public account was used only for schema verification and was not
-imported into the deployment ledger.
+policy. The public account was used only for schema verification and is not
+imported into any deployment ledger.
 
 The primary protocol interface is the
 [TIG API schema](https://swagger.tig.foundation/swagger.yaml); the checked live
@@ -154,8 +154,8 @@ and TIG observations.
 This adapter does not classify unknown legacy protocol balances, automatically
 reimburse arbitrary expenses, or create reward receipts. Those need explicit
 audited evidence. Deployment must initialize both custody and funding monitors
-before enabling live work. Intended-account submission and finalization checks,
-isolated deployment and the paired worker installer remain rollout work.
+before enabling live work. [ROADMAP.md](ROADMAP.md) lists what is not
+implemented or not yet validated.
 
 A top-up's native `fee_limit` counts against the operator's recorded spending
 cap in the same way as a withdrawal attempt, and the submission fees the pool

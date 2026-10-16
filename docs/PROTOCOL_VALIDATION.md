@@ -1,17 +1,13 @@
 # Stage 0 protocol validation
 
-Status: live block capture, qualifying-credit inputs, and public report
-parsing are implemented and tested. Both intended-account CPU benchmarks have
-also completed on **testnet**; [the 23 September follow-up](LIVE_VALIDATION_20260923.md)
-records cache handling, completed-state recovery and reporting/receipt findings.
-The remaining Stage 0 checks below still need their own evidence.
-This probe does not submit benchmarks, change a reward
+Live block capture, qualifying-credit inputs, and public report parsing are
+implemented and tested. This probe does not submit benchmarks, change a reward
 destination, authenticate a member, or make any ledger or token movement.
-
-For 9 October mainnet findings, use [operations status](OPERATIONS_STATUS.md).
-The later mainnet CPU attempt expired. A narrow explicit late-result rejection
-rule is now deployed; disappearance alone remains insufficient evidence of
-expiry. The older probes below are historical inputs, not current health checks.
+A narrow explicit late-result rejection rule exists in the coordinator (see
+[submission recovery](SUBMISSION_RECOVERY.md)); disappearance alone is
+insufficient evidence of expiry. The recorded probes below are integration
+inputs, not health checks of a running deployment. [ROADMAP.md](ROADMAP.md)
+lists the checks that have not been validated live.
 
 ## Run and replay
 
@@ -35,7 +31,7 @@ levels. Missing records, unknown fields needed for accounting, inconsistent
 counts, stale blocks, and a block change prevent that observation from passing.
 
 The compact player endpoint avoids fetching full nonce solutions and Merkle
-proofs for every network benchmark. It currently covers the last 120 blocks;
+proofs for every network benchmark. It covers the last 120 blocks;
 the probe checks actual coverage against the active IDs on every capture,
 instead of assuming that window will always cover every eligible benchmark.
 
@@ -52,7 +48,7 @@ efficient storage of recurring benchmark data belong to Stage 2.
 
 ## Recorded live evidence
 
-The public responses were captured on 20 September 2026 from
+The public responses were captured from
 [TIG's mainnet API](https://mainnet-api.tig.foundation/get-block?include_data=true).
 The complete compressed recordings and response provenance are in
 [`tests/v2/fixtures`](../tests/v2/fixtures).
@@ -93,33 +89,32 @@ token's `decimals()` returned 18. Its requests and responses are preserved in
 [official chain ID documentation](https://docs.base.org/base-chain/api-reference/ethereum-json-rpc-api/eth_chainId)
 also identifies 8453 as Base Mainnet.
 
-The future funds adapter must use explicit deployment configuration, verify
-it against the RPC and token contract, and surface disagreement with TIG's
+The funds adapter must use explicit deployment configuration, verify it
+against the RPC and token contract, and surface disagreement with TIG's
 advertised metadata. Do not copy that advertised chain ID into wallet-signing
-messages, deposit attribution, or withdrawal checks. No deployment network
-configuration or wallet has been changed by this probe.
+messages, deposit attribution, or withdrawal checks. This probe changes no
+deployment network configuration or wallet.
 
-The custody observer now also reproduces a complete public token transfer and
+The custody observer also reproduces a complete public token transfer and
 its wallet balance change from archived RPC responses. See the
 [custody observation evidence](CUSTODY_OBSERVER.md). This validates the read-only
-adapter against current Base responses; it does not select or fund the user's
-deployment wallet.
+adapter against real Base responses; it does not select or fund a deployment
+wallet.
 
 ## Remaining Stage 0 work
 
-- Prove precommit acceptance/rejection and ambiguous-response reconciliation
-  against the intended deployment, including retention limits of lookup data.
-- Verify definitive expiry against the deployment's current protocol. A
-  record disappearing from a current feed is not proof of expiry. The separate
-  confirmed verification-failure feed now has a recorded public fixture and
-  adapter tests; see [submission recovery](SUBMISSION_RECOVERY.md).
-- Confirm the creation/reporting-round boundary mapping and preserve both
-  identifiers. An elapsed date or an unsuccessful reports fetch is not a
-  final-outcome signal.
-- Establish how final round emissions become actual pool receipts, including
-  any required claim, protocol penalties, and operator-paid cost reimbursement.
-- Configure and verify the actual pool account, custody wallet, token network,
-  and confirmation policy before enabling monetary operations.
-
-There is no new business-policy question in these remaining checks. They are
-technical integration and deployment requirements from the agreed plan.
+The probe establishes complete protocol inputs and arithmetic for recorded
+blocks; it proves nothing about a particular deployment. A record disappearing
+from a current feed is not proof of expiry (the confirmed verification-failure
+feed has a recorded public fixture and adapter tests; see
+[submission recovery](SUBMISSION_RECOVERY.md)), an elapsed date or an
+unsuccessful reports fetch is not a final-outcome signal, and both the
+creation and the reporting round identifiers are preserved. Every deployment
+must configure and verify its own pool account, custody wallet, token network
+and confirmation policy before enabling monetary operations. Precommit
+acceptance and rejection against a deployment, definitive expiry, the
+creation/reporting-round boundary mapping and the path from final round
+emissions to actual pool receipts (claim, protocol penalties and operator-paid
+cost reimbursement) are the checks listed in [ROADMAP.md](ROADMAP.md). There
+is no new business-policy question in them; they are technical integration
+and deployment requirements.

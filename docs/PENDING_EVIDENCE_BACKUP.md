@@ -1,11 +1,11 @@
 # Pending protocol file protection
 
-Prepared on 12 October and **activated/verified on 13 October 2026**. The German
-host now has the new volume, a fresh base and a successful combined production-copy
-restore. See [the activation record](RECOVERY_VOLUME_20261013.md).
-This supplements the existing three verified database bases, continuous WAL and
-encrypted settings/release exports. It does not activate a second pool or
-independent protocol collection.
+The pending-file snapshot supplements the three verified database bases,
+continuous WAL and encrypted settings/release exports. It does not activate a
+second pool or independent protocol collection. Together with the base backups
+it is the supported protection for protocol files that have not yet entered
+the database; the raw copy of the whole spool to the recovery host is an
+optional feature, disabled by default.
 
 ## What is copied
 
@@ -19,16 +19,16 @@ maintenance runs as root, so the collector can reopen them. Symlinked or
 hardlinked lock files are refused. Publication locks make one bounded selection;
 maintenance locks then protect
 the selected chunks while copying. A manifest moved to `recorded` after selection
-still has its complete saved bytes in the snapshot. The updated collector and
+still has its complete saved bytes in the snapshot. The collector and
 maintenance locking implementation must be installed before production pruning.
 
 The export records a database WAL boundary after selecting the files and waits
-up to 15 seconds for Germany's existing receiver to acknowledge it. This binds
-imports that have left the pending queues to durable WAL. The receiver verifies
-the source cluster identity against its base backup, every compressed file hash,
-every content digest and the complete set of manifest references before
-publishing an atomic snapshot pointer. Failed exports retain the previous copy
-and fail the service/health check.
+up to 15 seconds for the recovery server's existing receiver to acknowledge it.
+This binds imports that have left the pending queues to durable WAL. The
+receiver verifies the source cluster identity against its base backup, every
+compressed file hash, every content digest and the complete set of manifest
+references before publishing an atomic snapshot pointer. Failed exports retain
+the previous copy and fail the service/health check.
 
 ## Limits and retention
 
@@ -57,8 +57,8 @@ copied. Database financial commits retain the existing synchronous WAL policy.
 2. Install `mainnet_pending_evidence_v2.py` and its `mainnet_backup_v2.py` dependency
    in the operations directory on both hosts. The primary exporter uses the
    existing virtual environment for its read-only PostgreSQL query.
-3. Generate a dedicated key **on Germany**. Add its public key on the primary
-   with `from="2.28.230.81",restrict` and a forced command:
+3. Generate a dedicated key **on the recovery host**. Add its public key on the
+   primary with `from="<recovery host address>",restrict` and a forced command:
    `/opt/innopool-v2-mainnet/venv/bin/python /opt/innopool-v2-mainnet/operations/mainnet_pending_evidence_v2.py export`.
    The exporter also requires `SSH_ORIGINAL_COMMAND=export-pending-v1`; the key
    permits neither arbitrary commands nor forwarding. Use existing verified
@@ -66,8 +66,12 @@ copied. Database financial commits retain the existing synchronous WAL policy.
 4. Install root-owned 0600 copies of
    [`pending-evidence.json.example`](../deploy/v2-mainnet/pending-evidence.json.example)
    and [`recovery-protection.json.example`](../deploy/v2-mainnet/recovery-protection.json.example).
-   Install the pending-evidence service/timer examples, run one copy manually,
-   and verify the snapshot before enabling its timer.
+   The receiver checks the configured `source_host` against the
+   `hosts.primary` value of `/etc/innopool-v2-mainnet/deployment.json` and
+   refuses any other source; `deployment.json` carries a `hosts` object with
+   the `primary` and `recovery` addresses used by the backup and restore
+   tools. Install the pending-evidence service/timer examples, run one copy
+   manually, and verify the snapshot before enabling its timer.
 5. Install the updated backup health module and recovery health tool. Point the
    existing recovery health service at `mainnet_recovery_health_v2.py` using the
    supplied recovery health service example. The recovery profile expects pool

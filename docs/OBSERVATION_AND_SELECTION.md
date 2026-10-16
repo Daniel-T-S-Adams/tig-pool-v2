@@ -1,32 +1,30 @@
 # Block history and work selection
 
-The Stage 2 increment adds independent collection, durable replay, exact member
-credit attribution and a pure selector. It does not enable benchmark submission
-or settle rewards. The coordinator and worker integrations are implemented
-separately. See [operations status](OPERATIONS_STATUS.md) for current collector
-coverage, unresolved gaps and deployment controls.
+The observation layer provides independent collection, durable replay, exact
+member credit attribution and a pure selector. It does not itself enable
+benchmark submission or settle rewards. The coordinator and worker
+integrations are implemented separately.
 
 ## Collection and recovery
 
-The storage cleanup implementation saves validated pool inputs and best network
+The lean storage implementation saves validated pool inputs and best network
 reference summaries. It retains legacy readers and a guarded backfill path.
 See [lean storage](LEAN_STORAGE.md) for fields and deployment requirements.
-It was activated on 13 October; see [rollout status](LEAN_ROLLOUT_20261013.md).
-The full-snapshot encoding below describes the historical format that remains
+The full-snapshot encoding below describes the legacy format that remains
 readable during conversion. New successful captures use one compact blob.
 
-Since 15 October the deployed pool-scoped capture reads, each block, the
-block header, the algorithm, challenge and OPoW tables and only the pool's
-own benchmark feed: six requests and under one megabyte instead of one feed
-per active player. Other players' qualifier counts still arrive inside every
-algorithm record and are reconciled against the OPoW and challenge totals, so
-a truncated or inconsistent block is rejected, and the pool's own counts are
-checked against its own bundles. Member credit depends only on those inputs.
-The whole network is read separately, on demand, for selection references;
-see [lean storage](LEAN_STORAGE.md) for fields and deployment requirements.
+The pool-scoped capture reads, each block, the block header, the algorithm,
+challenge and OPoW tables and only the pool's own benchmark feed: six
+requests and under one megabyte instead of one feed per active player. Other
+players' qualifier counts still arrive inside every algorithm record and are
+reconciled against the OPoW and challenge totals, so a truncated or
+inconsistent block is rejected, and the pool's own counts are checked against
+its own bundles. Member credit depends only on those inputs. The whole
+network is read separately, on demand, for selection references; see
+[lean storage](LEAN_STORAGE.md) for fields and deployment requirements.
 A restarted collector resumes after the newest recorded block, so the current
-head is not captured a second time in a newer format. A same-block format
-conflict that did occur is resolved only under the proven
+head is not captured a second time in a newer format. A same-block conflict
+between a legacy and a pool-scoped capture is resolved only under the
 `format-boundary-projection-v1` policy described there.
 
 `tools/observe_tig_v2.py` runs separately from the API and scheduler. Its capture
@@ -39,13 +37,14 @@ digests, the block's active-id lists as sorted pages of ids, and any other
 oversized value as one chunk; pages are deduplicated chunks like the records,
 and the manifest tree is itself stored as one compressed chunk referenced from
 the capture row. Lists are kept in digest order, so an unchanged list costs
-nothing on the next block. Measured on the two recorded live blocks, a block
+nothing on the next block. Measured on recorded live blocks, a block
 costs about 250 KB of new storage instead of about 950 KB, of which 80 KB is
 the changed records themselves. Replays return the canonical order, which the
 snapshot validation does not depend on; all original fields are kept and every
-checksum is verified when replaying. Manifests recorded before October 2026 keep
-their inline record lists in the API's order and replay unchanged. Custody and
-report captures keep their original order, since there it can carry meaning.
+checksum is verified when replaying. Manifests recorded before the digest-order
+format keep their inline record lists in the API's order and replay unchanged.
+Custody and report captures keep their original order, since there it can
+carry meaning.
 
 Use a separate spool per collector and run the redundant collector in a different
 failure domain. Both can record the same block into the database: block identity
@@ -83,7 +82,7 @@ last.
 
 Stale timestamps generate alerts but do not prevent preserving otherwise complete
 historical observations. The work selector separately refuses stale snapshots.
-In the live validation here, normal and cache-busted reads returned the same head
+In live validation, normal and cache-busted reads returned the same head
 even when its protocol timestamp lagged wall time; `Cache-Control: max-age=15`
 alone did not explain that lag. Configure and monitor freshness based on the
 chosen deployment, without treating an older timestamp as proof of a missing or
@@ -100,7 +99,8 @@ the same block checks the prior rule and ownership digest and cannot credit twic
 The block's reward round owns its credit. A benchmark's creation round stays on
 its separate reservation. The adapter checks the deployed block-round mapping
 against configured blocks per round; this does **not** establish the separate
-reporting-round mapping still listed in the Stage 0 integration checks.
+creation/reporting-round mapping, which is a separate
+[protocol validation](PROTOCOL_VALIDATION.md) check.
 
 `round_credits()` requires the round to have ended, every observed block to
 carry its credit marker, no unresolved conflicting block, and no more
@@ -153,17 +153,15 @@ spooling, unknown ownership, gap recovery, conflicting data and complete rounds
 on either side of a gap. Run the full suite using the isolated test instructions
 in [MEMBER_FUNDS.md](MEMBER_FUNDS.md).
 
-A finite live run on 20 September 2026 recorded complete consecutive blocks
-1,351,170 and 1,351,171 into the new PostgreSQL/spool implementation. The chosen
-start height 1,351,169 had advanced before the first complete capture; the
-collector correctly retained that missing height and did not advance its
-contiguous cursor past it. This was a read-only test, with no member liabilities.
+A finite live run has recorded complete consecutive blocks into the
+PostgreSQL/spool implementation. The chosen start height had advanced before
+the first complete capture; the collector correctly retained that missing
+height and did not advance its contiguous cursor past it. That was a read-only
+test, with no member liabilities.
 
-The primary collector now runs continuously and the coordinator performs
+The primary collector runs continuously and the coordinator performs
 current-head checks before precommit submission. Database backup/restore
-protection is active, including verified bases, continuous WAL and bounded
-pending-file snapshots. The operator chose manual health inspection rather
-than external alerts. Independent recovery collectors remain inactive. The
-storage ordering conflict is resolved; the two historical round-137 gaps remain
-as described in
-[operations status](OPERATIONS_STATUS.md).
+protection covers verified bases, continuous WAL and bounded pending-file
+snapshots. External alerts and an independent recovery collector are operator
+decisions; those, and the checks that remain open, are listed in
+[ROADMAP.md](ROADMAP.md).

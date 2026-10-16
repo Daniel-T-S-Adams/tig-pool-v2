@@ -73,4 +73,4 @@ individual rules.
 | Repository and guide titles | `README.md`, `docs/OWNER_GUIDE.md`, `docs/MEMBER_SETUP_V2.md` |
 
 `tests/v2/test_api_origins.py` checks that the served shell and API carry the
-name. Dated operations records keep the wording they had when they were written.
+name.

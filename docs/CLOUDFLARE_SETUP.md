@@ -1,140 +1,133 @@
 # Cloudflare proxy setup
 
-The website is **pool.tig.foundation**. Both the browser dashboard and CPU/GPU
-workers use **pool-api.tig.foundation/api/v2** for live requests. Cloudflare
-proxies both addresses to the primary Hetzner server, **46.62.249.188**.
-The German recovery server is **2.28.230.81**.
-[Structure diagram](POOL_STRUCTURE.md).
+The website is **pool.example**. Both the browser dashboard and CPU/GPU
+workers use **pool-api.example/api/v2** for live requests. These two
+hostnames are placeholders for the operator's own; substitute them wherever
+they appear in this documentation. Cloudflare proxies both addresses to the
+primary host. [Structure diagram](POOL_STRUCTURE.md).
 
-## Current deployment — 14 October 2026
+## Deployed configuration
 
-The HTTPS and scoped API rule below remain the recorded configuration. Member
-sign-in and the mainnet CPU assignment/result upload occurred after these
-transport checks. The corrected CPU benchmark activated on TIG on 14 October.
-New work is paused; historical protocol gaps and reward settlement remain open.
-Database/WAL/settings/pending-file recovery protection is active and verified.
-External alerts were deferred by the operator
-on 6 October in favour of manual inspection. See
-[operations status](OPERATIONS_STATUS.md). The 2 October checks below are
-historical transport/TLS evidence, not the current release or fund flags.
+The HTTPS setup and the scoped API rule below are the recorded configuration.
+Member sign-in and mainnet CPU assignment/result upload through the proxy are
+validated after these transport checks. Database/WAL/settings/pending-file
+recovery protection is described in [backup operations](BACKUP_OPERATIONS.md).
+External alerting is the operator's decision ([roadmap](ROADMAP.md)); without
+a configured destination, manual inspection is the process. The checks below
+are transport/TLS evidence, not a statement about the release or fund flags.
 
-## Transport and TLS validation — 2 October 2026
+## Transport and TLS validation
 
-**21:07 UTC update: worker connectivity now passes.** After Daniel reported
-saving the scoped rule, the unchanged worker client received capabilities
-**200** and an invalid-token response **401** from the pool. API preflight
-succeeded, responses stayed `no-store`, and HTTP API requests redirected to
-HTTPS. The Cloudflare worker blocker is resolved. This verifies transport and
+**Worker connectivity passes once the scoped rule is saved.** The unchanged
+worker client receives capabilities **200** and an invalid-token response
+**401** from the pool. API preflight succeeds, responses stay `no-store`, and
+HTTP API requests redirect to HTTPS. This verifies transport and
 invalid-token rejection; authenticated work/uploads remain separate checks.
-No benchmark or funds movement occurred, and mainnet stays paused.
+No benchmark or funds movement is involved.
 
-**The Origin CA certificate is installed and public HTTPS works.** Daniel
-provided the signed PEM, which matches the server key and covers exactly the
-two pool hostnames. It was activated at **09:14 UTC**. Its expiry is
-**28 September 2041, 09:06 UTC** (the issued certificate uses a 15-year term).
-Certbot renewal is disabled; the existing health check now reports origin
-certificate and trust-root expiry, with a 60-day warning. External alert
-notifications remain part of the wider launch work.
+**The Origin CA certificate enables public HTTPS.** The operator provides the
+signed PEM, which must match the server key and cover exactly the two pool
+hostnames. Origin CA certificates can be issued with a 15-year term; record
+the expiry. Certbot renewal is disabled; the health check reports origin
+certificate and trust-root expiry, with a 60-day warning. Forwarding those
+notifications externally is part of the wider launch work.
 
-A fresh Chromium browser loaded the website, both hashed assets and the API.
-Browser API capabilities returned **200**, and an invalid worker token returned
+A fresh Chromium browser loads the website, both hashed assets and the API.
+Browser API capabilities return **200**, and an invalid worker token returns
 **401**, with working CORS and no JavaScript errors. HTML/API responses are
-`no-store`; public CSS/JavaScript produced Cloudflare cache **HIT** responses.
+`no-store`; public CSS/JavaScript produce Cloudflare cache **HIT** responses.
 Public TLS validates normally, and direct origin HTTP access is rejected even
 when the caller supplies a fake Cloudflare forwarding header. SSH still works.
-The encrypted certificate/key/configuration backup passed verification on
-Germany at **09:22 UTC**. No financial features or paid work were enabled.
+The encrypted certificate/key/configuration backup is verified on the recovery
+server. No financial features or paid work are enabled by this step.
 
-**Earlier failure, now resolved:** at **09:16 UTC**,
-the unchanged `worker_v2.client.Client` received **403 / error 1010** for its
-normal capabilities and benchmark requests. It used its normal headers, an
-invalid test execution token and no browser User-Agent override. This was a
-transport check, not a paid benchmark. Browser requests passed; the worker's
-normal HTTP requests were rejected by Cloudflare before pool authentication.
-Example Ray ID: **a4429b6f5f4c82d1-ARN**.
+**Failure mode the rule fixes:** without the scoped rule, the unchanged
+`worker_v2.client.Client` receives **403 / error 1010** for its normal
+capabilities and benchmark requests. It uses its normal headers, an invalid
+test execution token and no browser User-Agent override. This is a transport
+check, not a paid benchmark. Browser requests pass; the worker's normal HTTP
+requests are rejected by Cloudflare before pool authentication.
 
-The earlier September HTTP/ACME probe did not establish this worker failure.
-The new worker evidence supports the narrow configuration rule below. No
-website or ACME-path security exception is needed for certificate issuance.
+An HTTP/ACME probe does not establish this worker failure. The worker evidence
+supports the narrow configuration rule below. No website or ACME-path security
+exception is needed for certificate issuance.
 [Cloudflare error 1010](https://developers.cloudflare.com/support/troubleshooting/http-status-codes/cloudflare-1xxx-errors/error-1010/).
 
-## Completed rule — keep for configuration reference
+## Configuration rule — keep for configuration reference
 
-Daniel completed this as pool operator in the local Cloudflare browser. The
-normal worker client now passes. These are the saved rule instructions; no
-operator action needs repeating:
+The pool operator creates this rule in the Cloudflare browser dashboard. Once
+it is saved, the normal worker client passes. These are the rule
+instructions:
 
-1. Open **Cloudflare → tig.foundation → Rules → Overview → Create rule →
+1. Open **Cloudflare → your zone → Rules → Overview → Create rule →
    Configuration Rule**.
 2. Name it **Pool API worker requests**. Choose **Custom filter expression →
    Edit expression**, and paste:
 
    ```text
-   (http.host eq "pool-api.tig.foundation" and starts_with(http.request.uri.path, "/api/v2/"))
+   (http.host eq "pool-api.example" and starts_with(http.request.uri.path, "/api/v2/"))
    ```
 
 3. Add the setting **Browser Integrity Check → Off**. Deploy the rule after
    any conflicting configuration rule. Keep **Full (strict)**, API cache bypass
    and other security settings unchanged.
-4. **Verified at 21:07 UTC:** the same worker-client calls now succeed for
-   capabilities, and invalid execution tokens are still refused by the pool.
+4. **Verify:** the same worker-client calls now succeed for capabilities, and
+   invalid execution tokens are still refused by the pool.
 
 This disables that browser-specific check only for `/api/v2/` on
-`pool-api.tig.foundation`. Pool authentication and other attack protections
+`pool-api.example`. Pool authentication and other attack protections
 still apply. [Cloudflare's selective BIC setting](https://developers.cloudflare.com/waf/tools/browser-integrity-check/),
 [configuration rule instructions](https://developers.cloudflare.com/rules/configuration-rules/create-dashboard/).
 
-Certificate signing is complete; there is no CSR/certificate action to repeat.
-The public [original CSR](POOL_ORIGIN_CERTIFICATE.csr) remains a record of the
-request. The private key stays protected on the primary and in encrypted
-recovery backups.
+Keep the CSR used for the certificate request as a record. The private key
+stays protected on the primary and in encrypted recovery backups.
 
 ## Existing DNS and cache settings
 
-These settings are reported complete; there is no DNS action to repeat:
+The required DNS records and cache settings:
 
 | Type | Name | Content | Proxy status | TTL |
 |---|---|---|---|---|
-| A | pool | 46.62.249.188 | Proxied — orange cloud | Auto |
-| A | pool-api | 46.62.249.188 | Proxied — orange cloud | Auto |
+| A | pool | `<primary host address>` | Proxied — orange cloud | Auto |
+| A | pool-api | `<primary host address>` | Proxied — orange cloud | Auto |
 
 The **Pool API cache bypass** Cache Rule matches
-`http.host eq "pool-api.tig.foundation"` and sets **Cache eligibility → Bypass
+`http.host eq "pool-api.example"` and sets **Cache eligibility → Bypass
 cache**. It must take precedence over conflicting cache rules. Only public,
 content-hashed CSS/JavaScript receive long-lived caching. HTML and all API
-responses, including errors, use `no-store`. Live checks confirmed asset cache
-hits and uncached HTML/API responses; no additional caching change is needed
-for the tested paths.
+responses, including errors, use `no-store`. Live checks should confirm asset
+cache hits and uncached HTML/API responses; no additional caching change is
+needed for these paths.
 [Cloudflare cache rules](https://developers.cloudflare.com/cache/how-to/cache-rules/settings/).
 
 ## Server work and public checks
 
-- [x] Verify proxied DNS; record the operator's Full (strict) and API cache-bypass
+- Verify proxied DNS; record the operator's Full (strict) and API cache-bypass
   confirmations. Host-specific dashboard overrides are not independently read.
-- [x] Implement/test the website/API split and deploy `d3b9d1a` on both VMs.
-  Newer repository work has not been deployed as part of this TLS change.
-- [x] Generate the server key/CSR and receive Daniel's signed public PEM.
-- [x] Verify the issuing chain, hostnames, dates and key match; activate HTTPS
+- Deploy the release with the website/API split on both VMs.
+- Generate the server key/CSR and receive the operator's signed public PEM.
+- Verify the issuing chain, hostnames, dates and key match; activate HTTPS
   with saved rollback settings. Recheck official Cloudflare peer ranges.
-- [x] Verify public TLS, redirects and real-browser loading/API CORS. Confirm
+- Verify public TLS, redirects and real-browser loading/API CORS. Confirm
   cached public assets, uncached HTML/API responses and invalid-token rejection.
-- [x] Verify direct origin web access is denied and SSH remains available.
-- [x] Test the unchanged worker HTTP client and capture its **403 / 1010** failure.
-- [x] **Operator, local browser:** deploy the scoped Browser Integrity Check
-  rule above; **Codex:** repeat the unchanged worker client. Capabilities 200,
-  invalid token 401, preflight and API no-store checks passed at 21:07 UTC.
-- [ ] **Codex and operator:** complete wallet login, authenticated worker work,
-  uploads and size/timeout checks in their authorized validation phase.
-- [x] Back up and verify the final certificate, key and nginx settings on
-  Germany. Supplement `configuration-origin-ca-2026-10-02T092242Z` augments the
-  `2026-09-25T125901Z` database snapshot; it does not advance that DB backup.
-- [x] Record expiry and add local monitoring of the origin certificate and
+- Verify direct origin web access is denied and SSH remains available.
+- Test the unchanged worker HTTP client; without the scoped rule it fails with
+  **403 / 1010**.
+- **Operator, local browser:** deploy the scoped Browser Integrity Check rule
+  above; then repeat the unchanged worker client and confirm capabilities 200,
+  invalid token 401, preflight and API no-store checks pass.
+- Complete wallet login, authenticated worker work, uploads and size/timeout
+  checks in their authorized validation phase.
+- Back up and verify the final certificate, key and nginx settings on the
+  recovery server. A configuration supplement augments the existing database
+  snapshot; it does not advance that DB backup.
+- Record expiry and add local monitoring of the origin certificate and
   RSA trust root. Replace the certificate before expiry; refresh the stored
   trust root when required. Origin CA does not use automatic ACME renewal.
-- [ ] Connect health/expiry failures to external operator notifications as
-  part of the mainnet launch work.
+- Connect health/expiry failures to external operator notifications if the
+  operator chooses an alert destination.
 
-Origin CA protects the **Cloudflare → Hetzner** connection. Visitors see
+Origin CA protects the **Cloudflare → origin** connection. Visitors see
 Cloudflare's public certificate. Keep the proxy enabled: a browser connecting
 directly would not trust an Origin CA certificate.
 [Origin CA](https://developers.cloudflare.com/ssl/origin-configuration/origin-ca/),

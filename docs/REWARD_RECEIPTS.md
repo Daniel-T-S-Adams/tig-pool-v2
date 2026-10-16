@@ -7,7 +7,7 @@ reward transaction and compare every player amount against a saved TIG
 round-emissions response. It cannot sign transactions, change member balances,
 declare a final round or enable settlement.
 
-## Verified 23 September 2026
+## Verified contract and chain values
 
 | Item | Verified value |
 |---|---|
@@ -53,7 +53,7 @@ network and contract pin. This example only reads public mainnet data:
 python tools/inspect_rewards_v2.py \
   --rpc https://mainnet.base.org --chain-id 8453 \
   --token 0x0c03ce270b4826ec62e7dd007f0b716068639f7b \
-  --wallet 0xd4a076b5335f0fb2da40158b52e0bb6d6ac59ebf \
+  --wallet <pool custody wallet> \
   --locker 0x9f6b29e498ef6bee4a050fa1f29c31dbe6c6aef4 \
   --code-sha256 a38dc562bbe1339d79fb13f088ffb4f27379c26e7e4c0d865ec0b5d99892a35e \
   --output /protected/new-reward-observation.json
@@ -72,10 +72,12 @@ the selected provider requires it.
 Before a real reward becomes spendable, retain a reviewed mapping from final
 round earnings through claim/unlock to an actual indexed wallet transfer.
 Reconcile operator-paid contract-call gas with the shared custody nonce history.
-Settlement still requires complete round credit, final arbitration, received
-money and any funded operator reimbursement. A manual transfer or dashboard
-earnings figure cannot substitute for those inputs.
+Settlement requires complete round credit, final arbitration, received money
+and any funded operator reimbursement. A manual transfer or dashboard earnings
+figure cannot substitute for those inputs.
 
-The reader provides evidence only. It does not yet implement the operator
-claim/unlock/send workflow or automatic round attribution. The public batch
-and nine reader tests validate observation, not a live reward cycle for this pool.
+The reader provides evidence only. It does not implement the operator
+claim/unlock/send workflow or automatic round attribution; the operator claims
+and unlocks outside the pool and records the receipt by hand. The public batch
+and the reader tests validate observation, not a live reward cycle for a pool.
+See [ROADMAP.md](ROADMAP.md) for what is not implemented or validated.

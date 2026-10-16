@@ -1,17 +1,10 @@
 # Pool data and its path to recovery
 
-Checked against the **14 October 2026** deployment: pool `59a3446`, worker
-`dddad9d`, migrations through 022. Primary is Helsinki `46.62.249.188`;
-recovery is Nuremberg `2.28.230.81`. The ordering conflict is resolved and all
-26,050 historical observed blocks have compact replacements. See
-[the storage fix](STORAGE_ORDERING_FIX_20261014.md) for recovery verification,
-cleanup counts and measurements. The previous full-network storage survey is
-preserved as [the historical 9 October trace](STORAGE_MAP_20261009.md).
-
-Since 15 October the deployed pool-scoped capture replaces the per-block
-whole-network read with six responses and an on-demand reference read, and
-reuses checked binaries across reservations; the sources and measurements
-below describe the 14 October release and have not been re-measured.
+This map describes the lean-storage release: the pool-scoped capture replaces
+the per-block whole-network read with six responses and an on-demand reference
+read, and reuses checked binaries across reservations. Historical observed
+blocks captured in the earlier full-network format have compact replacements
+after the guarded conversion described in [lean storage](LEAN_STORAGE.md).
 
 ## Data sources and contents
 
@@ -47,7 +40,7 @@ flowchart LR
     Collectors --> Spool["Primary spool: pending then recorded"]
     Spool -->|"Validate and import"| DB["Primary PostgreSQL"]
     Members["Member uploads and operator actions"] --> DB
-    DB -->|"Synchronous WAL + daily verified bases"| Recovery["Germany: backup storage"]
+    DB -->|"Synchronous WAL + daily verified bases"| Recovery["Recovery host: backup storage"]
     Spool -->|"Pending files and referenced chunks"| Recovery
     Settings["Exact release and settings"] -->|"Encrypted export + SSH pull"| Recovery
 ```
@@ -72,14 +65,15 @@ records and checksums prevent duplicate sends, ownership changes or repeated
 credit. A compact replacement does not change an observed block's original
 identity, credit or reconciliation.
 
-## Exactly how Germany receives the data
+## Exactly how the recovery host receives the data
 
 ### Continuous WAL
 
 WAL is PostgreSQL's **write-ahead log**, the ordered changes needed to advance
-a database backup. Germany's `pg_receivewal` stores this stream through a
-restricted SSH tunnel using a replication-only database role and pinned host
-keys. The receiver saves files; it does not run an active replacement pool.
+a database backup. The recovery host's `pg_receivewal` stores this stream
+through a restricted SSH tunnel using a replication-only database role and
+pinned host keys. The receiver saves files; it does not run an active
+replacement pool.
 
 Normal runtime and migration-owner transactions require the receiver's disk
 acknowledgment. All six primary application services use the runtime role with
@@ -98,11 +92,11 @@ pass. Retention keeps **three verified bases plus the WAL required since the
 oldest base**. Removing an old base does not permit deleting WAL needed by a
 base that remains.
 
-An actual isolated restore on 14 October replayed 229 later WAL segments from
-the 03:13 UTC base to the sealed conversion boundary. All 26,050 compact copies
-and 47 protected table fingerprints matched, including accounting, ownership,
-the original conflict alert and its resolution. The disposable database was
-removed after verification. See [the detailed record](STORAGE_ORDERING_FIX_20261014.md).
+The restore rehearsal replays the later WAL segments from a verified base to a
+sealed boundary in an isolated database, compares the compact copies and the
+protected table fingerprints (accounting, ownership, conflict alerts and their
+resolutions), and removes the disposable database after verification. See
+[backup operations](BACKUP_OPERATIONS.md#restore-rehearsal).
 
 ### Pending protocol files
 
@@ -110,19 +104,21 @@ Recovery copies bounded snapshots of **pending** block, report, custody and
 funding manifests, plus only their referenced content. The job runs again one
 minute after completion; health requires the protected source snapshot to be
 no more than five minutes old. It verifies file/content hashes, cluster identity
-and a source WAL boundary durably acknowledged on Germany before publication.
-Two verified generations are retained. The copy never deletes primary files.
+and a source WAL boundary durably acknowledged on the recovery host before
+publication. Two verified generations are retained. The copy never deletes
+primary files.
 
-This covers the interval before a capture enters PostgreSQL. There is no full
-recorded-spool mirror. Independent recovery collectors remain inactive.
+This covers the interval before a capture enters PostgreSQL. A full
+recorded-spool mirror is optional and disabled by default. Independent recovery
+collectors remain inactive.
 See [pending evidence protection](PENDING_EVIDENCE_BACKUP.md).
 
 ### Release and settings
 
 The daily export includes the pinned pool source archive, service units and
 encrypted settings, credentials and TLS configuration. Recovery pulls these
-exports over restricted SSH every five minutes. Off-host file hashes and
-private decryption were verified on 14 October. Configuration export does not
+exports over restricted SSH every five minutes. Verify the pulled export's file
+hashes and its private decryption off-host. Configuration export does not
 advance the database recovery point; WAL and bases provide that protection.
 
 ## Paths
@@ -140,13 +136,11 @@ advance the database recovery point; WAL and bases provide that protection.
 | Recovery | `/var/lib/innopool-v2-mainnet/primary-backups/` | Pulled release and encrypted configuration exports |
 
 The newest database base, continuous WAL and pending snapshots use persistent
-guarded bind mounts on the **200 GiB EXT4 volume 107125099** at
-`/mnt/HC_Volume_107125099`. Mount checks prevent silently writing those archives
-to the root filesystem if the volume is unavailable. See
-[the volume record](RECOVERY_VOLUME_20261013.md). Two older retained bases use
-the server's spare root disk, with a combined catalogue and reserve checks for
-both filesystems. The policy still keeps three bases and all WAL required by
-the oldest. See [current base placement](BACKUP_BASE_ARCHIVES_20261014.md).
+guarded bind mounts on a dedicated EXT4 volume mounted at `/mnt/<volume>`.
+Mount checks prevent silently writing those archives to the root filesystem if
+the volume is unavailable. Two older retained bases use the server's spare root
+disk, with a combined catalogue and reserve checks for both filesystems. The
+policy still keeps three bases and all WAL required by the oldest.
 
 ## Retention and cleanup
 
@@ -158,21 +152,23 @@ floor; the cap does not justify discarding uncredited evidence.
 
 Redundant full-network originals can expire earlier after their validated
 compact replacement, credit/reconciliation and any conflict resolution are
-verified off-host. That is the 14 October historical cleanup. File chunk
+verified off-host. That is the historical cleanup described in
+[lean storage](LEAN_STORAGE.md#existing-archive-cleanup). File chunk
 collection honors surviving references and writing pins; database chunk
 collection checks all current surviving captures under the writer lock.
 
 Expiry makes PostgreSQL space reusable after vacuum. Allocated database files
 and retained physical backups do not immediately shrink to logical payload
-size. Current measurements belong in [operations status](OPERATIONS_STATUS.md)
-and [the storage fix record](STORAGE_ORDERING_FIX_20261014.md), rather than
-being treated as fixed capacity requirements.
+size. Measure the deployment's actual sizes rather than treating any figure
+here as a fixed capacity requirement.
 
-## Current verification and holds
+## Verification and holds
 
-The ordering conflict at 1382587 has an immutable, fully replayed resolution.
-Historical gaps **1375817** and **1376650** remain unresolved; the earlier
-prelaunch waiver at 1372249 is unchanged. A backup cannot recreate a block
-that was never captured. These gaps continue to hold exact settlement.
-New work is durably paused and settlement disabled. The successful two-server
-CPU activation is recorded separately from still-unverified reward settlement.
+A same-height ordering conflict is resolved by an immutable, fully replayed
+resolution; see [legacy ordering conflicts](LEAN_STORAGE.md#legacy-ordering-conflicts).
+A backup cannot recreate a block that was never captured: a missing height
+stays visible and is handled under the
+[bounded missing-block tolerance](ROUND_SETTLEMENT.md#bounded-missing-block-tolerance),
+and the one-time prelaunch waiver is not a general way to fill later gaps.
+A successful CPU activation on TIG is recorded separately from reward
+settlement, which is verified on its own.

@@ -1,12 +1,12 @@
 # Lean pool storage
 
-Implemented on the 9 October 2026 storage cleanup branches and activated on
-13 October as pool `f5f1028`, worker `a715041`, with migrations through 021.
-See [rollout and remaining maintenance](LEAN_ROLLOUT_20261013.md) and
-[verification details](LEAN_STORAGE_VERIFICATION.md). The [14 October ordering fix](STORAGE_ORDERING_FIX_20261014.md) adds migration 022 and a verified resolution
-for the single held rollout-boundary capture. Historical conversion, backup/restore
-verification and guarded redundant raw/file/chunk cleanup are complete. See
-[operations status](OPERATIONS_STATUS.md) for live measurements and controls.
+Lean storage comprises direct binary downloads, pool-scoped block capture,
+selection references, final report fetching and guarded cleanup of the earlier
+full-network archives. Migrations 020 and 021 introduce it; migration 022 adds
+a verified resolution for a same-height ordering conflict at the rollout
+boundary, described at the end of this document. Where the data lives and how
+it reaches the recovery host is explained in the [storage map](STORAGE_MAP.md);
+live measurements belong to each deployment.
 
 ## Binary downloads
 
@@ -69,9 +69,9 @@ Deploy every collector with this change at once: a legacy full capture and a
 pool-scoped capture of the same block carry different block identities and
 would be reported as a conflicting observation at that height. A restarted
 collector resumes after the newest recorded block instead of capturing the
-current head again. The 15 October rollout switched before that guard existed
-and recorded height 1385323 twice, once compact and once scoped. Such a
-same-block format conflict is resolved under the policy
+current head again. A rollout that switches formats without that guard can
+record one height twice, once compact and once scoped. Such a same-block
+format conflict is resolved under the policy
 `format-boundary-projection-v1` (migration 026): the resolution is appended
 only when the block identity, configuration, the pool's feed, bundles,
 qualifier counts and credit, the pool's own algorithm counts, the algorithm,
@@ -123,7 +123,7 @@ cached fetch at the round transition.
 ## Existing archive cleanup
 
 Apply the additive migrations through 026 and the updated runtime/observer
-grants; 020 to 025 are deployed since 15 October.
+grants.
 Install all collector changes before pruning so writing-chunk pins protect
 captures during maintenance. The old deployed reader cannot read the new
 compact format; rollback must retain a reader that understands it.
@@ -156,13 +156,11 @@ Missing heights remain visible and continue to hold exact settlement.
 
 WAL, bases and configuration transfers keep their current transport and
 retention. Smaller writes reduce future backup volume. Expiry makes PostgreSQL
-space reusable; it does not shrink database files or purge retained backups.
-Local API, worker, browser and database checks and fixture-only pruning have
-been performed. Production migrations and paired activation are complete.
-Historical conversion and guarded redundant archive/chunk cleanup completed on
-14 October. Allocated-table rewrites were not performed. Normal backup
-retirement still retains three verified bases and their required WAL; the
-[archive placement](BACKUP_BASE_ARCHIVES_20261014.md) uses existing server disks.
+space reusable; it does not shrink database files or purge retained backups,
+and allocated-table rewrites are a separate maintenance-window task. Normal
+backup retirement retains three verified bases and their required WAL; older
+retained bases may use the recovery server's existing disks (see the
+[storage map](STORAGE_MAP.md#paths)).
 
 ## Legacy ordering conflicts
 

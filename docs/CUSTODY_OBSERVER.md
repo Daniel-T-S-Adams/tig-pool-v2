@@ -63,14 +63,14 @@ logs, receipts and balance state. On restart the collector resumes after the
 last completely recorded batch. `--batch-size` bounds a query to 1–1000 blocks;
 reduce it for a provider with tighter limits. `--rpc-interval-seconds`
 spaces calls using a shared monotonic clock (default one second; 0–5 allowed).
-The live cleanup uses two seconds and a sixty-second collection poll. Failure
-captures record a safe RPC method and numeric HTTP/RPC code, without storing
-credentials or provider error messages. Pacing does not grant historical-data
-access: a usable Base RPC is still required. See
-[current custody status](OPERATIONS_STATUS.md#wallet-observation).
-`--once` returns success only when
-collection is current and custody reconciles. `--replay-only` imports pending
-local captures without making network calls.
+The documented service configuration uses two seconds and a sixty-second
+collection poll. Failure captures record a safe RPC method and numeric
+HTTP/RPC code, without storing credentials or provider error messages. Pacing
+does not grant historical-data access: a usable Base RPC that serves the
+required historical logs, receipts and balances is still required.
+`--once` returns success only when collection is current and custody
+reconciles. `--replay-only` imports pending local captures without making
+network calls.
 
 Every complete or failed attempt is fsynced to the local spool before database
 recording. The database also preserves the raw RPC responses with a checksum.
@@ -81,8 +81,10 @@ do not prevent the collector from obtaining fresh data. An RPC/database failure
 can be retried, while a canonical conflict keeps financial operations held.
 Preserve the spool, including its manifests and chunks, under the approved
 retention and recovery policy. Pending files are outside database WAL protection;
-the currently disabled full file copy is described in
-[operations status](OPERATIONS_STATUS.md#recovery-protection-and-remaining-cleanup). The RPC URL is represented by an
+their snapshot copy is described in
+[pending protocol file protection](PENDING_EVIDENCE_BACKUP.md), and whether the
+recovery host also keeps a full raw copy of the spools is an operator decision
+listed in [ROADMAP.md](ROADMAP.md). The RPC URL is represented by an
 opaque source identifier in captures, rather than persisting provider secrets.
 
 ## Funds and work controls
@@ -163,11 +165,9 @@ concurrent collectors, backfill, stale evidence, canonical conflicts, exact
 attribution, and source/network mismatches. Browser tests exercise operator
 deposit review and native funding against the real API with generated fixtures.
 
-Unconfirmed-deposit display, other operator
-expense reconciliation, automatic native/internal-transfer indexing, and the
-audited correction workflow remain separate adapters. A pending native funding
-or protocol top-up cannot be assumed to explain a discrepancy. Deployment must
+Unconfirmed-deposit display, other operator expense reconciliation, automatic
+native/internal-transfer indexing, and the audited correction workflow are not
+implemented; see [ROADMAP.md](ROADMAP.md). A pending native funding or
+protocol top-up cannot be assumed to explain a discrepancy. Deployment must
 initialize and verify the custody monitor before enabling its live work flags;
 the low-level API factory remains usable without a monitor in isolated tests.
-This increment is not a production deployment or a complete live finalization
-adapter.

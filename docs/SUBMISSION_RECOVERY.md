@@ -1,11 +1,10 @@
 # TIG submission and recovery service
 
 The v2 coordinator links the member queue to TIG using durable submission
-intents. It runs independently of the API and block collector. The initial
-increment used simulated writes. Live CPU testnet activation was checked in
-September; the 7 October mainnet CPU attempt later expired. The installed
-mainnet coordinator can reconcile existing submissions while new work is
-paused. See [operations status](OPERATIONS_STATUS.md).
+intents. It runs independently of the API and block collector. The coordinator
+can reconcile existing submissions while new work is paused.
+[ROADMAP.md](ROADMAP.md) lists which submission paths have been validated
+live and which have not.
 
 ## Durable submission sequence
 
@@ -53,8 +52,8 @@ Activations and confirmed verification failures free slots while keeping all
 collateral held for X+2 finalization. Disappearing records, elapsed wall time,
 ambiguous HTTP failures and missing reports do not release funds. Explicit
 definitive-rejection handling exists for a trusted protocol adapter; generic
-HTTP 4xx responses are deliberately insufficient evidence. The October
-cleanup adds a narrow late-results rule: the exact archived HTTP-400 missing-
+HTTP 4xx responses are deliberately insufficient evidence. One narrow
+late-results rule applies: the exact archived HTTP-400 missing-
 precommit response must match the configured TIG origin, benchmark ID and raw
 hash; a complete later pool feed must contain no record for it; the original
 challenge lifetime must have elapsed. Any successful prior result response or
@@ -113,7 +112,7 @@ submissions and a public artifact origin. Only the submission service receives
 response evidence, logs, member assignments or runtime containers. `--once`
 performs one cycle for development checks; it does not change the flags.
 
-The observer remains `tools/observe_tig_v2.py`, now with
+The observer is `tools/observe_tig_v2.py`, with
 `--pool-player-id <configured-address>`. It needs no TIG API key. Neither entry
 point changes legacy deployments or performs startup migrations.
 
@@ -133,7 +132,7 @@ They also cover artifact integrity and serving, restricted public redirects,
 and replay that continues past held blocks. The paired worker commit is pinned
 in pool CI. No test writes to TIG or Ethereum.
 
-Read-only downloads on 20 September 2026 verified these live artifacts:
+Recorded read-only downloads verified these live artifacts:
 
 | Algorithm | Library name | Compressed bytes | SHA-256 |
 |---|---|---:|---|
@@ -153,6 +152,7 @@ activation at 1,351,079, demonstrating why proof receipt alone is insufficient.
 Its owner and public source are retained in the fixture. This failure feed is
 separate from later per-nonce arbitrations.
 
-Real CPU/GPU benchmark execution, intended-account submission/rejection and
-expiry validation, final reward receipt mapping, deployment configuration and
-the remaining implementation stages still gate a production release.
+Real CPU/GPU benchmark execution on the members' hardware, intended-account
+submission/rejection and expiry validation, final reward receipt mapping and
+deployment configuration are each deployment's own checks;
+[ROADMAP.md](ROADMAP.md) lists which have been validated and which have not.
