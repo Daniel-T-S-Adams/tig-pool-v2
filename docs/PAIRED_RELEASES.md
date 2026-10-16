@@ -1,10 +1,10 @@
 # Serving the recorded pool and worker release
 
 The API publishes a paired release and its checked worker installer. A private
-CPU testnet pair was validated in September. Since 15 October mainnet serves
-pool `4e64bf3` with worker `c6eccfb` under the recorded
-[pool-scoped capture release](POOL_SCOPED_ROLLOUT_20261015.md), using the
-official 0.0.8 CPU runtime map. The corrected two-server CPU benchmark activated on TIG;
+CPU testnet pair was validated in September. Since 16 October mainnet serves
+pool `ea4c830` with worker `c6eccfb` under the recorded
+[safety release](SAFETY_RELEASE_20261016.md),
+using the official 0.0.8 CPU runtime map and offering CPU work only. The corrected two-server CPU benchmark activated on TIG;
 reward-cycle verification remains open. New work remains paused.
 See [operations status](OPERATIONS_STATUS.md) and the
 [deployment procedure](MAINNET_DEPLOYMENT.md).

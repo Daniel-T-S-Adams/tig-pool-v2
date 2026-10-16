@@ -1,5 +1,23 @@
 # V2 operations and storage status
 
+**16 October update:** the safety release, pool `ea4c830` (tag
+`mainnet-safety-release-20261016`) with the unchanged worker `c6eccfb`, was
+deployed at **14:04 UTC** at captured boundary 1386945 behind restore point
+`innopool_safety_release_20261016`, with the financial digest unchanged. It
+adds migration 027 and the software-enforced spending cap, offers CPU work
+only until GPU execution is validated, and upgrades both hosts to FastAPI
+0.143.2 and Starlette 1.8.0 from a shipped wheelhouse. The owner-approved cap
+was recorded at 14:04 UTC: 10 TIG of submission fees and 0.0005 Base ETH of
+custody gas per rolling 30 days, at most 0.01 TIG per attempt and 0.0001 ETH
+per send; five 0.001 TIG ceilings from the October benchmarks already fall
+inside the window. The primary health check passes with the new rule. No
+operator income wallet is configured, so the operator reserve stays unset.
+During activation the upgraded packages were installed unreadable to the
+service user and the API restarted in a loop for about three minutes until
+the permissions were corrected; the deployment script now installs with the
+right mask. New work stays paused and settlement disabled. See
+[the release record](SAFETY_RELEASE_20261016.md).
+
 **15 October update:** `main` now carries every ready feature, and the pair
 pool `4e64bf3` (tag `mainnet-pool-scoped-capture-20261015`) with worker
 `c6eccfb` (tag `mainnet-library-cache-20261015`) was deployed at **11:02 UTC**
@@ -37,7 +55,7 @@ The [storage ordering fix](STORAGE_ORDERING_FIX_20261014.md) is deployed.
 All 26,050 historical blocks are converted; alert 2 has an immutable replay
 resolution. Fresh backup, actual restore and guarded redundant raw cleanup passed.
 
-Checked against the running services on **14 October 2026**. This is the current
+Checked against the running services on **16 October 2026**. This is the current
 operations record. Wallet RPC recovery was checked on **12 October**; backup
 relocation, recovery verification and paired application activation passed
 on **13 October**, as recorded below. Older dated validation notes
