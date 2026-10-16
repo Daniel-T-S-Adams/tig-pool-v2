@@ -296,9 +296,7 @@ reserve in `service.json` before relying on operator withdrawals. Since
 [PR 28](https://github.com/Daniel-T-S-Adams/tig-pool-v2/pull/28), deployed on
 8 October, new benchmarks copy the hyperparameters of the selected algorithm's
 best active bundle per track. Source
-availability is separate from production readiness. The inherited `admin.py`,
-legacy `.env` settings and original Compose instructions do not administer these
-v2 ledger controls.
+availability is separate from production readiness.
 
 **If something goes wrong, use the existing record before retrying an action.**
 

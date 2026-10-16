@@ -1,7 +1,7 @@
 # InnoPool v2 implementation status
 
 Documentation and live application checked on **14 October 2026**. The agreed design is
-[POOL_REDESIGN_PLAN.md](POOL_REDESIGN_PLAN.md). The detailed current state and
+[docs/DESIGN.md](docs/DESIGN.md). The detailed current state and
 storage explanation are in [operations status](docs/OPERATIONS_STATUS.md).
 The foundation and increment records below are historical validation records.
 
