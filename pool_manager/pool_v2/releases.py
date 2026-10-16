@@ -9,8 +9,8 @@ from .ledger import canonical
 from .money import FundsError
 
 
-POOL_REPOSITORY='https://github.com/Daniel-T-S-Adams/tig-pool-v2.git'
-WORKER_REPOSITORY='https://github.com/Daniel-T-S-Adams/innopool-slave-v2.git'
+POOL_REPOSITORY='https://github.com/Daniel-T-S-Adams/community-pool.git'
+WORKER_REPOSITORY='https://github.com/Daniel-T-S-Adams/community-pool-worker.git'
 CPU_TYPES={'aws_t3','aws_t3a','aws_t4g','aws_c7i','aws_c7a','aws_c7g','aws_m7i','aws_m7a','aws_m7g'}
 
 

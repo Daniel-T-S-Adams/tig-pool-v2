@@ -43,8 +43,8 @@ configuring release metadata does not enable member funds, work or settlement.
 {
   "manifest_version": 1,
   "api_version": "2.0",
-  "pool": {"repository": "https://github.com/Daniel-T-S-Adams/tig-pool-v2.git", "commit": "<40 hex characters>", "tag": "<tested pool tag>"},
-  "worker": {"repository": "https://github.com/Daniel-T-S-Adams/innopool-slave-v2.git", "commit": "<40 hex characters>", "tag": "<tested worker tag>", "state_version": 1, "installer_sha256": "<64 hex characters>"},
+  "pool": {"repository": "https://github.com/Daniel-T-S-Adams/community-pool.git", "commit": "<40 hex characters>", "tag": "<tested pool tag>"},
+  "worker": {"repository": "https://github.com/Daniel-T-S-Adams/community-pool-worker.git", "commit": "<40 hex characters>", "tag": "<tested worker tag>", "state_version": 1, "installer_sha256": "<64 hex characters>"},
   "runtime_images": {"c001": "ghcr.io/tig-foundation/tig-monorepo/satisfiability/runtime@sha256:<64 hex characters>"}
 }
 ```
