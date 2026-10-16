@@ -16,6 +16,10 @@ def application():
     for field in ('funds_enabled', 'work_enabled', 'settlement_enabled', 'require_pilot_limits'):
         if type(config.get(field, False)) is not bool:
             raise ValueError('service capability flags must be explicit booleans')
+    if 'offered_resources' in config:
+        if not isinstance(config['offered_resources'], list) or not all(isinstance(item, str) for item in config['offered_resources']):
+            raise ValueError('offered resources must be a list of resource names')
+        config['offered_resources'] = tuple(config['offered_resources'])
     # Runtime credentials are separate from the reviewable, nonsecret config.
     if 'database_dsn' in config or 'operator_token_sha256' in config:
         raise ValueError('database and operator credentials must use protected service configuration')

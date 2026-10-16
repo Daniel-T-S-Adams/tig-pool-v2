@@ -32,7 +32,8 @@ class MemberProtocolTests(DatabaseCase):
         super().setUp()
         self.player = "0x" + "6"*40
         self.settings = Settings(self.db.dsn, "https://pool.example", 8453, "a"*64,
-                                 funds_enabled=True, work_enabled=True, pool_player_id=self.player)
+                                 funds_enabled=True, work_enabled=True, pool_player_id=self.player,
+                                 offered_resources=("CPU", "GPU"))
         self.api = TestClient(create_app(self.settings))
         auth = Auth(self.db, origin=self.settings.origin, chain_id=8453)
         with self.db.transaction() as cursor:
