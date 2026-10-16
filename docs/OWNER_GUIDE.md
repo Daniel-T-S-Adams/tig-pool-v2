@@ -31,6 +31,7 @@ Use this table to decide where a task belongs:
 | Check balances, deposits, work and alerts | Pool website | Operator dashboard → Refresh |
 | Change a member's collateral requirement | Pool website | Members & collateral → Edit multiplier |
 | Pause or resume new pool work | Pool website | Pause new work / Resume new work |
+| Record or change the spending cap | Pool website | Spending cap → Set spending cap |
 | Register a member | Member's browser and MetaMask | Member account → Connect wallet → sign in |
 | Connect, drain or update a worker | Member website, then that worker's machine | Execution token and verified installer |
 | Review a withdrawal | Pool website | Withdrawal review → Approve or Reject |
@@ -88,6 +89,19 @@ setting applies across that member's CPU/GPU workers. Already-reserved
 benchmarks retain their original multiplier and held amount. Changing it needs
 no wallet transaction. Zero collateral does not suspend the member or remove
 their work limits.
+
+**The spending cap is the pool's hard budget.** It is an immutable, append-only
+record of a rolling window and, within it, the most TIG the pool may commit to
+submission fees and the most native token it may reserve for custody sends,
+plus a ceiling per attempt. Ceilings count in full from the moment they are
+committed, even when the actual fee turns out lower, is refunded or the send
+never happens, so nothing can recycle budget inside the window. Without a cap
+the pool reserves no work, begins no withdrawal attempt and prepares no top-up,
+and the website shows **Spending cap not set**; when the window is used up it
+shows **Spending cap reached**. Record a new cap from the Spending cap card; the
+newest record applies to new commitments and the health check warns when a
+window is more than 90% committed. Recording a cap of zero stops new fee
+commitments without touching reservations already made.
 
 **To pause the pool's new work, click Pause new work.** Existing handovers,
 computation results, proofs and recovery remain available; an already committed

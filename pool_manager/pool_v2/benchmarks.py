@@ -94,8 +94,9 @@ def reserve(database, member_id, request_key, *, creation_round, resource, selec
             if existing["request_hash"] != request_hash:
                 raise Conflict("work request key was reused with different inputs")
             return dict(existing)
-        if blocked(database,cursor=cursor):
-            raise Conflict('new benchmark reservations are paused or awaiting custody reconciliation')
+        reason = blocked(database,cursor=cursor)
+        if reason:
+            raise Conflict('new benchmark reservations are paused or blocked: ' + reason)
         cursor.execute("SELECT clock_timestamp() AS now")
         if offer_expires_at <= cursor.fetchone()["now"]:
             raise Conflict("compute offer has expired")
@@ -106,6 +107,8 @@ def reserve(database, member_id, request_key, *, creation_round, resource, selec
         from . import pilot
         pilot.check(database, cursor, member=member, resource=resource, amount=amount,
                     fee_limit=fee_limit, payload=payload)
+        from . import spending
+        spending.check_fee(cursor, fee_limit)
         identity = uuid.uuid4()
         ledger.account(cursor, held(identity), "collateral")
         ledger.account(cursor, committed_fee(identity), "operator_commitment", location="protocol")
@@ -141,6 +144,8 @@ def mark_submitting(database, identity, *, _cursor=None):
         member = member_lock(cursor, row['member_id'])
         pilot.check(database, cursor, member=member, resource=row['resource'], amount=int(row['amount']),
                     fee_limit=int(row['fee_limit']), payload=row['payload'], reservation_id=identity)
+        from . import spending
+        spending.check_fee(cursor, int(row['fee_limit']), reservation_id=identity)
         cursor.execute("UPDATE reservations SET state='uncertain' WHERE id=%s", (identity,))
         payload = json.loads(row["payload_text"]) if row["payload_text"] else row["payload"]
         event(cursor, identity, "potentially_sent", {"payload_hash": ledger.fingerprint(payload)})

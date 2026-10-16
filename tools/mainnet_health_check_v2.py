@@ -57,11 +57,23 @@ def application_directory():
     return application
 
 
+def spending_issues(status):
+    """Pure rule: no cap, or a window more than 90% committed, needs the operator's attention."""
+    if not status['configured']:
+        return ['no spending cap is recorded; the pool commits no fees without one']
+    issues = []
+    for asset, used, limit in (('TIG fee', status['window']['tig_fee_units'], status['cap']['tig_fee_window_units']),
+                               ('custody gas', status['window']['native_fee_units'], status['cap']['native_fee_window_units'])):
+        if int(limit) and (int(limit) - int(used)) * 10 < int(limit):
+            issues.append(asset + ' spending cap window is more than 90% committed')
+    return issues
+
+
 def main():
     sys.path.insert(0, str(application_directory()))
     from pool_manager.pool_v2.database import Database
     from pool_manager.pool_v2.block_observer import BlockStore
-    from pool_manager.pool_v2 import controls, ledger
+    from pool_manager.pool_v2 import controls, ledger, spending
     os.umask(0o077)
     deployment = json.loads((CONFIG / 'deployment.json').read_text())
     role = deployment['role']
@@ -88,6 +100,8 @@ def main():
         database = Database((CONFIG / 'observer-dsn').read_text().strip())
         record['blocks'] = BlockStore(database).status()
         record['new_work_paused'] = controls.paused(database)
+        record['spending'] = spending.status(database)
+        issues.extend(spending_issues(record['spending']))
         with database.transaction() as cursor:
             record['ledger_audit'] = ledger.audit(cursor)
         if not record['new_work_paused']:

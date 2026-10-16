@@ -156,3 +156,8 @@ reimburse arbitrary expenses, or create reward receipts. Those need explicit
 audited evidence. Deployment must initialize both custody and funding monitors
 before enabling live work. Intended-account submission and finalization checks,
 isolated deployment and the paired worker installer remain rollout work.
+
+A top-up's native `fee_limit` counts against the operator's recorded spending
+cap in the same way as a withdrawal attempt, and the submission fees the pool
+commits from the prepaid balance are capped per attempt and per rolling window.
+Without a recorded cap the pool neither tops up nor reserves work.

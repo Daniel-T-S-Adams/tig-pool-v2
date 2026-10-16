@@ -4,7 +4,7 @@ import sys
 import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / 'tools'))
-from mainnet_health_check_v2 import block_issues
+from mainnet_health_check_v2 import block_issues, spending_issues
 
 NOW = 1_800_000_000
 
@@ -19,6 +19,15 @@ def status(**overrides):
             'held_rounds': []}
     base.update(overrides)
     return base
+
+
+class SpendingRuleTests(unittest.TestCase):
+    def test_missing_cap_and_nearly_used_windows_are_issues(self):
+        self.assertEqual(spending_issues({'configured': False}), ['no spending cap is recorded; the pool commits no fees without one'])
+        cap = {'tig_fee_window_units': '1000', 'native_fee_window_units': '0'}
+        self.assertEqual(spending_issues({'configured': True, 'cap': cap, 'window': {'tig_fee_units': 900, 'native_fee_units': 0}}), [])
+        self.assertEqual(spending_issues({'configured': True, 'cap': cap, 'window': {'tig_fee_units': 901, 'native_fee_units': 5}}),
+                         ['TIG fee spending cap window is more than 90% committed'])
 
 
 class HealthRuleTests(unittest.TestCase):

@@ -191,6 +191,8 @@ def begin(database, identity, request_key, preflight, *, fee_limit, actor, opera
         observed=status(database,cursor=cursor)
         if observed['initialized'] and not observed['ready']:
             raise Conflict('custody observer requires reconciliation before another payment attempt')
+        from . import spending
+        spending.check_gas(cursor, fee_limit)
         attempt_id = uuid.uuid4()
         custody.reserve_nonce(cursor,attempt_id,preflight.network,preflight.nonce,'withdrawal')
         account = ledger.account(cursor, gas_hold(attempt_id), 'operator_commitment', asset='NATIVE')

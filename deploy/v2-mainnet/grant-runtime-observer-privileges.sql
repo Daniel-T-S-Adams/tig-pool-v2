@@ -25,3 +25,6 @@ GRANT SELECT ON TABLE pool_v2.missing_block_policies TO innopool_observer, innop
 GRANT SELECT, INSERT ON TABLE pool_v2.verified_binaries TO innopool_runtime;
 -- Migration 025: the coordinator records and reads whole-network selection references.
 GRANT SELECT, INSERT ON TABLE pool_v2.reference_captures TO innopool_runtime;
+-- Migration 027: the API appends spending caps; reservations, sends and health checks read them.
+GRANT SELECT, INSERT ON TABLE pool_v2.spending_caps TO innopool_runtime;
+GRANT SELECT ON TABLE pool_v2.spending_caps TO innopool_observer;
