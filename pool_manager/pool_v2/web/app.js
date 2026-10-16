@@ -45,7 +45,7 @@ function table(id, rows, columns, empty = 'No records yet.') {
 }
 async function loadCapabilities() {
   capabilities = await api('capabilities');
-  $('work-status').textContent = capabilities.work_enabled ? 'Accepting work' : capabilities.new_work_paused ? 'New work paused' : capabilities.work_block_reason==='custody-reconciliation' ? 'Checking pool funds' : capabilities.work_block_reason==='protocol-fee-reconciliation' ? 'Checking submission funds' : 'Work not enabled';
+  $('work-status').textContent = capabilities.work_enabled ? 'Accepting work' : capabilities.new_work_paused ? 'New work paused' : capabilities.work_block_reason==='custody-reconciliation' ? 'Checking pool funds' : capabilities.work_block_reason==='protocol-fee-reconciliation' ? 'Checking submission funds' : capabilities.work_block_reason==='spending-cap-unset' ? 'Spending cap not set' : capabilities.work_block_reason==='spending-cap' ? 'Spending cap reached' : 'Work not enabled';
   $('worker-install-options').hidden=!capabilities.release_digest;
   $('worker-install-status').textContent=capabilities.release_digest?'Single-machine reference installer. It asks privately for your execution token and does not connect helper machines.':'The single-machine reference installer will be available with the verified release.';
   $('work-status').classList.toggle('active', capabilities.work_enabled);
@@ -180,8 +180,8 @@ async function previewRound(row) {
   $('action-fields').append(list);$('action-submit').disabled=!capabilities.settlement_enabled || !preview.preview;
 }
 async function loadOperator() {
-  const [data,payments,custody,funding,income]=await Promise.all([api('operator/dashboard?limit=50&offset='+operatorOffset),api('operator/withdrawals'),api('operator/custody'),api('operator/funding'),api('operator/income')]);
-  operatorIncome=income;
+  const [data,payments,custody,funding,income,spending]=await Promise.all([api('operator/dashboard?limit=50&offset='+operatorOffset),api('operator/withdrawals'),api('operator/custody'),api('operator/funding'),api('operator/income'),api('operator/spending')]);
+  operatorIncome=income;renderSpending(spending);
   await loadCapabilities();$('operator-login').hidden=true;$('operator-content').hidden=false;$('operator-sign-out').hidden=false;
   const sum=(asset,location,kind)=>data.balances.filter(row=>row.asset===asset&&row.location===location&&(!kind||row.kind===kind)).reduce((total,row)=>total+BigInt(row.balance),0n);
   $('operator-balances').replaceChildren();
@@ -249,6 +249,23 @@ $('prepare-topup').addEventListener('click',()=>{
     const attempt=await api('operator/topups',{request_key:requestKey,amount:units($('topup-amount').value.trim()),fee_limit:units($('topup-gas').value.trim())});
     $('action-dialog').close();await loadOperator();showPayment(attempt,true);return false;
   });field('Amount · TIG','topup-amount',tig($('prepare-topup').dataset.minimum||'0'));field('Maximum reserved operator fee · native token','topup-gas','0.0001');
+});
+function renderSpending(data){
+  const cap=data.cap,used=data.window;
+  $('spending-health').textContent=!data.configured?'Not set':data.block_reason?'Reached':'Within cap';
+  $('spending-health').classList.toggle('active',data.configured&&!data.block_reason);
+  $('spending-summary').textContent=!data.configured?'No spending cap is recorded. New work and custody sends are blocked until the operator records one.':
+    'Window '+(cap.window_seconds/86400).toFixed(1).replace(/\.0$/,'')+' days · submission fees '+tig(used.tig_fee_units)+' of '+tig(cap.tig_fee_window_units)+' TIG committed, at most '+tig(cap.tig_fee_attempt_units)+' TIG per attempt · custody gas '+tig(used.native_fee_units)+' of '+tig(cap.native_fee_window_units)+' native token reserved, at most '+tig(cap.native_fee_attempt_units)+' per send · recorded by '+cap.actor+' on '+date(cap.created_at)+': '+cap.reason;
+}
+$('set-spending-cap').addEventListener('click',()=>{
+  const eventKey=key();
+  dialog('Set spending cap','The newest cap replaces the previous one for new commitments. Amounts are per rolling window; ceilings already committed inside the window keep counting.','Record cap',async()=>{
+    await api('operator/spending-cap',{event_key:eventKey,reason:$('cap-reason').value.trim(),window_seconds:Math.round(Number($('cap-days').value)*86400),
+      tig_fee_window_units:units($('cap-tig-window').value.trim()),tig_fee_attempt_units:units($('cap-tig-attempt').value.trim()),
+      native_fee_window_units:units($('cap-native-window').value.trim()),native_fee_attempt_units:units($('cap-native-attempt').value.trim())});
+    await loadOperator();notice('Spending cap recorded.');
+  });field('Window · days','cap-days','30');field('Submission fees per window · TIG','cap-tig-window','10');field('Submission fee per attempt · TIG','cap-tig-attempt','0.01');
+  field('Custody gas per window · native token','cap-native-window','0.0005');field('Custody gas per send · native token','cap-native-attempt','0.0001');field('Reason','cap-reason');
 });
 $('refresh-operator').addEventListener('click',()=>run(loadOperator,$('refresh-operator')));
 $('pause-work').addEventListener('click',()=>run(async()=>{await api('operator/controls/new-work',{paused:!capabilities.new_work_paused,reason:capabilities.new_work_paused?'Operator resumed new work':'Operator paused new work',event_key:key()});await loadOperator();notice('Work control updated. Existing benchmark recovery remains available.');},$('pause-work')));

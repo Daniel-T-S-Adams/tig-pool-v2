@@ -12,14 +12,14 @@ from fastapi import Depends, FastAPI, Header, HTTPException
 from fastapi.encoders import jsonable_encoder
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse,Response
-from pydantic import BaseModel, ConfigDict, Field, StrictBool,StrictInt, StrictStr
+from pydantic import BaseModel, ConfigDict, Field, StrictBool, StrictInt, StrictStr
 
 from .auth import Auth, AuthenticationError
 from .database import Database
 from .chain import Chain, Network, Rpc, FEE_MODELS, UnsupportedCustodyTransaction
 from . import members, withdrawals, work_requests, member_protocol, benchmarks
 from . import artifacts, native_funding, sponsored_withdrawals
-from . import controls,custody,dashboard,deposits,settlement,chain_observer,funding,topups,releases
+from . import controls,custody,dashboard,deposits,settlement,chain_observer,funding,topups,releases,spending
 from .protocol import ProtocolDataError
 from .money import Conflict, FundsError, InsufficientFunds
 from .frontend import Frontend, https_origin
@@ -112,6 +112,14 @@ class TopupRequest(WithdrawalSend):
 
 class PauseChange(WithdrawalRelease):
     paused: StrictBool
+
+
+class SpendingCap(WithdrawalRelease):
+    window_seconds: StrictInt = Field(ge=3600, le=31622400)
+    tig_fee_window_units: StrictStr = Field(pattern=r'^(0|[1-9][0-9]{0,77})$')
+    tig_fee_attempt_units: StrictStr = Field(pattern=r'^(0|[1-9][0-9]{0,77})$')
+    native_fee_window_units: StrictStr = Field(pattern=r'^(0|[1-9][0-9]{0,77})$')
+    native_fee_attempt_units: StrictStr = Field(pattern=r'^(0|[1-9][0-9]{0,77})$')
 
 
 class SettlementApproval(Input):
@@ -425,6 +433,15 @@ def create_app(settings):
     @app.post('/api/v2/operator/controls/new-work')
     def pause_new_work(body:PauseChange,actor=Depends(operator)):
         return response(controls.set_pause(database,body.paused,actor=actor,reason=body.reason,event_key=body.event_key))
+
+    @app.get('/api/v2/operator/spending')
+    def spending_dashboard(actor=Depends(operator)):
+        return response(spending.status(database))
+
+    @app.post('/api/v2/operator/spending-cap')
+    def set_spending_cap(body:SpendingCap,actor=Depends(operator)):
+        return response(spending.set_cap(database,window_seconds=body.window_seconds,actor=actor,reason=body.reason,
+            event_key=body.event_key,**{name:int(getattr(body,name)) for name in spending.FIELDS}))
 
     @app.get('/api/v2/operator/funding')
     def funding_dashboard(actor=Depends(operator)):

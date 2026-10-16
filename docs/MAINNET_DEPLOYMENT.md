@@ -241,10 +241,14 @@ independent preparation work.
 
 Before enabling a limited mainnet pilot, resolve the remaining authoritative
 outcome/reporting and operator reward-call/correction integrations and confirm
-the deployment inputs. The operator will monitor the authorized 10 TIG and
-0.0005 Base ETH budgets manually; there is no software-enforced mainnet spending
-cap. This repository's two-member pilot policy is **testnet-only** and separate
-from the operator-monitored mainnet budget.
+the deployment inputs. The authorized 10 TIG and 0.0005 Base ETH budgets are
+enforced in software by the operator's recorded spending cap (migration 027):
+without a cap row the pool commits no submission fee and reserves no custody
+gas, and every committed ceiling counts in full inside the rolling window. The
+operator records the cap through `POST /api/v2/operator/spending-cap` or the
+operator screen; the health check reports a missing cap or a window more than
+90% committed. This repository's two-member pilot policy is **testnet-only** and
+separate from the mainnet cap.
 
 With the budget authorized and members ready, start a small monitored pilot.
 Keep incomplete or unfunded reward

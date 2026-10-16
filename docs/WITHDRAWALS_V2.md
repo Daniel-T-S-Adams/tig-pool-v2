@@ -152,3 +152,9 @@ with its public signature, block, balances and trace; see
 [fixture provenance](../tests/v2/fixtures/README.md). Authorization processing
 follows [EIP-7702](https://eips.ethereum.org/EIPS/eip-7702). The service still holds
 no signing key and has no transaction-sending RPC.
+
+Every send attempt's native `fee_limit` is checked against the operator's
+recorded spending cap before the nonce is reserved: at most the per-send ceiling,
+and at most the window ceiling together with every withdrawal attempt and
+protocol top-up started inside the rolling window. Without a recorded cap no
+attempt can begin. See the owner's guide for recording a cap.

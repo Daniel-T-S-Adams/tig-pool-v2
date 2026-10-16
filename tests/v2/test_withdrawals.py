@@ -197,6 +197,7 @@ class WithdrawalTests(DatabaseCase):
         # Restore the previous schema shape in this disposable test database.
         # All real withdrawal rows, journals and chain receipts remain intact.
         with self.db.transaction() as cursor:
+            cursor.execute('DROP TABLE spending_caps CASCADE')
             cursor.execute('DROP TABLE missing_block_policies CASCADE')
             cursor.execute('DROP TABLE observation_conflict_resolutions CASCADE')
             cursor.execute('DROP FUNCTION ordering_resolution_guard() CASCADE')

@@ -47,6 +47,8 @@ def begin(database,request_key,preflight,policy_capture,*,amount,fee_limit,fee_m
         if not protocol['ready']:raise Conflict('protocol fee balance requires reconciliation before another top-up')
         if protocol['observation']['id']!=policy_capture:
             raise Conflict('top-up must use the most recent protocol policy observation')
+        from . import spending
+        spending.check_gas(cursor,fee_limit)
         identity=uuid.uuid4()
         custody.reserve_nonce(cursor,identity,preflight.network,preflight.nonce,'protocol_topup')
         for asset in ('TIG','NATIVE'):ledger.account(cursor,held(identity,asset),'operator_commitment',asset)

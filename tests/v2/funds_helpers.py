@@ -10,7 +10,7 @@ import uuid
 
 from psycopg2.extensions import parse_dsn
 
-from pool_manager.pool_v2 import benchmarks, deposits, ledger, members
+from pool_manager.pool_v2 import benchmarks, deposits, ledger, members, spending
 from pool_manager.pool_v2.chain import Chain, Network, TRANSFER_TOPIC
 from pool_manager.pool_v2.database import Database
 from pool_manager.pool_v2.money import TIG
@@ -49,6 +49,9 @@ def transfer(sender=WALLET, recipient=CUSTODY, amount=100*TIG):
 
 
 class DatabaseCase(unittest.TestCase):
+    # Every fee commitment needs a recorded cap; tests of the cap itself start without one.
+    spending_cap = True
+
     def setUp(self):
         dsn = os.environ.get("POOL_V2_TEST_DSN")
         if not dsn:
@@ -60,6 +63,10 @@ class DatabaseCase(unittest.TestCase):
             cursor.execute("DROP SCHEMA IF EXISTS pool_v2 CASCADE")
         self.db.migrate()
         benchmarks.initialize_accounts(self.db)
+        if self.spending_cap:
+            spending.set_cap(self.db, window_seconds=30*86400, tig_fee_window_units=10**24, tig_fee_attempt_units=10**24,
+                             native_fee_window_units=10**30, native_fee_attempt_units=10**30,
+                             actor='fixture', reason='generous test cap', event_key='test-default-cap')
         with self.db.transaction() as cursor:
             self.member = members.register_verified(cursor, WALLET)["id"]
             self.other = members.register_verified(cursor, OTHER)["id"]
