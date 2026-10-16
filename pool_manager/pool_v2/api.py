@@ -51,6 +51,8 @@ class Settings:
     api_origin: str | None = None
     operator_income_wallet: str | None = None
     operator_tig_reserve_units: str | None = None
+    # Resources the operator has validated on this pool; GPU stays hidden until then.
+    offered_resources: tuple = ('CPU',)
 
 
 class Input(BaseModel):
@@ -189,6 +191,9 @@ def create_app(settings):
         if income_wallet == settings.custody_network.custody:
             raise ValueError('operator income wallet must differ from pool custody')
         income_reserve = int(settings.operator_tig_reserve_units)
+    offered = tuple(settings.offered_resources)
+    if not offered or len(set(offered)) != len(offered) or any(item not in ('CPU', 'GPU') for item in offered):
+        raise ValueError('offered resources must name CPU and/or GPU once each')
     auth = Auth(database, origin=website_origin, chain_id=settings.chain_id)
     app = FastAPI(title="Community Pool", version=API_VERSION)
     app.state.database, app.state.auth = database, auth
@@ -286,7 +291,7 @@ def create_app(settings):
                          "release_digest":release_digest,"pool_commit":release['pool']['commit'] if release else None,
                          "custody":settings.custody_network.custody if settings.custody_network else None,
                          "token":settings.custody_network.token if settings.custody_network else None,
-                         "assignment_unit": "whole-benchmark"})
+                         "assignment_unit": "whole-benchmark", "offered_resources": list(offered)})
 
     def recorded_release():
         if release is None:raise HTTPException(503,'a verified paired release has not been configured')
@@ -304,7 +309,7 @@ def create_app(settings):
 
     @app.get('/api/v2/worker-installation')
     def worker_installation(resource:str,compute_type:str,workers:int=1):
-        return response(releases.installation(recorded_release(),api_origin,resource,compute_type,workers))
+        return response(releases.installation(recorded_release(),api_origin,resource,compute_type,workers,offered=offered))
 
     @app.post("/api/v2/auth/challenges")
     def challenge(body: WalletChallenge):
@@ -701,6 +706,8 @@ def create_app(settings):
     def work_request(body: WorkRequest, member_id=Depends(principal)):
         if not settings.work_enabled or controls.blocked(database):
             raise HTTPException(503, "new work is currently disabled")
+        if body.resource not in offered:
+            raise HTTPException(409, body.resource + " work is not offered by this pool yet")
         return response(work_requests.create(database, member_id, body.request_key,
             resource=body.resource, compute_type=body.compute_type, capacity=body.capacity.model_dump(),
             ttl_seconds=settings.offer_ttl_seconds))

@@ -8,8 +8,10 @@ internal communication and scheduling. See the [master integration contract](MEM
 All work routes require
 `Authorization: Bearer <member-token>` and `X-InnoPool-Version: 2.0`. A wrong or
 missing work-protocol version returns 426 before reserving funds. The pool's
-capabilities route reports `api_version`, `assignment_unit: whole-benchmark`
-and whether new work is enabled. Amounts exposed to clients use decimal strings
+capabilities route reports `api_version`, `assignment_unit: whole-benchmark`,
+whether new work is enabled and `offered_resources`, the resources the operator
+has validated on this pool (`CPU` alone until GPU execution is validated); a
+work request for a resource that is not offered is refused with 409. Amounts exposed to clients use decimal strings
 of token base units, with 18 decimal places per TIG.
 
 ## Work request
