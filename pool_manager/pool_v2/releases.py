@@ -44,10 +44,12 @@ def validate(manifest,build_commit,installer):
     except (KeyError,TypeError) as error:raise ValueError('paired release metadata is incomplete or malformed') from error
 
 
-def installation(manifest,pool_origin,resource,compute_type,workers):
+def installation(manifest,pool_origin,resource,compute_type,workers,offered=('CPU','GPU')):
     if (resource not in ('CPU','GPU') or (compute_type not in CPU_TYPES if resource=='CPU' else compute_type!='aws_g4dn')
             or type(workers) is not int or not 1<=workers<=4096):
         raise FundsError('choose a compatible CPU or GPU verification type and capacity from 1 to 4096')
+    if resource not in offered:
+        raise FundsError(resource+' work is not offered by this pool yet; it offers '+' and '.join(offered)+' work')
     command='python3 install_worker_v2.py install \\\n  --pool '+shlex.quote(pool_origin)+' \\\n  --directory "$HOME/innopool-v2-member" \\\n  --resource '+resource+' --compute-type '+compute_type+' --workers '+str(workers)
     return {'installer_url':pool_origin.rstrip('/')+'/api/v2/install-worker','installer_sha256':manifest['worker']['installer_sha256'],
         'worker_commit':manifest['worker']['commit'],'command':command,

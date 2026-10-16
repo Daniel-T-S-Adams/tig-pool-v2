@@ -73,6 +73,18 @@ class ReleaseApiTests(DatabaseCase):
         self.assertEqual(guide.status_code,200,guide.text)
         self.assertEqual(guide.json()['installer_sha256'],expected['worker']['installer_sha256'])
         self.assertEqual(client.get('/api/v2/worker-installation',params={'resource':'CPU','compute_type':'aws_g4dn'}).status_code,400)
+        self.assertEqual(capabilities['offered_resources'],['CPU'])
+        hidden=client.get('/api/v2/worker-installation',params={'resource':'GPU','compute_type':'aws_g4dn'})
+        self.assertEqual(hidden.status_code,400,hidden.text);self.assertIn('not offered',hidden.json()['detail'])
+
+    def test_gpu_installation_is_served_only_once_the_operator_offers_gpu(self):
+        client=TestClient(create_app(replace(self.settings(),offered_resources=('CPU','GPU'))))
+        self.assertEqual(client.get('/api/v2/capabilities').json()['offered_resources'],['CPU','GPU'])
+        guide=client.get('/api/v2/worker-installation',params={'resource':'GPU','compute_type':'aws_g4dn','workers':2})
+        self.assertEqual(guide.status_code,200,guide.text);self.assertIn('--resource GPU --compute-type aws_g4dn --workers 2',guide.json()['command'])
+        with self.assertRaises(ValueError):create_app(replace(self.settings(),offered_resources=('CPU','CPU')))
+        with self.assertRaises(ValueError):create_app(replace(self.settings(),offered_resources=()))
+        with self.assertRaises(FundsError):releases.installation(release_fixture(),'https://pool.example','GPU','aws_g4dn',1,offered=('CPU',))
 
     def test_unreleased_pool_cannot_serve_an_installer_or_claim_a_pair(self):
         client=TestClient(create_app(replace(self.settings(),release_manifest=None,worker_installer=None,build_commit=None)))

@@ -57,7 +57,9 @@ are not established by this minimal API schema.
 ## Member installation and updates
 
 The Join page lets members choose CPU on AMD64, CPU on ARM64, or GPU on AMD64,
-and concurrent nonce capacity. It provides the checked download and commands
+and concurrent nonce capacity. Only resources listed in the service
+configuration's `offered_resources` are shown and served; the mainnet service
+offers CPU only until GPU execution has been validated end to end. It provides the checked download and commands
 using a new `innopool-v2-member` directory. The command contains no execution
 token; the installer prompts privately for it. Hardware compatibility is
 checked before an installed worker can request work.

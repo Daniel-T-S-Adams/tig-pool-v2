@@ -8,6 +8,7 @@
   "funds_enabled": false,
   "work_enabled": false,
   "settlement_enabled": false,
+  "offered_resources": ["CPU"],
   "operator_income_wallet": "0x03f540Af6aAB40Bbf86D94584D4712541FbD6c4a",
   "operator_tig_reserve_units": null,
   "custody_network": {

@@ -75,7 +75,8 @@ Choose one resource and a compatible TIG verification compute type for each
 request. CPU types are `aws_t3`, `aws_t3a`, `aws_t4g`, `aws_c7i`, `aws_c7a`,
 `aws_c7g`, `aws_m7i`, `aws_m7a` and `aws_m7g`. The t4g/c7g/m7g types require ARM64;
 the other CPU types require AMD64. GPU requests use `aws_g4dn` on AMD64 with the
-appropriate NVIDIA runtime and PTX. Every participating machine must execute the
+appropriate NVIDIA runtime and PTX, and are accepted only once the pool lists
+GPU among its `offered_resources` in the capabilities route. Every participating machine must execute the
 exact assigned binary and runtime compatibly; CPU/GPU family alone is not enough.
 
 Your master supplies `capacity.workers`: concurrent nonce computations available

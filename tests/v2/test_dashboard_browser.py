@@ -58,7 +58,7 @@ class DashboardBrowserTests(DatabaseCase):
         self.addCleanup(api_listener.close)
         self.api_origin='https://127.0.0.1:'+str(api_listener.getsockname()[1])
         settings=Settings(self.db.dsn,self.origin,8453,hashlib.sha256(self.operator.encode()).hexdigest(),
-            funds_enabled=True,work_enabled=True,pool_player_id=CUSTODY,custody_network=NETWORK,
+            funds_enabled=True,work_enabled=True,pool_player_id=CUSTODY,custody_network=NETWORK,offered_resources=('CPU','GPU'),
             custody_rpc_url='https://rpc.example',withdrawal_fee_model='op-jovian',
             release_manifest=release_fixture(),build_commit='a'*40,worker_installer=INSTALLER,
             api_origin=self.api_origin,operator_income_wallet='0x'+'9'*40,operator_tig_reserve_units=str(TIG))

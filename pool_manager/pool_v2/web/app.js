@@ -49,6 +49,9 @@ async function loadCapabilities() {
   $('worker-install-options').hidden=!capabilities.release_digest;
   $('worker-install-status').textContent=capabilities.release_digest?'Single-machine reference installer. It asks privately for your execution token and does not connect helper machines.':'The single-machine reference installer will be available with the verified release.';
   $('work-status').classList.toggle('active', capabilities.work_enabled);
+  const offered=capabilities.offered_resources||['CPU'],compute=$('worker-compute');
+  for(const option of compute.options){const shown=offered.includes(option.dataset.resource);option.hidden=!shown;option.disabled=!shown;}
+  if(compute.selectedOptions[0]?.disabled)compute.value=[...compute.options].find(option=>!option.disabled)?.value;
 }
 function field(label, id, value = '', options = {}) {
   const wrapper = node('div'), caption = node('label', label), input = node('input');
