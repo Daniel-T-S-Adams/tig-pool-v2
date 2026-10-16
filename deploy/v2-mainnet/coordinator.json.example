@@ -1,6 +1,6 @@
 {
   "tig_api_url": "https://mainnet-api.tig.foundation",
-  "pool_player_id": "0xd4a076b5335f0fb2da40158b52e0bb6d6ac59ebf",
+  "pool_player_id": "REPLACE_POOL_WALLET",
   "public_origin": "https://REPLACE_POOL_API_HOSTNAME",
   "require_pilot_limits": false,
   "submissions_enabled": false,

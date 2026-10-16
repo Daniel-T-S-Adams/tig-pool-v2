@@ -467,8 +467,10 @@ def main():
         if os.geteuid() != 0 or args.config is None:
             raise SystemExit('receive requires root and a protected config file')
         config = json.loads(args.config.read_text())
-        if config['minimum_free_gib'] < 35 or config['source_host'] != '46.62.249.188':
-            raise SystemExit('invalid pending backup safety configuration')
+        # The source must be the primary recorded in this host's deployment record.
+        hosts = json.loads(Path('/etc/innopool-v2-mainnet/deployment.json').read_text()).get('hosts') or {}
+        if config['minimum_free_gib'] < 35 or not hosts.get('primary') or config['source_host'] != hosts['primary']:
+            raise SystemExit('invalid pending backup safety configuration: the source must be the recorded primary host')
         print(json.dumps(receive(config)))
     else:
         if args.snapshot is None or args.target is None:

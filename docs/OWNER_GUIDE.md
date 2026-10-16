@@ -1,27 +1,27 @@
 # Community Pool owner's guide
 
 **Most routine owner actions belong on the pool website. MetaMask signs money
-movements. Hetzner hosts the services and their configuration. Software changes
-are reviewed and tested before a fixed release is deployed.**
+movements. The server hosts the services and their configuration. Software
+changes are reviewed and tested before a fixed release is deployed.**
 
-Revised **14 October 2026**, checked against release
-`mainnet-storage-ordering-20261014` (schema through 022).
-Member funds are enabled; new work is paused and settlement is disabled.
-The API serves pinned worker `dddad9d`, with official 0.0.8 CPU runtimes.
-Recovery preserves base backups, WAL, encrypted settings and pending files;
-its API and collectors are inactive. The master/helper CPU benchmark activated
-successfully on TIG. Historical compact conversion, backup/restore
-verification and guarded redundant raw cleanup are complete. The round-137 gaps
-fall under the bounded missing-block tolerance once it is deployed; reward
-settlement verification remains open. See [operations status](OPERATIONS_STATUS.md).
+The owner decides the pool's finances and policy: recording the spending cap,
+pausing and resuming new work, setting member collateral multipliers,
+reviewing and paying withdrawals, funding submission fees and network fees,
+withdrawing operator income, and crediting settled rounds. Whether member
+funds, submissions, new work and settlement are enabled is server
+configuration; the website shows the enabled state. A separate recovery host
+preserves base backups, WAL, encrypted settings and pending files for a
+manual takeover.
 
 This guide describes implemented controls. A control still depends on its
 deployed capability, custody checks and complete evidence; its presence on the
 website does not establish that a full mainnet reward cycle has passed.
+[ROADMAP.md](ROADMAP.md) lists what is not implemented or not yet validated.
 
-The website address is `https://pool.tig.foundation`. Open `/operator` for owner controls, `/` for a member account, and
-`/join` for worker installation instructions. The separate
-`pool-api.tig.foundation` hostname serves browser and worker requests.
+The website address is the configured origin, for example
+`https://pool.example`. Open `/operator` for owner controls, `/` for a member
+account, and `/join` for worker installation instructions. A separate API
+hostname, for example `pool-api.example`, serves browser and worker requests.
 Always identify which deployment you are using before a financial action.
 
 Use this table to decide where a task belongs:
@@ -39,15 +39,15 @@ Use this table to decide where a task belongs:
 | Add operator running funds | Funding wallet in MetaMask, then pool website | Wallet reconciliation and receipt/ownership checks |
 | Refill TIG submission credit | Pool website → MetaMask → pool website | Prepare fee top-up → manual transfer → verify transaction and TIG credit |
 | Withdraw your available operator funds | Pool website → MetaMask → pool website | Operator income → Withdraw operator funds, then the normal payment procedure |
-| Change your income destination or retained operating budget | Hetzner service configuration | Update the configured values and reload the API |
+| Change your income destination or retained operating budget | Server service configuration | Update the configured values and reload the API |
 | Finalize eligible collateral or credit a completed round | Pool website, after backend evidence is ready | Finalize; Preview → Credit this round |
-| Claim/unlock TIG protocol rewards | Wallet actions plus backend integration | The complete pool workflow remains unfinished |
+| Claim/unlock TIG protocol rewards | Wallet actions outside the pool, then manual receipt recording | No pool workflow for this; see [ROADMAP.md](ROADMAP.md) |
 | Rotate the operator token, TIG API key or database credentials | Protected server configuration | Coordinate service updates; keep secrets outside Git |
 | Enable mainnet funds, submissions or settlement | Server configuration and launch procedure | Explicit launch settings, evidence and budget |
 | Change the 5% fee, reward rules, work selection or two-slot limit | Development code, tests, GitHub and deployment | A reviewed software release |
-| Deploy an existing tested software update | Hetzner administration | Install the recorded release and required database migrations |
-| Maintain backups, inspect services or recover a server | Hetzner administration | Service checks, backups and rehearsed restore/takeover |
-| Change DNS, certificates or hosting resources | Cloudflare/Hetzner web consoles and server administration | Infrastructure settings; usually no application code change |
+| Deploy an existing tested software update | Server administration | Install the recorded release and required database migrations |
+| Maintain backups, inspect services or recover a server | Server administration | Service checks, backups and rehearsed restore/takeover |
+| Change DNS, certificates or hosting resources | Cloudflare and hosting-provider consoles and server administration | Infrastructure settings; usually no application code change |
 
 **To open the owner controls, use the operator access token.**
 
@@ -107,8 +107,8 @@ commitments without touching reservations already made.
 computation results, proofs and recovery remain available; an already committed
 submission can still finish. Payments and observation are separate controls.
 Use **Resume new work** once the cause is resolved. This button cannot override
-disabled server capabilities or unresolved funding/evidence checks. The current
-owner screen has no separate per-member suspend/ban control.
+disabled server capabilities or unresolved funding/evidence checks. The owner
+screen has no separate per-member suspend/ban control.
 
 **To onboard a member, the member signs in and connects their own master.**
 
@@ -200,9 +200,9 @@ An `uncertain` request means the pool has reserved a potentially sent attempt;
 it does not mean that payment failed. Closing the dialog does not cancel it.
 Reopen **Check transfer** and reconcile the original attempt. Avoid unrelated
 outgoing custody transactions while an attempt is pending because withdrawals
-and fee top-ups share the same nonce sequence. The recorded sponsored-testnet
-recovery supports one existing payment pattern; it is not general support for
-new sponsored payments. See [withdrawal behavior](WITHDRAWALS_V2.md).
+and fee top-ups share the same nonce sequence. Sponsored-payment recovery
+supports one existing payment pattern; it is not general support for new
+sponsored payments. See [withdrawal behavior](WITHDRAWALS_V2.md).
 
 **To refill submission credit, prepare a fee top-up on the pool website.**
 
@@ -254,13 +254,14 @@ pool ledger. They do not distribute individual on-chain payments; members
 subsequently use the withdrawal process.
 
 The backend must first establish complete credit, final outcomes and actual
-reward receipts. The current implementation still needs the complete operator
-reward claim/unlock/receipt and round-attribution connection. Treat that as
-remaining engineering and wallet-validation work, rather than a ready-to-use
-sequence of owner clicks. See [settlement](ROUND_SETTLEMENT.md) and
-[reward receipts](REWARD_RECEIPTS.md).
+reward receipts. The operator reward claim/unlock/receipt workflow and
+automatic round attribution are not implemented; the operator performs them
+outside the pool and records the receipt by hand. Treat reward intake as an
+evidenced manual procedure rather than a ready-to-use sequence of owner
+clicks. See [settlement](ROUND_SETTLEMENT.md), [reward
+receipts](REWARD_RECEIPTS.md) and [ROADMAP.md](ROADMAP.md).
 
-**Server settings can change without editing application code.** The mainnet
+**Server settings can change without editing application code.** A
 deployment keeps service settings under `/etc/innopool-v2-mainnet/`, with secrets
 in protected service configuration. The installed application is a fixed
 release under `/opt/innopool-v2-mainnet/releases/`. For example, changing the
@@ -281,24 +282,18 @@ For a changed income address, existing withdrawal requests keep their original
 destination; the operator handles any affected unsent requests explicitly.
 
 **Application behavior changes follow the development and release workflow.**
-The current fee rule is 5%, with a two-slot member limit and automatic work
+The fee rule is 5%, with a two-slot member limit and automatic work
 selection. Changing these rules, adding a per-member suspension control or
 changing the website's behavior requires source changes and relevant testing.
-Work is prepared in the development checkout, reviewed through GitHub, then a
-tested pool/worker release is installed on Hetzner with any required migrations.
-Editing GitHub alone does not update the running site. Routine restarts use
-the installed release.
+Work is prepared in a development checkout, reviewed, then a tested
+pool/worker release is installed on the server with any required migrations.
+Editing the repository alone does not update the running site. Routine
+restarts use the installed release.
 
-The pool's v2 code, including operator income, was promoted to `main` in
-[PR 22](https://github.com/Daniel-T-S-Adams/tig-pool-v2/pull/22) on 29 September
-and deployed with migration 015 on 4 October. Confirm the configured operating
-reserve in `service.json` before relying on operator withdrawals. Since
-[PR 28](https://github.com/Daniel-T-S-Adams/tig-pool-v2/pull/28), deployed on
-8 October, new benchmarks copy the hyperparameters of the selected algorithm's
-best active bundle per track. Source
-availability is separate from production readiness. The inherited `admin.py`,
-legacy `.env` settings and original Compose instructions do not administer these
-v2 ledger controls.
+Confirm the configured operating reserve in `service.json` before relying on
+operator withdrawals. New benchmarks copy the hyperparameters of the selected
+algorithm's best active bundle per track. Source availability is separate from
+production readiness.
 
 **If something goes wrong, use the existing record before retrying an action.**
 
@@ -311,7 +306,7 @@ v2 ledger controls.
 | Website unavailable | Check the configured hostname and whether the API is reachable | Inspect nginx, TLS, API services, Cloudflare routing and host health |
 | Disk/backup/server failure | Ask the maintainer to follow the documented recovery procedure | Restore and compare the ledger; stop the old primary before a takeover |
 
-The separate German host provides recovery data and independent observation;
+The separate recovery host provides recovery data and independent observation;
 takeover is manual. Restoring an old database over the active pool is not a
 routine software rollback because it could erase newer financial records.
 Use the [deployment/recovery procedure](MAINNET_DEPLOYMENT.md) and

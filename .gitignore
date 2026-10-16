@@ -1,11 +1,5 @@
-# Runtime data — never commit
-db_data/
-
-# Secrets — use .env.example as the template
+# Local secrets
 .env
-
-# TIG master saved config contains your API key
-saved_config.json
 
 # Python
 __pycache__/

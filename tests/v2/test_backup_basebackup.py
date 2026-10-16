@@ -25,7 +25,7 @@ class BaseBackupArchiveTests(unittest.TestCase):
         self.archive = Path(self.temporary.name) / 'older'; self.archive.mkdir()
         pgpass = Path(self.temporary.name) / 'pgpass'; pgpass.write_text('fixture')
         self.config = {'directory': str(self.root), 'base_archive_directory': str(self.archive), 'minimum_free_gib': 35,
-                       'pgpass': str(pgpass), 'tunnel_port': 55440, 'source_host': '46.62.249.188',
+                       'pgpass': str(pgpass), 'tunnel_port': 55440, 'source_host': '198.51.100.10',
                        'postgres_image': 'postgres@sha256:' + '0' * 64, 'wal_segment_bytes': 16 * 1024 ** 2}
 
     def save(self, stamp, number, *, parent=None):

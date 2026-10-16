@@ -5,14 +5,11 @@ is the software that connects to the pool, saves assignments and submits your
 combined results and proofs. You decide how it distributes computation to your
 other machines. The pool requires no helper-machine registration.
 
-The updated **Connect your master** page at `/join` gives the same connection
-steps. It was deployed with the paired worker on 13 October; see
-[rollout status](LEAN_ROLLOUT_20261013.md).
+The **Connect your master** page at `/join` gives the same connection steps.
 The supplied reference installer configures one machine. You can implement a
 custom master using the member API described here, or configure the paired
 reference worker's optional SSH helper mode. See the
-[setup diagram and master contract](MEMBER_MASTER_V2.md) and
-[SSH implementation and verification](SSH_MEMBER_MASTER_VERIFICATION.md).
+[setup diagram and master contract](MEMBER_MASTER_V2.md).
 
 ## 1. Register and prepare your account
 
@@ -44,13 +41,14 @@ Changing the execution token does not transfer or discard existing benchmarks.
 
 ## 3. Configure and check the pool connection
 
-For the recorded mainnet deployment:
+The operator publishes the pool's real addresses; the values below are
+placeholders:
 
 | Setting | Value |
 |---|---|
-| Website | `https://pool.tig.foundation` |
-| API origin | `https://pool-api.tig.foundation` |
-| Member API base | `https://pool-api.tig.foundation/api/v2` |
+| Website | `https://pool.example` |
+| API origin | `https://pool-api.example` |
+| Member API base | `https://pool-api.example/api/v2` |
 | Authorization header | `Authorization: Bearer <execution-token>` |
 | Protocol header | `X-InnoPool-Version: 2.0` |
 | JSON request header | `Content-Type: application/json` |
@@ -81,7 +79,7 @@ exact assigned binary and runtime compatibly; CPU/GPU family alone is not enough
 
 Your master supplies `capacity.workers`: concurrent nonce computations available
 for this offer, between 1 and 4096. This can span compatible machines. It is not
-machine count, CPU-core count or benchmark count. The current pool records this
+machine count, CPU-core count or benchmark count. The pool records this
 declaration but does not use the number to size the selected benchmark. Configure
 or discover concurrency in your own master/helpers; no website concurrency choice
 is required to use a custom master. Divide available capacity between concurrent
@@ -172,11 +170,9 @@ payload requirements are in [member API 2.0](MEMBER_API_V2.md).
 | Offer stays `queued` | Refresh before expiry. Check available funds and slots; the operator may need to resolve compatible-work availability, protocol funding or observation issues. |
 | Results stored but no activation | Continue following the authoritative outcome; local computation and pool storage do not establish TIG acceptance. |
 
-The current operational pause and deployment limits are recorded in
-[operations status](OPERATIONS_STATUS.md). The API contract supports a
-member-managed master. Real two-server computation, restart recovery and
-combined uploads passed on 12 October; actual mainnet acceptance and final
-settlement remain unverified. See the
-[hardware verification record](SSH_MEMBER_MASTER_VERIFICATION.md). This guide
-covers your connection to the pool; configuring helper machines and their
-communication remains your responsibility.
+Whether new work is paused is reported by the capabilities route; the pool's
+known limitations are listed in [ROADMAP.md](ROADMAP.md). The API contract
+supports a member-managed master, and a real two-server rehearsal passed
+computation, restart recovery and combined uploads. This guide covers your
+connection to the pool; configuring helper machines and their communication
+remains your responsibility.

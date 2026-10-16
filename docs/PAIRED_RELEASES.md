@@ -1,13 +1,13 @@
 # Serving the recorded pool and worker release
 
-The API publishes a paired release and its checked worker installer. A private
-CPU testnet pair was validated in September. Since 16 October mainnet serves
-pool `ea4c830` with worker `c6eccfb` under the recorded
-[safety release](SAFETY_RELEASE_20261016.md),
-using the official 0.0.8 CPU runtime map and offering CPU work only. The corrected two-server CPU benchmark activated on TIG;
-reward-cycle verification remains open. New work remains paused.
-See [operations status](OPERATIONS_STATUS.md) and the
-[deployment procedure](MAINNET_DEPLOYMENT.md).
+The API publishes a paired release and its checked worker installer. The
+served pair names the tested pool and worker commits, pins the official
+challenge runtime images by digest and offers only the resources listed in
+the service configuration's `offered_resources` (CPU by default; GPU once
+validated). A CPU pair has been validated on a private testnet, and a
+two-server CPU benchmark has activated on TIG through a mainnet pair.
+See the [deployment procedure](MAINNET_DEPLOYMENT.md); the checks that remain
+open, including the reward cycle, are listed in [ROADMAP.md](ROADMAP.md).
 
 Supply the API factory with `release_manifest`, the actual running
 `build_commit`, and the paired `worker_installer` bytes. Defaults leave these
@@ -17,7 +17,7 @@ The build process must obtain its revision from the application artifact and
 extract the installer from the recorded worker checkout. It must not infer a
 running revision from an arbitrary value in the deployment manifest.
 
-Startup verifies the expected user-owned fork URLs, full commits, release tags,
+Startup verifies the expected repository URLs, full commits, release tags,
 worker evidence format, pool/build match, installer checksum and official TIG
 runtime digests. The API keeps its own snapshot of the validated metadata.
 Changing the caller's configuration object cannot change the served pair.
@@ -58,8 +58,8 @@ are not established by this minimal API schema.
 
 The Join page lets members choose CPU on AMD64, CPU on ARM64, or GPU on AMD64,
 and concurrent nonce capacity. Only resources listed in the service
-configuration's `offered_resources` are shown and served; the mainnet service
-offers CPU only until GPU execution has been validated end to end. It provides the checked download and commands
+configuration's `offered_resources` are shown and served; by default that is
+CPU only, until GPU execution has been validated end to end. It provides the checked download and commands
 using a new `innopool-v2-member` directory. The command contains no execution
 token; the installer prompts privately for it. Hardware compatibility is
 checked before an installed worker can request work.
@@ -74,11 +74,10 @@ work. A durable drain request lets a running worker finish and exit.
 
 Download the current installer again before updating, since its checksum is
 part of the release. The previous file can still request a drain. See the
-worker fork's
-[installation procedure](https://github.com/Daniel-T-S-Adams/innopool-slave-v2/blob/main/docs/INSTALL_V2.md)
-for recovery details. The fork's former startup script now invokes only the
-pinned v2 launcher; its previous Git-reset, Compose and service-installation
-behavior is retired in the fork.
+worker repository's installation procedure (`docs/INSTALL_V2.md`) for recovery
+details. The worker's former startup script invokes only the pinned v2
+launcher; its previous Git-reset, Compose and service-installation behavior is
+retired.
 
 ## Validation and remaining rollout
 
@@ -91,7 +90,9 @@ real temporary Git repositories, tags, Python environments and subprocesses,
 including lost activation, changed checkouts and unfinished evidence.
 
 Automated tests simulate runtime execution and do not establish CPU/GPU
-performance. Fixed tags, the mainnet manifest, restricted database roles and
-backup/restore preparation are installed. The 7–9 October CPU attempt did not
-complete within TIG's lifetime. Timely protocol completion, GPU execution and
-a complete funded recovery/reward cycle remain required before wider use.
+performance. The deployment procedure installs fixed tags, the release
+manifest, restricted database roles and backup/restore protection. Measure
+each challenge and hardware combination against TIG's benchmark lifetime
+before offering it to members: a benchmark that does not complete within that
+lifetime expires. GPU execution and a complete funded recovery/reward cycle
+are among the checks listed in [ROADMAP.md](ROADMAP.md).

@@ -1,22 +1,23 @@
 # Evidence retention
 
-The storage cleanup activated on 13 October adds compact pool captures, direct
-binary downloads, final report fetching and guarded legacy conversion.
+The storage cleanup adds compact pool captures, direct binary downloads, final
+report fetching and guarded legacy conversion.
 [Lean storage](LEAN_STORAGE.md) specifies migrations 020 to 022, 024 and 025 and the cleanup
 sequence. The policy below applies to retained legacy and new compact captures.
-Historical conversion is complete; see [the ordering fix and cleanup](STORAGE_ORDERING_FIX_20261014.md).
-The pool-scoped capture branch adds whole-network selection references under
+Guarded conversion of historical full-network captures is described in
+[existing archive cleanup](LEAN_STORAGE.md#existing-archive-cleanup).
+The pool-scoped capture adds whole-network selection references under
 migration 025; their payloads follow the same floors.
 
-Decided by the operator on 8 October 2026. The pool reads the block tables and
-its own feed every block, reads the whole network only when selection needs a
-reference, and only has to **keep** what an open obligation can still need.
-Ledger, credit, benchmark, collateral and settlement records are permanent.
-Raw captures are bounded-life evidence and expire under this policy.
-The lean format retains compact pool evidence under these floors. A redundant
-full-network copy can expire sooner when its validated compact replacement,
-credit, reconciliation and any conflict resolution are verified off-host;
-the original identity and accounting records remain.
+The pool reads the block tables and its own feed every block, reads the whole
+network only when selection needs a reference, and only has to **keep** what
+an open obligation can still need. Ledger, credit, benchmark, collateral and
+settlement records are permanent. Raw captures are bounded-life evidence and
+expire under this policy. The lean format retains compact pool evidence under
+these floors. A redundant full-network copy can expire sooner when its
+validated compact replacement, credit, reconciliation and any conflict
+resolution are verified off-host; the original identity and accounting
+records remain.
 
 | Evidence | Expires when | Cap |
 |---|---|---|
@@ -80,9 +81,9 @@ chunks expire only once every block up to it has.
 
 1. Apply migrations 018 and 019 with the admin role, then apply
    `deploy/v2-mainnet/grant-runtime-observer-privileges.sql`: the observer and
-   runtime roles need the chunk index and may read the floors and runs. On
-   8 October the grants were applied a minute after the migration; in that
-   minute the recorder refused every block and the spool replayed them.
+   runtime roles need the chunk index and may read the floors and runs. Apply
+   the grants immediately after the migration: until they are applied the
+   recorder refuses every block, and the spool replays them afterwards.
 2. Run `tools/retain_evidence_v2.py --initialize-chunk-index` once, before any
    retention run, while the observer is the only writer.
 3. Install `innopoolv2mainnet-retention.service` and `.timer` with
@@ -102,10 +103,10 @@ chunks expire only once every block up to it has.
 - Both block and report spools have guarded file pruning. Recorded report
   files require a matching backed database payload and scope; pending files
   remain. Custody/funding spool cleanup retains its existing controls.
-- Recovery collectors are inactive and the full primary-evidence copy is
-  disabled after a disk-reserve failure. At 14:55 UTC on 9 October, the configured
-  recovery raw-copy directory was absent and its local spool measured only
-  36 KiB; do not assume that a separate raw archive exists there.
-  The replacement bounded pending-file snapshots were activated on 13 October
-  and include all four spools. See [operations status](OPERATIONS_STATUS.md)
-  for the current recovery path and measured footprint.
+- Recovery collectors are inactive by default, and the raw copy of the
+  primary's evidence spool is an optional feature that is disabled by default;
+  do not assume that a separate raw archive exists on the recovery host unless
+  it has been enabled. The bounded pending-file snapshots include all four
+  spools; see [pending evidence protection](PENDING_EVIDENCE_BACKUP.md) and
+  the [storage map](STORAGE_MAP.md) for the recovery path. Both choices are
+  operator decisions listed in [the roadmap](ROADMAP.md).

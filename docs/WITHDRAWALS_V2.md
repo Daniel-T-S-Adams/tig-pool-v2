@@ -5,7 +5,7 @@ sends a withdrawal using their own wallet software. The service holds no signing
 key and its RPC adapter cannot send transactions. Native transaction fees use
 separate operator funds, including fees on a failed or cancelled transaction.
 
-[Operator income withdrawals](OPERATOR_INCOME.md) now use this same payment
+[Operator income withdrawals](OPERATOR_INCOME.md) use this same payment
 lifecycle with a separate funding source, configured destination and retained
 operating budget. The member rules below continue to apply only to members.
 
@@ -81,7 +81,7 @@ transfer history is checked before binding an upgraded database. Ledger
 reconciliation includes member balances, collateral, pending withdrawals,
 round accounts, operator funds and unattributed receipts.
 
-The verified adapter now accepts zero-valued ERC-20 events. They are retained
+The verified adapter accepts zero-valued ERC-20 events. They are retained
 exactly once without manufacturing a monetary journal or blocking an indexer.
 Direct, confirmed native transfers into custody fund operator-native accounts;
 replay cannot credit them twice. Native deposits are not member TIG deposits.
@@ -98,18 +98,18 @@ than an additional blob payment. These distinctions follow the primary
 and [Jovian specification](https://specs.optimism.io/protocol/jovian/exec-engine.html#operator-fee).
 
 The recorded Base receipt in `tests/v2/fixtures/base-transaction.json` was read
-from `https://mainnet.base.org` at finalized block 51,570,607 on 20 September
-2026. It exercises the actual Jovian receipt shape, L1 fee and DA footprint
-fields. It is public test evidence and is unrelated to any member payment.
-The new transaction verifier also checked that same transaction directly
-against the public RPC, including canonical inclusion and finality; its
-verified fee was 1,160,679,890,131 native units (wei).
+from `https://mainnet.base.org` at finalized block 51,570,607. It exercises the
+actual Jovian receipt shape, L1 fee and DA footprint fields. It is public test
+evidence and is unrelated to any member payment. The transaction verifier also
+checked that same transaction directly against the public RPC, including
+canonical inclusion and finality; its verified fee was 1,160,679,890,131
+native units (wei).
 
 New payments support ordinary direct EOA custody transactions (types 0, 1 and 2).
 Custody preflight rejects contract or delegated wallets. Wallet login and
 destination verification support EOA signatures. Continuous custody indexing,
 member deposits, operator funding and member/operator screens are implemented;
-live validation and production rollout remain separately recorded checks.
+[ROADMAP.md](ROADMAP.md) lists what has not been validated live.
 
 ## Already sent sponsored payments
 

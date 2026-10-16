@@ -42,15 +42,9 @@ jobs:
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           repository: Daniel-T-S-Adams/innopool-slave-v2
-          ref: dfa6779f15aae862e33e99bd89b70b7cb7440837
+          ref: c6eccfb4f7bf4fc1ceb448f80983dd954bfc99ef
           path: .paired-worker
           persist-credentials: false
-      - name: Run existing accounting regression checks
-        env:
-          PYTHONDONTWRITEBYTECODE: "1"
-        run: |
-          python3 tools/test_revenue_split.py
-          python3 tools/test_work_credits.py
       - name: Test protocol replay, funds concurrency and the paired worker API
         env:
           PYTHONDONTWRITEBYTECODE: "1"

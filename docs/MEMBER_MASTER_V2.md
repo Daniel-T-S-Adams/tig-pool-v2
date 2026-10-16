@@ -1,6 +1,6 @@
 # Member master integration
 
-Agreed 11 October 2026. The pool assigns one complete benchmark to one member.
+The pool assigns one complete benchmark to one member.
 The member's **master** is their pool-facing client. It may compute locally,
 distribute different nonces to compatible helper machines, or combine both.
 Members operate communication and scheduling within their own machines, using
@@ -11,9 +11,9 @@ the member-managed master is the entry point for that arrangement.
 
 This uses [member API 2.0](MEMBER_API_V2.md). Ownership is bound to the
 authenticated member, without a machine registration or machine ID. The
-reference worker demonstrates the same assignment/result/proof contract. Its
-optional SSH helper mode is described in
-[the implementation and verification note](SSH_MEMBER_MASTER_VERIFICATION.md).
+reference worker demonstrates the same assignment/result/proof contract and
+supplies an optional SSH helper mode, documented in the worker repository
+(`docs/SSH_MEMBER_MASTER_V2.md`).
 
 Start with the [member setup guide](MEMBER_SETUP_V2.md) for website registration,
 the execution token, API connection settings and receiving your first assignment.
@@ -35,7 +35,7 @@ machines add neither a collateral reservation nor an execution slot. One shared
 benchmark uses one of the member's two slots.
 
 The following diagram shows the member's setup steps and subsequent computation.
-Orange nodes are member-supplied software and setup. The current Join-page
+Orange nodes are member-supplied software and setup. The Join-page
 installer supplies the single-machine reference worker; it does not install a
 distributed master, pair helpers or configure their communication. The helper
 jobs and output collection shown here are the member's implementation of the
@@ -95,14 +95,13 @@ and one collateral reservation. If a second benchmark is running, divide the
 available compute between the two rather than promising the same capacity twice.
 
 The pool contract and [member connection guide](MEMBER_SETUP_V2.md) are in place.
-The supplied installer remains single-machine. Members implement their own
+The supplied installer is single-machine. Members implement their own
 master/helper connections and scheduling, or configure the reference worker's
 optional SSH mode. They can integrate through the existing API without using
-that installer. Real two-server computation, restart recovery and combined API
-uploads passed on 12 October; see [the verification record](SSH_MEMBER_MASTER_VERIFICATION.md).
-Actual mainnet acceptance and finalization remain to be checked. Deployment and
-new-work availability are separate from this architecture; see
-[operations status](OPERATIONS_STATUS.md).
+that installer. A real two-server rehearsal passed computation, restart
+recovery and combined API uploads. Deployment and new-work availability are
+separate from this architecture; the checks that remain open are listed in
+[ROADMAP.md](ROADMAP.md).
 
 ## Responsibilities
 
@@ -212,20 +211,14 @@ Freeing the execution slot does not by itself end the evidence obligation.
 ## Implementation status
 
 The existing API is compatible with this member-managed execution model.
-The 11 October contract increment added schema/route descriptions without new
-pool work fields or a migration. The 12 October worker implementation adds
-optional SSH helpers: `workers` controls local concurrency and helper entries
-add compatible remote capacity. Custom masters may still implement their own
-transport and aggregation. The updated paired installer is served on mainnet
-since 13 October; the default installation still configures one machine.
-Optional SSH helpers require member configuration. See
-[rollout status](LEAN_ROLLOUT_20261013.md).
+The master contract added schema/route descriptions without new pool work
+fields or a migration. The reference worker implements optional SSH helpers:
+`workers` controls local concurrency and helper entries add compatible remote
+capacity. Custom masters may still implement their own transport and
+aggregation. The paired installer served from the Join page configures one
+machine by default; optional SSH helpers require member configuration.
 
 Tests combine helper outputs, recover missing work after restart and submit one
 complete result and sampled proofs. A real two-server CPU rehearsal passed
 complete results/proofs, helper disconnection and master-crash recovery.
-Actual TIG acceptance remains unverified. See
-[SSH verification](SSH_MEMBER_MASTER_VERIFICATION.md) and
-[the wider verification details](LEAN_STORAGE_VERIFICATION.md).
-See [implementation status](../IMPLEMENTATION_STATUS.md) for deployment and
-verification state.
+The checks that remain open are listed in [ROADMAP.md](ROADMAP.md).

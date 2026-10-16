@@ -1,18 +1,11 @@
 # Arbitration evidence and round settlement
 
-The isolated v2 package now implements the agreed collateral and reward rules
-against PostgreSQL. It does not start a payment process or automatically turn
-on live settlement. Migration `005_settlement.sql` adds append-only reporting
+The v2 package implements the agreed collateral and reward rules against
+PostgreSQL. It does not start a payment process or automatically turn on live
+settlement. Migration `005_settlement.sql` adds append-only reporting
 evidence, reporting-round associations, finalization records and round accounts.
-
-Checked 9 October: settlement is disabled. Round 137 has unresolved block gaps
-at `1375817` and `1376650`, after the one-time prelaunch waiver for `1372249`.
-The expired CPU attempt's slot is free, with collateral still held for its
-existing X+2 rules. See [operations status](OPERATIONS_STATUS.md). On
-14 October the owner chose the
-[bounded missing-block tolerance](#bounded-missing-block-tolerance) below;
-once deployed, these three heights are within its limit and no longer hold
-round 137 by themselves.
+Rounds with a few missing block snapshots settle under the
+[bounded missing-block tolerance](#bounded-missing-block-tolerance) below.
 
 An acknowledged benchmark that expires without ever sending results uses the
 same finalization path as an explicitly rejected late result: release its work
@@ -24,7 +17,7 @@ not change reporting evidence, finalization gates or settlement controls. See
 
 ## Evidence collected before financial decisions
 
-The deployed [storage cleanup](LEAN_STORAGE.md) fetches final responses for
+The [storage cleanup](LEAN_STORAGE.md) fetches final responses for
 open obligations after X+2 and the applicable reporting window close. It keeps
 positive benchmark/reporting-round mappings while available, and saves relevant
 final facts instead of every repeated global response. Pending arbitration and
@@ -58,7 +51,7 @@ benchmark with its protocol reporting round, separately from its recorded
 creation round. An empty index cannot establish that a benchmark has no
 reports. Unowned public benchmark IDs never create internal ownership.
 
-A read-only probe on 20 September found benchmark
+A recorded read-only probe of public TIG data found benchmark
 `0017d114eead779d2a14567929f45c69`, created in round 135, in the round-135 index
 for player `0xb9a66a0f6c1aedadfd7d03e9d9b2388da67300f5` and challenge `c008`.
 It was absent from the adjacent round-134 and round-136 responses. This is one
@@ -124,8 +117,8 @@ settlement; independently eligible collateral can finalize.
 
 ## Bounded missing-block tolerance
 
-Decided by the owner on 14 October 2026 and implemented in migration 023; not
-yet deployed. A reward round may settle while a bounded number of its heights
+Implemented in migration 023 as an operator decision: a reward round may
+settle while a bounded number of its heights
 have no complete snapshot. Each tolerated height counts as zero pool credit for
 everyone: the round's actual received reward is split by the credit recorded
 in the observed blocks. One block is about 0.01% of a round, so a few misses
@@ -155,13 +148,13 @@ revision with its actor and reason; identical limits add nothing:
 python tools/set_missing_block_policy_v2.py            # show the current limits
 python tools/set_missing_block_policy_v2.py --max-missing-per-round 50 \
   --warn-missing-per-round 10 --actor "pool operator" \
-  --reason "reviewed: the collector outage on 20 October was unrecoverable"
+  --reason "reviewed: the collector outage was unrecoverable"
 ```
 
-A limit of 0 restores the earlier strict rule. The primary health script
-deployed on the host is maintained outside this repository and still lists
-every unresolved gap as an issue; when this release is deployed, change it to
-flag `held_rounds` and conflicting heights instead.
+A limit of 0 restores the strict rule. The primary health check,
+`tools/mainnet_health_check_v2.py`, judges block history by this tolerance:
+held rounds, a current round already over the limit and unresolved conflicting
+heights are issues, while tolerated and waived gaps are recorded only.
 
 ## One-time prelaunch block-gap exception
 
@@ -177,19 +170,19 @@ under the bounded tolerance above.
 The immutable waiver records the operator, reason, evidence, adjacent block
 identities and the missing block ID referenced by its successor. It does not
 remove the gap from raw history or release/forfeit collateral. A later valid
-backfill remains usable as actual evidence. The approximation is safe for the
-current prelaunch gap because no pool benchmark was submitted before the waiver;
+backfill remains usable as actual evidence. The approximation is safe for a
+prelaunch gap because no pool benchmark was submitted before the waiver;
 never use it to skip a height after members could have earned credit there.
 
-After the reviewed migration is deployed, prepare a small evidence JSON file
-stating the operator's no-prior-work check and the source attempts to recover
-the block, then invoke the explicit admin tool with the owner database role:
+Prepare a small evidence JSON file stating the operator's no-prior-work check
+and the source attempts to recover the block, then invoke the explicit admin
+tool with the owner database role:
 
 ```sh
-python tools/waive_prelaunch_gap_v2.py --height 1372249 \
+python tools/waive_prelaunch_gap_v2.py --height <missing height> \
   --actor "pool operator" \
-  --reason "unrecoverable prelaunch observation gap; no pool work in round 137" \
-  --evidence-json /secure/path/gap-1372249-evidence.json
+  --reason "unrecoverable prelaunch observation gap; no pool work in round <round>" \
+  --evidence-json /secure/path/gap-<missing height>-evidence.json
 ```
 
 The command is deliberately not part of deployment or startup. Do not run it
@@ -203,22 +196,18 @@ settlement, restart/replay, several upheld nonces on one benchmark, handover
 failure, multiplier changes and zero holds, independent collateral release,
 missing blocks, exact equal credit, zero-credit pots and actual operator
 reimbursement. Recorded public arbitration fixtures are replayed through the
-new evidence store. These tests contain no real token transfers.
+evidence store. These tests contain no real token transfers.
 
-Live monetary operation still requires verification of reporting-round scope
-at benchmark boundaries, authoritative expiry, intended-account precommit
-rejection, final emissions/penalty classification and the mapping from actual
-token receipts to reward rounds. The public earnings response alone does not
-prove a token receipt. A reporting index alone does not establish scope for
-failed or not-yet-reportable work. Neither assumption is automated here.
-
-The [reward receipt investigation](REWARD_RECEIPTS.md) includes a finalized
-mainnet distribution and a pinned TokenLocker reader. Its 28-day withdrawal
-delay is separate from collateral finalization. Claimable/locked balances are
-not spendable custody money; the reader does not yet automate attribution.
-
-Finalized journal entries and allocations cannot be edited. A later externally
-discovered inconsistency requires an explicit evidenced correction through
-new journals and reconciliation; replay never silently reprices or debits a
-member. The operator correction interface and production reconciliation gates
-remain part of the remaining deployment work.
+The software guarantees that the public earnings response alone never counts
+as a token receipt, that a reporting index alone never establishes scope for
+failed or not-yet-reportable work, and that finalized journal entries and
+allocations cannot be edited: a later externally discovered inconsistency
+requires an explicit evidenced correction through new journals and
+reconciliation, and replay never silently reprices or debits a member. The
+[reward receipt investigation](REWARD_RECEIPTS.md) includes a finalized
+mainnet distribution and a pinned TokenLocker reader; its 28-day withdrawal
+delay is separate from collateral finalization, and claimable/locked balances
+are not spendable custody money. The reader does not automate attribution, and
+there is no operator correction interface. [ROADMAP.md](ROADMAP.md) lists
+these limitations and the settlement checks that have not been exercised with
+real rewards.

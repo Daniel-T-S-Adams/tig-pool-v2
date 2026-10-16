@@ -233,7 +233,7 @@ class PendingEvidenceTests(unittest.TestCase):
             'data_checksums_verified': True, 'wal_parse_verified': True}))
         archive = self.root / 'archive'
         config = {'directory': str(archive), 'minimum_free_gib': 35, 'base_record': str(base),
-            'ssh_key': '/private/key', 'known_hosts': '/private/known-hosts', 'source_host': '46.62.249.188'}
+            'ssh_key': '/private/key', 'known_hosts': '/private/known-hosts', 'source_host': '198.51.100.10'}
         real_popen = pending.subprocess.Popen
         calls = []
         def fixture_ssh(args, **kwargs):
@@ -271,7 +271,7 @@ class PendingEvidenceTests(unittest.TestCase):
         base.write_text(json.dumps({'system_identifier': '123',
             'data_checksums_verified': True, 'wal_parse_verified': True}))
         config = {'directory': str(archive), 'minimum_free_gib': 35, 'base_record': str(base),
-            'ssh_key': '/private/key', 'known_hosts': '/private/known-hosts', 'source_host': '46.62.249.188'}
+            'ssh_key': '/private/key', 'known_hosts': '/private/known-hosts', 'source_host': '198.51.100.10'}
         real_popen = pending.subprocess.Popen
         def fixture_ssh(args, **kwargs):
             return real_popen([sys.executable, '-c',

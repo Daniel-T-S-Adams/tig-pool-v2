@@ -1,509 +1,103 @@
 # Community Pool
 
-The [14 October mainnet CPU trial](docs/MAINNET_CPU_TRIAL_20261014.md) established
-an initial runtime-pin failure followed by successful corrected activation.
-The master and helper completed 4,000 nonces and uploaded results in 12m40s;
-TIG confirmed the proof and activated the benchmark. New work remains paused
-while the remaining storage and settlement launch checks are completed.
-
-Community Pool is the member-run pool for The Innovation Game that grew out of
-the InnoPool v2 redesign. This independent repository preserves the original
-pool's complete local Git history. The pool is deployed on the mainnet servers
-with new work and settlement still disabled; the legacy instructions below are
-kept for reference only. The system uses whole-benchmark
-member work, custodial balances and collateral, equal qualifying-bundle credit,
-round settlement and operator-reviewed withdrawals. See the
-[redesign plan](POOL_REDESIGN_PLAN.md) and
-[implementation status](IMPLEMENTATION_STATUS.md) and
-[checked operations status](docs/OPERATIONS_STATUS.md) before using this repository.
-The new API serves its own member/operator screens and
-[paired worker installer](docs/PAIRED_RELEASES.md). Releases are deployed as
-fixed tags; `release/v2` points at the currently deployed one and `main` is the
-integration branch. The old `/static/install.sh` installer is retired in this fork; use the checked download from a configured v2 pool's Join page.
-
-For a high-level view of hosting, connections and deployments, see the
-[pool structure diagram](docs/POOL_STRUCTURE.md) and
-[Cloudflare setup steps](docs/CLOUDFLARE_SETUP.md). The name, mark and
-colours used by the website are recorded in the [branding guide](docs/BRANDING.md).
-
-The [13 October recovery update](docs/RECOVERY_VOLUME_20261013.md) records the new
-volume, verified database/WAL/pending-file restore and active protection.
-The [lean application and paired member master worker](docs/LEAN_ROLLOUT_20261013.md)
-were activated on 13 October with new work paused. Historical conversion and the corrected mainnet CPU test have passed. See
-[the storage ordering fix](docs/STORAGE_ORDERING_FIX_20261014.md) for verified backup, restore and
-completed redundant archive cleanup.
-
-For day-to-day operation, use the [owner's guide](docs/OWNER_GUIDE.md).
-It explains the website and MetaMask steps, server configuration, software
-updates, and the remaining deployment requirements.
-
-Members building a master to use several compatible machines should follow the
-[member setup guide](docs/MEMBER_SETUP_V2.md) and
-[member master contract](docs/MEMBER_MASTER_V2.md). The pool assigns a complete
-benchmark; members coordinate their own machines and return its combined result
-and proofs through the existing API.
-
-## Legacy implementation reference
-
-A self-hosted, open-source mining pool for [The Innovation Game (TIG)](https://tig.foundation), built on the official `tig-benchmarker` master/slave architecture.
-
-Pool members run TIG slave nodes pointing at your server. The pool manager tracks contributions, distributes rewards on-chain via `/set-coinbase`, and automatically tunes pool capacity through an autopilot system.
-
----
-
-## Features
-
-- **Fleet-based registration** — members register with invite codes, receive a fleet token and auto-generated slave name
-- **Live pool website** — public stats, leaderboard, per-member dashboard, and fleet install scripts
-- **Autopilot** — continuously tunes benchmark slots, capacities, and workload based on live pool health
-- **Worker trust system** — probation/trust states gate capacity contributions from community miners
-- **Quality audit** — master spot-checks the qualities every slave posts by re-scoring original solutions with `tig-verifier`; mismatches auto-quarantine the member and keep the evidence
-- **AI co-pilot** — optional DeepSeek-backed advisor that reviews pool health and surfaces recommendations (read-only, operator-approved)
-- **Scheduler** — optional benchmark pre-seeding to keep the master active during quiet periods
-- **Admin CLI** — `admin.py` for all operator tasks without needing to call the API directly
-- **Security audit tool** — `tools/security_audit.py` for pre-release static analysis
-
----
-
-## Architecture
-
-```
-Community Miners (slave nodes)
-        │ :5115
-        ▼
-  TIG Master (Docker)          ← manages jobs, roots, proofs
-        │ :3336 (internal)
-        ▼
-  Pool Manager (FastAPI)       ← tracks contributions, autopilot, coinbase
-        │
-  Auditor (Docker)             ← re-scores sampled leaves with tig-verifier
-        │   └─ CPU challenge runtimes (knapsack, energy_arbitrage, …)
-  PostgreSQL (Docker)          ← shared schema for master + pool
-        │
-  Nginx (Docker)               ← serves pool website, proxies /api/ and /benchmarker/
-        │ :80 / :443
-        ▼
-  Public Internet
-```
-
-| Service | Internal port | Public port | Purpose |
-|---|---|---|---|
-| Nginx | 80 | 80 / 443 | Pool website + API proxy |
-| Master (slave) | 5115 | 5115 | Slave node connections |
-| Benchmarker UI | 7777 | 8081 | Operator-only master admin |
-| Pool Manager | 8080 | — | Internal only (proxied via nginx) |
-| Auditor | — | — | No ports; talks to Postgres and the host Docker socket |
-| PostgreSQL | 5432 | — | Internal only |
-
-> Port 3336 (master internal API) and 5432 (postgres) must **never** be exposed publicly.
-
----
-
-## Prerequisites
-
-- Ubuntu 22.04+ (or any Linux host with Docker)
-- Docker + Docker Compose V2 (`docker compose`, not `docker-compose`)
-- A TIG benchmarker `player_id` and `api_key` from [tig.foundation](https://tig.foundation)
-- (Optional) A domain name + SSL certificate for production
-
----
-
-## Quick Start
-
-### 1. Clone and configure
-
-```bash
-git clone https://github.com/your-org/innopool.git
-cd innopool
-cp .env.example .env
-```
-
-Edit `.env` and set at minimum:
-
-```env
-POSTGRES_PASSWORD=<strong-random-password>
-ADMIN_SECRET=<strong-random-secret>
-POOL_NAME=MyPool
-POOL_PUBLIC_URL=http://localhost   # or your domain
-POOL_FEE=0.05                      # 5% operator fee
-```
-
-See [Master Configuration](#master-configuration) below for how to seed your TIG credentials and algo selection into the pool master.
-
-### 2. Build and start
-
-```bash
-docker compose up -d --build
-```
-
-### 3. Set your TIG credentials
-
-Open the benchmarker UI at `http://localhost:8081/benchmarker/`, go to **Config**, and set your `player_id`, `api_key`, `api_url`, and `algo_selection`. Click **Update Config**.
-
-### 4. Register yourself as the first member
-
-```bash
-python3 admin.py add 0xYourWalletAddress cpu
-```
-
-This prints a `slave_name`, fleet token, and a ready-to-paste slave `.env` block.
-
-Or generate invite codes for others to self-register:
-
-```bash
-python3 admin.py invite 5
-```
-
-### 5. Connect a slave
-
-The pool website serves a one-liner install script at `/static/fleet-install.sh`. Members run:
-
-```bash
-curl -s http://your-pool-domain/static/fleet-install.sh | bash
-```
-
-Or follow the manual steps on the pool website registration page.
-
-### 6. Verify
-
-```bash
-python3 admin.py autopilot
-```
-
----
-
-## Production Deployment
-
-### Recommended hosting
-
-- **VPS**: Hetzner CX22 (~€4/month) is sufficient for the master + pool manager alone
-- Larger fleets (50+ slaves) benefit from a CX32 or CX42
-- **Domain**: Any registrar; Cloudflare proxy or Certbot for SSL
-
-### Firewall
-
-```bash
-ufw allow 22    # SSH
-ufw allow 80    # Pool website + API
-ufw allow 443   # HTTPS (if using SSL)
-ufw allow 5115  # Slave node connections
-ufw enable
-```
-
-### Deploy
-
-```bash
-git clone https://github.com/your-org/innopool.git
-cd innopool
-cp .env.example .env
-# edit .env with production values
-docker compose up -d --build
-```
-
-### SSL with Certbot
-
-```bash
-apt install certbot python3-certbot-nginx
-certbot --nginx -d yourpool.example.com
-```
-
-Then update `POOL_PUBLIC_URL` in `.env` and restart nginx:
-
-```bash
-docker compose restart nginx
-```
-
----
-
-## Autopilot
-
-The autopilot runs every `AUTOPILOT_INTERVAL_S` seconds (default 300) and automatically adjusts:
-
-- **Benchmark slots** — scales CPU and GPU slot counts based on connected worker capacity
-- **Max concurrent benchmarks** — tunes the master's workload cap to match proof throughput
-- **Stale work cleanup** — reclaims abandoned roots and proofs
-
-Enable it by setting `AUTOPILOT_MODE=on` in `.env`, then restart `pool_manager`:
-
-```bash
-docker compose up -d pool_manager
-```
-
-Key tuning parameters (all set in `.env`):
-
-| Variable | Default | Description |
-|---|---|---|
-| `AUTOPILOT_MODE` | `off` | `on` to enable, `off` to disable |
-| `AUTOPILOT_INTERVAL_S` | `300` | Seconds between autopilot runs |
-| `AUTOPILOT_MAX_CPU_SLOTS` | `128` | Hard cap on CPU benchmark slots |
-| `AUTOPILOT_MAX_GPU_SLOTS_PER_TYPE` | `6` | Hard cap on GPU slots per challenge type |
-| `AUTOPILOT_FUNNEL_MIN_PROOF_CONVERSION_RATE` | `0.85` | Minimum proof conversion before scaling is blocked |
-
----
-
-## AI Co-pilot
-
-An optional DeepSeek-backed advisor that analyses pool state and surfaces recommendations for operator review. It is **read-only** — it never applies changes automatically.
-
-Enable by setting in `.env`:
-
-```env
-DEEPSEEK_API_KEY=sk-...
-AI_OPTIMIZER_ENABLED=true
-AI_OPTIMIZER_MODE=on
-AI_OPTIMIZER_INTERVAL_S=1800
-```
-
-View the latest recommendation:
-
-```bash
-python3 admin.py ai-optimizer
-```
-
-View decision history:
-
-```bash
-python3 admin.py ai-decisions
-```
-
-Recommendations are categorised as `observe_only`, `investigate`, or `act`. All proposed config changes are listed under `blocked_actions` until the operator manually applies them.
-
----
-
-## Worker Trust System
-
-New community miners start on **probation**. The autopilot only counts their capacity once they have demonstrated consistent proof conversion and passed preflight checks.
-
-Trust states:
-
-| State | Meaning |
+A member-run mining pool for [The Innovation Game](https://tig.foundation) (TIG).
+Members connect their own machines and receive whole benchmarks; the pool
+submits the work under its own TIG account, watches TIG's blocks to credit
+the bundles that qualify, holds member balances and collateral in a custody
+wallet on Base, settles each round's rewards with equal credit per qualifying
+bundle, and pays operator-reviewed withdrawals. Every movement of money is a
+balanced, append-only journal, and nothing is spent beyond an operator-recorded
+cap.
+
+The pool is one repository (this one) and a separate member worker that members
+install from the pool's Join page.
+
+## How it works
+
+- **Whole benchmarks.** A member offers CPU or GPU capacity with a TIG
+  verification compute type. The coordinator selects a challenge and algorithm
+  from the live network, reserves a fee ceiling and the member's collateral,
+  sends the precommit, and hands the complete benchmark to the member. The
+  member computes every nonce, keeps durable evidence, and returns the result
+  and TIG's sampled proofs through the member API.
+- **Observation and credit.** Collectors record the pool's own feed from every
+  TIG block and fetch whole-network references on demand. Qualifying bundles
+  earn equal credit; conflicts between captures are resolved with appended
+  proofs, never by editing history.
+- **Funds.** Deposits are matched to verified member wallets, collateral is
+  held per benchmark and returned or forfeited on the recorded outcome, and
+  withdrawals are reviewed by the operator and reconciled against the chain.
+  The software never holds a signing key; the operator signs sends outside it.
+- **Settlement.** Reporting rounds are scoped and sealed after TIG's reporting
+  delay, earnings are declared with evidence, and each round's pot is allocated
+  to members by credit with the remainder to the operator.
+- **Safety.** A recorded spending cap bounds submission fees and custody gas
+  per rolling window and per attempt. New work can be paused durably. The
+  recovery host keeps verified database backups and pending-file snapshots.
+
+## Documentation
+
+For operators:
+[owner's guide](docs/OWNER_GUIDE.md),
+[deployment](docs/MAINNET_DEPLOYMENT.md),
+[paired releases and the worker installer](docs/PAIRED_RELEASES.md),
+[backups and recovery](docs/BACKUP_OPERATIONS.md),
+[pending-evidence snapshots](docs/PENDING_EVIDENCE_BACKUP.md),
+[storage map](docs/STORAGE_MAP.md),
+[evidence retention](docs/EVIDENCE_RETENTION.md),
+[lean storage](docs/LEAN_STORAGE.md),
+[Cloudflare in front of the pool](docs/CLOUDFLARE_SETUP.md),
+[pool structure](docs/POOL_STRUCTURE.md),
+[operator income](docs/OPERATOR_INCOME.md),
+[protocol fee funding](docs/PROTOCOL_FUNDING.md),
+[custody observer](docs/CUSTODY_OBSERVER.md),
+[protocol validation](docs/PROTOCOL_VALIDATION.md),
+[submission recovery](docs/SUBMISSION_RECOVERY.md),
+[dashboard](docs/DASHBOARD_V2.md),
+[branding](docs/BRANDING.md).
+
+For members:
+[member setup](docs/MEMBER_SETUP_V2.md),
+[member API](docs/MEMBER_API_V2.md),
+[member master contract](docs/MEMBER_MASTER_V2.md),
+[one bounded worker on a shared machine](docs/LOCAL_CPU_PILOT.md).
+
+Design and money:
+[design](docs/DESIGN.md),
+[observation and selection](docs/OBSERVATION_AND_SELECTION.md),
+[member funds](docs/MEMBER_FUNDS.md),
+[withdrawals](docs/WITHDRAWALS_V2.md),
+[round settlement](docs/ROUND_SETTLEMENT.md),
+[reward receipts](docs/REWARD_RECEIPTS.md).
+
+What is not implemented or validated yet, and the decisions every operator
+makes, are listed in the [roadmap](docs/ROADMAP.md).
+
+## Repository layout
+
+| Path | Contents |
 |---|---|
-| `probation` | New miner, limited capacity contribution; every audit request is verified |
-| `trusted` | Verified miner, full capacity counted; audits are sampled (`AUDIT_TRUSTED_SAMPLE_RATE`) |
-| `operator` | Pool operator's own machines; never auto-quarantined |
-| `quarantined` | Failed a quality audit — deactivated, unfinished batches released |
-| `suspended` | Removed from capacity calculations |
+| `pool_manager/pool_v2/` | The pool: API and website, coordinator, collectors, ledger, settlement, controls, migrations |
+| `tools/` | Operations scripts run by the systemd units: collectors, coordinator, backups, health checks, retention, conflict resolution |
+| `deploy/v2-mainnet/` | systemd unit, nginx and configuration templates for a two-host deployment |
+| `tests/v2/` | The test suite, which is the specification for the money and protocol behaviour |
+| `docs/` | Operator, member and design documentation |
 
-View trust state for all members:
+## Development
 
-```bash
-python3 admin.py members
-```
+Python 3.12 and PostgreSQL. See [CONTRIBUTING.md](CONTRIBUTING.md) for the
+test setup, the branch policy and the rules for changes that touch money or
+the member protocol. Security reports follow [SECURITY.md](SECURITY.md).
+Releases are fixed tags; `release/v2` points at the pool commit production
+serves and `main` is the integration branch.
 
-**Promotion is driven by the quality audit.** A probation member is verified on every batch, so the auditor promotes it to `trusted` once it has `AUDIT_PROMOTE_MIN_PASSED` (50) passed audits, its first audit is at least `AUDIT_PROMOTE_MIN_AGE_H` (24 h) old, and it has zero failed or missing audits in the last `AUDIT_PROMOTE_WINDOW_H` (24 h). A typical CPU slave gets there in about a day. Any failed audit drops an auditor-promoted member straight back to `probation` (quarantine usually fires first). Members you set to `trusted` yourself are never demoted by the auditor — the `trust_source` column records who promoted whom.
+## Status
 
-Trust state can also be set directly in the pool database. The `members` command shows `trust_state` and `preflight_status` columns for every registered slave.
+The pool has run on TIG mainnet with CPU benchmarks end to end: assignment,
+member computation across two machines, TIG activation, credit recording and
+collateral handling. GPU execution and a reward cycle with non-zero earnings
+are still being validated; the [roadmap](docs/ROADMAP.md) has the details.
 
----
+## License
 
-## Quality Audit
-
-A root submit commits to the *solutions* (merkle root) but not to the *quality numbers* the slave posts alongside them. A hostile member could post real solutions with inflated qualities; TIG only re-checks a few nonces per benchmark, and a disagreement is clawed back from the pool. The audit closes that gap without re-solving anything:
-
-1. Slave POSTs `/submit-batch-root` as normal.
-2. Master picks the audit nonces **after** seeing the quality list — the highest-quality nonce plus `leaves_per_batch` random ones — and returns them in the ack as `audit_nonces`. The slave cannot know the sample before committing.
-3. Slave (≥ 0.1.22) POSTs the original `{nonce}.json` leaves to `/submit-batch-audit/{batch_id}`.
-4. The `auditor` container runs **`tig-verifier` only** on each leaf inside the matching challenge container and compares the result to the posted quality.
-
-Outcomes per batch: `passed`, `failed`, `skipped` (not sampled / GPU challenge), `missing` (slave never delivered), `error` (verifier infrastructure problem, retried). A `failed` audit deactivates the member, sets `trust_state = quarantined` and releases its unfinished work. Failed audits and their leaves are kept **forever** as evidence; passed ones are pruned after `AUDIT_RETENTION_DAYS`.
-
-### Every leaf, on demand (fetch)
-
-The sample covers a few nonces per batch. If someone reports a nonce we did **not** sample, the pool can still produce it: slaves ≥ 0.1.23 archive **every** leaf of every batch (`AUDIT_DIR/<batch>/leaves.json.gz`, 14 days) and the master pulls specific nonces on demand:
-
-1. `admin.py audit --benchmark <bid> --nonce <n> --fetch` creates a `batch_audit` row with `kind = fetch` for the slave that computed that batch.
-2. The master advertises it in the `X-Innopool-Audit-Fetch` header of that slave's next `get-batches` reply (seconds if online; older slaves ignore the header).
-3. The slave answers `/submit-batch-audit/{batch_id}` with the leaf **and its merkle branch**. The master recomputes the root from the branch and compares it with the `merkle_root` the slave committed at root-submit time (`merkle_ok`). A leaf altered after the fact cannot pass this check; a slave that no longer holds the archive reports `unavailable` and the row is marked `missing` at once.
-4. The auditor re-scores the leaf with `tig-verifier` exactly like a sample. A `merkle_ok = false` leaf is a `failed` audit regardless of quality. Fetches are always verified (no trust sampling) and wait `AUDIT_FETCH_TTL_H` (24 h) for an offline slave before being marked `missing`.
-
-```bash
-python3 admin.py audit              # per-slave pass/fail/missing, backlog
-python3 admin.py audit --failures   # expected vs verifier quality per nonce
-python3 admin.py audit <id>         # one audit's verdict (--json for leaves)
-python3 admin.py audit --benchmark <bid> --nonce <n> --dump ./evidence
-                                    # answer a TIG report for one benchmark/nonce
-python3 admin.py audit --benchmark <bid> --nonce <n> --fetch --wait
-                                    # not sampled? pull the archived leaf, merkle-check, re-verify
-python3 admin.py audit --benchmark <bid> --nonces 12,57,301 --fetch --wait 900 --note "tig report #123"
-```
-
-**If one of the pool's benchmarks is reported**, run `audit --benchmark <bid> --nonce <n>`. It shows which slave computed that batch, the quality the slave posted for that exact nonce (`batch_data`), whether the nonce was in our sample, what `tig-verifier` returned, and whether we still hold the original `{nonce}.json`. If it was not sampled, the output prints the `--fetch` command to run; `--wait` blocks until the leaf arrives and is verified (default 600 s). `--dump DIR` writes kept leaves out so you can re-run `tig-verifier` in front of anyone. Fetches need the job and its roots to still be in the DB (14-day job retention) and the slave to still hold its archive (`AUDIT_TTL`, 14 days).
-
-Tuning lives in `.env` (`AUDIT_*`, see `.env.example`) and, for the master side, under `"audit"` in the master config (`enabled`, `leaves_per_batch`, `include_max_quality`, `max_leaf_bytes`, `request_ttl_ms`). Leave `AUDIT_MISSING_QUARANTINE_THRESHOLD=0` until every member runs a slave ≥ 0.1.22 — older slaves never answer audit requests. GPU challenges are stored but not verified (the VPS has no GPU).
-
----
-
-## Admin CLI
-
-`admin.py` provides operator access to all pool management functions without needing to call the API directly.
-
-```bash
-python3 admin.py --help
-```
-
-Common commands:
-
-```bash
-python3 admin.py autopilot                            # Pool health + scale readiness report
-python3 admin.py autopilot --json                     # Same, machine-readable
-python3 admin.py hit-rate                             # Quality vs TIG qualifier floor, bundles, time
-python3 admin.py hit-rate --json                      # Same, machine-readable
-python3 admin.py audit [--json]                       # Quality spot-check: per-slave pass/fail, backlog
-python3 admin.py audit --failures                     # Failed audits with expected vs verifier quality
-python3 admin.py audit <id>                           # One audit incl. kept leaves (dispute evidence)
-python3 admin.py audit --benchmark <bid> [--nonce N] [--dump DIR]  # Answer a TIG report for one benchmark
-python3 admin.py audit --benchmark <bid> --nonce N --fetch --wait  # Pull + merkle-check + re-verify an unsampled nonce
-
-python3 admin.py members                              # List all registered members (with trust/preflight state)
-python3 admin.py fleets                               # List registered fleets
-
-python3 admin.py add <wallet> [cpu|gpu]               # Add a member directly (no invite needed)
-python3 admin.py create-fleet <wallet> <label> [cpu|gpu|mixed] [--cpu N] [--gpu N]
-python3 admin.py invite [N]                           # Generate N invite codes (default 1)
-python3 admin.py invites                              # List all invite codes
-
-python3 admin.py activate <wallet|slave>              # Re-activate a member or slave
-python3 admin.py deactivate <wallet|slave>            # Deactivate a member or slave
-python3 admin.py clear-slave <slave>                  # Unassign stale batches from a slave
-python3 admin.py member-health <slave>                # Detailed assignment health for a slave
-
-python3 admin.py ai-optimizer                         # Run AI co-pilot manually (read-only)
-python3 admin.py ai-decisions [N]                     # Show last N AI recommendations (default 10)
-
-python3 admin.py coinbase                             # Show last 10 coinbase distribution events
-python3 admin.py compute-types [--apply]              # Validate/fix TIG compute_type on algo_selection
-```
-
----
-
-## Master Configuration
-
-### New operators (no prior TIG setup)
-
-Configure your `player_id`, `api_key`, and `algo_selection` via the benchmarker UI at `http://your-server:8081/benchmarker/`. This is the simplest path.
-
-### Migrating from an existing tig-benchmarker setup
-
-If you already run a standalone `tig-benchmarker` (tig-master) and want to transplant its full config into InnoPool, use `configure_innopool.py`:
-
-```bash
-# 1. Export your existing master config
-docker compose -f ~/tig-master/master.yml exec db \
-  psql -U postgres -d postgres -t \
-  -c 'SELECT config FROM config LIMIT 1;' \
-  | python3 -c 'import sys,json; print(json.dumps(json.loads(sys.stdin.read().strip()), indent=2))' \
-  > ~/tig-master/saved_config.json
-
-# 2. Create your API key file
-echo 'YOUR_TIG_API_KEY' > ~/.tig_api_key && chmod 600 ~/.tig_api_key
-
-# 3. Push config to InnoPool master (with pool-* slave routing)
-python3 configure_innopool.py
-```
-
-This script reads `~/tig-master/saved_config.json`, rewrites slave routing to `pool-gpu-.*` / `pool-cpu-.*`, sets pool-appropriate batch sizes, validates TIG 0.0.7 `compute_type` values, and pushes the full config to InnoPool's master.
-
-**Environment overrides:**
-
-| Variable | Default | Description |
-|---|---|---|
-| `SLAVE_MODE` | `pool` | `pool` (pool-* routing) or `hybrid` (your own named slaves) |
-| `CPU_BATCH_SIZE` | `64` | Nonces per CPU batch |
-| `GPU_BATCH_SIZE` | `8` | Nonces per GPU batch |
-| `CPU_COMPUTE_TYPE` | `aws_c7a` | Default compute_type for CPU algorithms |
-| `GPU_COMPUTE_TYPE` | `aws_g4dn` | Default compute_type for GPU algorithms |
-| `SAVED_CONFIG` | `~/tig-master/saved_config.json` | Path to exported config |
-
----
-
-## API Reference
-
-All endpoints are prefixed with `/api/`.
-
-### Public
-
-| Method | Endpoint | Description |
-|---|---|---|
-| GET | `/stats` | Pool overview (workers, benchmarks, slots) |
-| GET | `/leaderboard` | Top contributors (24h) |
-| GET | `/member/{wallet}` | Individual member stats |
-| GET | `/health` | Pool health indicators |
-| POST | `/register` | Register with invite code |
-| POST | `/preflight` | Submit preflight check result |
-
-### Admin (requires `X-Admin-Secret` header)
-
-| Method | Endpoint | Description |
-|---|---|---|
-| POST | `/admin/invite` | Create invite codes |
-| POST | `/admin/members` | Add member directly |
-| GET | `/admin/members` | List all members |
-| POST | `/admin/members/{id}/activate` | Re-activate member |
-| POST | `/admin/members/{id}/deactivate` | Deactivate member |
-| GET | `/admin/coinbase-history` | Reward distribution history |
-| GET | `/admin/invites` | List invite codes |
-| GET | `/admin/pool-settings` | View pool configuration |
-| POST | `/admin/pool-settings` | Update pool configuration |
-| GET | `/admin/ops/audit` | Quality-audit report: per-slave totals, backlog, recent failures |
-| GET | `/admin/ops/audit/{id}` | One audit row with its kept leaves |
-| GET | `/admin/ops/audit/benchmark/{bid}` | Per-batch audit picture for one benchmark (`?nonce=N&leaves=true`) |
-| POST | `/admin/ops/audit/fetch` | Request archived leaves from the computing slave (`{benchmark_id, nonces[], requested_by}`) |
-
----
-
-## Codebase Overview
-
-| Path | Purpose |
-|---|---|
-| `docker-compose.yml` | Orchestrates all services |
-| `postgres/init.sql` | Combined master + pool database schema |
-| `nginx/nginx.conf` | Routes `/`, `/api/`, `/benchmarker/`, `/static/` |
-| `pool_manager/main.py` | FastAPI server + background loop |
-| `pool_manager/pool/routes.py` | All HTTP endpoints |
-| `pool_manager/pool/tracker.py` | Contribution snapshots (every 60s) |
-| `pool_manager/pool/coinbase.py` | Calls TIG `/set-coinbase` when due |
-| `pool_manager/pool/autopilot.py` | Autopilot capacity and workload tuning |
-| `pool_manager/pool/ai_optimizer.py` | AI co-pilot advisor |
-| `pool_manager/pool/scheduler.py` | Lightweight dynamic tuner — adjusts `max_concurrent_benchmarks` based on active slave count (superseded by autopilot) |
-| `master/slave_manager.py` | Slave connection and batch assignment |
-| `master/batch_audit.py` | Audit nonce sampling, leaf validation, `batch_audit` schema |
-| `master/precommit_manager.py` | Precommit selection and submission |
-| `auditor/` | Auditor service: `tig-verifier`-only re-scoring, strikes, retention |
-| `pool_manager/pool/audit_report.py` | Observe-only audit report for `/admin/ops/audit` |
-| `pool_website/` | Static HTML/CSS/JS pool site |
-| `admin.py` | Operator CLI |
-| `configure_innopool.py` | Migrates an existing tig-master config into InnoPool with pool slave routing |
-| `tools/security_audit.py` | Read-only static security audit |
-| `tools/autopilot_sim/` | Autopilot scenario simulation and testing |
-| `docs/` | Operator documentation and AI context |
-
----
-
-## Payouts
-
-`/set-coinbase` splits the round's member pot (`1 - POOL_FEE`) between wallets. `PAY_MODE` picks how:
-
-| Mode | Wallet share | Notes |
-|---|---|---|
-| `effort` (default) | Σ nonces × fleet seconds/nonce for that challenge+track | One rate for CPU and GPU time. Simple and predictable, but pays a challenge the pool earns nothing on the same as one that pays well. |
-| `revenue` | Within each challenge, effort share as above; each challenge's pot is the fraction of the pool's TIG that challenge actually earned | Attribution comes from TIG block data: `pool qualifiers × legacy multiplier / total qualifiers` per challenge, the same term TIG's influence uses. Sampled every `REVENUE_SAMPLE_INTERVAL_S` into `challenge_reward_samples`. `PAY_EFFORT_BLEND` (default 0.2) keeps that much of the pot on pure effort so work the operator assigned to a dead challenge is not paid zero. Falls back to `effort` until the round has samples. |
-| `family` | GPU challenges share `PAY_GPU_POT_FRAC`, CPU the rest | Legacy fixed split. |
-
-Compare before switching — the report is read-only unless `PAY_MODE=revenue`:
-
-```bash
-python3 admin.py payout-revenue            # per challenge: effort % vs earned %; per wallet/slave: effort vs revenue vs blended
-python3 admin.py payout-revenue --blend 0  # what pure attribution would pay
-python3 admin.py payout-revenue --sample   # take a TIG sample now instead of waiting for the loop
-python3 admin.py payout-shadow             # older: nonce split vs effort credits
-```
-
-`VALUE` in the challenge table is `earned % / effort %`: above 1 that challenge pays more per effort-hour than the pool average. Members who worked early and then stopped keep their share in every mode.
-
-## Notes
-
-- The pool operator is the on-chain benchmarker. Members trust you to call `/set-coinbase` proportionally to their contributions. The code is open source — they can verify it does exactly that.
-- `/set-coinbase` is rate-limited by TIG to once per `coinbase_update_period` blocks. The pool manager tracks this automatically.
-- Fleet labels (the display name shown on the website) are cosmetic only. The pool identifies workers by their fleet token hash, which cannot be changed after registration.
-- The benchmarker UI (port 8081) should **not** be exposed publicly. Nginx restricts it to requests with valid `OPERATOR_USER`/`OPERATOR_PASSWORD` HTTP basic auth.
-- **Data retention.** The pool manager runs an hourly sweep that deletes job/batch rows and autopilot/AI decision logs older than `RETENTION_DAYS` (default 14). Without it the `batch_data`/`root_batch` tables grow by roughly 1 GB/day. The payout ledger (`pool_coinbase_history`), member earnings (`pool_contributions`), the member roster, and failed quality audits are never trimmed.
+[MIT](LICENSE).

@@ -7,8 +7,8 @@ Assets are local; no third-party scripts or analytics are required.
 The screens carry the Community Pool identity; the name, mark, colours and
 the rules for member-facing wording are in the [branding guide](BRANDING.md).
 
-The updated `/join` page, prepared locally for deployment, is **Connect your
-master**. Its public guide covers account setup, the deployment's API address,
+The `/join` page is **Connect your master**. Its public guide covers account
+setup, the deployment's API address,
 execution tokens, work requests and confirmed assignment handover, plus result
 and proof submission and troubleshooting. Links are visible before and after
 sign-in. Members configure their own helper machines; website concurrency only
@@ -102,13 +102,13 @@ pool database: it deliberately recreates its isolated test schema.
 
 Funds, work and settlement capability flags default to disabled. This screen
 does not establish live reporting scope, final reward-receipt attribution or
-definitive benchmark expiry. [Custody observation](CUSTODY_OBSERVER.md) adds
-continuous finalized-deposit indexing, wallet checks and incoming funding
-review. The remaining live finalization and expense adapters, unconfirmed
-deposit views, timely CPU/GPU execution and funded takeover remain rollout work.
-The current deployment and evidenced benchmark expiry rules are
-recorded in [operations status](OPERATIONS_STATUS.md); the screen does not
-override the work pause, custody readiness or settlement evidence gates.
-The worker connection page now supports the
-[paired installer](PAIRED_RELEASES.md), and keeps it unavailable until checked
-release metadata and installer bytes are explicitly configured.
+definitive benchmark expiry, and it does not override the work pause, custody
+readiness or settlement evidence gates. [Custody observation](CUSTODY_OBSERVER.md)
+adds continuous finalized-deposit indexing, wallet checks and incoming funding
+review; the evidenced benchmark expiry rules are in
+[submission recovery](SUBMISSION_RECOVERY.md). The worker connection page
+supports the [paired installer](PAIRED_RELEASES.md), and keeps it unavailable
+until checked release metadata and installer bytes are explicitly configured.
+[ROADMAP.md](ROADMAP.md) lists what is not implemented or not yet validated,
+including the live finalization and expense adapters, unconfirmed deposit
+views and funded takeover.

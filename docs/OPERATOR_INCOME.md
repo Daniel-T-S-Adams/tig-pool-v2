@@ -1,6 +1,6 @@
 # Operator income withdrawals
 
-The pool custody wallet remains the TIG benchmarker identity and holds the
+The pool custody wallet is the TIG benchmarker identity and holds the
 recorded member and operator funds. A separate operator income wallet receives
 reviewed payouts from the operator's available custody TIG. Your personal
 member wallet continues to use the ordinary member balance and withdrawal flow.
@@ -14,9 +14,11 @@ money already committed to top-ups are not available for operator withdrawal.
 
 Migration `015_operator_withdrawals.sql` extends the existing withdrawal records
 with an immutable owner kind and operating reserve. Existing member records
-retain their member identity, amounts, destinations, outcomes and cooldowns.
-Deploy the migrated API and its matching website assets together. Older API
-versions do not support the new operator records.
+retain their member identity, amounts, destinations, outcomes and cooldowns;
+member balances, collateral holds, withdrawal records and journals survive the
+upgrade and a repeated migration run. Deploy the migrated API and its matching
+website assets together. Older API versions do not support the new operator
+records.
 
 Configure both fields in the protected service JSON:
 
@@ -30,14 +32,13 @@ Configure both fields in the protected service JSON:
 Both API settings default to `null`, disabling new operator payouts. Existing
 custody configuration and `funds_enabled: true` are also required.
 
-The operator selected income wallet
-`0x03f540Af6aAB40Bbf86D94584D4712541FbD6c4a` on 28 September 2026. Its address
-format and checksum were checked locally; this does not verify ownership or
-on-chain balances. The mainnet deployment template records this address and
-leaves financial operations disabled. The retained TIG budget is still awaiting
-the operator's choice. Complete `operator_tig_reserve_units` before loading the
-template: the API requires the income address and reserve to be configured
-together. Setting these fields does not send tokens or enable reward settlement.
+The configured income wallet is the operator's own choice. The API checks its
+address format when the configuration loads; this does not verify ownership or
+on-chain balances, so check the address and its checksum before recording it.
+Complete `operator_tig_reserve_units` at the same time: the API requires the
+income address and reserve to be configured together, and leaves operator
+payouts disabled while either is missing. Setting these fields does not send
+tokens or enable reward settlement.
 
 Changing the configured address never changes an existing request. An unsent
 request for the old address must be rejected and recreated before a new payment
@@ -96,26 +97,6 @@ member isolation, immutable recipients, shared nonces, failed transactions,
 duplicate confirmations and recovery after configuration changes. The HTTPS
 browser test completes member payment, fee funding and operator payment in one
 flow using simulated chain evidence and exact integer amounts. These tests send
-no real funds and do not establish a completed mainnet reward cycle.
-
-## Current deployment — 14 October 2026
-
-The payout implementation remains in current release `59a3446`, schema
-through 022. Member funds are enabled, new work paused and settlement disabled.
-The operator reserve is still unset, so operator payout configuration remains
-disabled. Custody freshness checks continue to gate payouts. See
-[operations status](OPERATIONS_STATUS.md).
-
-## Historical deployment verification — 4 October 2026
-
-Release `994739d` and migration 015 are installed on the primary and German
-recovery servers. The matching website assets are deployed; previous asset
-hashes remain available. A restored funded testnet pilot preserved both member
-balances, collateral holds, withdrawal records and journals through the upgrade
-and a second migration run. All 270 current pool tests passed, including the
-browser flow; public authenticated operator reads passed after deployment.
-
-Financial operations remain disabled. The operator income wallet/reserve pair
-is unset in the active service configuration until the operator chooses the
-reserve. The chosen destination remains recorded above. No mainnet payment was
-sent, and the pool has not completed a live mainnet reward cycle.
+no real funds and do not establish a completed mainnet reward cycle; see
+[ROADMAP.md](ROADMAP.md) for what has not been exercised with real rewards.
+Custody freshness checks gate every payout, as they do for member withdrawals.
